@@ -1,0 +1,57 @@
+.container {
+  padding: 20px;
+  font-family: Arial, sans-serif;
+  background: white;
+  min-height: 100vh;
+}
+
+.dashboard-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.dashboard-table th,
+.dashboard-table td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: center;
+}
+
+.dashboard-table th {
+  background: #f4f4f4;
+}
+
+.status.running {
+  color: orange;
+  font-weight: bold;
+}
+
+.status.pending {
+  color: gray;
+}
+
+.status.completed {
+  color: green;
+  font-weight: bold;
+}
+
+.failed {
+  color: red;
+  font-weight: bold;
+}
+
+.task-btn,
+.jira-btn {
+  display: inline-block;
+  margin: 2px;
+  padding: 3px 6px;
+  background: #e8f0fe;
+  border-radius: 4px;
+  text-decoration: none;
+  font-size: 12px;
+}
+
+.task-btn:hover,
+.jira-btn:hover {
+  background: #c7dbff;
+}

@@ -1,0 +1,233 @@
+{
+  "run_plans": [
+    {
+      "id": "1769627197170",
+      "name": "testtrigger",
+      "job_profiles": [
+        "68e55d5d2bc0c47ea1a67f68"
+      ],
+      "nos_commit": null,
+      "tag_name": "testtrigger_1769659267445",
+      "schedule_date": "2026-01-30T00:38",
+      "created_at": "2026-01-29T00:36:37.170735",
+      "last_triggered": "2026-01-29T00:37:36.318820"
+    },
+    {
+      "id": "1770700028806",
+      "name": "CDP_Regression_751_Run2",
+      "job_profiles": [
+        "698077578e79ce94f2d2a819",
+        "6980793c2bc0c487ab869e7f",
+        "6980796b8e79ce35e9382967",
+        "69709d81d24d8217788c4210",
+        "69709e318e79ce6b2d11cace",
+        "69709ebf2bc0c4fe218f26e4",
+        "69709f43b5e4759e4d556e11",
+        "69709fac2bc0c4fe10fe4c71",
+        "6970a015d24d82177aa4b6f9",
+        "6970a0a42bc0c4fe097e9cac",
+        "6970a0f88e79ce6b2917430d",
+        "6970a164d24d821780c4aa3f",
+        "6970a1d82bc0c4fe1f6f4f85",
+        "6970a23cd24d82176a39ea54",
+        "6970a282b5e4759e5a9325ee",
+        "6970a2d88e79ce6b291743ac",
+        "6970a34cb5e4759e44b2492a",
+        "6970a391d24d82176654aab6",
+        "6970a41dd24d821772f10716",
+        "6970a46c8e79ce6b20f4960d",
+        "6970a4c5b5e4759e4a318b05",
+        "6970a50e8e79ce6b38201e6f",
+        "6970a557b5e4759e41c3e252",
+        "696f5a058e79ce6b35196dcb",
+        "696f5c578e79ce6b2e8839ad",
+        "696f5ca0b5e47503240d6f4f",
+        "696f5d00d24d8280b120945e",
+        "696f5d5eb5e4750316f2b442",
+        "696f5e18d24d8280bafb2601",
+        "696f5e89b5e47503240d6ff7",
+        "696f4d52b5e4750310d1ec50",
+        "696f4e488e79ce6b361f4707",
+        "696f4f62d24d8280c679e709",
+        "696f4fd68e79ce6b1fe0a5d9",
+        "696f50378e79ce6b266487d6",
+        "696f50912bc0c463b24b71e1",
+        "696f50ebb5e475031aceb5cc",
+        "696f51558e79ce6b381f9294",
+        "696f5211d24d8280c56ae871",
+        "696f527db5e475032b1643ce",
+        "696f5411d24d8280b3d3a39c",
+        "696f54898e79ce6b2ac0d6e0",
+        "696f54e42bc0c463b8fe7986",
+        "696f5533d24d8280c56ae97d",
+        "696f56d22bc0c463c39cdcec",
+        "696f5754d24d8280cd3cb0ee",
+        "696f58018e79ce6b2b0fe290",
+        "696f58522bc0c463cb7057d0",
+        "696f58bbb5e475030fdf28bb",
+        "696f5924d24d8280c39bb3f8"
+      ],
+      "tag_name": "Run2_1770700028798",
+      "schedule_date": "2026-02-11T10:37",
+      "created_at": "2026-02-10T10:37:08.807010",
+      "last_triggered": null
+    },
+    {
+      "id": "1770700774865",
+      "name": "CDP_Regression_751_Run2_clone",
+      "job_profiles": [
+        "698077578e79ce94f2d2a819",
+        "6980793c2bc0c487ab869e7f",
+        "6980796b8e79ce35e9382967",
+        "69709d81d24d8217788c4210",
+        "69709e318e79ce6b2d11cace",
+        "69709ebf2bc0c4fe218f26e4",
+        "69709f43b5e4759e4d556e11",
+        "69709fac2bc0c4fe10fe4c71",
+        "6970a015d24d82177aa4b6f9",
+        "6970a0a42bc0c4fe097e9cac",
+        "6970a0f88e79ce6b2917430d",
+        "6970a164d24d821780c4aa3f",
+        "6970a1d82bc0c4fe1f6f4f85",
+        "6970a23cd24d82176a39ea54",
+        "6970a282b5e4759e5a9325ee",
+        "6970a2d88e79ce6b291743ac",
+        "6970a34cb5e4759e44b2492a",
+        "6970a391d24d82176654aab6",
+        "6970a41dd24d821772f10716",
+        "6970a46c8e79ce6b20f4960d",
+        "6970a4c5b5e4759e4a318b05",
+        "6970a50e8e79ce6b38201e6f",
+        "6970a557b5e4759e41c3e252",
+        "696f5a058e79ce6b35196dcb",
+        "696f5c578e79ce6b2e8839ad",
+        "696f5ca0b5e47503240d6f4f",
+        "696f5d00d24d8280b120945e",
+        "696f5d5eb5e4750316f2b442",
+        "696f5e18d24d8280bafb2601",
+        "696f5e89b5e47503240d6ff7",
+        "696f4d52b5e4750310d1ec50",
+        "696f4e488e79ce6b361f4707",
+        "696f4f62d24d8280c679e709",
+        "696f4fd68e79ce6b1fe0a5d9",
+        "696f50378e79ce6b266487d6",
+        "696f50912bc0c463b24b71e1",
+        "696f50ebb5e475031aceb5cc",
+        "696f51558e79ce6b381f9294",
+        "696f5211d24d8280c56ae871",
+        "696f527db5e475032b1643ce",
+        "696f5411d24d8280b3d3a39c",
+        "696f54898e79ce6b2ac0d6e0",
+        "696f54e42bc0c463b8fe7986",
+        "696f5533d24d8280c56ae97d",
+        "696f56d22bc0c463c39cdcec",
+        "696f5754d24d8280cd3cb0ee",
+        "696f58018e79ce6b2b0fe290",
+        "696f58522bc0c463cb7057d0",
+        "696f58bbb5e475030fdf28bb",
+        "696f5924d24d8280c39bb3f8"
+      ],
+      "tag_name": "Run2_1770700774865",
+      "schedule_date": "2026-02-11T10:37",
+      "created_at": "2026-02-10T10:49:34.865729",
+      "last_triggered": null
+    },
+    {
+      "id": "1771833330862",
+      "name": "CDP_Regression_SmartQual_751_Run3",
+      "job_profiles": [
+        "6970a282b5e4759e5a9325ee",
+        "6970a1d82bc0c4fe1f6f4f85",
+        "69709f43b5e4759e4d556e11",
+        "6970a23cd24d82176a39ea54",
+        "6970a34cb5e4759e44b2492a",
+        "6970a50e8e79ce6b38201e6f",
+        "6970a557b5e4759e41c3e252",
+        "6970a391d24d82176654aab6",
+        "6970a46c8e79ce6b20f4960d",
+        "69709fac2bc0c4fe10fe4c71",
+        "6970a015d24d82177aa4b6f9",
+        "6970a0f88e79ce6b2917430d",
+        "6970a0a42bc0c4fe097e9cac",
+        "69709d81d24d8217788c4210",
+        "6970a164d24d821780c4aa3f",
+        "6970a2d88e79ce6b291743ac",
+        "69709ebf2bc0c4fe218f26e4",
+        "69709e318e79ce6b2d11cace",
+        "6970a41dd24d821772f10716",
+        "6970a4c5b5e4759e4a318b05"
+      ],
+      "tag_name": "Run3_1771833330852",
+      "schedule_date": "2026-02-23T13:25",
+      "created_at": "2026-02-23T13:25:30.862902",
+      "last_triggered": null
+    },
+    {
+      "id": "1771834822321",
+      "name": "CDP_Regression_751GSRun3",
+      "job_profiles": [
+        "6980793c2bc0c487ab869e7f",
+        "698c567f2bc0c4e5a036f9d0",
+        "6980796b8e79ce35e9382967",
+        "698077578e79ce94f2d2a819"
+      ],
+      "tag_name": "751GSRun3_1771834822314",
+      "schedule_date": "2026-02-23T13:50",
+      "created_at": "2026-02-23T13:50:22.321560",
+      "last_triggered": null
+    },
+    {
+      "id": "1773160958063",
+      "name": "CDP_Regression_751Upgrade",
+      "job_profiles": [
+        "696f5d5eb5e4750316f2b442",
+        "696f5d00d24d8280b120945e",
+        "696f5ca0b5e47503240d6f4f",
+        "696f5a058e79ce6b35196dcb",
+        "696f5e18d24d8280bafb2601",
+        "696f5c578e79ce6b2e8839ad",
+        "696f5e89b5e47503240d6ff7"
+      ],
+      "tag_name": "751Upgrade_1773160958045",
+      "schedule_date": null,
+      "created_at": "2026-03-10T22:12:38.063525",
+      "last_triggered": null
+    }
+  ],
+  "history": [
+    {
+      "id": "1769627205839",
+      "run_plan_id": "1769627197170",
+      "triggered_at": "2026-01-29T00:36:45.839908",
+      "task_ids": [
+        "697a5e45d24d8204192cd07d"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1769663203845",
+      "run_plan_id": "1769662851190",
+      "triggered_at": "2026-01-29T10:36:43.845995",
+      "task_ids": [
+        "697aeae32bc0c49968d713f7"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1769768779688",
+      "run_plan_id": "1769768768104",
+      "triggered_at": "2026-01-30T15:56:19.688339",
+      "task_ids": [],
+      "failed_jobs": [
+        {
+          "job_id": "690cdb19b5e475a5273ab90a",
+          "success": false,
+          "error": "Failed to trigger job: commit: d70bf8109200996993e7c5207b35a22fc68844d2 GBN: 1762871343 branch: master not found in JITA DB"
+        }
+      ],
+      "status": "partial"
+    }
+  ]
+}

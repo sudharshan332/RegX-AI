@@ -1,0 +1,7 @@
+{
+  "intermittent_patterns": [
+    "Timedout executing command source.*cluster start in .* secs with error:",
+    "Timedout executing command source.*cluster.*create in .* secs with error",
+    "Couldn't get handle to SVM VM object for ip"
+  ]
+}

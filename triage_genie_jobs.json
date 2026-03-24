@@ -1,0 +1,16 @@
+{
+  "jobs": [
+    {
+      "id": 3192,
+      "success": true,
+      "name": "Sudharshan_RegX_Final",
+      "created_by": "user",
+      "jita_task_ids": "690cdb48b5e475a53b2453da",
+      "jita_task_id_list": [
+        "690cdb48b5e475a53b2453da"
+      ],
+      "create_time": "2026-01-29T21:40:03.786528",
+      "skip_review": false
+    }
+  ]
+}
