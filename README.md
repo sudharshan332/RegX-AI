@@ -2,7 +2,7 @@
 
 This project consists of a React frontend and a Flask backend for displaying regression test results.
 
-**Documentation:** For full project documentation, architecture diagrams, improvement suggestions, and AI integration roadmap, see [PROJECT_DOCUMENTATION_AND_ARCHITECTURE.md](PROJECT_DOCUMENTATION_AND_ARCHITECTURE.md).
+**Documentation:** For architecture, integrations, and enhancement notes, see [PROJECT_DOCUMENTATION_AND_ARCHITECTURE.md](PROJECT_DOCUMENTATION_AND_ARCHITECTURE.md). For AI coding agents, see [AGENTS.md](AGENTS.md).
 
 ## Prerequisites
 
