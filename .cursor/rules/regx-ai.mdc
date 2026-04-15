@@ -1,0 +1,12 @@
+---
+description: RegX-AI stack, ports, secrets, and Gerrit review pushes
+alwaysApply: true
+---
+
+# RegX-AI
+
+- **Stack:** React (Create React App) in `src/`, Flask API in `backend/test_flask.py`.
+- **Ports:** dev frontend 3000 (`npm start`), backend 5001; `package.json` proxies to 5001 in development.
+- **API:** Routes live under `/mcp/regression/` (see Flask file for exact paths).
+- **Secrets:** Never commit API keys or tokens; use environment variables (see `PROJECT_DOCUMENTATION_AND_ARCHITECTURE.md`).
+- **Gerrit:** For code review, push to `refs/for/<branch>` instead of pushing directly to the target branch.

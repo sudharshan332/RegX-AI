@@ -11,6 +11,7 @@ import random
 import smtplib
 import urllib.request
 import urllib.error
+import urllib.parse
 import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -18,16 +19,18 @@ from collections import defaultdict
 from io import BytesIO
 from datetime import datetime, timedelta
 
-from flask import Flask, jsonify, request, Response, stream_with_context, send_file
+from flask import Flask, jsonify, request, Response, stream_with_context, send_file, g
 from flask_cors import CORS
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from auth import LDAPAuth, create_jwt, decode_jwt, jwt_required
 
 # ======================================================
 # Flask App
 # ======================================================
 app = Flask(__name__)
-CORS(app)
+CORS(app, supports_credentials=True)
 
 # ======================================================
 # Disable SSL warnings
@@ -52,6 +55,34 @@ TRIAGE_GENIE_BASE = "http://triage-genie.eng.nutanix.com/api"
 LOGIN_URL = os.getenv("TRIAGE_GENIE_LOGIN_URL", "http://triage-genie.eng.nutanix.com/login")
 PHX_BASE = "https://jita-phx1-webserver-2.eng.nutanix.com/api/v2"
 TCMS_BASE = "https://tcms.eng.nutanix.com/api-readonly/v1"
+TCMS_SUMMARY_BASE = "https://tcms.eng.nutanix.com/api/v1"
+TCMS_WRITE_BASE = "https://tcms.eng.nutanix.com/api/v1"
+TCMS_TESTDB_BASE = "https://quality-pipeline.eng.nutanix.com/testdb/api/v1"
+
+# TCMS auth (base64-encoded defaults; override with env vars in production)
+TCMS_USER = os.getenv("TCMS_USER", "agave_bot")
+TCMS_PASSWORD = os.getenv("TCMS_PASSWORD", "admin")
+
+TESTCASE_MGMT_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
+)
+
+# Tag-to-team configuration for TCMS QI lookups.
+# Each key is a tag pattern; value holds the TCMS team name and fallback branch.
+# "default" is used when no specific tag match is found.
+TEAM_CONFIG = {
+    "cdp_master_full_reg": {"team": "CDP", "default_branch": "master"},
+    "default":             {"team": "CDP", "default_branch": "master"},
+}
+
+# Maps full branch names (as shown in the Run Summary table) to the short
+# milestone names expected by the TCMS API.  "master" stays as-is.
+BRANCH_SHORT_NAME_MAP = {
+    "master": "master",
+    "ganges-7.6-stable": "7.6",
+    "ganges-7.5-stable": "7.5",
+    "ganges-7.5.1-stable": "7.5.1",
+}
 
 # AI Endpoint for failure summary
 AI_BASE = "https://hkn12.ai.nutanix.com/enterpriseai/v1"
@@ -345,7 +376,10 @@ def fetch_regression_tasks(tag=None, task_ids=None):
         # Fetch tasks by tag (original behavior)
         raw_query = {
             "$or": [
-                {"created_by": "sudharshan.musali"},
+                {"created_by": {
+                    "$in": ["shilpa.sattigeri", "sudharshan.musali"]
+                    }
+                },
                 {"user_groups": {"$in": ["cdp_reg_jarvis"]}}
             ],
             "tester_tags": {"$in": [tag]},
@@ -487,7 +521,47 @@ def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120):
         logger.error(f"Error fetching test results: {e}")
         raise
 
+# ======================================================
+# Auth Routes (no @jwt_required)
+# ======================================================
+@app.route("/mcp/regression/auth/login", methods=["POST"])
+def auth_login():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+
+    if not username or not password:
+        return jsonify({"error": "Username and password are required"}), 400
+
+    ldap_auth = LDAPAuth()
+    user_info = ldap_auth.authenticate(username, password)
+    if user_info is None:
+        return jsonify({"error": "Invalid username or password"}), 401
+
+    token = create_jwt(
+        user_info["username"],
+        user_info.get("displayName", ""),
+        user_info.get("email", ""),
+    )
+    return jsonify({"token": token, "user": user_info})
+
+
+@app.route("/mcp/regression/auth/me", methods=["GET"])
+@jwt_required
+def auth_me():
+    return jsonify({"user": g.current_user})
+
+
+@app.route("/mcp/regression/auth/logout", methods=["POST"])
+def auth_logout():
+    return jsonify({"success": True})
+
+
+# ======================================================
+# Protected Routes
+# ======================================================
 @app.route("/mcp/regression/home", methods=["GET"])
+@jwt_required
 def regression_home():
     start = time.time()
 
@@ -778,6 +852,7 @@ def regression_home():
 # Manual Tasks Endpoints
 # ---------------------------------------------------
 @app.route("/mcp/regression/manual-tasks", methods=["GET"])
+@jwt_required
 def get_manual_tasks():
     tag = request.args.get("tag")
     branch = request.args.get("branch")
@@ -800,6 +875,7 @@ def get_manual_tasks():
 
 
 @app.route("/mcp/regression/manual-tasks", methods=["POST"])
+@jwt_required
 def add_manual_tasks():
     data = request.get_json()
     tag = data.get("tag")
@@ -836,6 +912,7 @@ def add_manual_tasks():
 
 
 @app.route("/mcp/regression/manual-tasks", methods=["DELETE"])
+@jwt_required
 def remove_manual_task():
     tag = request.args.get("tag")
     branch = request.args.get("branch")
@@ -866,6 +943,7 @@ def remove_manual_task():
 # Configuration Endpoints
 # ---------------------------------------------------
 @app.route("/mcp/regression/config", methods=["GET"])
+@jwt_required
 def get_regression_config():
     """Get regression dashboard configuration from JSON file"""
     try:
@@ -877,6 +955,7 @@ def get_regression_config():
 
 
 @app.route("/mcp/regression/config", methods=["POST"])
+@jwt_required
 def save_regression_config_endpoint():
     """Save regression dashboard configuration to JSON file"""
     try:
@@ -924,6 +1003,7 @@ def save_regression_config_endpoint():
 
 
 @app.route("/mcp/regression/config/tags", methods=["POST"])
+@jwt_required
 def add_config_tag():
     """Add a tag to added_tags. Validation is lenient - tag is added even if JITA returns empty."""
     try:
@@ -956,6 +1036,7 @@ def add_config_tag():
 
 
 @app.route("/mcp/regression/config/tags", methods=["DELETE"])
+@jwt_required
 def delete_config_tag():
     """Remove tag from added_tags and delete per-tag triage accuracy JSON."""
     try:
@@ -987,6 +1068,7 @@ def delete_config_tag():
 # Fetch Branches from Tag Endpoint
 # ---------------------------------------------------
 @app.route("/mcp/regression/branches", methods=["GET"])
+@jwt_required
 def get_branches_from_tag():
     tag = request.args.get("tag")
     
@@ -1244,6 +1326,7 @@ def fetch_qi_from_tcms(testcase_name, milestone="7.5.1"):
 # Triage Count Endpoint
 # ---------------------------------------------------
 @app.route("/mcp/regression/triage-count", methods=["GET"])
+@jwt_required
 def get_triage_count():
     start = time.time()
     tag = request.args.get("tag")
@@ -1442,6 +1525,7 @@ def _config_matches_cached(cached, tag, task_ids):
 
 @app.route("/mcp/regression/triage-accuracy", methods=["GET"])
 @app.route("/api/mcp/regression/triage-accuracy", methods=["GET"])
+@jwt_required
 def get_triage_accuracy():
     """Triage Accuracy Analyzer: fetch Failed+Warning testcases, compare Jira vs Triage Genie, store in JSON."""
     start = time.time()
@@ -1621,6 +1705,7 @@ def get_triage_accuracy():
 
 @app.route("/mcp/regression/triage-accuracy/export-excel", methods=["GET"])
 @app.route("/api/mcp/regression/triage-accuracy/export-excel", methods=["GET"])
+@jwt_required
 def export_triage_accuracy_excel():
     """Export triage accuracy data as Excel file."""
     try:
@@ -1678,6 +1763,7 @@ def export_triage_accuracy_excel():
 # QI Summary Report Endpoint
 # ---------------------------------------------------
 @app.route("/mcp/regression/qi-summary", methods=["GET"])
+@jwt_required
 def get_qi_summary():
     start = time.time()
     tag = request.args.get("tag")
@@ -1864,6 +1950,161 @@ def get_qi_summary():
     except Exception as e:
         logger.error(f"Error in QI summary: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------
+# TCMS Overall QI Endpoint
+# ---------------------------------------------------
+def _resolve_tcms_milestone(branch_name):
+    """
+    Convert a full branch name (as shown in the Run Summary table) to the
+    short milestone name the TCMS API expects.
+
+    Lookup order:
+      1. Explicit entry in BRANCH_SHORT_NAME_MAP
+      2. Regex extraction of a version pattern like X.Y or X.Y.Z
+      3. Fall back to the original branch_name unchanged
+    """
+    if branch_name in BRANCH_SHORT_NAME_MAP:
+        return BRANCH_SHORT_NAME_MAP[branch_name]
+
+    version_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', branch_name)
+    if version_match:
+        return version_match.group(1)
+
+    return branch_name
+
+
+@app.route("/mcp/regression/tcms-overall-qi", methods=["GET"])
+@jwt_required
+def get_tcms_overall_qi():
+    """
+    Fetch the aggregate QI (average_total_op_success_percentage) from the
+    TCMS Summary API for a given team, branch, and time filter.
+
+    Branch handling:
+      * **master** — uses team-specific filters (additional_data.team,
+        team test_sets regex, release_name exclusion, tag exclusions) and
+        ``feat_type=regression``.
+      * **release branches** (e.g. ganges-7.6-stable → milestone "7.6") —
+        uses simpler filters (test_sets regex + deprecated flag only) and
+        ``feat_type=all``.
+    """
+    start = time.time()
+    team_name = request.args.get("team_name")
+    branch_name = request.args.get("branch_name")
+    time_filter = request.args.get("time_filter", "all")
+
+    if not team_name or not branch_name:
+        return jsonify({"error": "team_name and branch_name are required"}), 400
+
+    milestone = _resolve_tcms_milestone(branch_name)
+    is_master = branch_name.lower() in ("master", "main")
+
+    logger.info(
+        f"[START] TCMS Overall QI | team={team_name} branch={branch_name} "
+        f"milestone={milestone} is_master={is_master} time_filter={time_filter}"
+    )
+
+    try:
+        if is_master:
+            # Master: team-specific filters, feat_type=regression
+            filters = json.dumps({
+                "$and": [
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/", "$options": "i"}},
+                    {"release_name": {"$ne": milestone}},
+                    {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
+                    {"additional_data.team": f"{milestone}/{team_name}"},
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
+                    {"test_case.deprecated": False},
+                ]
+            })
+            feat_type = "regression"
+        else:
+            # Release branch: simple filters, feat_type=all
+            filters = json.dumps({
+                "$and": [
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/", "$options": "i"}},
+                    {"test_case.deprecated": False},
+                ]
+            })
+            feat_type = "all"
+
+        params = {
+            "aggregation_field": "target_package_type",
+            "time_filter": time_filter,
+            "target_milestone": milestone,
+            "feat_type": feat_type,
+            "filters": filters,
+        }
+
+        url = f"{TCMS_SUMMARY_BASE}/milestone_all_test_cases/aggregate/metrics"
+        response = requests.get(
+            url,
+            params=params,
+            headers={"Content-Type": "application/json"},
+            verify=False,
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+            logger.error(f"TCMS Summary API returned {response.status_code}: {response.text[:500]}")
+            return jsonify({"error": f"TCMS API error: {response.status_code}"}), 502
+
+        data = response.json()
+        if not data.get("success") or not data.get("data"):
+            logger.warning("TCMS Summary API returned no data")
+            return jsonify({
+                "qi_value": None,
+                "message": "No data returned from TCMS",
+                "team_name": team_name,
+                "branch_name": branch_name,
+                "milestone": milestone,
+                "time_filter": time_filter,
+            })
+
+        overall = data["data"][0]
+        qi_value = overall.get("average_total_op_success_percentage")
+
+        logger.info(
+            f"[END] TCMS Overall QI | qi={qi_value} | time={time.time() - start:.2f}s"
+        )
+
+        return jsonify({
+            "qi_value": qi_value,
+            "team_name": team_name,
+            "branch_name": branch_name,
+            "milestone": milestone,
+            "time_filter": time_filter,
+            "total_tests": overall.get("total"),
+            "run": overall.get("run"),
+            "passed": overall.get("passed"),
+            "failed": overall.get("failed"),
+            "run_percentage": overall.get("run_percentage"),
+            "overall_effectiveness": overall.get("overall_effectiveness"),
+            "overall_stability": overall.get("overall_stability"),
+        })
+
+    except requests.exceptions.Timeout:
+        logger.error("TCMS Summary API request timed out")
+        return jsonify({"error": "TCMS API request timed out"}), 504
+    except Exception as e:
+        logger.error(f"Error fetching TCMS Overall QI: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------
+# Team Config Endpoint
+# ---------------------------------------------------
+@app.route("/mcp/regression/team-config", methods=["GET"])
+@jwt_required
+def get_team_config():
+    """Return the tag-to-team configuration and branch short-name mapping."""
+    return jsonify({
+        "team_config": TEAM_CONFIG,
+        "branch_short_names": BRANCH_SHORT_NAME_MAP,
+    })
+
 
 # ======================================================
 # Run Report - QI Analysis Endpoint
@@ -2081,6 +2322,7 @@ def generate_qi_analysis(run_folder):
         raise
 
 @app.route("/mcp/regression/run-report/list-analysis-files", methods=["POST"])
+@jwt_required
 def list_analysis_files():
     """List all analysis_*.xlsx files in a given directory"""
     try:
@@ -2234,6 +2476,7 @@ def read_existing_analysis_file(analysis_file_path):
         raise
 
 @app.route("/mcp/regression/run-report/qi-analysis", methods=["POST"])
+@jwt_required
 def qi_analysis_from_folder():
     """Generate QI analysis Excel file and extract data from it, or read from existing file"""
     try:
@@ -2284,6 +2527,7 @@ def qi_analysis_from_folder():
 # Run Report - Email Endpoints
 # ======================================================
 @app.route("/mcp/regression/run-report/preview-email", methods=["POST"])
+@jwt_required
 def preview_qi_bug_email():
     """Generate email preview for Top QI Impacting Bugs"""
     try:
@@ -2431,6 +2675,7 @@ Run Folder: {run_folder}
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-report/send-email", methods=["POST"])
+@jwt_required
 def send_qi_bug_email():
     """Send email for Top QI Impacting Bugs"""
     try:
@@ -2708,6 +2953,7 @@ def update_job_profiles_tester_tags(job_profile_ids, tag_name, action="add"):
     return updated_count, failed_updates
 
 @app.route("/mcp/regression/run-plan", methods=["GET"])
+@jwt_required
 def list_run_plans():
     """List all run plans"""
     try:
@@ -2718,6 +2964,7 @@ def list_run_plans():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan", methods=["POST"])
+@jwt_required
 def create_run_plan():
     """Create a new run plan"""
     try:
@@ -2774,6 +3021,7 @@ def create_run_plan():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/<run_plan_id>", methods=["PUT"])
+@jwt_required
 def update_run_plan(run_plan_id):
     """Update an existing run plan"""
     try:
@@ -2834,6 +3082,7 @@ def update_run_plan(run_plan_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/search-job-profiles", methods=["POST"])
+@jwt_required
 def search_job_profiles():
     """Search job profiles by ID or pattern"""
     try:
@@ -2888,6 +3137,7 @@ def search_job_profiles():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/<run_plan_id>/trigger", methods=["POST"])
+@jwt_required
 def trigger_run_plan(run_plan_id):
     """Trigger a run plan now"""
     try:
@@ -3063,6 +3313,7 @@ def trigger_run_plan(run_plan_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/<run_plan_id>/batch-update", methods=["POST"])
+@jwt_required
 def batch_update_job_profiles(run_plan_id):
     """Batch update job profiles in a run plan"""
     try:
@@ -3367,6 +3618,7 @@ def batch_update_job_profiles(run_plan_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/<run_plan_id>/history", methods=["GET"])
+@jwt_required
 def get_run_plan_history(run_plan_id):
     """Get history for a run plan"""
     try:
@@ -3383,6 +3635,7 @@ def get_run_plan_history(run_plan_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/history/<history_id>/retry", methods=["POST"])
+@jwt_required
 def retry_history_entry(history_id):
     """Retry a history entry trigger"""
     try:
@@ -3406,6 +3659,7 @@ def retry_history_entry(history_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/history/<history_id>", methods=["DELETE"])
+@jwt_required
 def delete_history_entry(history_id):
     """Delete a history entry"""
     try:
@@ -3424,6 +3678,7 @@ def delete_history_entry(history_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/<run_plan_id>/clone", methods=["POST"])
+@jwt_required
 def clone_run_plan(run_plan_id):
     """Clone a run plan with a new unique tag_name"""
     try:
@@ -3491,6 +3746,7 @@ def clone_run_plan(run_plan_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/<run_plan_id>", methods=["DELETE"])
+@jwt_required
 def delete_run_plan(run_plan_id):
     """Delete a run plan and all its associated history entries"""
     try:
@@ -3527,6 +3783,7 @@ def delete_run_plan(run_plan_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/<run_plan_id>/delete-tag", methods=["POST"])
+@jwt_required
 def delete_tag_from_job_profiles(run_plan_id):
     """Delete a tag from tester_tags of all job profiles in a run plan"""
     try:
@@ -3569,6 +3826,7 @@ def delete_tag_from_job_profiles(run_plan_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/run-plan/tags", methods=["GET"])
+@jwt_required
 def get_available_tags():
     """Get list of available tags from JITA"""
     try:
@@ -3607,6 +3865,7 @@ def get_available_tags():
 # Triage Genie Endpoints
 # ======================================================
 @app.route("/mcp/regression/triage-genie/jobs", methods=["GET"])
+@jwt_required
 def list_triage_genie_jobs():
     """List all Triage Genie jobs - primarily from JSON file"""
     try:
@@ -3669,6 +3928,7 @@ def list_triage_genie_jobs():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/mcp/regression/triage-genie/jobs", methods=["POST"])
+@jwt_required
 def create_triage_genie_job():
     """Create a new Triage Genie job"""
     try:
@@ -4361,6 +4621,7 @@ def fetch_triage_genie_ticket_id(agave_task_id, triage_session=None):
         return None
 
 @app.route("/mcp/regression/failed-analysis/analyze", methods=["GET"])
+@jwt_required
 def analyze_failed_testcases():
     """Analyze failed testcases with AI agent"""
     start = time.time()
@@ -4714,6 +4975,7 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set):
 
 
 @app.route("/mcp/regression/failed-analysis/analyze-stream", methods=["GET"])
+@jwt_required
 def analyze_failed_testcases_stream():
     """Stream analysis results as Server-Sent Events so the UI can display rows as they load."""
     tag = request.args.get("tag")
@@ -4740,6 +5002,7 @@ def analyze_failed_testcases_stream():
 
 
 @app.route("/mcp/regression/failed-analysis/update-triage", methods=["PUT"])
+@jwt_required
 def update_triage_comments():
     """Update comment and/or jira_ticket for an agave_test_result via JITA PUT API."""
     try:
@@ -4813,6 +5076,7 @@ def _fetch_test_result_for_task_and_name(task_id, test_name):
 
 
 @app.route("/mcp/regression/failed-analysis/history", methods=["GET"])
+@jwt_required
 def failed_analysis_history():
     """Return past 3 runs for a test on same or other branch. For each run: status, jira_ticket or comment."""
     test_name = request.args.get("test_name")
@@ -4850,6 +5114,709 @@ def failed_analysis_history():
     except Exception as e:
         logger.error(f"Error fetching history: {e}", exc_info=True)
         return jsonify({"error": str(e), "runs": []}), 500
+
+
+# ======================================================
+# Testcase Management
+# ======================================================
+
+TESTCASE_MGMT_BRANCHES = {
+    "master": {"milestone": "master", "team_prefix": "master", "test_set_regex": "test_sets/milestones/master/"},
+    "ganges-7.6-stable": {"milestone": "7.6", "team_prefix": "7.6", "test_set_regex": "test_sets/milestones/7.6/"},
+    "ganges-7.5-stable": {"milestone": "7.5", "team_prefix": "7.5", "test_set_regex": "test_sets/milestones/7.5/"},
+}
+
+TESTCASE_MGMT_TEAMS = ["CDP", "AHV"]
+
+
+def _tcms_auth():
+    return (TCMS_USER, TCMS_PASSWORD)
+
+
+def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip, limit):
+    """Build the MongoDB aggregation pipeline payload for the POST API."""
+    return json.dumps([
+        {"$match": {"$and": [
+            {
+                "target_milestone": milestone,
+                "last_result": {"$elemMatch": {"pass_name": "overall"}},
+                "deleted": False,
+            },
+            {"test_case.test_sets": {"$regex": test_set_regex, "$options": "i"}},
+            {"additional_data.team": f"{team_prefix}/{team}"},
+            {"release_name": {"$ne": milestone}},
+            {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
+            {"test_case.deprecated": False},
+        ]}},
+        {"$sort": {"name": 1}},
+        {"$skip": skip},
+        {"$limit": limit},
+    ])
+
+
+def _normalize_testcase(item):
+    """Extract a flat dict from a raw TCMS milestone_all_test_cases record."""
+    tc = item.get("test_case", {})
+    meta = tc.get("metadata", {})
+    ad = item.get("additional_data", {})
+    score = item.get("test_score", {})
+
+    last_result_list = item.get("last_result", [])
+    last_status = ""
+    is_triaged = False
+    issue_type = ""
+    last_run_tickets = []
+    last_run_date = None
+    last_passed_date = None
+    if isinstance(last_result_list, list) and last_result_list:
+        entry = last_result_list[0]
+        run_info = entry.get("run", {})
+        last_status = run_info.get("status", "")
+        is_triaged = run_info.get("is_triaged", False)
+        issue_type = run_info.get("issue_type", "")
+        last_run_tickets = run_info.get("tickets", [])
+        run_start = run_info.get("start_time", {})
+        if isinstance(run_start, dict) and "$date" in run_start:
+            last_run_date = datetime.utcfromtimestamp(run_start["$date"] / 1000).strftime("%Y-%m-%d %H:%M")
+        succeeded_info = entry.get("succeeded", {})
+        if isinstance(succeeded_info, dict) and succeeded_info:
+            succ_start = succeeded_info.get("start_time", {})
+            if isinstance(succ_start, dict) and "$date" in succ_start:
+                last_passed_date = datetime.utcfromtimestamp(succ_start["$date"] / 1000).strftime("%Y-%m-%d %H:%M")
+
+    published_qi = None
+    published_success_ops = None
+    published_total_ops = None
+    if isinstance(last_result_list, list) and last_result_list:
+        published_info = last_result_list[0].get("published", {})
+        if isinstance(published_info, dict) and published_info:
+            published_qi = published_info.get("operation_success_percentage")
+            published_success_ops = published_info.get("successful_operations")
+            published_total_ops = published_info.get("total_operations")
+
+    ect = item.get("execution_cycle_time", {})
+    automated_date_raw = ad.get("automated_date", {})
+    automated_date = None
+    if isinstance(automated_date_raw, dict) and "$date" in automated_date_raw:
+        automated_date = datetime.utcfromtimestamp(automated_date_raw["$date"] / 1000).strftime("%Y-%m-%d")
+
+    return {
+        "oid": (item.get("_id", {}).get("$oid", "") if isinstance(item.get("_id"), dict) else ""),
+        "name": item.get("name", ""),
+        "path": tc.get("path", ""),
+        "owners": tc.get("owners", []),
+        "priority": meta.get("priority", ""),
+        "summary": meta.get("summary", ""),
+        "components": meta.get("components", []),
+        "primary_component": meta.get("primary_component", ""),
+        "services": meta.get("services", []),
+        "tags": [],
+        "metadata_tags": meta.get("tags", []),
+        "test_sets": tc.get("test_sets", []),
+        "team": ad.get("team", []),
+        "target_service": item.get("target_service", ""),
+        "target": item.get("target", ""),
+        "framework": tc.get("framework", ""),
+        "last_status": last_status,
+        "last_run_date": last_run_date,
+        "last_passed_date": last_passed_date,
+        "is_triaged": is_triaged,
+        "issue_type": issue_type,
+        "last_run_tickets": last_run_tickets,
+        "success_percentage": ad.get("success_percentage"),
+        "avg_run_duration": ad.get("avg_run_duration"),
+        "automated_date": automated_date,
+        "one_month_mttr": ect.get("one_month_mttr"),
+        "three_months_mttr": ect.get("three_months_mttr"),
+        "published_qi": published_qi,
+        "published_success_ops": published_success_ops,
+        "published_total_ops": published_total_ops,
+        "stability": score.get("stability"),
+        "effectiveness": score.get("effectiveness"),
+        "total_results": score.get("total_results"),
+        "tickets": item.get("tickets", []),
+        "resource_spec": tc.get("resource_spec", []),
+    }
+
+
+def _fetch_tags_for_testcases(testcases, branch_key):
+    """Batch-fetch tags from the GET all_test_cases API using regex matching."""
+    if not testcases:
+        return testcases
+
+    name_map = {tc["name"]: tc for tc in testcases}
+    target_branch = branch_key
+
+    batch_size = 50
+    names = list(name_map.keys())
+
+    def _fetch_batch(batch_names):
+        for tc_name in batch_names:
+            try:
+                raw_query = json.dumps({
+                    "$and": [
+                        {
+                            "target_service": "NutestPy3Tests",
+                            "target_branch": target_branch,
+                            "target_package_type": "tar",
+                            "deleted": False,
+                        },
+                        {"test_case.name": tc_name},
+                        {"test_case.deprecated": False},
+                    ]
+                })
+                url = (
+                    f"{TCMS_TESTDB_BASE}/all_test_cases"
+                    f"?raw_query={urllib.parse.quote(raw_query)}&sort=name&limit=1"
+                )
+                resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
+                if resp.status_code == 200:
+                    data = resp.json().get("data", [])
+                    if data:
+                        tags = data[0].get("additional_data", {}).get("tags", [])
+                        if tc_name in name_map:
+                            name_map[tc_name]["tags"] = tags
+            except Exception as exc:
+                logger.warning(f"Failed to fetch tags for {tc_name}: {exc}")
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        for i in range(0, len(names), batch_size):
+            batch = names[i:i + batch_size]
+            pool.submit(_fetch_batch, batch)
+
+    return testcases
+
+
+def _tc_data_file(branch, team):
+    """Return the path for a per-branch/team JSON file."""
+    safe_name = f"testcase_management_{branch}_{team}.json".replace("/", "_")
+    return os.path.join(TESTCASE_MGMT_DATA_DIR, safe_name)
+
+
+def _load_tc_data(branch, team):
+    fpath = _tc_data_file(branch, team)
+    try:
+        with open(fpath, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"last_updated": None, "branch": branch, "team": team, "testcases": []}
+
+
+def _save_tc_data(branch, team, data):
+    os.makedirs(TESTCASE_MGMT_DATA_DIR, exist_ok=True)
+    fpath = _tc_data_file(branch, team)
+    with open(fpath, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+
+
+@app.route("/mcp/regression/testcase-mgmt/fetch-data", methods=["GET"])
+@jwt_required
+def testcase_mgmt_fetch_data():
+    """Fetch all test cases from TCMS for a given branch/team and persist to JSON."""
+    branch = request.args.get("branch", "master")
+    team = request.args.get("team", "CDP")
+    page_limit = 500
+
+    branch_cfg = TESTCASE_MGMT_BRANCHES.get(branch)
+    if not branch_cfg:
+        return jsonify({"error": f"Unknown branch: {branch}"}), 400
+
+    milestone = branch_cfg["milestone"]
+    team_prefix = branch_cfg["team_prefix"]
+    test_set_regex = branch_cfg["test_set_regex"]
+
+    all_testcases = []
+    skip = 0
+
+    try:
+        while True:
+            payload = _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip, page_limit)
+            resp = requests.post(
+                f"{TCMS_BASE}/milestone_all_test_cases/aggregate",
+                data=payload,
+                auth=_tcms_auth(),
+                verify=False,
+                timeout=120,
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code != 200:
+                logger.error(f"TCMS aggregate API returned {resp.status_code}: {resp.text[:500]}")
+                break
+
+            batch = resp.json().get("data", [])
+            if not batch:
+                break
+
+            for item in batch:
+                all_testcases.append(_normalize_testcase(item))
+
+            logger.info(f"Fetched {len(batch)} testcases (skip={skip}) for {branch}/{team}")
+            if len(batch) < page_limit:
+                break
+            skip += page_limit
+
+        logger.info(f"Total testcases fetched from aggregate API: {len(all_testcases)} for {branch}/{team}")
+
+        _fetch_tags_for_testcases(all_testcases, branch)
+
+        now = datetime.utcnow().isoformat() + "Z"
+        data = {
+            "last_updated": now,
+            "branch": branch,
+            "team": team,
+            "testcases": all_testcases,
+        }
+        _save_tc_data(branch, team, data)
+
+        return jsonify({
+            "status": "ok",
+            "branch": branch,
+            "team": team,
+            "count": len(all_testcases),
+            "last_updated": now,
+        })
+
+    except Exception as e:
+        logger.error(f"Error fetching testcase data: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/testcase-mgmt/testcases", methods=["GET"])
+@jwt_required
+def testcase_mgmt_get_testcases():
+    """Return testcases from local JSON with optional filters."""
+    branch = request.args.get("branch", "master")
+    team = request.args.get("team", "CDP")
+    tag_filter = request.args.get("tags", "")
+    name_filter = request.args.get("name", "").lower()
+    status_filter = request.args.get("status", "")
+
+    data = _load_tc_data(branch, team)
+    all_testcases = data.get("testcases", [])
+    testcases = list(all_testcases)
+
+    if tag_filter:
+        filter_tags = [t.strip().lower() for t in tag_filter.split(",") if t.strip()]
+        testcases = [
+            tc for tc in testcases
+            if any(ft in [t.lower() for t in tc.get("tags", [])] for ft in filter_tags)
+        ]
+
+    if name_filter:
+        testcases = [tc for tc in testcases if name_filter in tc.get("name", "").lower()]
+
+    if status_filter:
+        testcases = [tc for tc in testcases if tc.get("last_status", "").lower() == status_filter.lower()]
+
+    all_tags = set()
+    for tc in all_testcases:
+        for t in tc.get("tags", []):
+            all_tags.add(t)
+
+    return jsonify({
+        "branch": branch,
+        "team": team,
+        "count": len(testcases),
+        "total_count": len(all_testcases),
+        "last_updated": data.get("last_updated"),
+        "available_tags": sorted(all_tags),
+        "testcases": testcases,
+    })
+
+
+@app.route("/mcp/regression/testcase-mgmt/tags/add", methods=["POST"])
+@jwt_required
+def testcase_mgmt_add_tags():
+    """Add tags to selected test cases via TCMS write API."""
+    body = request.get_json(force=True)
+    testcase_oids = body.get("testcase_oids", [])
+    tags_to_add = body.get("tags", [])
+    branch = body.get("branch", "master")
+    team = body.get("team", "CDP")
+
+    if not testcase_oids or not tags_to_add:
+        return jsonify({"error": "testcase_oids and tags are required"}), 400
+
+    results = {"success": 0, "failed": 0, "errors": []}
+
+    for oid in testcase_oids:
+        try:
+            url = f"{TCMS_WRITE_BASE}/all_test_cases/tags/{oid}"
+            resp = requests.post(
+                url,
+                auth=_tcms_auth(),
+                data=json.dumps({"tags": tags_to_add}),
+                verify=False,
+                timeout=30,
+            )
+            if resp.status_code in (200, 201):
+                results["success"] += 1
+            else:
+                results["failed"] += 1
+                results["errors"].append({"oid": oid, "status": resp.status_code})
+        except Exception as exc:
+            results["failed"] += 1
+            results["errors"].append({"oid": oid, "error": str(exc)})
+
+    data = _load_tc_data(branch, team)
+    for tc in data.get("testcases", []):
+        if tc.get("oid") in testcase_oids:
+            existing = tc.get("tags", [])
+            for tag in tags_to_add:
+                if tag not in existing:
+                    existing.append(tag)
+            tc["tags"] = existing
+    data["last_updated"] = datetime.utcnow().isoformat() + "Z"
+    _save_tc_data(branch, team, data)
+
+    return jsonify(results)
+
+
+@app.route("/mcp/regression/testcase-mgmt/tags/delete", methods=["POST"])
+@jwt_required
+def testcase_mgmt_delete_tags():
+    """Delete tags from selected test cases via TCMS write API."""
+    body = request.get_json(force=True)
+    testcase_oids = body.get("testcase_oids", [])
+    tags_to_delete = body.get("tags", [])
+    branch = body.get("branch", "master")
+    team = body.get("team", "CDP")
+
+    if not testcase_oids or not tags_to_delete:
+        return jsonify({"error": "testcase_oids and tags are required"}), 400
+
+    results = {"success": 0, "failed": 0, "errors": []}
+
+    for oid in testcase_oids:
+        try:
+            url = f"{TCMS_WRITE_BASE}/all_test_cases/tags/{oid}"
+            resp = requests.delete(
+                url,
+                auth=_tcms_auth(),
+                data=json.dumps({"tags": tags_to_delete}),
+                verify=False,
+                timeout=30,
+            )
+            if resp.status_code in (200, 204):
+                results["success"] += 1
+            else:
+                results["failed"] += 1
+                results["errors"].append({"oid": oid, "status": resp.status_code})
+        except Exception as exc:
+            results["failed"] += 1
+            results["errors"].append({"oid": oid, "error": str(exc)})
+
+    data = _load_tc_data(branch, team)
+    for tc in data.get("testcases", []):
+        if tc.get("oid") in testcase_oids:
+            tc["tags"] = [t for t in tc.get("tags", []) if t not in tags_to_delete]
+    data["last_updated"] = datetime.utcnow().isoformat() + "Z"
+    _save_tc_data(branch, team, data)
+
+    return jsonify(results)
+
+
+@app.route("/mcp/regression/testcase-mgmt/resource-spec/download", methods=["GET"])
+@jwt_required
+def testcase_mgmt_resource_spec_download():
+    """Generate an Excel workbook grouping test cases by unique resource_spec."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    branch = request.args.get("branch", "master")
+    team = request.args.get("team", "CDP")
+    data = _load_tc_data(branch, team)
+    testcases = data.get("testcases", [])
+
+    if not testcases:
+        return jsonify({"error": "No testcase data found. Reload from TCMS first."}), 404
+
+    def _spec_fingerprint(spec_list):
+        """Canonical string key for grouping (ignores resource 'name')."""
+        cleaned = []
+        for item in (spec_list or []):
+            entry = {k: v for k, v in sorted(item.items()) if k != "name"}
+            cleaned.append(json.dumps(entry, sort_keys=True))
+        return "|".join(sorted(cleaned))
+
+    def _format_resource(r):
+        """Return a multi-line human-readable string for one resource item."""
+        lines = []
+        lines.append(f"name: {r.get('name', '—')}")
+        lines.append(f"type: {r.get('type', '—')}")
+        hw = r.get("hardware", {})
+        if hw:
+            lines.append(f"min_host_gb_ram: {hw.get('min_host_gb_ram', '—')}")
+            lines.append(f"min_host_cpu_cores: {hw.get('min_host_cpu_cores', '—')}")
+            lines.append(f"cluster_min_nodes: {hw.get('cluster_min_nodes', r.get('cluster_min_nodes', '—'))}")
+        elif "cluster_min_nodes" in r:
+            lines.append(f"cluster_min_nodes: {r['cluster_min_nodes']}")
+        sc = r.get("scaleout", {})
+        if sc:
+            lines.append(f"scaleout.num_instances: {sc.get('num_instances', '—')}")
+        deps = r.get("dependencies")
+        if deps:
+            lines.append(f"dependencies: {', '.join(deps)}")
+        prov = r.get("provider")
+        if isinstance(prov, dict):
+            lines.append(f"provider.host: {prov.get('host', '—')}")
+        can_run = r.get("can_run_on_provider")
+        if can_run:
+            lines.append(f"can_run_on_provider: {', '.join(can_run) if isinstance(can_run, list) else can_run}")
+        for k, v in sorted(r.items()):
+            if k not in ("name", "type", "hardware", "cluster_min_nodes", "scaleout",
+                         "dependencies", "provider", "can_run_on_provider"):
+                lines.append(f"{k}: {json.dumps(v) if isinstance(v, (dict, list)) else v}")
+        return "\n".join(lines)
+
+    def _format_spec_full(spec_list):
+        """Return the full resource_spec as readable text (all resources)."""
+        if not spec_list:
+            return "None"
+        blocks = []
+        for idx, r in enumerate(spec_list, 1):
+            blocks.append(f"[Resource {idx}]\n{_format_resource(r)}")
+        return "\n\n".join(blocks)
+
+    groups = defaultdict(list)
+    for tc in testcases:
+        key = _spec_fingerprint(tc.get("resource_spec", []))
+        groups[key].append(tc)
+    key_to_id = {}
+    for idx, key in enumerate(sorted(groups.keys(), key=lambda k: -len(groups[k])), 1):
+        key_to_id[key] = idx
+
+    wb = Workbook()
+    hdr_font = Font(bold=True, color="FFFFFF", size=11)
+    hdr_fill = PatternFill(start_color="34495E", end_color="34495E", fill_type="solid")
+    grp_fill = PatternFill(start_color="EAF2F8", end_color="EAF2F8", fill_type="solid")
+    thin = Border(left=Side(style="thin"), right=Side(style="thin"),
+                  top=Side(style="thin"), bottom=Side(style="thin"))
+    wrap = Alignment(wrap_text=True, vertical="top")
+
+    def _write_header(ws, headers):
+        for ci, h in enumerate(headers, 1):
+            c = ws.cell(row=1, column=ci, value=h)
+            c.font = hdr_font
+            c.fill = hdr_fill
+            c.alignment = wrap
+            c.border = thin
+
+    # ── Sheet 1: Testcases ──
+    ws1 = wb.active
+    ws1.title = "Testcases"
+    _write_header(ws1, ["Testcase Name", "Resource Spec", "Group ID"])
+
+    row = 2
+    for tc in sorted(testcases, key=lambda t: key_to_id.get(_spec_fingerprint(t.get("resource_spec", [])), 0)):
+        spec = tc.get("resource_spec", [])
+        gid = key_to_id.get(_spec_fingerprint(spec), 0)
+        ws1.cell(row=row, column=1, value=tc.get("name", "")).border = thin
+        ws1.cell(row=row, column=1).alignment = wrap
+        c_spec = ws1.cell(row=row, column=2, value=_format_spec_full(spec))
+        c_spec.border = thin
+        c_spec.alignment = wrap
+        c_gid = ws1.cell(row=row, column=3, value=gid)
+        c_gid.border = thin
+        c_gid.alignment = Alignment(horizontal="center", vertical="top")
+        row += 1
+
+    ws1.column_dimensions["A"].width = 80
+    ws1.column_dimensions["B"].width = 70
+    ws1.column_dimensions["C"].width = 12
+
+    # ── Sheet 2: Grouped Resource Specs ──
+    ws2 = wb.create_sheet("Grouped Resource Specs")
+    _write_header(ws2, ["Group ID", "Testcase Count", "Resource Spec", "Testcase Names"])
+
+    sorted_groups = sorted(key_to_id.items(), key=lambda kv: kv[1])
+    for key, gid in sorted_groups:
+        tcs = groups[key]
+        spec_list = tcs[0].get("resource_spec", [])
+        r = gid + 1
+        ws2.cell(row=r, column=1, value=gid).border = thin
+        ws2.cell(row=r, column=1).alignment = Alignment(horizontal="center", vertical="top")
+        ws2.cell(row=r, column=2, value=len(tcs)).border = thin
+        ws2.cell(row=r, column=2).alignment = Alignment(horizontal="center", vertical="top")
+        c_spec = ws2.cell(row=r, column=3, value=_format_spec_full(spec_list))
+        c_spec.border = thin
+        c_spec.alignment = wrap
+        tc_names = "\n".join(t.get("name", "") for t in tcs)
+        c_names = ws2.cell(row=r, column=4, value=tc_names)
+        c_names.border = thin
+        c_names.alignment = wrap
+
+    ws2.column_dimensions["A"].width = 12
+    ws2.column_dimensions["B"].width = 14
+    ws2.column_dimensions["C"].width = 70
+    ws2.column_dimensions["D"].width = 80
+
+    # ── Sheet 3: Resource Spec Detail (flat table) ──
+    ws3 = wb.create_sheet("Resource Detail")
+    detail_headers = [
+        "Group ID", "Resource #", "name", "type",
+        "min_host_gb_ram", "min_host_cpu_cores", "cluster_min_nodes",
+        "scaleout.num_instances", "dependencies", "provider.host",
+        "Extra Parameters",
+    ]
+    _write_header(ws3, detail_headers)
+    KNOWN_KEYS = {"name", "type", "hardware", "cluster_min_nodes", "scaleout",
+                  "dependencies", "provider", "can_run_on_provider", "can_run_on_hardware"}
+
+    dr = 2
+    for key, gid in sorted_groups:
+        tcs = groups[key]
+        spec_list = tcs[0].get("resource_spec", [])
+        for ri, res in enumerate(spec_list, 1):
+            hw = res.get("hardware", {})
+            extras = {k: v for k, v in res.items() if k not in KNOWN_KEYS}
+            extra_str = "; ".join(f"{k}={json.dumps(v) if isinstance(v, (dict, list)) else v}"
+                                  for k, v in sorted(extras.items())) if extras else ""
+            vals = [
+                gid,
+                ri,
+                res.get("name", ""),
+                res.get("type", ""),
+                hw.get("min_host_gb_ram", ""),
+                hw.get("min_host_cpu_cores", ""),
+                hw.get("cluster_min_nodes", res.get("cluster_min_nodes", "")),
+                (res.get("scaleout") or {}).get("num_instances", ""),
+                ", ".join(res.get("dependencies", [])) if res.get("dependencies") else "",
+                (res.get("provider") or {}).get("host", "") if isinstance(res.get("provider"), dict) else "",
+                extra_str,
+            ]
+            for ci, v in enumerate(vals, 1):
+                c = ws3.cell(row=dr, column=ci, value=v)
+                c.border = thin
+                c.alignment = wrap
+            if ri == 1:
+                for ci in range(1, len(vals) + 1):
+                    ws3.cell(row=dr, column=ci).fill = grp_fill
+            dr += 1
+
+    ws3.column_dimensions["A"].width = 10
+    ws3.column_dimensions["B"].width = 12
+    ws3.column_dimensions["C"].width = 22
+    ws3.column_dimensions["D"].width = 18
+    ws3.column_dimensions["E"].width = 16
+    ws3.column_dimensions["F"].width = 18
+    ws3.column_dimensions["G"].width = 18
+    ws3.column_dimensions["H"].width = 20
+    ws3.column_dimensions["I"].width = 30
+    ws3.column_dimensions["J"].width = 20
+    ws3.column_dimensions["K"].width = 40
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f"resource_spec_{branch}_{team}.xlsx"
+    return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                     as_attachment=True, download_name=filename)
+
+
+@app.route("/mcp/regression/testcase-mgmt/resolve-job-profiles", methods=["POST"])
+@jwt_required
+def testcase_mgmt_resolve_job_profiles():
+    """Search JITA job profiles by prefix and cross-reference with testcase test_sets."""
+    from urllib.parse import quote
+
+    body = request.get_json(force=True)
+    branch = body.get("branch", "master")
+    team = body.get("team", "CDP")
+    jp_prefix = body.get("jp_prefix", "").strip()
+    tc_names = body.get("testcase_names", [])
+
+    if not jp_prefix:
+        return jsonify({"error": "jp_prefix is required"}), 400
+
+    data = _load_tc_data(branch, team)
+    all_tcs = data.get("testcases", [])
+
+    if tc_names:
+        name_set = set(tc_names)
+        target_tcs = [tc for tc in all_tcs if tc.get("name") in name_set]
+    else:
+        target_tcs = all_tcs
+
+    if not target_tcs:
+        return jsonify({"error": "No matching testcases found"}), 404
+
+    raw_query = json.dumps({"name": {"$regex": f"^{jp_prefix}", "$options": "i"}})
+    try:
+        resp = requests.get(
+            f"{JITA_BASE}/job_profiles",
+            params={"raw_query": quote(raw_query), "limit": 200},
+            auth=JITA_SVC_AUTH,
+            verify=False,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        job_profiles = resp.json().get("data", [])
+    except Exception as exc:
+        return jsonify({"error": f"JITA search failed: {exc}"}), 502
+
+    if not job_profiles:
+        return jsonify({
+            "matched": [],
+            "unmatched_testcases": [tc.get("name", "") for tc in target_tcs],
+            "total_matched_testcases": 0,
+            "total_unmatched_testcases": len(target_tcs),
+            "job_profiles_found": 0,
+        })
+
+    jp_map = {}
+    for jp in job_profiles:
+        jp_id = jp.get("_id", {}).get("$oid", "") if isinstance(jp.get("_id"), dict) else str(jp.get("_id", ""))
+        jp_name = jp.get("name", "")
+        jp_test_sets = set()
+        for ts in jp.get("test_sets", jp.get("test_set", [])):
+            if isinstance(ts, str):
+                jp_test_sets.add(ts.lower())
+            elif isinstance(ts, dict):
+                ts_name = ts.get("name", ts.get("test_set", ""))
+                if ts_name:
+                    jp_test_sets.add(str(ts_name).lower())
+        jp_map[jp_id] = {"name": jp_name, "test_sets": jp_test_sets, "testcases": []}
+
+    matched_tc_names = set()
+    for tc in target_tcs:
+        tc_test_sets = {s.lower() for s in tc.get("test_sets", []) if isinstance(s, str)}
+        for jp_id, jp_info in jp_map.items():
+            if tc_test_sets & jp_info["test_sets"]:
+                jp_info["testcases"].append(tc.get("name", ""))
+                matched_tc_names.add(tc.get("name", ""))
+
+    matched = []
+    for jp_id, jp_info in jp_map.items():
+        if jp_info["testcases"]:
+            matched.append({
+                "job_profile_id": jp_id,
+                "job_profile_name": jp_info["name"],
+                "testcase_count": len(jp_info["testcases"]),
+                "testcases": jp_info["testcases"],
+            })
+    matched.sort(key=lambda x: -x["testcase_count"])
+
+    unmatched = [tc.get("name", "") for tc in target_tcs if tc.get("name", "") not in matched_tc_names]
+
+    return jsonify({
+        "matched": matched,
+        "unmatched_testcases": unmatched,
+        "total_matched_testcases": len(matched_tc_names),
+        "total_unmatched_testcases": len(unmatched),
+        "job_profiles_found": len(job_profiles),
+    })
+
+
+@app.route("/mcp/regression/testcase-mgmt/branches", methods=["GET"])
+@jwt_required
+def testcase_mgmt_branches():
+    """Return available branches and teams for the testcase management module."""
+    return jsonify({
+        "branches": list(TESTCASE_MGMT_BRANCHES.keys()),
+        "teams": TESTCASE_MGMT_TEAMS,
+    })
 
 
 # ======================================================
