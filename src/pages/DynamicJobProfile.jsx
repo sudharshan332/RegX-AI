@@ -105,7 +105,10 @@ export default function DynamicJobProfile() {
   }, [customTSName, reuseSourceTS]);
 
   const parseTestcaseNames = () =>
-    testcaseInput.split(/[,\n]+/).map(s => s.trim()).filter(s => s.length > 0);
+    testcaseInput
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
 
   const getErrorMessage = (error) => {
     if (error.response?.data?.error) return error.response.data.error;
@@ -597,10 +600,10 @@ export default function DynamicJobProfile() {
           <textarea
             value={testcaseInput}
             onChange={(e) => setTestcaseInput(e.target.value)}
-            placeholder="Enter fully qualified testcase names, one per line or comma-separated&#10;e.g.&#10;cdp.stargate.storage_policy.api.test_storage_policy.TestStoragePolicy.test_storage_policy___duplicate_name"
+            placeholder="Enter fully qualified testcase names (space, comma, or line break between names)&#10;e.g.&#10;cdp.stargate.storage_policy.api.test_storage_policy.TestStoragePolicy.test_storage_policy___duplicate_name"
             rows={4}
           />
-          <small>Comma or newline separated testcase names</small>
+          <small>Space, comma, or newline between testcase names</small>
         </div>
 
         <div className="djp-search-row">
