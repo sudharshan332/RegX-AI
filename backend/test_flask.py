@@ -1,6 +1,7 @@
 import json
 import time
 import logging
+import threading
 import requests
 import urllib3
 import pandas as pd
@@ -6181,11 +6182,11 @@ def testcase_mgmt_branches():
 def dynamic_jp_test_execution_history():
     """Fetch detailed test execution history from JITA.
 
-    Mirrors the data shown on JITA's /test_history page: each row is one
-    execution of the given testcase across different runs.
-
-    Uses GET agave_test_results with test.name filter (same as JITA frontend).
-    Falls back to POST reports/agave_test_results with raw_query if needed.
+    Mirrors JITA /test_history: each row is one execution. When ``branch`` is set in
+    the JSON body, results are restricted to that ``system_under_test.branch`` (query
+    + case-insensitive post-filter). ``test_set`` and ``job_profile`` come from the
+    **history row** (``test_set`` / ``test_set_name`` / ``AgaveTask`` and run
+    ``label`` for JP), with task lookups only as fallback.
     """
     try:
         req_data = request.json or {}
@@ -6259,6 +6260,25 @@ def dynamic_jp_test_execution_history():
             except Exception as e:
                 logger.warning(f"[test-exec-history] POST fallback failed: {e}")
 
+        jita_total_pre_branch = total
+
+        def _sut_branch(item):
+            return (item.get("system_under_test") or {}).get("branch") or ""
+
+        def _branch_matches(item):
+            if not branch_filter:
+                return True
+            return (_sut_branch(item) or "").strip().lower() == branch_filter.lower()
+
+        # Match UI: use history rows for the selected branch (backup if JITA query is loose)
+        if branch_filter:
+            raw_items = [it for it in raw_items if _branch_matches(it)]
+            total = len(raw_items)
+            logger.info(
+                f"[test-exec-history] After branch filter {branch_filter!r}: {len(raw_items)} rows "
+                f"(pre-filter total from JITA was {jita_total_pre_branch})"
+            )
+
         def _oid(val):
             if isinstance(val, dict) and "$oid" in val:
                 return val["$oid"]
@@ -6268,6 +6288,81 @@ def dynamic_jp_test_execution_history():
             if isinstance(val, dict) and "$date" in val:
                 return val["$date"]
             return val
+
+        def _test_set_name_from_embedded_agave(agt):
+            """Per-result test set from AgaveTask embed only."""
+            if not isinstance(agt, dict):
+                return ""
+            s = (agt.get("test_set_name") or "").strip()
+            if s:
+                return s
+            tso = agt.get("test_set")
+            if isinstance(tso, dict):
+                s = (tso.get("name") or "").strip()
+                if s:
+                    return s
+            elif isinstance(tso, str) and tso.strip():
+                return tso.strip()
+            return ""
+
+        def _test_set_from_history_row(item, agt):
+            """JITA test history row: prefer top-level + AgaveTask (same as /test_history table)."""
+            if isinstance(item, dict):
+                s = (item.get("test_set_name") or "").strip()
+                if s:
+                    return s
+                tso = item.get("test_set")
+                if isinstance(tso, dict):
+                    s = (tso.get("name") or "").strip()
+                    if s:
+                        return s
+                elif isinstance(tso, str) and tso.strip():
+                    return tso.strip()
+            return _test_set_name_from_embedded_agave(agt)
+
+        def _label_to_jp_display(label):
+            """Run label is the JP line on JITA history, e.g. Some_JP_Name-(42)."""
+            if not label or not isinstance(label, str):
+                return ""
+            return re.sub(r"-\(\d+\)$", "", label.strip())
+
+        def _jp_name_from_history_row(item, agt):
+            """JP for display: JITA /test_history uses run label; prefer that over job_profile_name."""
+            if isinstance(agt, dict):
+                lab = (agt.get("label") or "").strip()
+                if lab:
+                    d = _label_to_jp_display(lab)
+                    if d:
+                        return d
+                    return lab
+                jn = (agt.get("job_profile_name") or "").strip()
+                if jn:
+                    return jn
+            if isinstance(item, dict):
+                lab = (item.get("label") or "").strip()
+                if lab:
+                    d = _label_to_jp_display(lab)
+                    if d:
+                        return d
+                    return lab
+                jn = (item.get("job_profile_name") or "").strip()
+                if jn:
+                    return jn
+            return ""
+
+        def _test_names_from_ts_doc_tests_field(tests_field):
+            """Normalize JITA test_sets.tests entries to full testcase name strings."""
+            out = set()
+            if not isinstance(tests_field, list):
+                return out
+            for entry in tests_field:
+                if isinstance(entry, str) and entry.strip():
+                    out.add(entry.strip())
+                elif isinstance(entry, dict):
+                    n = entry.get("name") or entry.get("test") or entry.get("path")
+                    if isinstance(n, str) and n.strip():
+                        out.add(n.strip())
+            return out
 
         # Collect unique task IDs so we can look up test_set / job_profile
         unique_task_ids = list({
@@ -6326,6 +6421,14 @@ def dynamic_jp_test_execution_history():
                             continue
                         ts_list = t.get("test_sets") or []
                         ts_name = ts_list[0].get("name", "") if ts_list else ""
+                        ts_refs = []
+                        for el in ts_list:
+                            if not isinstance(el, dict):
+                                continue
+                            rid = _oid(el.get("_id") or el)
+                            nm = (el.get("name") or "").strip()
+                            if rid or nm:
+                                ts_refs.append({"id": rid, "name": nm})
 
                         # Get JP name: prefer resolved name, fall back to label parsing
                         jp_ref = t.get("job_profile")
@@ -6337,12 +6440,59 @@ def dynamic_jp_test_execution_history():
 
                         task_info[tid] = {
                             "test_set_name": ts_name,
+                            "ts_refs": ts_refs,
                             "job_profile_name": jp_name,
                             "branch": t.get("branch", ""),
                         }
                     logger.info(f"[test-exec-history] Fetched info for {len(task_info)} tasks, {len(jp_id_map)} unique JPs")
             except Exception as e:
                 logger.warning(f"[test-exec-history] Failed to fetch task details: {e}")
+
+        # When a task has multiple test sets and a row has no embedded test set, match by testcase name.
+        ts_id_to_testnames = {}
+        ts_id_to_tsname = {}
+        if task_info:
+            need_ids = set()
+            for _tid, tmeta in task_info.items():
+                refs = tmeta.get("ts_refs") or []
+                if len(refs) > 1:
+                    for r in refs:
+                        rid = r.get("id")
+                        if rid:
+                            need_ids.add(rid)
+            if need_ids:
+                from urllib.parse import quote
+
+                for chunk in (
+                    list(need_ids)[i : i + 40] for i in range(0, min(len(need_ids), 200), 40)
+                ):
+                    if not chunk:
+                        break
+                    try:
+                        tq = json.dumps({"_id": {"$in": [{"$oid": x} for x in chunk]}})
+                        tsr = requests.get(
+                            f"{JITA_BASE}/test_sets",
+                            params={
+                                "raw_query": quote(tq),
+                                "limit": len(chunk),
+                                "only": "_id,tests,name",
+                            },
+                            auth=JITA_SVC_AUTH,
+                            verify=False,
+                            timeout=45,
+                        )
+                        if tsr.status_code == 200:
+                            for d in tsr.json().get("data", []):
+                                oid = _oid(d.get("_id"))
+                                if oid:
+                                    ts_id_to_testnames[oid] = _test_names_from_ts_doc_tests_field(
+                                        d.get("tests")
+                                    )
+                                    nm = (d.get("name") or "").strip()
+                                    if nm:
+                                        ts_id_to_tsname[oid] = nm
+                    except Exception as e:
+                        logger.warning(f"[test-exec-history] Batch test_sets fetch failed: {e}")
 
         rows = []
         seen_pairs = set()
@@ -6352,10 +6502,23 @@ def dynamic_jp_test_execution_history():
             agave_task = item.get("AgaveTask") or {}
             exec_id = _oid(item.get("agave_task_id"))
             ti = task_info.get(exec_id, {})
-            # Prefer our resolved task_info (from actual task/JP lookup) over
-            # AgaveTask embedded data which can be stale or use path format
-            ts = ti.get("test_set_name", "") or agave_task.get("test_set_name", "")
-            jp = ti.get("job_profile_name", "") or agave_task.get("job_profile_name", "")
+            # Test set: JITA history row first (matches /test_history), then multi-TS membership, then task.
+            row_ts = _test_set_from_history_row(item, agave_task)
+            if not row_ts:
+                refs = ti.get("ts_refs") or []
+                if len(refs) > 1 and test_name:
+                    for r in refs:
+                        rid = r.get("id")
+                        if not rid:
+                            continue
+                        tnames = ts_id_to_testnames.get(rid)
+                        if tnames and test_name in tnames:
+                            row_ts = (r.get("name") or "").strip() or ts_id_to_tsname.get(rid, "")
+                            if row_ts:
+                                break
+            ts = row_ts or ti.get("test_set_name", "")
+            # JP: history label / row fields first (user expects test set + label as on JITA for that branch).
+            jp = _jp_name_from_history_row(item, agave_task) or ti.get("job_profile_name", "")
             rows.append({
                 "id": _oid(item.get("_id")),
                 "execution_id": exec_id,
@@ -6574,6 +6737,86 @@ def _dynamic_jp_ts_prefix_for_date(dyn_date_str=None):
     return jp_p, ts_p
 
 
+# Monotonic sequence per YYYYMMDD; increments on every /dynamic-jp/create attempt (success or fail after bump).
+DYN_NAME_SEQ_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dyn_name_sequence.json")
+_dyn_name_seq_lock = threading.Lock()
+
+
+def _dyn_name_seq_date_key(dyn_name_date):
+    d = (dyn_name_date or "").strip()
+    if d and len(d) == 8 and d.isdigit():
+        return d
+    return datetime.now().strftime("%Y%m%d")
+
+
+def _load_dyn_name_seq() -> dict:
+    try:
+        with open(DYN_NAME_SEQ_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                out = {}
+                for k, v in data.items():
+                    ks = str(k)
+                    if len(ks) == 8 and ks.isdigit():
+                        try:
+                            out[ks] = int(v)
+                        except (TypeError, ValueError):
+                            pass
+                return out
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return {}
+
+
+def _save_dyn_name_seq(data: dict) -> None:
+    try:
+        with open(DYN_NAME_SEQ_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=0)
+    except OSError as e:
+        logger.warning(f"Could not write {DYN_NAME_SEQ_FILE}: {e}")
+
+
+def _peek_next_dyn_name_seq(dyn_name_date):
+    """Next sequence number to suggest (1 + last used); does not modify store."""
+    key = _dyn_name_seq_date_key(dyn_name_date)
+    with _dyn_name_seq_lock:
+        data = _load_dyn_name_seq()
+        return int(data.get(key, 0)) + 1
+
+
+def _bump_dyn_name_seq(dyn_name_date):
+    """Increment and return the sequence to use for this /create call (one bump per create request)."""
+    key = _dyn_name_seq_date_key(dyn_name_date)
+    with _dyn_name_seq_lock:
+        data = _load_dyn_name_seq()
+        n = int(data.get(key, 0)) + 1
+        data[key] = n
+        _save_dyn_name_seq(data)
+    logger.info(f"[dyn-seq] date={key} last_reserved={n}")
+    return n
+
+
+def _apply_reserved_seq_to_dyn_custom_name(name: str, date_key: str, seq: int) -> str:
+    """Rewrite User_Dyn_{date}_JP_n / _TS_n to use `seq` (per create attempt)."""
+    if not name or not date_key:
+        return name
+    s = re.sub(
+        rf"(User_Dyn_{re.escape(date_key)}_JP_)\d+",
+        rf"\g<1>{seq}",
+        name,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(
+        rf"(User_Dyn_{re.escape(date_key)}_TS_)\d+",
+        rf"\g<1>{seq}",
+        s,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return s
+
+
 @app.route("/mcp/regression/dynamic-jp/check-existing", methods=["POST"])
 def dynamic_jp_check_existing():
     """Search for existing dynamic JP/TS by name prefix; suggest next numeric suffix.
@@ -6682,6 +6925,13 @@ def dynamic_jp_check_existing():
                     next_ts_num = max(next_ts_num, num + 1)
                 except (ValueError, TypeError):
                     pass
+
+        date_key = dyn_name_date if (dyn_name_date and len(dyn_name_date) == 8 and dyn_name_date.isdigit()) else datetime.now().strftime("%Y%m%d")
+        seq_peek = _peek_next_dyn_name_seq(date_key)
+        # Never suggest a number below JITA reality or our next reserved slot
+        next_both = max(next_jp_num, next_ts_num, seq_peek)
+        next_jp_num = next_both
+        next_ts_num = next_both
 
         return jsonify({
             "success": True,
@@ -7284,51 +7534,27 @@ def dynamic_jp_create():
         if dyn_name_date and (len(dyn_name_date) != 8 or not dyn_name_date.isdigit()):
             return jsonify({"error": "dyn_name_date must be YYYYMMDD"}), 400
         jp_prefix, ts_prefix = _dynamic_jp_ts_prefix_for_date(dyn_name_date or None)
-
-        def _find_next_num(entity_type, prefix):
-            try:
-                raw_q = json.dumps({"name": {"$regex": f"^{re.escape(prefix)}\\d+$", "$options": "i"}})
-                resp_num = requests.get(
-                    f"{JITA_BASE}/{entity_type}",
-                    params={"raw_query": quote(raw_q), "limit": 200, "only": "_id,name"},
-                    auth=JITA_SVC_AUTH, verify=False, timeout=30
-                )
-                n = 1
-                if resp_num.status_code == 200:
-                    for item in (resp_num.json().get("data", []) if isinstance(resp_num.json(), dict) else []):
-                        if not isinstance(item, dict):
-                            continue
-                        name = item.get("name", "")
-                        suffix = name[len(prefix):]
-                        try:
-                            n = max(n, int(suffix) + 1)
-                        except (ValueError, TypeError):
-                            pass
-                return n
-            except (requests.exceptions.RequestException, ValueError) as e:
-                logger.warning(f"Could not determine next number for {prefix}: {e}")
-                return int(time.time()) % 100000
+        date_key = _dyn_name_seq_date_key(dyn_name_date or None)
+        # Monotonic: bumps every /create, success or later failure, so JP_/TS_ numbers always advance
+        reserved_seq = _bump_dyn_name_seq(dyn_name_date or None)
+        if custom_jp_name:
+            custom_jp_name = _apply_reserved_seq_to_dyn_custom_name(custom_jp_name, date_key, reserved_seq)
+        if custom_ts_name and not (reuse_source_ts and linked_ts_id_for_reuse):
+            custom_ts_name = _apply_reserved_seq_to_dyn_custom_name(custom_ts_name, date_key, reserved_seq)
 
         if custom_jp_name:
             new_jp_name = custom_jp_name
         else:
-            next_jp_num = _find_next_num("job_profiles", jp_prefix)
-            next_ts_num = _find_next_num("test_sets", ts_prefix)
-            next_num = max(next_jp_num, next_ts_num)
-            new_jp_name = f"{jp_prefix}{next_num}"
+            new_jp_name = f"{jp_prefix}{reserved_seq}"
 
         if reuse_source_ts and linked_ts_id_for_reuse:
             new_ts_name = reuse_ts_display_name or linked_ts_id_for_reuse
         elif custom_ts_name:
             new_ts_name = custom_ts_name
         else:
-            if not custom_jp_name:
-                new_ts_name = f"{ts_prefix}{next_num}"
-            else:
-                next_ts_num = _find_next_num("test_sets", ts_prefix)
-                new_ts_name = f"{ts_prefix}{next_ts_num}"
+            new_ts_name = f"{ts_prefix}{reserved_seq}"
 
-        # 4. Pre-check: verify JP and TS names don't already exist
+        # 4. Pre-check: verify JP and TS names; pick alternatives if the requested name exists
         def _name_exists(entity_type, name):
             """Check if a JP or TS with this exact name already exists. Returns ID or None."""
             try:
@@ -7356,13 +7582,26 @@ def dynamic_jp_create():
                 logger.warning(f"[create] Pre-check for {entity_type} '{name}' failed: {e}")
             return None
 
-        existing_jp_id = _name_exists("job_profiles", new_jp_name)
-        if existing_jp_id:
-            logger.info(f"[create] BLOCKED: JP '{new_jp_name}' already exists with ID {existing_jp_id}")
-            return jsonify({
-                "error": f"Cannot create Job Profile — a JP named '{new_jp_name}' already exists (ID: {existing_jp_id}). "
-                         f"Please choose a different name.",
-            }), 409
+        def _pick_unique_name(entity_type, base_name, kind="Job Profile"):
+            """If base_name is free, return (base_name, None). Otherwise use base_2, base_3, ... in JITA."""
+            if not base_name:
+                return base_name, None
+            if not _name_exists(entity_type, base_name):
+                return base_name, None
+            orig = base_name
+            for n in range(2, 5000):
+                candidate = f"{orig}_{n}"
+                if not _name_exists(entity_type, candidate):
+                    msg = f"{kind} name {orig!r} already exists in JITA; using {candidate!r} instead."
+                    logger.info(f"[create] {msg}")
+                    return candidate, msg
+            fallback = f"{orig}_{int(time.time())}"
+            return fallback, f"{kind} name {orig!r} exists; using time-based name {fallback!r}."
+
+        jp_name_adjust_warn = None
+        new_jp_name, _adj = _pick_unique_name("job_profiles", new_jp_name, "Job Profile")
+        if _adj:
+            jp_name_adjust_warn = _adj
 
         existing_ts_id = None
         if not (reuse_source_ts and linked_ts_id_for_reuse):
@@ -7569,6 +7808,33 @@ def dynamic_jp_create():
             # Only update name, description, test_sets (already done above)
             logger.info(f"[create] Clone mode — preserving source JP config "
                         f"(infra={new_jp_payload.get('infra', 'N/A')[:80] if isinstance(new_jp_payload.get('infra'), str) else 'present'})")
+            # User-supplied patch URLs (clone flow): fresh-create applied these above; clone had skipped them
+            if test_patch_url or framework_patch_url:
+                logger.info(
+                    f"[create] Clone mode — applying patches: test_patch_url={bool(test_patch_url)}, "
+                    f"framework_patch_url={bool(framework_patch_url)}"
+                )
+                tmeta = new_jp_payload.get("test_framework_metadata")
+                tmeta = dict(tmeta) if isinstance(tmeta, dict) else {}
+                test_m = tmeta.get("test")
+                test_m = dict(test_m) if isinstance(test_m, dict) else {}
+                fw_m = tmeta.get("framework")
+                fw_m = dict(fw_m) if isinstance(fw_m, dict) else {}
+                test_m["branch"] = nutest_branch
+                test_m["commit"] = None
+                fw_m["branch"] = nutest_branch
+                fw_m["commit"] = None
+                if test_patch_url:
+                    test_m["patch_url"] = test_patch_url
+                if framework_patch_url:
+                    fw_m["patch_url"] = framework_patch_url
+                tmeta["test"] = test_m
+                tmeta["framework"] = fw_m
+                new_jp_payload["test_framework_metadata"] = tmeta
+                new_jp_payload["test_framework"] = "nutest-py3-tests"
+                new_jp_payload["nutest-py3-tests_branch"] = nutest_branch
+                if framework_patch_url:
+                    new_jp_payload["patch_url"] = framework_patch_url
 
         # Tags will be applied via a separate PUT after creation (same
         # approach as Run Plan) because JITA's POST ignores tag fields.
@@ -7678,6 +7944,8 @@ def dynamic_jp_create():
                 logger.warning(f"[create] Tag update error: {e}")
 
         warnings = []
+        if jp_name_adjust_warn:
+            warnings.append(jp_name_adjust_warn)
         if ts_fetch_warning:
             warnings.append(ts_fetch_warning)
         if ts_create_warning:

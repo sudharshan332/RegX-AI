@@ -843,6 +843,12 @@
 }
 
 /* Unique TS / JP lists */
+.djp-clear-selection-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
 .djp-unique-lists {
   display: flex;
   gap: 32px;
@@ -974,7 +980,62 @@
   margin-top: 16px;
 }
 
+.djp-ts-mode-row {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.djp-ts-mode-option {
+  flex: 1;
+  min-width: min(100%, 240px);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #64748b;
+  font-weight: 400;
+}
+
+.djp-ts-mode-option input {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.djp-ts-mode-option strong {
+  color: #1e293b;
+  font-weight: 600;
+}
+
 .djp-tag-section {
+  margin-top: 12px;
+}
+
+.djp-tag-patch-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 24px 32px;
+}
+
+.djp-toggle-row--inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 0;
+}
+
+.djp-toggle-row--inline label {
+  margin-bottom: 0;
+  min-width: 4.5rem;
+}
+
+.djp-tag-patch-expand {
   margin-top: 12px;
 }
 

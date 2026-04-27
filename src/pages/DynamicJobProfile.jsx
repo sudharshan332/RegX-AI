@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import axios from 'axios';
 import { API_BASE_URL } from '../config';
 import './DynamicJobProfile.css';
@@ -64,6 +64,8 @@ export default function DynamicJobProfile() {
   const [customTSName, setCustomTSName] = useState('');
   /** Clone mode only: link new JP to source TS instead of creating a TS with only the typed testcases. */
   const [reuseSourceTS, setReuseSourceTS] = useState(false);
+  /** Keeps the last "New Testset" name if user toggles to Use Existing (field hidden) and back. */
+  const newTestSetNameWhenNewMode = useRef('');
 
   // Tag support
   const [showTagInput, setShowTagInput] = useState(false);
@@ -95,6 +97,12 @@ export default function DynamicJobProfile() {
   const [branchLoading, setBranchLoading] = useState(false);
   const branchReqId = useRef(0);
   const branchDebounce = useRef(null);
+
+  useEffect(() => {
+    if (!reuseSourceTS) {
+      newTestSetNameWhenNewMode.current = customTSName;
+    }
+  }, [customTSName, reuseSourceTS]);
 
   const parseTestcaseNames = () =>
     testcaseInput.split(/[,\n]+/).map(s => s.trim()).filter(s => s.length > 0);
@@ -148,9 +156,8 @@ export default function DynamicJobProfile() {
     }
   };
 
-  /** After picking an existing JP/TS, suggest User_Dyn_<date>_(JP|TS)_<n>_<source name> (JITA next numbers). */
-  const applyDynNamesFromExistingSelections = async (jpName, tsName) => {
-    const d = await fetchNextNumbers();
+  /** Apply suggested User_Dyn names from a check-existing result (no extra network). */
+  const applyNamesFromCheckData = (d, jpName, tsName) => {
     if (jpName) {
       setCustomJPName(`${d.jpPrefix}${d.jpNum}_${jpName}`);
     } else {
@@ -163,41 +170,37 @@ export default function DynamicJobProfile() {
     }
   };
 
-  const clearJPSelection = (e) => {
+  const clearJPAndTSSelection = (e) => {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
     setSelectedJP(null);
     setSelectedJPName('');
     setResolvedJPId(null);
-    setErrorMsg(null);
-    (async () => {
-      const d = await fetchNextNumbers();
-      setCustomJPName(`${d.jpPrefix}${d.jpNum}`);
-    })();
-  };
-
-  const clearTSSelection = (e) => {
-    if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
     setSelectedTestSetName('');
     setResolvedTSId(null);
     setTestSetDetails(null);
     setErrorMsg(null);
     (async () => {
       const d = await fetchNextNumbers();
+      setCustomJPName(`${d.jpPrefix}${d.jpNum}`);
       setCustomTSName(`${d.tsPrefix}${d.tsNum}`);
     })();
   };
 
   const handleSelectJP = async (jpName) => {
+    const tsName = selectedTestSetName || null;
     setSelectedJPName(jpName);
     setResolvedJPId(null);
     setResolving(true);
     setErrorMsg(null);
     try {
-      const resp = await axios.post(`${API_BASE}/resolve-names`, { jp_name: jpName });
+      const [resp, d] = await Promise.all([
+        axios.post(`${API_BASE}/resolve-names`, { jp_name: jpName }),
+        fetchNextNumbers(),
+      ]);
       if (resp.data?.jp?._id) {
         setSelectedJP(resp.data.jp._id);
         setResolvedJPId(resp.data.jp._id);
-        await applyDynNamesFromExistingSelections(jpName, selectedTestSetName || null);
+        applyNamesFromCheckData(d, jpName, tsName);
       } else {
         setSelectedJP(null);
         setErrorMsg(`Could not resolve Job Profile "${jpName}" to an ID. It may not exist in JITA.`);
@@ -214,17 +217,21 @@ export default function DynamicJobProfile() {
   };
 
   const handleSelectTS = async (tsName) => {
+    const jpName = selectedJPName || null;
     setSelectedTestSetName(tsName);
     setResolvedTSId(null);
     setTestSetDetails(null);
     setResolving(true);
     setErrorMsg(null);
     try {
-      const resp = await axios.post(`${API_BASE}/resolve-names`, { ts_name: tsName });
+      const [resp, d] = await Promise.all([
+        axios.post(`${API_BASE}/resolve-names`, { ts_name: tsName }),
+        fetchNextNumbers(),
+      ]);
       if (resp.data?.ts?._id) {
         setResolvedTSId(resp.data.ts._id);
         setTestSetDetails(resp.data.ts);
-        await applyDynNamesFromExistingSelections(selectedJPName || null, tsName);
+        applyNamesFromCheckData(d, jpName, tsName);
       } else {
         setErrorMsg(`Could not resolve Test Set "${tsName}" to an ID. It may not exist in JITA.`);
       }
@@ -442,19 +449,35 @@ export default function DynamicJobProfile() {
       </div>
     ) : null;
 
-  const renderTagSection = () => (
+  /** Add tags and Patch toggles on one row; tag fields then patch fields open below. */
+  const renderTagsAndPatchSection = () => (
     <div className="djp-tag-section">
-      <div className="djp-toggle-row">
-        <label>Add Tags</label>
-        <div
-          className={`djp-toggle ${showTagInput ? 'active' : ''}`}
-          onClick={() => setShowTagInput(!showTagInput)}
-        >
-          <div className="djp-toggle-knob" />
+      <div className="djp-tag-patch-toggles" role="group" aria-label="Tags and patches">
+        <div className="djp-toggle-row djp-toggle-row--inline">
+          <label>Add tags</label>
+          <div
+            className={`djp-toggle ${showTagInput ? 'active' : ''}`}
+            onClick={() => setShowTagInput(!showTagInput)}
+            role="switch"
+            aria-checked={showTagInput}
+          >
+            <div className="djp-toggle-knob" />
+          </div>
+        </div>
+        <div className="djp-toggle-row djp-toggle-row--inline">
+          <label>Patch</label>
+          <div
+            className={`djp-toggle ${showPatch ? 'active' : ''}`}
+            onClick={() => setShowPatch(!showPatch)}
+            role="switch"
+            aria-checked={showPatch}
+          >
+            <div className="djp-toggle-knob" />
+          </div>
         </div>
       </div>
       {showTagInput && (
-        <div className="djp-tag-input-area">
+        <div className="djp-tag-input-area djp-tag-patch-expand">
           <div className="djp-tag-input-row">
             <input
               type="text"
@@ -482,6 +505,28 @@ export default function DynamicJobProfile() {
             </div>
           )}
           <small style={{ color: '#64748b' }}>Tags will be added to the JP's advanced options</small>
+        </div>
+      )}
+      {showPatch && (
+        <div className="djp-patch-fields djp-tag-patch-expand">
+          <div className="djp-form-group">
+            <label>Framework Patch URL</label>
+            <input
+              type="text"
+              value={config.frameworkPatchUrl}
+              onChange={(e) => setConfig({ ...config, frameworkPatchUrl: e.target.value })}
+              placeholder="https://nugerrit.ntnxdpro.com/changes/nutest-py3~.../patch?zip"
+            />
+          </div>
+          <div className="djp-form-group">
+            <label>Nutest-Py3-Tests Patch URL</label>
+            <input
+              type="text"
+              value={config.testPatchUrl}
+              onChange={(e) => setConfig({ ...config, testPatchUrl: e.target.value })}
+              placeholder="https://nugerrit.ntnxdpro.com/changes/nutest-py3-tests~.../patch?zip"
+            />
+          </div>
         </div>
       )}
     </div>
@@ -660,30 +705,24 @@ export default function DynamicJobProfile() {
             ) : (
               <>
                 <h3 className="djp-section-title">Step 2: Select Source JP & Test Set to Clone</h3>
-                <div className="djp-info-banner info" style={{ marginBottom: '16px' }}>
-                  Pick a source job profile (required). Test set is optional if you choose <strong>Existing test set</strong>
-                  — JITA will use the source JP’s first test set when none is selected.
-                  New JP and new test set names default to{' '}
-                  <code>User_Dyn_</code>
-                  {' '}<code>YYYYMMDD</code>
-                  {' '}<code>_JP_</code> / <code>_TS_</code> plus a number (edit if needed). Use Clear to undo a list selection.
-                </div>
+                {(selectedJPName || selectedTestSetName || resolvedJPId || resolvedTSId) && (
+                  <div className="djp-clear-selection-row">
+                    <button
+                      type="button"
+                      className="djp-btn djp-btn-secondary"
+                      style={{ fontSize: '12px', padding: '4px 10px' }}
+                      onClick={clearJPAndTSSelection}
+                    >
+                      Clear selection
+                    </button>
+                  </div>
+                )}
                 <div className="djp-unique-lists">
                   <div className="djp-unique-list-col">
                     <div className="djp-list-heading-row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
                       <h4 className="djp-list-heading" style={{ margin: 0 }}>
                         Test Sets <span className="djp-list-count">{uniqueTS.length}</span>
                       </h4>
-                      {(selectedTestSetName || resolvedTSId) && (
-                        <button
-                          type="button"
-                          className="djp-btn djp-btn-secondary"
-                          style={{ fontSize: '12px', padding: '4px 10px' }}
-                          onClick={clearTSSelection}
-                        >
-                          Clear TS selection
-                        </button>
-                      )}
                     </div>
                     <ul className="djp-name-list djp-name-list-selectable">
                       {uniqueTS.map((name, i) => (
@@ -711,16 +750,6 @@ export default function DynamicJobProfile() {
                       <h4 className="djp-list-heading" style={{ margin: 0 }}>
                         Job Profiles <span className="djp-list-count">{uniqueJP.length}</span>
                       </h4>
-                      {(selectedJPName || resolvedJPId) && (
-                        <button
-                          type="button"
-                          className="djp-btn djp-btn-secondary"
-                          style={{ fontSize: '12px', padding: '4px 10px' }}
-                          onClick={clearJPSelection}
-                        >
-                          Clear JP selection
-                        </button>
-                      )}
                     </div>
                     <ul className="djp-name-list djp-name-list-selectable">
                       {uniqueJP.map((name, i) => (
@@ -749,56 +778,46 @@ export default function DynamicJobProfile() {
                   <h4 className="djp-list-heading" style={{ marginTop: '20px', marginBottom: '12px' }}>
                     Test set for cloned job profile
                   </h4>
-                  <div className="djp-form-group" style={{ marginBottom: '10px' }}>
-                    <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: 'pointer' }}>
+                  <div className="djp-ts-mode-row" role="radiogroup" aria-label="Test set for cloned job profile">
+                    <label className="djp-ts-mode-option">
                       <input
                         type="radio"
                         name="djp-ts-mode"
                         checked={!reuseSourceTS}
-                        onChange={() => setReuseSourceTS(false)}
-                        style={{ marginTop: '3px' }}
+                        onChange={() => {
+                          setReuseSourceTS(false);
+                          if (newTestSetNameWhenNewMode.current) {
+                            setCustomTSName(newTestSetNameWhenNewMode.current);
+                          }
+                        }}
                       />
                       <span>
-                        <strong>New test set</strong> — JITA test set contains <em>only</em> the testcase names above;
-                        copies <code>test_args</code> / <code>framework_args</code> from the source test set when available.
+                        <strong>New Testset</strong> — contains only the testcase above, copies <code>test_args</code> /{' '}
+                        <code>framework_args</code>
                       </span>
                     </label>
-                  </div>
-                  <div className="djp-form-group" style={{ marginBottom: '12px' }}>
-                    <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: 'pointer' }}>
+                    <label className="djp-ts-mode-option">
                       <input
                         type="radio"
                         name="djp-ts-mode"
                         checked={reuseSourceTS}
-                        onChange={() => setReuseSourceTS(true)}
-                        style={{ marginTop: '3px' }}
+                        onChange={() => {
+                          newTestSetNameWhenNewMode.current = customTSName;
+                          setReuseSourceTS(true);
+                        }}
                       />
                       <span>
-                        <strong>Existing test set</strong> — cloned job profile uses the source test set
-                        (pick below, or clear TS selection to use the source JP’s first test set). Testcase names above are
-                        optional and are not written to JITA. You still need a source job profile.
+                        <strong>Use Existing Testset</strong> — no clone; new job profile uses that test set. pick a
+                        test set below, or clear ts selection to use the source job profile’s first test set
                       </span>
                     </label>
                   </div>
                   <h4 className="djp-list-heading" style={{ marginTop: '8px', marginBottom: '12px' }}>
-                    New JP &amp; TS Names
+                    {reuseSourceTS ? 'New job profile name' : 'New JP & TS names'}
                   </h4>
-                  <div className="djp-name-editor-row">
-                    <div className="djp-form-group" style={{ flex: 1 }}>
-                      <label>New Test Set Name</label>
-                      <input
-                        type="text"
-                        value={customTSName}
-                        onChange={(e) => setCustomTSName(e.target.value)}
-                        placeholder="e.g., User_Dyn_20260424_TS_1"
-                        disabled={reuseSourceTS}
-                      />
-                      {selectedTestSetName && (
-                        <small>Cloning from: <strong>{selectedTestSetName}</strong></small>
-                      )}
-                    </div>
-                    <div className="djp-form-group" style={{ flex: 1 }}>
-                      <label>New Job Profile Name</label>
+                  {reuseSourceTS ? (
+                    <div className="djp-form-group" style={{ maxWidth: '520px' }}>
+                      <label>New job profile name</label>
                       <input
                         type="text"
                         value={customJPName}
@@ -806,11 +825,43 @@ export default function DynamicJobProfile() {
                         placeholder="e.g., User_Dyn_20260424_JP_1"
                       />
                       {selectedJPName && (
-                        <small>Cloning from: <strong>{selectedJPName}</strong></small>
+                        <small>Cloning <strong>JP</strong></small>
+                      )}
+                      {selectedTestSetName && (
+                        <small style={{ display: 'block', marginTop: '6px' }}>
+                          Test set linked to the new JP
+                        </small>
                       )}
                     </div>
-                  </div>
-                  {renderTagSection()}
+                  ) : (
+                    <div className="djp-name-editor-row">
+                      <div className="djp-form-group" style={{ flex: 1 }}>
+                        <label>New TestSet</label>
+                        <input
+                          type="text"
+                          value={customTSName}
+                          onChange={(e) => setCustomTSName(e.target.value)}
+                          placeholder="e.g., User_Dyn_20260424_TS_1"
+                        />
+                        {selectedTestSetName && (
+                          <small>Cloning <strong>TS</strong></small>
+                        )}
+                      </div>
+                      <div className="djp-form-group" style={{ flex: 1 }}>
+                        <label>New Job Profile</label>
+                        <input
+                          type="text"
+                          value={customJPName}
+                          onChange={(e) => setCustomJPName(e.target.value)}
+                          placeholder="e.g., User_Dyn_20260424_JP_1"
+                        />
+                        {selectedJPName && (
+                          <small>Cloning <strong>JP</strong></small>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {renderTagsAndPatchSection()}
                 </div>
 
                 <div className="djp-form-actions">
@@ -823,7 +874,7 @@ export default function DynamicJobProfile() {
                   </button>
                   {!selectedJP && (
                     <small style={{ color: '#e74c3c', marginLeft: '12px', alignSelf: 'center' }}>
-                      Select a source Job Profile (required). With “Existing test set”, a test set is optional.
+                      select a source job profile
                     </small>
                   )}
                 </div>
@@ -889,7 +940,7 @@ export default function DynamicJobProfile() {
                 />
               </div>
             </div>
-            {renderTagSection()}
+            {renderTagsAndPatchSection()}
           </div>
 
           <div className="djp-config-panel">
@@ -1094,24 +1145,6 @@ export default function DynamicJobProfile() {
                 <label>Branch</label>
                 <input type="text" value={config.nutestBranch} onChange={(e) => setConfig({ ...config, nutestBranch: e.target.value })} placeholder="e.g., master" />
               </div>
-              <div className="djp-toggle-row">
-                <label>Patch</label>
-                <div className={`djp-toggle ${showPatch ? 'active' : ''}`} onClick={() => setShowPatch(!showPatch)}>
-                  <div className="djp-toggle-knob" />
-                </div>
-              </div>
-              {showPatch && (
-                <>
-                  <div className="djp-form-group">
-                    <label>Framework Patch URL</label>
-                    <input type="text" value={config.frameworkPatchUrl} onChange={(e) => setConfig({ ...config, frameworkPatchUrl: e.target.value })} placeholder="https://nugerrit.ntnxdpro.com/changes/nutest-py3~.../patch?zip" />
-                  </div>
-                  <div className="djp-form-group">
-                    <label>Nutest-Py3-Tests Patch URL</label>
-                    <input type="text" value={config.testPatchUrl} onChange={(e) => setConfig({ ...config, testPatchUrl: e.target.value })} placeholder="https://nugerrit.ntnxdpro.com/changes/nutest-py3-tests~.../patch?zip" />
-                  </div>
-                </>
-              )}
             </div>
           </div>
 
