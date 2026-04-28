@@ -6,6 +6,7 @@ import TestcaseManagement from './pages/TestcaseManagement';
 import TriageGenie from './pages/TriageGenie';
 import RunReport from './pages/RunReport';
 import DynamicJobProfile from './pages/DynamicJobProfile';
+import ManageJobProfile from './pages/ManageJobProfile';
 import FailedTestcaseAnalysis from './pages/FailedTestcaseAnalysis';
 import { TaskProvider } from './context/TaskContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -37,6 +38,7 @@ function Dashboard() {
     { id: 'failed-analysis', label: 'Failed Testcase Analysis', icon: '🔍', description: 'AI-Powered Failure Analysis' },
     { id: 'run-report', label: 'Run Report', icon: '📊', description: 'QI Analysis' },
     { id: 'job-profile', label: 'Dynamic Job Profile', icon: '⚙️', description: 'Job Profile Creation' },
+    { id: 'manage-jp', label: 'Manage JP / TS', icon: '🗑️', description: 'Search & Delete JP/TS' },
   ];
 
   const renderPage = () => {
@@ -57,6 +59,8 @@ function Dashboard() {
         return <RunReport />;
       case 'job-profile':
         return <DynamicJobProfile />;
+      case 'manage-jp':
+        return <ManageJobProfile />;
       default:
         return <RegressionHome />;
     }
