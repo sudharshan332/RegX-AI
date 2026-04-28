@@ -28,6 +28,65 @@
 .djp-header-actions {
   display: flex;
   gap: 10px;
+  align-items: center;
+}
+
+/* Action dropdown (Create / Delete) */
+.djp-actions-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.djp-actions-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 200;
+  min-width: 200px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.12);
+  padding: 6px 0;
+  animation: djpFadeSlideDown 0.15s ease;
+}
+
+@keyframes djpFadeSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.djp-actions-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 18px;
+  border: none;
+  background: none;
+  font-size: 13px;
+  color: #334155;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.djp-actions-item:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+/* Embedded manage JP/TS inside Dynamic JP (no double page chrome) */
+.djp-manage-embedded {
+  margin-top: 4px;
+}
+
+.djp-manage-embedded .djp-section:first-of-type {
+  margin-top: 0;
 }
 
 /* ── Buttons ── */
@@ -98,6 +157,19 @@
 .djp-btn-danger:hover {
   background: #b91c1c;
   border-color: #b91c1c;
+}
+
+/* Green "Action" dropdown trigger — after .djp-btn so border/background win */
+.djp-btn.djp-btn-manage-actions {
+  background: linear-gradient(135deg, #15803d, #16a34a);
+  color: #fff;
+  border-color: #166534;
+}
+
+.djp-btn.djp-btn-manage-actions:hover:not(:disabled) {
+  background: linear-gradient(135deg, #14532d, #15803d);
+  border-color: #14532d;
+  box-shadow: 0 2px 8px rgba(22, 101, 52, 0.35);
 }
 
 .djp-btn-sm {

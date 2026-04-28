@@ -5,7 +5,7 @@ import './DynamicJobProfile.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/dynamic-jp`;
 
-export default function ManageJobProfile() {
+export default function ManageJobProfile({ embedded = false }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
@@ -124,11 +124,15 @@ export default function ManageJobProfile() {
 
   const totalSelected = selectedJPs.size + selectedTSs.size;
 
-  return (
-    <div className="djp-container">
-      <div className="djp-header">
-        <h1>Manage Job Profiles &amp; Test Sets</h1>
-      </div>
+  const headerBlock = !embedded ? (
+    <div className="djp-header">
+      <h1>Manage Job Profiles &amp; Test Sets</h1>
+    </div>
+  ) : null;
+
+  const inner = (
+    <>
+      {headerBlock}
 
       {/* Search bar */}
       <div className="djp-section">
@@ -303,6 +307,16 @@ export default function ManageJobProfile() {
           ))}
         </div>
       )}
+    </>
+  );
+
+  if (embedded) {
+    return <div className="djp-manage-embedded">{inner}</div>;
+  }
+
+  return (
+    <div className="djp-container">
+      {inner}
     </div>
   );
 }
