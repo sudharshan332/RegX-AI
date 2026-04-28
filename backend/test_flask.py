@@ -6817,6 +6817,61 @@ def _apply_reserved_seq_to_dyn_custom_name(name: str, date_key: str, seq: int) -
     return s
 
 
+# Default JITA test set "framework options" (framework_args JSON object) for dynamic creates.
+# On clone, merge with source: source keys win; any default key missing in source is added.
+# If a cloned TS already has all of these keys (order irrelevant), do not change framework_args.
+DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS = {
+    "no_log_collection": False,
+    "scatter_logs": "cascade",
+    "use_logbay": "",
+    "log_level": "DEBUG",
+}
+
+
+def _framework_args_value_to_dict(val):
+    """Normalize test set framework_args from JITA (JSON string or dict) to a dict."""
+    if val is None:
+        return {}
+    if isinstance(val, dict):
+        return dict(val)
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return {}
+        try:
+            parsed = json.loads(s)
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {}
+    return {}
+
+
+def _merge_dyn_testset_framework_args(existing):
+    """Apply defaults, then overlay existing (from clone or prior fetch)."""
+    ex = _framework_args_value_to_dict(existing)
+    return {**DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS, **ex}
+
+
+def _framework_args_dict_has_all_dyn_default_keys(framework_args_val):
+    """True if every key in DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS exists (order does not matter)."""
+    d = _framework_args_value_to_dict(framework_args_val)
+    return all(k in d for k in DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS)
+
+
+def _apply_default_framework_options_to_test_set_payload(ts_payload):
+    """Mutate a POST /test_sets body: set framework_args / frameworkArgs to merged JSON string."""
+    if not isinstance(ts_payload, dict):
+        return ts_payload
+    existing = ts_payload.get("framework_args")
+    if existing in (None, ""):
+        existing = ts_payload.get("frameworkArgs")
+    merged = _merge_dyn_testset_framework_args(existing)
+    fa_str = json.dumps(merged, separators=(",", ":"))
+    ts_payload["framework_args"] = fa_str
+    ts_payload["frameworkArgs"] = fa_str
+    return ts_payload
+
+
 @app.route("/mcp/regression/dynamic-jp/check-existing", methods=["POST"])
 def dynamic_jp_check_existing():
     """Search for existing dynamic JP/TS by name prefix; suggest next numeric suffix.
@@ -7662,6 +7717,13 @@ def dynamic_jp_create():
                     "testArgs": _ta,
                     "frameworkArgs": _fa,
                 }
+            # Clone: if source already had every default framework key, leave framework_args unchanged.
+            cloned_from_existing = bool(not create_fresh and source_ts)
+            _fa_for_skip = new_ts_payload.get("framework_args")
+            if _fa_for_skip in (None, ""):
+                _fa_for_skip = new_ts_payload.get("frameworkArgs")
+            if not (cloned_from_existing and _framework_args_dict_has_all_dyn_default_keys(_fa_for_skip)):
+                _apply_default_framework_options_to_test_set_payload(new_ts_payload)
             _ta_log, _fa_log = _jit_ts_arg_strings(new_ts_payload)
             logger.info(f"[create] TS payload: name={new_ts_name}, #tests={len(test_entries)}, "
                         f"test_args_len={len(_ta_log)}, framework_args_len={len(_fa_log)}")
