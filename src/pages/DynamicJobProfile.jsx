@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import axios from 'axios';
 import { API_BASE_URL } from '../config';
+import ManageJobProfile from './ManageJobProfile';
 import './DynamicJobProfile.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/dynamic-jp`;
@@ -98,6 +99,22 @@ export default function DynamicJobProfile() {
   const branchReqId = useRef(0);
   const branchDebounce = useRef(null);
 
+  const [djpSubView, setDjpSubView] = useState('create');
+  const [showDjpManageMenu, setShowDjpManageMenu] = useState(false);
+  const djpManageMenuRef = useRef(null);
+
+  useEffect(() => {
+    const onDocMouseDown = (e) => {
+      if (djpManageMenuRef.current && !djpManageMenuRef.current.contains(e.target)) {
+        setShowDjpManageMenu(false);
+      }
+    };
+    if (showDjpManageMenu) {
+      document.addEventListener('mousedown', onDocMouseDown);
+    }
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [showDjpManageMenu]);
+
   useEffect(() => {
     if (!reuseSourceTS) {
       newTestSetNameWhenNewMode.current = customTSName;
@@ -189,8 +206,13 @@ export default function DynamicJobProfile() {
     })();
   };
 
-  const handleSelectJP = async (jpName) => {
-    const tsName = selectedTestSetName || null;
+  /**
+   * @param {string} jpName
+   * @param {{ testSetName?: string | null }} [pair] — use when batching with TS so naming sees both before state updates.
+   */
+  const handleSelectJP = async (jpName, pair = {}) => {
+    const tsName =
+      pair.testSetName !== undefined ? pair.testSetName : (selectedTestSetName || null);
     setSelectedJPName(jpName);
     setResolvedJPId(null);
     setResolving(true);
@@ -219,8 +241,13 @@ export default function DynamicJobProfile() {
     }
   };
 
-  const handleSelectTS = async (tsName) => {
-    const jpName = selectedJPName || null;
+  /**
+   * @param {string} tsName
+   * @param {{ jobProfileName?: string | null }} [pair] — use when batching with JP so naming sees both before state updates.
+   */
+  const handleSelectTS = async (tsName, pair = {}) => {
+    const jpName =
+      pair.jobProfileName !== undefined ? pair.jobProfileName : (selectedJPName || null);
     setSelectedTestSetName(tsName);
     setResolvedTSId(null);
     setTestSetDetails(null);
@@ -288,12 +315,45 @@ export default function DynamicJobProfile() {
           fetchNextNumbers(),
         ]);
         const data = histResp.data || {};
-        setUniquePairs(Array.isArray(data.unique_pairs) ? data.unique_pairs : []);
+        const pairRows = Array.isArray(data.unique_pairs) ? data.unique_pairs : [];
+        setUniquePairs(pairRows);
         setExecHistoryFetched(true);
         const num = Math.max(numData.jpNum, numData.tsNum);
         setCustomJPName(`${numData.jpPrefix}${num}`);
         setCustomTSName(`${numData.tsPrefix}${num}`);
         setReadyToConfigure(true);
+
+        const firstFullPair = pairRows.find(
+          (p) =>
+            p &&
+            String(p.test_set || '').trim() &&
+            String(p.job_profile || '').trim()
+        );
+        if (firstFullPair) {
+          const tsN = String(firstFullPair.test_set).trim();
+          const jpN = String(firstFullPair.job_profile).trim();
+          await handleSelectTS(tsN, { jobProfileName: jpN });
+          await handleSelectJP(jpN, { testSetName: tsN });
+        } else {
+          const tsSet = new Set();
+          const jpSet = new Set();
+          for (const p of pairRows) {
+            if (p.test_set) tsSet.add(p.test_set.trim());
+            if (p.job_profile) jpSet.add(p.job_profile.trim());
+          }
+          const sortedTS = [...tsSet].sort();
+          const sortedJP = [...jpSet].sort();
+          const ts0 = sortedTS[0];
+          const jp0 = sortedJP[0];
+          if (ts0 && jp0) {
+            await handleSelectTS(ts0, { jobProfileName: jp0 });
+            await handleSelectJP(jp0, { testSetName: ts0 });
+          } else if (ts0) {
+            await handleSelectTS(ts0);
+          } else if (jp0) {
+            await handleSelectJP(jp0);
+          }
+        }
       } catch (error) {
         console.error('Error fetching execution history:', error);
         setErrorMsg(`Failed to fetch test history: ${getErrorMessage(error)}`);
@@ -588,9 +648,52 @@ export default function DynamicJobProfile() {
   return (
     <div className="djp-container">
       <div className="djp-header">
-        <h1>Dynamic Job Profile Creation</h1>
+        <h1>Dynamic Job Profile</h1>
+        <div className="djp-header-actions">
+          <div className="djp-actions-wrapper" ref={djpManageMenuRef}>
+            <button
+              type="button"
+              className="djp-btn djp-btn-manage-actions"
+              onClick={() => setShowDjpManageMenu((v) => !v)}
+              aria-expanded={showDjpManageMenu}
+              aria-haspopup="true"
+            >
+              Action ▾
+            </button>
+            {showDjpManageMenu && (
+              <div className="djp-actions-dropdown" role="menu">
+                <button
+                  type="button"
+                  className="djp-actions-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setDjpSubView('create');
+                    setShowDjpManageMenu(false);
+                  }}
+                >
+                  Create
+                </button>
+                <button
+                  type="button"
+                  className="djp-actions-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setDjpSubView('manage');
+                    setShowDjpManageMenu(false);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
+      {djpSubView === 'manage' ? (
+        <ManageJobProfile embedded />
+      ) : (
+      <>
       {/* Error messages are displayed below the Create buttons */}
 
       {/* Step 1: Testcase input + Branch + Toggle */}
@@ -1163,6 +1266,8 @@ export default function DynamicJobProfile() {
           {renderErrorMsg()}
           {renderResultBox('Profile Created Successfully')}
         </div>
+      )}
+      </>
       )}
     </div>
   );

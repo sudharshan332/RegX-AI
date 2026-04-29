@@ -6,7 +6,6 @@ import TestcaseManagement from './pages/TestcaseManagement';
 import TriageGenie from './pages/TriageGenie';
 import RunReport from './pages/RunReport';
 import DynamicJobProfile from './pages/DynamicJobProfile';
-import ManageJobProfile from './pages/ManageJobProfile';
 import FailedTestcaseAnalysis from './pages/FailedTestcaseAnalysis';
 import { TaskProvider } from './context/TaskContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -37,8 +36,7 @@ function Dashboard() {
     { id: 'triage-genie', label: 'Triage Genie', icon: '🤖', description: 'Automated Failure Triage' },
     { id: 'failed-analysis', label: 'Failed Testcase Analysis', icon: '🔍', description: 'AI-Powered Failure Analysis' },
     { id: 'run-report', label: 'Run Report', icon: '📊', description: 'QI Analysis' },
-    { id: 'job-profile', label: 'Dynamic Job Profile', icon: '⚙️', description: 'Job Profile Creation' },
-    { id: 'manage-jp', label: 'Manage JP / TS', icon: '🗑️', description: 'Search & Delete JP/TS' },
+    { id: 'job-profile', label: 'Dynamic Job Profile', icon: '⚙️', description: 'Job Profile creation & manage JP/TS' },
   ];
 
   const renderPage = () => {
@@ -59,8 +57,6 @@ function Dashboard() {
         return <RunReport />;
       case 'job-profile':
         return <DynamicJobProfile />;
-      case 'manage-jp':
-        return <ManageJobProfile />;
       default:
         return <RegressionHome />;
     }
@@ -82,14 +78,6 @@ function Dashboard() {
               {menuVisible ? '◀' : '▶'}
             </button>
           </div>
-          <div className="sidebar-user-info">
-            <span className="sidebar-user-name" title={user?.email || ''}>
-              {displayName}
-            </span>
-            <button className="sidebar-logout-btn" onClick={logout} title="Sign out">
-              Logout
-            </button>
-          </div>
           <ul className="menu-list">
             {menuItems.map((item) => (
               <li
@@ -105,6 +93,14 @@ function Dashboard() {
               </li>
             ))}
           </ul>
+          <div className="sidebar-user-info">
+            <span className="sidebar-user-name" title={user?.email || ''}>
+              {displayName}
+            </span>
+            <button className="sidebar-logout-btn" onClick={logout} title="Sign out">
+              Logout
+            </button>
+          </div>
         </nav>
 
         {!menuVisible && (

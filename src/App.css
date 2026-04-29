@@ -66,6 +66,8 @@
   padding: 0;
   margin: 0;
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .menu-item {
@@ -112,14 +114,16 @@
   color: rgba(255, 255, 255, 0.7);
 }
 
-/* Sidebar User Info */
+/* Sidebar User Info (pinned to bottom) */
 .sidebar-user-info {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 12px 20px 16px;
+  margin-top: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
   font-size: 13px;
+  flex-shrink: 0;
 }
 
 .sidebar-user-name {
