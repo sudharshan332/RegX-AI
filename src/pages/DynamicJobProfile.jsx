@@ -703,10 +703,16 @@ export default function DynamicJobProfile() {
           <textarea
             value={testcaseInput}
             onChange={(e) => setTestcaseInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' || e.shiftKey) return;
+              e.preventDefault();
+              if (loading || (showExisting && !testcaseInput.trim())) return;
+              handleSearch();
+            }}
             placeholder="Enter fully qualified testcase names (space, comma, or line break between names)&#10;e.g.&#10;cdp.stargate.storage_policy.api.test_storage_policy.TestStoragePolicy.test_storage_policy___duplicate_name"
             rows={4}
           />
-          <small>Space, comma, or newline between testcase names</small>
+          <small>Space, comma, or newline between testcase names. Enter runs search; Shift+Enter adds a line.</small>
         </div>
 
         <div className="djp-search-row">

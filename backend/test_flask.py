@@ -7118,22 +7118,36 @@ def dynamic_jp_resolve_names():
                 raw_q = json.dumps({"name": jp_name})
                 resp = requests.get(
                     f"{JITA_BASE}/job_profiles",
-                    params={"raw_query": quote(raw_q), "limit": 1, "only": "_id,name,description,tags,tester_tags"},
+                    params={"raw_query": quote(raw_q), "limit": 40, "only": "_id,name,description,tags,tester_tags"},
                     auth=JITA_SVC_AUTH, verify=False, timeout=30,
                 )
                 logger.info(f"[resolve-names] JP lookup for '{jp_name}': HTTP {resp.status_code}")
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data.get("data", []) if isinstance(data, dict) else []
-                    if items and isinstance(items, list) and isinstance(items[0], dict):
-                        item = items[0]
+                    want = jp_name.strip()
+                    want_l = want.lower()
+                    chosen = None
+                    if items and isinstance(items, list):
+                        for el in items:
+                            if not isinstance(el, dict):
+                                continue
+                            nm = (el.get("name") or "").strip()
+                            if nm == want or nm.lower() == want_l:
+                                chosen = el
+                                break
+                    if chosen:
                         result["jp"] = {
-                            "_id": _oid(item.get("_id")),
-                            "name": item.get("name", ""),
-                            "description": item.get("description", ""),
-                            "tags": item.get("tags", []) or [],
-                            "tester_tags": item.get("tester_tags", []) or [],
+                            "_id": _oid(chosen.get("_id")),
+                            "name": chosen.get("name", ""),
+                            "description": chosen.get("description", ""),
+                            "tags": chosen.get("tags", []) or [],
+                            "tester_tags": chosen.get("tester_tags", []) or [],
                         }
+                    elif items:
+                        logger.warning(
+                            f"[resolve-names] JP search returned {len(items)} row(s) but none named {want!r}; not guessing."
+                        )
                 else:
                     logger.warning(f"[resolve-names] JP search returned {resp.status_code}: {resp.text[:200]}")
             except Exception as e:
@@ -7144,23 +7158,37 @@ def dynamic_jp_resolve_names():
                 raw_q = json.dumps({"name": ts_name})
                 resp = requests.get(
                     f"{JITA_BASE}/test_sets",
-                    params={"raw_query": quote(raw_q), "limit": 1, "only": "_id,name,test_args,framework_args"},
+                    params={"raw_query": quote(raw_q), "limit": 40, "only": "_id,name,test_args,framework_args"},
                     auth=JITA_SVC_AUTH, verify=False, timeout=30,
                 )
                 logger.info(f"[resolve-names] TS lookup for '{ts_name}': HTTP {resp.status_code}")
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data.get("data", []) if isinstance(data, dict) else []
-                    if items and isinstance(items, list) and isinstance(items[0], dict):
-                        item = items[0]
-                        ta = item.get("test_args") or item.get("testArgs") or ""
-                        fa = item.get("framework_args") or item.get("frameworkArgs") or ""
+                    want = ts_name.strip()
+                    want_l = want.lower()
+                    chosen = None
+                    if items and isinstance(items, list):
+                        for el in items:
+                            if not isinstance(el, dict):
+                                continue
+                            nm = (el.get("name") or "").strip()
+                            if nm == want or nm.lower() == want_l:
+                                chosen = el
+                                break
+                    if chosen:
+                        ta = chosen.get("test_args") or chosen.get("testArgs") or ""
+                        fa = chosen.get("framework_args") or chosen.get("frameworkArgs") or ""
                         result["ts"] = {
-                            "_id": _oid(item.get("_id")),
-                            "name": item.get("name", ""),
+                            "_id": _oid(chosen.get("_id")),
+                            "name": chosen.get("name", ""),
                             "test_args": str(ta).strip() if ta is not None else "",
                             "framework_args": str(fa).strip() if fa is not None else "",
                         }
+                    elif items:
+                        logger.warning(
+                            f"[resolve-names] TS search returned {len(items)} row(s) but none named {want!r}; not guessing."
+                        )
                 else:
                     logger.warning(f"[resolve-names] TS search returned {resp.status_code}: {resp.text[:200]}")
             except Exception as e:
@@ -7386,6 +7414,19 @@ def dynamic_jp_create():
                 return ref.strip()
             return None
 
+        def _jp_test_set_refs_list(jp):
+            """Refs attached to a job profile: `test_sets` (list) or legacy `test_set` (list or one dict)."""
+            if not isinstance(jp, dict):
+                return []
+            raw = jp.get("test_sets")
+            if raw is None or raw == []:
+                raw = jp.get("test_set")
+            if raw is None:
+                return []
+            if isinstance(raw, list):
+                return raw
+            return [raw]
+
         def _jit_ts_arg_strings(ts):
             """JITA may expose args as snake_case or camelCase; normalize to strings for POST payload."""
             if not isinstance(ts, dict):
@@ -7472,7 +7513,7 @@ def dynamic_jp_create():
                     f"{JITA_BASE}/test_sets",
                     params={
                         "raw_query": quote(raw_q),
-                        "limit": 1,
+                        "limit": 40,
                         "only": "_id,name,test_args,framework_args,tests,description",
                     },
                     auth=JITA_SVC_AUTH,
@@ -7481,34 +7522,38 @@ def dynamic_jp_create():
                 )
                 if nm_resp.status_code == 200:
                     items = nm_resp.json().get("data", []) if isinstance(nm_resp.json(), dict) else []
-                    if items and isinstance(items[0], dict):
-                        hit = items[0]
-                        hit_name = (hit.get("name") or "").strip()
+                    want = source_testset_name.strip()
+                    want_l = want.lower()
+                    hit = None
+                    if isinstance(items, list):
+                        for el in items:
+                            if not isinstance(el, dict):
+                                continue
+                            hn = (el.get("name") or "").strip()
+                            if hn == want or hn.lower() == want_l:
+                                hit = el
+                                break
+                    if hit:
                         cand_id = _test_set_ref_oid(hit.get("_id"))
                         if cand_id:
-                            if (
-                                hit_name == source_testset_name
-                                or hit_name.lower() == source_testset_name.lower()
-                            ):
-                                ts_name_resolved_id = cand_id
-                                logger.info(
-                                    f"[create] Template from source_testset_name={source_testset_name!r} -> id={ts_name_resolved_id}"
-                                )
-                            else:
-                                ts_name_resolved_id = cand_id
-                                logger.warning(
-                                    f"[create] Name query returned '{hit_name}' for requested={source_testset_name!r}; "
-                                    f"using single-hit id={ts_name_resolved_id}"
-                                )
+                            ts_name_resolved_id = cand_id
+                            logger.info(
+                                f"[create] Template from source_testset_name={source_testset_name!r} -> id={ts_name_resolved_id}"
+                            )
+                    elif items:
+                        logger.warning(
+                            f"[create] source_testset_name={source_testset_name!r}: JITA returned {len(items)} "
+                            "row(s) but none matched that exact name; not guessing an id from order."
+                        )
             except (requests.exceptions.RequestException, ValueError, TypeError) as e:
                 logger.warning(f"[create] source_testset_name lookup failed: {e}")
 
-        if ts_name_resolved_id:
-            template_ts_id = ts_name_resolved_id
-        elif source_testset_id:
+        if source_testset_id:
             template_ts_id = str(source_testset_id).strip() or None
+        elif ts_name_resolved_id:
+            template_ts_id = ts_name_resolved_id
         if not create_fresh and not template_ts_id and source_jp:
-            refs = source_jp.get("test_sets") or []
+            refs = _jp_test_set_refs_list(source_jp)
             if refs:
                 template_ts_id = _test_set_ref_oid(refs[0])
                 if template_ts_id and not source_testset_id and not source_testset_name:
@@ -7547,7 +7592,7 @@ def dynamic_jp_create():
         if reuse_source_ts and not create_fresh:
             tid = source_testset_id or ts_name_resolved_id
             if not tid and source_jp:
-                refs = source_jp.get("test_sets") or []
+                refs = _jp_test_set_refs_list(source_jp)
                 if refs:
                     tid = _test_set_ref_oid(refs[0])
             if not tid:
@@ -7793,12 +7838,15 @@ def dynamic_jp_create():
                 new_jp_payload.pop(field, None)
             new_jp_payload["name"] = new_jp_name
             new_jp_payload["description"] = f"Dynamic JP cloned from {source_jp.get('name', source_jp_id)}"
+            # Legacy `test_set` on the source doc can override `test_sets` on POST; clear before we set links.
+            new_jp_payload.pop("test_set", None)
             new_jp_payload["test_sets"] = []
             logger.info(f"[create] Source JP keys: {list(source_jp.keys())}")
 
         # Link to new test set if created
         if created_ts_id:
             new_jp_payload["test_sets"] = [{"$oid": created_ts_id}]
+            new_jp_payload.pop("test_set", None)
 
         if create_fresh:
             # Fresh mode: apply all config from the UI
