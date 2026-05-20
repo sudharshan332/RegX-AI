@@ -162,6 +162,7 @@ export default function TestcaseManagement() {
   const [reloading, setReloading] = useState(false);
 
   const [nameFilter, setNameFilter] = useState('');
+  const [nameExactMatch, setNameExactMatch] = useState(false);
   const [tagFilter, setTagFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [lastRunDate, setLastRunDate] = useState('');
@@ -237,7 +238,10 @@ export default function TestcaseManagement() {
     setLoading(true);
     const params = { branch, team };
     if (tagFilter) params.tags = tagFilter;
-    if (nameFilter) params.name = nameFilter;
+    if (nameFilter) {
+      params.name = nameFilter;
+      if (nameExactMatch) params.exact_match = 'true';
+    }
     if (statusFilter) params.status = statusFilter;
 
     api.get(`${API_BASE_URL}/mcp/regression/testcase-mgmt/testcases`, { params })
@@ -254,7 +258,7 @@ export default function TestcaseManagement() {
         showToast('Failed to load testcases', 'error');
       })
       .finally(() => setLoading(false));
-  }, [branch, team, tagFilter, nameFilter, statusFilter, showToast]);
+  }, [branch, team, tagFilter, nameFilter, nameExactMatch, statusFilter, showToast]);
 
   useEffect(() => { fetchTestcases(); }, [fetchTestcases]);
 
@@ -629,14 +633,22 @@ export default function TestcaseManagement() {
             <option value="failed">Failed</option>
           </select>
         </div>
-        <div className="tc-mgmt-filter-group">
+        <div className="tc-mgmt-filter-group tc-name-filter-group">
           <label>Name:</label>
           <input
             type="text"
-            placeholder="Filter by test case name..."
+            placeholder="Filter by name (comma separated for multiple)..."
             value={nameFilter}
             onChange={e => setNameFilter(e.target.value)}
           />
+          <label className="tc-exact-match-label">
+            <input
+              type="checkbox"
+              checked={nameExactMatch}
+              onChange={e => setNameExactMatch(e.target.checked)}
+            />
+            Exact Match
+          </label>
         </div>
 
         <div className="tc-mgmt-filter-group tc-date-filter-group">

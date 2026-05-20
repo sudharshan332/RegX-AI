@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import api from '../api';
 import { API_BASE_URL } from '../config';
 import { useTaskContext } from '../context/TaskContext';
@@ -6,6 +6,16 @@ import './RunPlan.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/run-plan`;
 const JITA_BASE = 'https://jita.eng.nutanix.com/api/v2';
+
+const ADDITIONAL_TAG_OPTIONS = [
+  'CDP_Regression_Qual',
+  'CDP_Smart_Qual',
+  'NESTED_QUALIFIED',
+  'critical',
+  'major',
+  'minor',
+  'unstable',
+];
 
 export default function RunPlan() {
   const { addTask, updateTask: updateTaskCtx } = useTaskContext();
@@ -53,14 +63,29 @@ export default function RunPlan() {
     patchUrl: '',
     frameworkPatchUrl: '',
     testerTagsAction: '', // 'add' or 'remove' or ''
-    testerTagValue: '' // Tag value to add/remove
+    testerTagValue: '', // Tag value to add/remove
+    // Additional tags (overwrites run_tests_with_additional_tags)
+    updateAdditionalTags: false,
+    additionalTags: []
   });
 
   const [availableTags, setAvailableTags] = useState([]);
+  const [showAdditionalTagsDropdown, setShowAdditionalTagsDropdown] = useState(false);
+  const additionalTagsRef = useRef(null);
 
   // Job Profile search results
   const [jobProfileResults, setJobProfileResults] = useState([]);
   const [searching, setSearching] = useState(false);
+
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (additionalTagsRef.current && !additionalTagsRef.current.contains(e.target)) {
+        setShowAdditionalTagsDropdown(false);
+      }
+    }
+    if (showAdditionalTagsDropdown) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showAdditionalTagsDropdown]);
 
   useEffect(() => {
     if (view === 'list') {
@@ -295,9 +320,11 @@ export default function RunPlan() {
       patchUrl: '',
       frameworkPatchUrl: '',
       testerTagsAction: '',
-      testerTagValue: ''
+      testerTagValue: '',
+      updateAdditionalTags: false,
+      additionalTags: []
     });
-    
+    setShowAdditionalTagsDropdown(false);
     setView('batch-update');
   };
 
@@ -377,6 +404,11 @@ export default function RunPlan() {
         payload.tester_tag_value = batchUpdateData.testerTagValue;
       }
 
+      // Add run_tests_with_additional_tags overwrite if enabled
+      if (batchUpdateData.updateAdditionalTags) {
+        payload.run_tests_with_additional_tags = batchUpdateData.additionalTags;
+      }
+
       const batchTaskId = addTask({ label: `Batch Update: ${selectedRunPlan.name}`, page: 'Run Plan' });
       const response = await api.post(
         `${API_BASE}/${selectedRunPlan.id}/batch-update`,
@@ -402,6 +434,15 @@ export default function RunPlan() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const toggleAdditionalTag = (tag) => {
+    setBatchUpdateData(prev => {
+      const tags = prev.additionalTags.includes(tag)
+        ? prev.additionalTags.filter(t => t !== tag)
+        : [...prev.additionalTags, tag];
+      return { ...prev, additionalTags: tags };
+    });
   };
 
   const handleViewHistory = async (runPlanId) => {
@@ -1143,6 +1184,97 @@ export default function RunPlan() {
                   placeholder="e.g., minor, container__unlimited, v3.1"
                 />
                 <small>Enter the tag name to {batchUpdateData.testerTagsAction === 'add' ? 'add' : 'remove'}</small>
+              </div>
+            )}
+          </div>
+
+          {/* Additional Tags (run_tests_with_additional_tags) */}
+          <div className="form-group" style={{ marginTop: '30px', paddingTop: '20px', borderTop: '1px solid #ddd' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={batchUpdateData.updateAdditionalTags}
+                onChange={(e) => setBatchUpdateData({
+                  ...batchUpdateData,
+                  updateAdditionalTags: e.target.checked,
+                  additionalTags: e.target.checked ? batchUpdateData.additionalTags : []
+                })}
+              />
+              <span style={{ fontWeight: 'bold', fontSize: '16px' }}>
+                Update Additional Tags (run_tests_with_additional_tags)
+              </span>
+            </label>
+            <small style={{ display: 'block', marginTop: '4px', color: '#888' }}>
+              Enable to overwrite <code>run_tests_with_additional_tags</code> on all job profiles in this run plan.
+            </small>
+
+            {batchUpdateData.updateAdditionalTags && (
+              <div style={{ marginTop: '12px' }}>
+                <div className="additional-tags-picker" ref={additionalTagsRef}>
+                  <button
+                    type="button"
+                    className="additional-tags-trigger"
+                    onClick={() => setShowAdditionalTagsDropdown(v => !v)}
+                  >
+                    {batchUpdateData.additionalTags.length > 0
+                      ? `${batchUpdateData.additionalTags.length} tag(s) selected`
+                      : 'Disabled (empty list)'}
+                    <span className="additional-tags-arrow">{showAdditionalTagsDropdown ? '▴' : '▾'}</span>
+                  </button>
+
+                  {showAdditionalTagsDropdown && (
+                    <div className="additional-tags-dropdown">
+                      <label className="additional-tags-option additional-tags-disable-all">
+                        <input
+                          type="checkbox"
+                          checked={batchUpdateData.additionalTags.length === 0}
+                          onChange={() => setBatchUpdateData({ ...batchUpdateData, additionalTags: [] })}
+                        />
+                        Disable All (empty list)
+                      </label>
+                      <div className="additional-tags-divider" />
+                      {ADDITIONAL_TAG_OPTIONS.map(tag => (
+                        <label key={tag} className="additional-tags-option">
+                          <input
+                            type="checkbox"
+                            checked={batchUpdateData.additionalTags.includes(tag)}
+                            onChange={() => toggleAdditionalTag(tag)}
+                          />
+                          {tag}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {batchUpdateData.additionalTags.length > 0 && (
+                  <div className="additional-tags-selected">
+                    {batchUpdateData.additionalTags.map(tag => (
+                      <span key={tag} className="additional-tag-chip">
+                        {tag}
+                        <button
+                          type="button"
+                          onClick={() => toggleAdditionalTag(tag)}
+                          className="additional-tag-remove"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                    <button
+                      type="button"
+                      className="additional-tags-clear"
+                      onClick={() => setBatchUpdateData({ ...batchUpdateData, additionalTags: [] })}
+                    >
+                      Clear all
+                    </button>
+                  </div>
+                )}
+
+                <small style={{ color: '#e67e22', marginTop: '6px', display: 'block' }}>
+                  This will <strong>overwrite</strong> existing additional tags on all selected job profiles.
+                  {batchUpdateData.additionalTags.length === 0 && ' Leaving empty will clear all additional tags.'}
+                </small>
               </div>
             )}
           </div>

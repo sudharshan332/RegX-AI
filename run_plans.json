@@ -192,6 +192,56 @@
       "schedule_date": null,
       "created_at": "2026-03-10T22:12:38.063525",
       "last_triggered": null
+    },
+    {
+      "id": "1777389873143",
+      "name": "test10",
+      "job_profiles": [
+        "69ba1be02bc0c45a3c1f1c00"
+      ],
+      "tag_name": "test10_1777389873143",
+      "schedule_date": null,
+      "created_at": "2026-04-28T15:24:33.143939",
+      "last_triggered": null
+    },
+    {
+      "id": "1777390548476",
+      "name": "smartqual_10",
+      "job_profiles": [
+        "69ba1be02bc0c45a3c1f1c00",
+        "69ba1cbc2bc0c45a46fd3e95",
+        "69ba1b1f2bc0c45a4d21a698",
+        "69ba1cf68e79ceaa5effe7cd",
+        "69ba1d77d24d8219afd18fef",
+        "69ba1ed38e79ceaa77646d78",
+        "69ba1e9cd24d8219a3027381",
+        "69c0bd24b5e475b526a3e2a5",
+        "69ba1dff2bc0c45a48c8ac22",
+        "69ba1d3ed24d8219b51f1476",
+        "69ba1dc9b5e475e725b9fe32",
+        "69ba1c4f2bc0c45a3909fdb8",
+        "69c0bef58e79ceaa6f3ad12f",
+        "69ba1f748e79ceaa7ac48c7a",
+        "69c0bdc28e79ceaa6cbcbfc0",
+        "69c0be542bc0c432b547783f",
+        "69e90f5e2bc0c4d9f27f71f0",
+        "69e91028d24d82c3a2f2f4a9"
+      ],
+      "tag_name": "10_1777390548476",
+      "schedule_date": null,
+      "created_at": "2026-04-28T15:35:48.476090",
+      "last_triggered": null
+    },
+    {
+      "id": "1777391598101",
+      "name": "test11",
+      "job_profiles": [
+        "67ef8e98b5e475b1011cf562"
+      ],
+      "tag_name": "test11_1777391598101",
+      "schedule_date": null,
+      "created_at": "2026-04-28T15:53:18.101874",
+      "last_triggered": null
     }
   ],
   "history": [

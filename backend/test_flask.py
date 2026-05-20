@@ -3919,6 +3919,14 @@ def batch_update_job_profiles(run_plan_id):
                                 tester_tags.remove(tester_tag_value)
                                 updated_profile["tester_tags"] = tester_tags
                 
+                # Overwrite run_tests_with_additional_tags if provided in the request
+                if "run_tests_with_additional_tags" in req_data:
+                    new_additional_tags = req_data["run_tests_with_additional_tags"]
+                    if not isinstance(new_additional_tags, list):
+                        new_additional_tags = []
+                    updated_profile["run_tests_with_additional_tags"] = new_additional_tags
+                    logger.info(f"Overwriting run_tests_with_additional_tags for {job_id}: {new_additional_tags}")
+                
                 # Ensure JSON serializable (following reference script pattern)
                 serializable_payload = {}
                 for k, v in updated_profile.items():
@@ -5761,7 +5769,13 @@ def testcase_mgmt_get_testcases():
         ]
 
     if name_filter:
-        testcases = [tc for tc in testcases if name_filter in tc.get("name", "").lower()]
+        exact_match = request.args.get("exact_match", "false").lower() in ("1", "true", "yes")
+        name_terms = [t.strip() for t in name_filter.split(",") if t.strip()]
+        if name_terms:
+            if exact_match:
+                testcases = [tc for tc in testcases if tc.get("name", "").lower() in name_terms]
+            else:
+                testcases = [tc for tc in testcases if any(term in tc.get("name", "").lower() for term in name_terms)]
 
     if status_filter:
         testcases = [tc for tc in testcases if tc.get("last_status", "").lower() == status_filter.lower()]
