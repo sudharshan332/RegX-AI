@@ -29,14 +29,14 @@ function Dashboard() {
   }, []);
 
   const menuItems = [
-    { id: 'home', label: 'Home', icon: '🏠', description: 'Regression Overview' },
-    { id: 'run-plan', label: 'Run Plan', icon: '📅', description: 'Regression Scheduling' },
-    { id: 'handover', label: 'Handover', icon: '📤', description: 'New Testcase Onboarding' },
-    { id: 'testcase', label: 'Testcase Management', icon: '📋', description: 'Testcase Management' },
-    { id: 'triage-genie', label: 'Triage Genie', icon: '🤖', description: 'Automated Failure Triage' },
-    { id: 'failed-analysis', label: 'Failed Testcase Analysis', icon: '🔍', description: 'AI-Powered Failure Analysis' },
-    { id: 'run-report', label: 'Run Report', icon: '📊', description: 'QI Analysis' },
-    { id: 'job-profile', label: 'Dynamic Job Profile', icon: '⚙️', description: 'Job Profile creation & manage JP/TS' },
+    { id: 'home', label: 'Home', icon: 'HM', description: 'Regression Overview' },
+    { id: 'run-plan', label: 'Run Plan', icon: 'RP', description: 'Regression Scheduling' },
+    { id: 'handover', label: 'Handover', icon: 'HO', description: 'New Testcase Onboarding' },
+    { id: 'testcase', label: 'Testcase Management', icon: 'TC', description: 'Testcase Management' },
+    { id: 'triage-genie', label: 'Triage Genie', icon: 'TG', description: 'Automated Failure Triage' },
+    { id: 'failed-analysis', label: 'Failed Testcase Analysis', icon: 'FT', description: 'AI-Powered Failure Analysis' },
+    { id: 'run-report', label: 'Run Report', icon: 'RR', description: 'QI Analysis' },
+    { id: 'job-profile', label: 'Dynamic Job Profile', icon: 'JP', description: 'Job Profile creation & manage JP/TS' },
   ];
 
   const renderPage = () => {

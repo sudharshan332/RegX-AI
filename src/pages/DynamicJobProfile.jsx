@@ -1,7 +1,8 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import axios from 'axios';
-import { API_BASE_URL } from '../config';
+import { API_BASE_URL, jitaJobProfileWebUrl, jitaTestSetWebUrl } from '../config';
 import ManageJobProfile from './ManageJobProfile';
+import { useAuth } from '../context/AuthContext';
 import './DynamicJobProfile.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/dynamic-jp`;
@@ -31,7 +32,7 @@ const RESOURCE_TYPE_OPTIONS = [
   { value: 'physical',   label: 'Physical' },
 ];
 
-/** Local calendar YYYYMMDD — matches backend `dyn_name_date` for User_Dyn_<date>_JP_/TS_ names. */
+/** Local calendar YYYYMMDD — matches backend `dyn_name_date` for generated names. */
 const formatLocalYyyymmdd = () => {
   const d = new Date();
   const y = d.getFullYear();
@@ -40,7 +41,76 @@ const formatLocalYyyymmdd = () => {
   return `${y}${m}${day}`;
 };
 
+const formatLocalDdmm = () => {
+  const d = new Date();
+  return `${String(d.getDate()).padStart(2, '0')}${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
+const userInitials = (user) => {
+  const raw = user?.email || user?.sub || user?.username || user?.name || 'john.doe';
+  const local = String(raw).split('@')[0];
+  const parts = local.split(/[._\-\s]+/).filter(Boolean);
+  if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  return local.slice(0, 2).toUpperCase();
+};
+
+const meaningfulNameSuffix = (name) => {
+  const cleaned = String(name || '')
+    .trim()
+    .replace(/^CDP[_-]+/i, '')
+    .replace(/>=/g, '_GTE_')
+    .replace(/<=/g, '_LTE_')
+    .replace(/>/g, '_GT_')
+    .replace(/</g, '_LT_')
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return cleaned.slice(0, 80);
+};
+
+const PATCH_TEST_MARKER = 'TEMP_PATCH_TEST';
+
+const formatPatchTestName = (name) => {
+  const raw = String(name || '').trim();
+  if (!raw) return raw;
+
+  return raw
+    .replace(new RegExp(`_${PATCH_TEST_MARKER}(?=_|$)`, 'g'), '')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+};
+
+const buildSuggestedEntityName = (prefix, num, kind, suffix = '') => {
+  const cleanSuffix = suffix ? `_${suffix}` : '';
+  if (new RegExp(`_${kind}_$`, 'i').test(prefix)) {
+    return `${prefix}${num}${cleanSuffix}`;
+  }
+  return `${prefix}${num}${cleanSuffix}`;
+};
+
+/** Clipboard icon for JP/TS result copy buttons */
+function DjpCopyGlyph() {
+  return (
+    <svg
+      className="djp-copy-glyph"
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
 export default function DynamicJobProfile() {
+  const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
   const [showExisting, setShowExisting] = useState(false);
@@ -65,6 +135,8 @@ export default function DynamicJobProfile() {
   const [customTSName, setCustomTSName] = useState('');
   /** Clone mode only: link new JP to source TS instead of creating a TS with only the typed testcases. */
   const [reuseSourceTS, setReuseSourceTS] = useState(false);
+  /** Clone mode only: retain deployment after each test failure, without DataCorruptionError exception. */
+  const [retainSetupOnFailure, setRetainSetupOnFailure] = useState(false);
   /** Keeps the last "New Testset" name if user toggles to Use Existing (field hidden) and back. */
   const newTestSetNameWhenNewMode = useRef('');
 
@@ -78,6 +150,9 @@ export default function DynamicJobProfile() {
   const [nextJPNum, setNextJPNum] = useState(1);
   const [nextTSNum, setNextTSNum] = useState(1);
   const [createResult, setCreateResult] = useState(null);
+  /** Brief feedback after copying JP/TS line ('jp' | 'ts'). */
+  const [createResultCopyFlash, setCreateResultCopyFlash] = useState(null);
+  const createResultCopyTimerRef = useRef(null);
   const [readyToConfigure, setReadyToConfigure] = useState(false);
 
   // Patch toggle and search helpers
@@ -115,11 +190,26 @@ export default function DynamicJobProfile() {
     return () => document.removeEventListener('mousedown', onDocMouseDown);
   }, [showDjpManageMenu]);
 
+  useEffect(
+    () => () => {
+      if (createResultCopyTimerRef.current) clearTimeout(createResultCopyTimerRef.current);
+    },
+    []
+  );
+
   useEffect(() => {
     if (!reuseSourceTS) {
       newTestSetNameWhenNewMode.current = customTSName;
     }
   }, [customTSName, reuseSourceTS]);
+
+  useEffect(() => {
+    if (!readyToConfigure) return;
+    setCustomJPName((prev) => formatPatchTestName(prev, showPatch));
+    if (!reuseSourceTS) {
+      setCustomTSName((prev) => formatPatchTestName(prev, showPatch));
+    }
+  }, [showPatch, readyToConfigure, reuseSourceTS]);
 
   const parseTestcaseNames = () =>
     testcaseInput
@@ -149,15 +239,19 @@ export default function DynamicJobProfile() {
     setTagInput('');
     setShowTagInput(false);
     setReuseSourceTS(false);
+    setRetainSetupOnFailure(false);
   };
 
   const fetchNextNumbers = async () => {
     const dynNameDate = formatLocalYyyymmdd();
-    const fallbackJpPrefix = `User_Dyn_${dynNameDate}_JP_`;
-    const fallbackTsPrefix = `User_Dyn_${dynNameDate}_TS_`;
+    const userPrefix = `${userInitials(user)}_${formatLocalDdmm()}_P`;
+    const fallbackJpPrefix = userPrefix;
+    const fallbackTsPrefix = userPrefix;
     try {
       const response = await axios.post(`${API_BASE}/check-existing`, {
         dyn_name_date: dynNameDate,
+        jp_pattern: fallbackJpPrefix,
+        ts_pattern: fallbackTsPrefix,
       });
       const data = response.data || {};
       const jpNum = typeof data.next_jp_number === 'number' ? data.next_jp_number : 1;
@@ -176,17 +270,19 @@ export default function DynamicJobProfile() {
     }
   };
 
-  /** Apply suggested User_Dyn names from a check-existing result (no extra network). */
+  /** Apply suggested temporary JP/TS names from a check-existing result (no extra network). */
   const applyNamesFromCheckData = (d, jpName, tsName) => {
-    if (jpName) {
-      setCustomJPName(`${d.jpPrefix}${d.jpNum}_${jpName}`);
+    const jpSuffix = meaningfulNameSuffix(jpName);
+    const tsSuffix = meaningfulNameSuffix(tsName);
+    if (jpSuffix) {
+      setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP', jpSuffix), showPatch));
     } else {
-      setCustomJPName(`${d.jpPrefix}${d.jpNum}`);
+      setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
     }
-    if (tsName) {
-      setCustomTSName(`${d.tsPrefix}${d.tsNum}_${tsName}`);
+    if (tsSuffix) {
+      setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS', tsSuffix), showPatch));
     } else {
-      setCustomTSName(`${d.tsPrefix}${d.tsNum}`);
+      setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
     }
   };
 
@@ -201,8 +297,8 @@ export default function DynamicJobProfile() {
     setErrorMsg(null);
     (async () => {
       const d = await fetchNextNumbers();
-      setCustomJPName(`${d.jpPrefix}${d.jpNum}`);
-      setCustomTSName(`${d.tsPrefix}${d.tsNum}`);
+      setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
+      setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
     })();
   };
 
@@ -319,8 +415,8 @@ export default function DynamicJobProfile() {
         setUniquePairs(pairRows);
         setExecHistoryFetched(true);
         const num = Math.max(numData.jpNum, numData.tsNum);
-        setCustomJPName(`${numData.jpPrefix}${num}`);
-        setCustomTSName(`${numData.tsPrefix}${num}`);
+        setCustomJPName(formatPatchTestName(buildSuggestedEntityName(numData.jpPrefix, num, 'JP'), showPatch));
+        setCustomTSName(formatPatchTestName(buildSuggestedEntityName(numData.tsPrefix, num, 'TS'), showPatch));
         setReadyToConfigure(true);
 
         const firstFullPair = pairRows.find(
@@ -365,8 +461,8 @@ export default function DynamicJobProfile() {
       setReadyToConfigure(true);
       const numData = await fetchNextNumbers();
       const num = Math.max(numData.jpNum, numData.tsNum);
-      setCustomJPName(`${numData.jpPrefix}${num}`);
-      setCustomTSName(`${numData.tsPrefix}${num}`);
+      setCustomJPName(formatPatchTestName(buildSuggestedEntityName(numData.jpPrefix, num, 'JP'), showPatch));
+      setCustomTSName(formatPatchTestName(buildSuggestedEntityName(numData.tsPrefix, num, 'TS'), showPatch));
     }
   };
 
@@ -459,6 +555,11 @@ export default function DynamicJobProfile() {
 
     setLoading(true);
     setCreateResult(null);
+    setCreateResultCopyFlash(null);
+    if (createResultCopyTimerRef.current) {
+      clearTimeout(createResultCopyTimerRef.current);
+      createResultCopyTimerRef.current = null;
+    }
     setErrorMsg(null);
     try {
       const allTags = [...new Set(jpTags)];
@@ -484,6 +585,7 @@ export default function DynamicJobProfile() {
         dyn_name_date: formatLocalYyyymmdd(),
         jp_tags: allTags.length > 0 ? allTags : [],
         reuse_source_ts: !!(showExisting && reuseSourceTS),
+        retain_setup_on_failure: !!(showExisting && retainSetupOnFailure),
       });
       if (response.data?.success) {
         setCreateResult(response.data);
@@ -502,6 +604,40 @@ export default function DynamicJobProfile() {
       setLoading(false);
     }
   };
+
+  const handleCopyResultEntity = useCallback((which, text) => {
+    const t = (text || '').trim();
+    if (!t) return;
+    const flash = () => {
+      if (createResultCopyTimerRef.current) clearTimeout(createResultCopyTimerRef.current);
+      setCreateResultCopyFlash(which);
+      createResultCopyTimerRef.current = setTimeout(() => {
+        setCreateResultCopyFlash(null);
+        createResultCopyTimerRef.current = null;
+      }, 1600);
+    };
+    const fallback = () => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = t;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        flash();
+      } catch (_) {
+        /* ignore */
+      }
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(t).then(flash).catch(fallback);
+    } else {
+      fallback();
+    }
+  }, []);
 
   // Shared tag input UI used by both clone and fresh modes
   const renderErrorMsg = () =>
@@ -527,6 +663,20 @@ export default function DynamicJobProfile() {
             <div className="djp-toggle-knob" />
           </div>
         </div>
+        {showExisting && (
+          <div className="djp-toggle-row djp-toggle-row--inline">
+            <label>Retain setup</label>
+            <div
+              className={`djp-toggle ${retainSetupOnFailure ? 'active' : ''}`}
+              onClick={() => setRetainSetupOnFailure(!retainSetupOnFailure)}
+              role="switch"
+              aria-checked={retainSetupOnFailure}
+              title="Retain deployments after each test failure"
+            >
+              <div className="djp-toggle-knob" />
+            </div>
+          </div>
+        )}
         <div className="djp-toggle-row djp-toggle-row--inline">
           <label>Patch</label>
           <div
@@ -598,36 +748,91 @@ export default function DynamicJobProfile() {
   // Shared result box UI
   const renderResultBox = (title) => {
     if (!createResult?.success) return null;
+    const jp = createResult.job_profile;
+    const ts = createResult.test_set;
+    const jpName = jp?.name || 'Unknown';
+    const tsName = ts?.name || 'Unknown';
+    const jpId = jp?._id;
+    const tsId = ts?._id;
+    const jpHref = jp?.ui_url || jitaJobProfileWebUrl(jpId, jpName);
+    const tsHref = ts?.ui_url || jitaTestSetWebUrl(tsId, tsName);
     return (
       <div className="djp-result-box">
         <h3>{title}</h3>
-        <p>
-          Job Profile: <code>{createResult.job_profile?.name || 'Unknown'}</code>
-          {createResult.job_profile?._id && (
-            <> &mdash; <a
-              href={`https://jita.eng.nutanix.com/job_profiles/${createResult.job_profile._id}`}
+        <p className="djp-result-entity-line">
+          {jpHref ? (
+            <a
+              href={jpHref}
               target="_blank"
               rel="noreferrer"
-              style={{ color: '#3498db' }}
+              className="djp-jita-entity-link"
+              aria-label={`Open job profile ${jpName} in JITA`}
             >
-              View in JITA
-            </a></>
+              <span className="djp-jita-entity-prefix">JP</span>
+              <code>{jpName}</code>
+            </a>
+          ) : (
+            <>
+              <span className="djp-jita-entity-prefix djp-jita-entity-prefix--static">JP</span>
+              <code>{jpName}</code>
+            </>
+          )}
+          <button
+            type="button"
+            className="djp-result-copy-btn"
+            title="Copy job profile name"
+            aria-label="Copy job profile name"
+            onClick={() => handleCopyResultEntity('jp', jpName)}
+          >
+            <DjpCopyGlyph />
+          </button>
+          {createResultCopyFlash === 'jp' && (
+            <span className="djp-result-copied" role="status">
+              Copied
+            </span>
           )}
         </p>
-        {createResult.test_set && (
-          <p>
-            Test Set: <code>{createResult.test_set.name || 'Unknown'}</code>
-            {createResult.test_set.reused && (
+        {ts && (
+          <p className="djp-result-entity-line">
+            {tsHref ? (
+              <a
+                href={tsHref}
+                target="_blank"
+                rel="noreferrer"
+                className="djp-jita-entity-link"
+                aria-label={`Open test set ${tsName} in JITA`}
+              >
+                <span className="djp-jita-entity-prefix">TS</span>
+                <code>{tsName}</code>
+              </a>
+            ) : (
+              <>
+                <span className="djp-jita-entity-prefix djp-jita-entity-prefix--static">TS</span>
+                <code>{tsName}</code>
+              </>
+            )}
+            <button
+              type="button"
+              className="djp-result-copy-btn"
+              title="Copy test set name"
+              aria-label="Copy test set name"
+              onClick={() => handleCopyResultEntity('ts', tsName)}
+            >
+              <DjpCopyGlyph />
+            </button>
+            {createResultCopyFlash === 'ts' && (
+              <span className="djp-result-copied" role="status">
+                Copied
+              </span>
+            )}
+            {ts.reused && (
               <span className="djp-info-banner info" style={{ display: 'inline', marginLeft: '8px', padding: '2px 8px', fontSize: '11px' }}>
                 Already existed &mdash; reused
               </span>
             )}
-            {createResult.test_set._id && (
-              <span style={{ color: '#7f8c8d', marginLeft: '8px', fontSize: '12px' }}>ID: {createResult.test_set._id}</span>
-            )}
           </p>
         )}
-        {!createResult.test_set && (
+        {!ts && (
           <p style={{ color: '#856404', fontSize: '13px' }}>
             Note: No test set was created (test set creation may have failed).
           </p>
@@ -934,7 +1139,7 @@ export default function DynamicJobProfile() {
                         type="text"
                         value={customJPName}
                         onChange={(e) => setCustomJPName(e.target.value)}
-                        placeholder="e.g., User_Dyn_20260424_JP_1"
+                        placeholder="e.g., SW_2005_P1"
                       />
                       {selectedJPName && (
                         <small>Cloning <strong>JP</strong></small>
@@ -953,7 +1158,7 @@ export default function DynamicJobProfile() {
                           type="text"
                           value={customTSName}
                           onChange={(e) => setCustomTSName(e.target.value)}
-                          placeholder="e.g., User_Dyn_20260424_TS_1"
+                          placeholder="e.g., SW_2005_P1"
                         />
                         {selectedTestSetName && (
                           <small>Cloning <strong>TS</strong></small>
@@ -965,7 +1170,7 @@ export default function DynamicJobProfile() {
                           type="text"
                           value={customJPName}
                           onChange={(e) => setCustomJPName(e.target.value)}
-                          placeholder="e.g., User_Dyn_20260424_JP_1"
+                          placeholder="e.g., SW_2005_P1"
                         />
                         {selectedJPName && (
                           <small>Cloning <strong>JP</strong></small>
@@ -1039,7 +1244,7 @@ export default function DynamicJobProfile() {
                   type="text"
                   value={customJPName}
                   onChange={(e) => setCustomJPName(e.target.value)}
-                  placeholder="e.g., User_Dyn_20260424_JP_1"
+                  placeholder="e.g., SW_2005_P1"
                 />
               </div>
               <div className="djp-form-group" style={{ flex: 1 }}>
@@ -1048,7 +1253,7 @@ export default function DynamicJobProfile() {
                   type="text"
                   value={customTSName}
                   onChange={(e) => setCustomTSName(e.target.value)}
-                  placeholder="e.g., User_Dyn_20260424_TS_1"
+                  placeholder="e.g., SW_2005_P1"
                 />
               </div>
             </div>
