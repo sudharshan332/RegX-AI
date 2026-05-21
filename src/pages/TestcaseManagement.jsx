@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
 import { API_BASE_URL } from '../config';
 import { useTaskContext } from '../context/TaskContext';
+import AiMarkdown from '../components/AiMarkdown';
 import './TestcaseManagement.css';
 
 const PAGE_SIZE = 50;
@@ -194,6 +195,9 @@ export default function TestcaseManagement() {
 
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
+  const [aiAnalysis, setAiAnalysis] = useState(null);
+  const [loadingAi, setLoadingAi] = useState(false);
+  const [showAiPanel, setShowAiPanel] = useState(false);
 
   const showToast = useCallback((msg, type = 'info') => {
     setToast({ msg, type });
@@ -310,6 +314,80 @@ export default function TestcaseManagement() {
         showToast('Download failed: ' + msg, 'error');
         updateTask(taskId, { status: 'error', detail: msg });
       });
+  };
+
+  const handleAiAnalyse = async () => {
+    if (filtered.length === 0) { showToast('No testcases to analyse', 'error'); return; }
+    setLoadingAi(true);
+    setAiAnalysis(null);
+    setShowAiPanel(true);
+    try {
+      const allFailed = filtered.filter(tc => tc.last_status === 'failed');
+      const allSucceeded = filtered.filter(tc => tc.last_status === 'succeeded');
+
+      const issueTypeBreakdown = {};
+      const componentBreakdown = {};
+      const allTickets = [];
+      allFailed.forEach(tc => {
+        const it = tc.issue_type || 'Unclassified';
+        issueTypeBreakdown[it] = (issueTypeBreakdown[it] || 0) + 1;
+        const comp = tc.primary_component || 'Unknown';
+        componentBreakdown[comp] = (componentBreakdown[comp] || 0) + 1;
+        if (tc.last_run_tickets) allTickets.push(...tc.last_run_tickets);
+      });
+
+      const failedTcs = allFailed.slice(0, 80).map(tc => ({
+        name: tc.name,
+        issue_type: tc.issue_type || '',
+        stability: tc.stability,
+        success_percentage: tc.success_percentage,
+        last_run_tickets: tc.last_run_tickets || [],
+        primary_component: tc.primary_component || '',
+      }));
+
+      const avgStab = filtered.length
+        ? (filtered.reduce((s, tc) => s + (tc.stability || 0), 0) / filtered.length).toFixed(1)
+        : '0';
+      const avgSucc = filtered.length
+        ? (filtered.reduce((s, tc) => s + (tc.success_percentage || 0), 0) / filtered.length).toFixed(1)
+        : '0';
+      const qiCases = filtered.filter(tc => tc.published_qi != null);
+      const avgQi = qiCases.length
+        ? (qiCases.reduce((s, tc) => s + tc.published_qi, 0) / qiCases.length).toFixed(1)
+        : 'N/A';
+
+      const response = await api.post(
+        `${API_BASE_URL}/mcp/regression/ai-analysis/testcase-summary`,
+        {
+          stats: {
+            total: filtered.length,
+            succeeded: allSucceeded.length,
+            failed: allFailed.length,
+            avg_stability: avgStab,
+            avg_success: avgSucc,
+            avg_qi: avgQi,
+            issue_type_breakdown: issueTypeBreakdown,
+            component_breakdown: componentBreakdown,
+            unique_tickets: [...new Set(allTickets)],
+          },
+          failed_testcases: failedTcs,
+          branch,
+          team,
+        },
+        { timeout: 120000 }
+      );
+
+      if (response.data.success) {
+        setAiAnalysis(response.data.analysis);
+      } else {
+        setAiAnalysis(`Error: ${response.data.error || 'Unknown error'}`);
+      }
+    } catch (err) {
+      console.error('AI analysis failed:', err);
+      setAiAnalysis(`Error: ${err.response?.data?.error || err.message}`);
+    } finally {
+      setLoadingAi(false);
+    }
   };
 
   const openRunPlanModal = () => {
@@ -595,6 +673,14 @@ export default function TestcaseManagement() {
           </div>
 
           <button
+            className="tc-btn tc-btn-ai-analyse"
+            onClick={handleAiAnalyse}
+            disabled={loadingAi || filtered.length === 0}
+          >
+            {loadingAi ? 'Analysing...' : 'AI Analyse'}
+          </button>
+
+          <button
             className="tc-btn tc-btn-reload"
             onClick={handleReload}
             disabled={reloading}
@@ -717,6 +803,26 @@ export default function TestcaseManagement() {
           <div className="stat-label">Quality Index (QI)</div>
         </div>
       </div>
+
+      {/* AI Analysis Panel */}
+      {showAiPanel && (
+        <div className="tc-ai-panel">
+          <div className="tc-ai-panel-header">
+            <h3>AI Analysis — {branch} / {team} ({filtered.length} testcases, all pages)</h3>
+            <button className="tc-ai-panel-close" onClick={() => { setShowAiPanel(false); setAiAnalysis(null); }}>✕</button>
+          </div>
+          {loadingAi ? (
+            <div className="tc-ai-loading">
+              <div className="spinner" />
+              <span>AI is analysing all {filtered.length} filtered testcases across all pages... This may take 30-60 seconds...</span>
+            </div>
+          ) : aiAnalysis ? (
+            <div className="tc-ai-content">
+              <AiMarkdown content={aiAnalysis} />
+            </div>
+          ) : null}
+        </div>
+      )}
 
       {/* Tag action panel */}
       {selectedOids.size > 0 && (

@@ -8,9 +8,10 @@
       ],
       "nos_commit": null,
       "tag_name": "testtrigger_1769659267445",
-      "schedule_date": "2026-01-30T00:38",
+      "schedule_date": "2026-05-21T09:00",
       "created_at": "2026-01-29T00:36:37.170735",
-      "last_triggered": "2026-04-26T23:23:48.399144"
+      "last_triggered": "2026-05-21T06:15:10.543258",
+      "schedule_triggered": false
     },
     {
       "id": "1770700028806",
@@ -70,7 +71,8 @@
       "tag_name": "Run2_1770700028798",
       "schedule_date": "2026-02-11T10:37",
       "created_at": "2026-02-10T10:37:08.807010",
-      "last_triggered": null
+      "last_triggered": "2026-05-20T10:57:08.913175",
+      "schedule_triggered": true
     },
     {
       "id": "1770700774865",
@@ -130,7 +132,8 @@
       "tag_name": "Run2_1770700774865",
       "schedule_date": "2026-02-11T10:37",
       "created_at": "2026-02-10T10:49:34.865729",
-      "last_triggered": null
+      "last_triggered": "2026-05-20T10:57:17.685215",
+      "schedule_triggered": true
     },
     {
       "id": "1771833330862",
@@ -160,7 +163,8 @@
       "tag_name": "Run3_1771833330852",
       "schedule_date": "2026-02-23T13:25",
       "created_at": "2026-02-23T13:25:30.862902",
-      "last_triggered": null
+      "last_triggered": "2026-05-20T10:57:21.877643",
+      "schedule_triggered": true
     },
     {
       "id": "1771834822321",
@@ -174,7 +178,8 @@
       "tag_name": "751GSRun3_1771834822314",
       "schedule_date": "2026-02-23T13:50",
       "created_at": "2026-02-23T13:50:22.321560",
-      "last_triggered": null
+      "last_triggered": "2026-05-20T10:57:22.800988",
+      "schedule_triggered": true
     },
     {
       "id": "1773160958063",
@@ -295,6 +300,496 @@
       "triggered_at": "2026-04-26T23:23:48.399165",
       "task_ids": [
         "69ee512cd24d82d1505f48bf"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1779272341926",
+      "run_plan_id": "1769627197170",
+      "triggered_at": "2026-05-20T10:19:01.926852",
+      "triggered_by": "sudharshan.musali",
+      "task_ids": [
+        "6a0d8a958e79ce26e7ed3b26"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1779274628913",
+      "run_plan_id": "1770700028806",
+      "triggered_at": "2026-05-20T10:57:08.913175",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [
+        "6a0d9344d24d8233e3de9cec",
+        "6a0d9345b5e47598fbfdf4b7",
+        "6a0d9346b5e47598fdbc77b9",
+        "6a0d93472bc0c4d7f9446bd4",
+        "6a0d93492bc0c4d7fe562bf5",
+        "6a0d934eb5e47598eeaad4f9",
+        "6a0d934f2bc0c4d8132d7d22",
+        "6a0d93502bc0c4d80c0ea64f",
+        "6a0d9351b5e47598ea9ad3ab",
+        "6a0d93512bc0c4d80edd634e",
+        "6a0d93522bc0c4d80edd635e",
+        "6a0d93538e79ce26d9d39dd5",
+        "6a0d9354d24d8233e511c8fc",
+        "6a0d93552bc0c4d8055cb580",
+        "6a0d9356b5e47598eeaad522",
+        "6a0d9356d24d8233e511c90d",
+        "6a0d9357d24d8233f500e46a",
+        "6a0d93582bc0c4d8055cb58a",
+        "6a0d935ab5e475990291943c",
+        "6a0d935a8e79ce26e63adb7c",
+        "6a0d935c8e79ce26ee4fa44b",
+        "6a0d935fd24d8233eb5c3914",
+        "6a0d93602bc0c4d81155a7bb",
+        "6a0d9362d24d8233eea2ae98",
+        "6a0d93638e79ce26e59371f4",
+        "6a0d93648e79ce26e2447253",
+        "6a0d93658e79ce26e7ed3f7c",
+        "6a0d9367d24d8233f384d5e3",
+        "6a0d9368b5e47598e686a3d0",
+        "6a0d93692bc0c4d810da9fae",
+        "6a0d936a2bc0c4d7f7a4aa4d",
+        "6a0d936b8e79ce26e0f15230",
+        "6a0d936c8e79ce26e63adbb6",
+        "6a0d936d2bc0c4d810da9fc3",
+        "6a0d936e8e79ce26edf82dec",
+        "6a0d936f2bc0c4d810da9fdd",
+        "6a0d93718e79ce26e94b0eb1",
+        "6a0d93732bc0c4d7f60d8be2",
+        "6a0d9374d24d8233e0f93271",
+        "6a0d93758e79ce26ecd63c23",
+        "6a0d93762bc0c4d81250a9ab",
+        "6a0d9377b5e47598f22837b4",
+        "6a0d93788e79ce26e94b0f22",
+        "6a0d9379d24d8233eea2aeb2",
+        "6a0d9379b5e47598f46e4cbf",
+        "6a0d937a2bc0c4d80edd637e",
+        "6a0d937b2bc0c4d8084074dc",
+        "6a0d937e2bc0c4d7f8aa942a",
+        "6a0d9382d24d8233dfc04100",
+        "6a0d9383d24d8233da3bf2e6"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1779274637685",
+      "run_plan_id": "1770700774865",
+      "triggered_at": "2026-05-20T10:57:17.685215",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [],
+      "failed_jobs": [
+        {
+          "job_id": "698077578e79ce94f2d2a819",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 55 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6980793c2bc0c487ab869e7f",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 56 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6980796b8e79ce35e9382967",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 57 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709d81d24d8217788c4210",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 57 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709e318e79ce6b2d11cace",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 58 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709ebf2bc0c4fe218f26e4",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 3 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709f43b5e4759e4d556e11",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 4 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709fac2bc0c4fe10fe4c71",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 5 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a015d24d82177aa4b6f9",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 6 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a0a42bc0c4fe097e9cac",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 7 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a0f88e79ce6b2917430d",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 7 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a164d24d821780c4aa3f",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 8 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a1d82bc0c4fe1f6f4f85",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 9 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a23cd24d82176a39ea54",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 10 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a282b5e4759e5a9325ee",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 10 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a2d88e79ce6b291743ac",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 11 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a34cb5e4759e44b2492a",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 12 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a391d24d82176654aab6",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 13 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a41dd24d821772f10716",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 14 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a46c8e79ce6b20f4960d",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 14 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a4c5b5e4759e4a318b05",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 15 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a50e8e79ce6b38201e6f",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 18 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a557b5e4759e41c3e252",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 19 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5a058e79ce6b35196dcb",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 20 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5c578e79ce6b2e8839ad",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 22 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5ca0b5e47503240d6f4f",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 23 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5d00d24d8280b120945e",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 24 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5d5eb5e4750316f2b442",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 25 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5e18d24d8280bafb2601",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 26 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5e89b5e47503240d6ff7",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 27 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f4d52b5e4750310d1ec50",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 28 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f4e488e79ce6b361f4707",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 29 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f4f62d24d8280c679e709",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 30 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f4fd68e79ce6b1fe0a5d9",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 31 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f50378e79ce6b266487d6",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 32 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f50912bc0c463b24b71e1",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 31 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f50ebb5e475031aceb5cc",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 32 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f51558e79ce6b381f9294",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 34 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5211d24d8280c56ae871",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 35 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f527db5e475032b1643ce",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 37 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5411d24d8280b3d3a39c",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 38 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f54898e79ce6b2ac0d6e0",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 39 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f54e42bc0c463b8fe7986",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 39 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5533d24d8280c56ae97d",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 40 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f56d22bc0c463c39cdcec",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 41 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5754d24d8280cd3cb0ee",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 41 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f58018e79ce6b2b0fe290",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 42 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f58522bc0c463cb7057d0",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 43 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f58bbb5e475030fdf28bb",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 48 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "696f5924d24d8280c39bb3f8",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 49 seconds before re-triggering or change configuration"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1779274641877",
+      "run_plan_id": "1771833330862",
+      "triggered_at": "2026-05-20T10:57:21.877643",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [],
+      "failed_jobs": [
+        {
+          "job_id": "6970a282b5e4759e5a9325ee",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 4 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a1d82bc0c4fe1f6f4f85",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 2 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709f43b5e4759e4d556e11",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 57 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a23cd24d82176a39ea54",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 2 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a34cb5e4759e44b2492a",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 5 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a50e8e79ce6b38201e6f",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 12 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a557b5e4759e41c3e252",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 13 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a391d24d82176654aab6",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 5 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a46c8e79ce6b20f4960d",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 7 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709fac2bc0c4fe10fe4c71",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 56 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a015d24d82177aa4b6f9",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 57 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a0f88e79ce6b2917430d",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 58 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a0a42bc0c4fe097e9cac",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 58 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709d81d24d8217788c4210",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 47 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a164d24d821780c4aa3f",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 59 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a2d88e79ce6b291743ac",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 2 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709ebf2bc0c4fe218f26e4",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 53 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709e318e79ce6b2d11cace",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 47 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a41dd24d821772f10716",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 4 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a4c5b5e4759e4a318b05",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 6 seconds before re-triggering or change configuration"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1779274642801",
+      "run_plan_id": "1771834822321",
+      "triggered_at": "2026-05-20T10:57:22.800988",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [
+        "6a0d93928e79ce26dfefa9ab"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "6980793c2bc0c487ab869e7f",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 43 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6980796b8e79ce35e9382967",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 43 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "698077578e79ce94f2d2a819",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 41 seconds before re-triggering or change configuration"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1779276937194",
+      "run_plan_id": "1769627197170",
+      "triggered_at": "2026-05-20T11:35:37.194627",
+      "triggered_by": "sudharshan.musali",
+      "task_ids": [
+        "6a0d9c882bc0c4d8132d8167"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1779296973325",
+      "run_plan_id": "1769627197170",
+      "triggered_at": "2026-05-20T17:09:33.325497",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [
+        "6a0deacd8e79ce26e7ed6932"
       ],
       "failed_jobs": [],
       "status": "success"
