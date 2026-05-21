@@ -6874,12 +6874,15 @@ def _apply_reserved_seq_to_dyn_custom_name(name: str, date_key: str, seq: int) -
 
 
 # Default JITA test set "framework options" (framework_args JSON object) for dynamic creates.
-# On clone, merge with source: source keys win; any default key missing in source is added.
-# If a cloned TS already has all of these keys (order irrelevant), do not change framework_args.
+# Enforce log collection defaults for every new TS. Retain-specific teardown skips are conditional.
 DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS = {
     "no_log_collection": False,
     "use_logbay": True,
     "log_level": "DEBUG",
+}
+DYN_TESTSET_RETAIN_FRAMEWORK_OPTS = {
+    "skip_teardown": True,
+    "skip_class_teardown": True,
 }
 
 
@@ -6901,10 +6904,16 @@ def _framework_args_value_to_dict(val):
     return {}
 
 
-def _merge_dyn_testset_framework_args(existing):
-    """Keep existing extra keys, enforce dynamic default keys+values."""
+def _merge_dyn_testset_framework_args(existing, retain_setup_on_failure=False):
+    """Keep existing extra keys, enforce dynamic defaults, and apply retain-only teardown skips."""
     ex = _framework_args_value_to_dict(existing)
-    return {**ex, **DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS}
+    merged = {**ex, **DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS}
+    if retain_setup_on_failure:
+        merged.update(DYN_TESTSET_RETAIN_FRAMEWORK_OPTS)
+    else:
+        for key in DYN_TESTSET_RETAIN_FRAMEWORK_OPTS:
+            merged.pop(key, None)
+    return merged
 
 
 def _framework_args_dict_has_all_dyn_default_keys(framework_args_val):
@@ -6913,17 +6922,21 @@ def _framework_args_dict_has_all_dyn_default_keys(framework_args_val):
     return all(k in d for k in DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS)
 
 
-def _apply_default_framework_options_to_test_set_payload(ts_payload):
-    """Mutate a POST /test_sets body: set framework_args / frameworkArgs to merged JSON string."""
+def _apply_default_framework_options_to_test_set_payload(ts_payload, retain_setup_on_failure=False):
+    """Mutate a POST /test_sets body with framework options used by both API and JITA UI."""
     if not isinstance(ts_payload, dict):
         return ts_payload
     existing = ts_payload.get("framework_args")
     if existing in (None, ""):
         existing = ts_payload.get("frameworkArgs")
-    merged = _merge_dyn_testset_framework_args(existing)
+    if existing in (None, ""):
+        existing = ts_payload.get("agave_options")
+    merged = _merge_dyn_testset_framework_args(existing, retain_setup_on_failure)
     fa_str = json.dumps(merged, separators=(",", ":"))
     ts_payload["framework_args"] = fa_str
     ts_payload["frameworkArgs"] = fa_str
+    # JITA Edit Test Set UI renders "Framework Options" from agave_options.
+    ts_payload["agave_options"] = merged
     return ts_payload
 
 
@@ -7903,8 +7916,8 @@ def dynamic_jp_create():
                     "testArgs": _ta,
                     "frameworkArgs": _fa,
                 }
-            # Always enforce default framework options for every newly created TS.
-            _apply_default_framework_options_to_test_set_payload(new_ts_payload)
+            # Always enforce logbay defaults; add teardown skips only when retain setup is enabled.
+            _apply_default_framework_options_to_test_set_payload(new_ts_payload, retain_setup_on_failure)
             _ensure_test_args_on_test_set_payload(new_ts_payload)
             _ta_log, _fa_log = _jit_ts_arg_strings(new_ts_payload)
             logger.info(f"[create] TS payload: name={new_ts_name}, #tests={len(test_entries)}, "
@@ -7921,6 +7934,36 @@ def dynamic_jp_create():
                 if ts_resp_json.get("success"):
                     created_ts_id = str(ts_resp_json["id"]) if ts_resp_json.get("id") else None
                     logger.info(f"Created test set: {new_ts_name} (ID: {created_ts_id})")
+                    if created_ts_id:
+                        try:
+                            ts_get_resp = requests.get(
+                                f"{JITA_BASE}/test_sets/{created_ts_id}",
+                                auth=JITA_SVC_AUTH,
+                                verify=False,
+                                timeout=30,
+                            )
+                            if ts_get_resp.status_code == 200:
+                                created_ts_doc = _jit_pick_ts_dict_from_response(ts_get_resp.json())
+                                if isinstance(created_ts_doc, dict):
+                                    _apply_default_framework_options_to_test_set_payload(
+                                        created_ts_doc,
+                                        retain_setup_on_failure,
+                                    )
+                                    ts_put_resp = requests.put(
+                                        f"{JITA_BASE}/test_sets/{created_ts_id}",
+                                        json=created_ts_doc,
+                                        auth=JITA_SVC_AUTH,
+                                        verify=False,
+                                        timeout=30,
+                                    )
+                                    logger.info(
+                                        "[create] Test set framework options PUT: "
+                                        f"ts_id={created_ts_id}, status={ts_put_resp.status_code}"
+                                    )
+                        except (requests.exceptions.RequestException, ValueError) as e:
+                            logger.warning(
+                                f"[create] Could not verify/update test set framework options for {created_ts_id}: {e}"
+                            )
                 else:
                     msg = ts_resp_json.get("message", f"HTTP {ts_create_resp.status_code}")
                     ts_create_warning = f"Test set creation failed: {msg}"

@@ -665,7 +665,7 @@ export default function DynamicJobProfile() {
         </div>
         {showExisting && (
           <div className="djp-toggle-row djp-toggle-row--inline">
-            <label>Retain setup</label>
+            <label>Retain live setup</label>
             <div
               className={`djp-toggle ${retainSetupOnFailure ? 'active' : ''}`}
               onClick={() => setRetainSetupOnFailure(!retainSetupOnFailure)}
