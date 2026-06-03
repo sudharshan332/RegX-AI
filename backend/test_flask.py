@@ -6904,7 +6904,7 @@ def _framework_args_value_to_dict(val):
     return {}
 
 
-def _merge_dyn_testset_framework_args(existing, retain_setup_on_failure=False):
+def _merge_dyn_testset_framework_args(existing, retain_setup_on_failure=False, custom_options=None):
     """Keep existing extra keys, enforce dynamic defaults, and apply retain-only teardown skips."""
     ex = _framework_args_value_to_dict(existing)
     merged = {**ex, **DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS}
@@ -6913,6 +6913,9 @@ def _merge_dyn_testset_framework_args(existing, retain_setup_on_failure=False):
     else:
         for key in DYN_TESTSET_RETAIN_FRAMEWORK_OPTS:
             merged.pop(key, None)
+    # Apply custom framework options from UI (overrides defaults, only if has actual keys)
+    if custom_options and isinstance(custom_options, dict) and len(custom_options) > 0:
+        merged.update(custom_options)
     return merged
 
 
@@ -6922,7 +6925,7 @@ def _framework_args_dict_has_all_dyn_default_keys(framework_args_val):
     return all(k in d for k in DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS)
 
 
-def _apply_default_framework_options_to_test_set_payload(ts_payload, retain_setup_on_failure=False):
+def _apply_default_framework_options_to_test_set_payload(ts_payload, retain_setup_on_failure=False, custom_options=None):
     """Mutate a POST /test_sets body with framework options used by both API and JITA UI."""
     if not isinstance(ts_payload, dict):
         return ts_payload
@@ -6931,7 +6934,7 @@ def _apply_default_framework_options_to_test_set_payload(ts_payload, retain_setu
         existing = ts_payload.get("frameworkArgs")
     if existing in (None, ""):
         existing = ts_payload.get("agave_options")
-    merged = _merge_dyn_testset_framework_args(existing, retain_setup_on_failure)
+    merged = _merge_dyn_testset_framework_args(existing, retain_setup_on_failure, custom_options)
     fa_str = json.dumps(merged, separators=(",", ":"))
     ts_payload["framework_args"] = fa_str
     ts_payload["frameworkArgs"] = fa_str
@@ -6940,7 +6943,7 @@ def _apply_default_framework_options_to_test_set_payload(ts_payload, retain_setu
     return ts_payload
 
 
-def _ensure_test_args_on_test_set_payload(ts_payload, default_value="{}"):
+def _ensure_test_args_on_test_set_payload(ts_payload, default_value="{}", custom_args=None):
     """Mutate a POST /test_sets body so test_args / testArgs are always present and non-empty."""
     if not isinstance(ts_payload, dict):
         return ts_payload
@@ -6949,8 +6952,23 @@ def _ensure_test_args_on_test_set_payload(ts_payload, default_value="{}"):
         ta = ts_payload.get("testArgs")
     if ta in (None, ""):
         ta = default_value
+    
+    # Merge custom test args from UI (only if custom_args has actual keys)
+    try:
+        ta_dict = json.loads(ta) if isinstance(ta, str) else (ta if isinstance(ta, dict) else {})
+        if custom_args and isinstance(custom_args, dict) and len(custom_args) > 0:
+            ta_dict.update(custom_args)
+        ta = json.dumps(ta_dict, separators=(",", ":"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        ta = default_value
+        if custom_args and isinstance(custom_args, dict) and len(custom_args) > 0:
+            ta = json.dumps(custom_args, separators=(",", ":"))
+    
+    # Set all test args fields that Jita might read
     ts_payload["test_args"] = ta
     ts_payload["testArgs"] = ta
+    # Jita UI "Test Arguments" section reads from args_map (dict, not JSON string)
+    ts_payload["args_map"] = json.loads(ta) if isinstance(ta, str) else (ta if isinstance(ta, dict) else {})
     return ts_payload
 
 
@@ -6970,6 +6988,8 @@ def dynamic_jp_check_existing():
         def_jp, def_ts = _dynamic_jp_ts_prefix_for_date(dyn_name_date or None)
         jp_raw = (req_data.get("jp_pattern") or "").strip() or def_jp
         ts_raw = (req_data.get("ts_pattern") or "").strip() or def_ts
+        jp_suffix = (req_data.get("jp_suffix") or "").strip().strip("_")
+        ts_suffix = (req_data.get("ts_suffix") or "").strip().strip("_")
 
         # Sanitize patterns to avoid regex injection
         jp_pattern = re.escape(jp_raw)
@@ -6979,7 +6999,12 @@ def dynamic_jp_check_existing():
 
         existing_jps = []
         try:
-            raw_query = json.dumps({"name": {"$regex": f"^{jp_pattern}", "$options": "i"}})
+            jp_regex = (
+                f"^{jp_pattern}\\d+_{re.escape(jp_suffix)}$"
+                if jp_suffix
+                else f"^{jp_pattern}"
+            )
+            raw_query = json.dumps({"name": {"$regex": jp_regex, "$options": "i"}})
             params = {"raw_query": quote(raw_query), "limit": 100}
             resp = requests.get(
                 f"{JITA_BASE}/job_profiles",
@@ -7012,7 +7037,12 @@ def dynamic_jp_check_existing():
 
         existing_ts = []
         try:
-            raw_query_ts = json.dumps({"name": {"$regex": f"^{ts_pattern}", "$options": "i"}})
+            ts_regex = (
+                f"^{ts_pattern}\\d+_{re.escape(ts_suffix)}$"
+                if ts_suffix
+                else f"^{ts_pattern}"
+            )
+            raw_query_ts = json.dumps({"name": {"$regex": ts_regex, "$options": "i"}})
             params_ts = {"raw_query": quote(raw_query_ts), "limit": 100}
             resp_ts = requests.get(
                 f"{JITA_BASE}/test_sets",
@@ -7042,14 +7072,19 @@ def dynamic_jp_check_existing():
         except (requests.exceptions.RequestException, ValueError) as e:
             logger.warning(f"check-existing: Failed to fetch test sets: {e}")
 
-        def _next_seq_from_prefixed_name(name, prefix):
+        def _next_seq_from_prefixed_name(name, prefix, suffix=""):
             if not isinstance(name, str) or not isinstance(prefix, str):
                 return None
             if not name.lower().startswith(prefix.lower()):
                 return None
-            m = re.match(r"(\d+)(?:_|$)", name[len(prefix):])
+            rest = name[len(prefix):]
+            m = re.match(r"(\d+)(?:_|$)", rest)
             if not m:
                 return None
+            if suffix:
+                existing_suffix = rest[m.end():].strip("_")
+                if existing_suffix.lower() != suffix.lower():
+                    return None
             try:
                 return int(m.group(1)) + 1
             except (ValueError, TypeError):
@@ -7059,21 +7094,28 @@ def dynamic_jp_check_existing():
         next_ts_num = 1
         for jp in existing_jps:
             name = jp.get("name", "")
-            num = _next_seq_from_prefixed_name(name, jp_raw)
+            num = _next_seq_from_prefixed_name(name, jp_raw, jp_suffix)
             if num is not None:
                 next_jp_num = max(next_jp_num, num)
         for ts in existing_ts:
             name = ts.get("name", "")
-            num = _next_seq_from_prefixed_name(name, ts_raw)
+            num = _next_seq_from_prefixed_name(name, ts_raw, ts_suffix)
             if num is not None:
                 next_ts_num = max(next_ts_num, num)
 
         date_key = dyn_name_date if (dyn_name_date and len(dyn_name_date) == 8 and dyn_name_date.isdigit()) else datetime.now().strftime("%Y%m%d")
         seq_peek = _peek_next_dyn_name_seq(date_key)
-        # Never suggest a number below JITA reality or our next reserved slot
-        next_both = max(next_jp_num, next_ts_num, seq_peek)
-        next_jp_num = next_both
-        next_ts_num = next_both
+        # Generic names keep the global daily floor. Suffix-based names use an
+        # independent sequence so new source JP/TS suffixes start at P1.
+        if not jp_suffix and not ts_suffix:
+            next_both = max(next_jp_num, next_ts_num, seq_peek)
+            next_jp_num = next_both
+            next_ts_num = next_both
+        else:
+            if not jp_suffix:
+                next_jp_num = max(next_jp_num, seq_peek)
+            if not ts_suffix:
+                next_ts_num = max(next_ts_num, seq_peek)
 
         return jsonify({
             "success": True,
@@ -7083,6 +7125,8 @@ def dynamic_jp_check_existing():
             "next_ts_number": next_ts_num,
             "jp_name_prefix": jp_raw,
             "ts_name_prefix": ts_raw,
+            "jp_suffix": jp_suffix,
+            "ts_suffix": ts_suffix,
         })
     except Exception as e:
         logger.error(f"Error in dynamic-jp check-existing: {e}", exc_info=True)
@@ -7395,12 +7439,18 @@ def dynamic_jp_search_clusters():
 
 
 @app.route("/mcp/regression/dynamic-jp/create", methods=["POST"])
+@jwt_required
 def dynamic_jp_create():
     """Create a dynamic JP and test set. Two modes:
     - create_fresh=True: brand-new JP+TS from scratch with the given testcases
     - create_fresh=False: clone from source_jp_id, optionally copying test_args from source_testset_id
     """
     try:
+        # Get current user info from JWT
+        current_user_email = None
+        if hasattr(g, 'current_user') and isinstance(g.current_user, dict):
+            current_user_email = g.current_user.get('email', '').strip()
+        
         req_data = request.json
         if not req_data:
             return jsonify({"error": "Request body is required (JSON)"}), 400
@@ -7410,8 +7460,13 @@ def dynamic_jp_create():
         source_testset_id = req_data.get("source_testset_id")
         nos_branch = req_data.get("nos_branch", "master") or "master"
         nos_tag = req_data.get("nos_tag", "Latest Smoke Passed") or "Latest Smoke Passed"
+        nos_update_type = req_data.get("nos_update_type", "by_tag") or "by_tag"
+        nos_commit_id = (req_data.get("nos_commit_id") or "").strip() or ""
+        nos_gbn = (req_data.get("nos_gbn") or "").strip() or ""
         pc_branch = req_data.get("pc_branch", "master") or "master"
         pc_tag = req_data.get("pc_tag", "Latest Smoke Passed") or "Latest Smoke Passed"
+        pc_update_type = req_data.get("pc_update_type", "by_tag") or "by_tag"
+        pc_commit_id = (req_data.get("pc_commit_id") or "").strip() or ""
         nutest_branch = req_data.get("nutest_branch", "master") or "master"
         provider = req_data.get("provider", "global_pool") or "global_pool"
         resource_type = req_data.get("resource_type", "nested_2.0") or "nested_2.0"
@@ -7433,6 +7488,16 @@ def dynamic_jp_create():
 
         reuse_source_ts = bool(req_data.get("reuse_source_ts", False))
         retain_setup_on_failure = bool(req_data.get("retain_setup_on_failure", False))
+        use_latest_commit = bool(req_data.get("use_latest_commit", False))
+        sync_to_tcms = bool(req_data.get("sync_to_tcms", False))
+        custom_test_args = req_data.get("custom_test_args")
+        custom_framework_options = req_data.get("custom_framework_options")
+        
+        # Convert None to empty dict
+        if not custom_test_args or not isinstance(custom_test_args, dict):
+            custom_test_args = {}
+        if not custom_framework_options or not isinstance(custom_framework_options, dict):
+            custom_framework_options = {}
         if reuse_source_ts and create_fresh:
             return jsonify({
                 "error": "reuse_source_ts is only valid when cloning from an existing job profile (not fresh create).",
@@ -7459,7 +7524,7 @@ def dynamic_jp_create():
                      f"source_jp_id={source_jp_id}, source_testset_id={source_testset_id}, "
                      f"source_testset_name={(req_data.get('source_testset_name') or '').strip() or None}, "
                      f"custom_jp_name={custom_jp_name}, custom_ts_name={custom_ts_name}, "
-                     f"#testcases={len(testcase_names)}, #tags={len(jp_tags)}")
+                     f"#testcases={len(testcase_names)}, #tags={len(jp_tags)}, sync_to_tcms={sync_to_tcms}")
 
         from urllib.parse import quote
 
@@ -7589,25 +7654,34 @@ def dynamic_jp_create():
                     payload[snake] = payload[camel]
             return payload
 
-        def _disable_tcms_sync_flags(jp_payload):
-            """Turn off JITA/TCMS sync for cloned JPs."""
+        def _set_tcms_sync_flags(jp_payload, enabled):
+            """Set JITA/TCMS sync flags for the created JP."""
             if not isinstance(jp_payload, dict):
                 return
 
-            jp_payload["sync_to_tcms"] = False
+            jp_payload["sync_to_tcms"] = bool(enabled)
 
             # JITA manage UI computes "Sync To TCMS" from tester_tags.includes("official").
             tester_tags = jp_payload.get("tester_tags")
             if isinstance(tester_tags, list):
-                jp_payload["tester_tags"] = [t for t in tester_tags if t != "official"]
+                if enabled:
+                    jp_payload["tester_tags"] = list(dict.fromkeys(tester_tags + ["official"]))
+                else:
+                    jp_payload["tester_tags"] = [t for t in tester_tags if t != "official"]
+            elif enabled:
+                jp_payload["tester_tags"] = ["official"]
 
             sut = jp_payload.get("system_under_test")
             if isinstance(sut, dict):
-                sut["sync_to_tcms"] = False
+                sut["sync_to_tcms"] = bool(enabled)
 
-            # Empty strings survive JITA PUT; missing keys get defaulted back.
-            for k in ("service", "package_type", "test_service"):
-                jp_payload[k] = ""
+            if enabled:
+                jp_payload.setdefault("package_type", "tar")
+                jp_payload.setdefault("test_service", "NutestPy3Tests")
+            else:
+                # Empty strings survive JITA PUT; missing keys get defaulted back.
+                for k in ("service", "package_type", "test_service"):
+                    jp_payload[k] = ""
 
         def _apply_retain_setup_on_failure(jp_payload):
             """Retain deployment after each test failure, excluding DataCorruptionError."""
@@ -7785,13 +7859,10 @@ def dynamic_jp_create():
         if dyn_name_date and (len(dyn_name_date) != 8 or not dyn_name_date.isdigit()):
             return jsonify({"error": "dyn_name_date must be YYYYMMDD"}), 400
         jp_prefix, ts_prefix = _dynamic_jp_ts_prefix_for_date(dyn_name_date or None)
-        date_key = _dyn_name_seq_date_key(dyn_name_date or None)
-        # Monotonic: bumps every /create, success or later failure, so JP_/TS_ numbers always advance
+        # Keep a monotonic fallback counter for generic names, but do not
+        # rewrite user-visible custom names. Those may be suffix-specific
+        # suggestions like SW_2205_P1_<source-name>.
         reserved_seq = _bump_dyn_name_seq(dyn_name_date or None)
-        if custom_jp_name:
-            custom_jp_name = _apply_reserved_seq_to_dyn_custom_name(custom_jp_name, date_key, reserved_seq)
-        if custom_ts_name and not (reuse_source_ts and linked_ts_id_for_reuse):
-            custom_ts_name = _apply_reserved_seq_to_dyn_custom_name(custom_ts_name, date_key, reserved_seq)
 
         if custom_jp_name:
             new_jp_name = custom_jp_name
@@ -7917,11 +7988,13 @@ def dynamic_jp_create():
                     "frameworkArgs": _fa,
                 }
             # Always enforce logbay defaults; add teardown skips only when retain setup is enabled.
-            _apply_default_framework_options_to_test_set_payload(new_ts_payload, retain_setup_on_failure)
-            _ensure_test_args_on_test_set_payload(new_ts_payload)
-            _ta_log, _fa_log = _jit_ts_arg_strings(new_ts_payload)
-            logger.info(f"[create] TS payload: name={new_ts_name}, #tests={len(test_entries)}, "
-                        f"test_args_len={len(_ta_log)}, framework_args_len={len(_fa_log)}")
+            _apply_default_framework_options_to_test_set_payload(
+                new_ts_payload, 
+                retain_setup_on_failure, 
+                custom_framework_options
+            )
+            _ensure_test_args_on_test_set_payload(new_ts_payload, "{}", custom_test_args)
+            logger.info(f"[create] TS POST payload ready: name={new_ts_name}, #tests={len(test_entries)}")
 
             created_ts_id = None
             try:
@@ -7948,6 +8021,12 @@ def dynamic_jp_create():
                                     _apply_default_framework_options_to_test_set_payload(
                                         created_ts_doc,
                                         retain_setup_on_failure,
+                                        custom_framework_options,
+                                    )
+                                    _ensure_test_args_on_test_set_payload(
+                                        created_ts_doc,
+                                        "{}",
+                                        custom_test_args,
                                     )
                                     ts_put_resp = requests.put(
                                         f"{JITA_BASE}/test_sets/{created_ts_id}",
@@ -7976,41 +8055,160 @@ def dynamic_jp_create():
         # 5. Build infra based on provider selection
         def _build_infra(prov, res_type, np_list):
             if prov == "global_pool":
+                # Don't include coupon field - let Jita/QMS allocate it automatically
+                params = {"category": "general"}
                 if res_type == "physical":
-                    return [{"type": "physical", "kind": "PRIVATE_CLOUD", "params": {"category": "general"}}]
-                pool_name = "global_nested_2.0" if res_type == "nested_2.0" else "global_nested_1.0"
-                return [{"kind": "ON_PREM", "type": "cluster_pool", "entries": [pool_name]}]
+                    return [{"type": "physical", "kind": "PRIVATE_CLOUD", "params": params}]
+                # nested_2.0 → "nested", nested_1.0 → "nested_1"
+                nested_type = "nested" if res_type in ("nested_2.0", "nested") else "nested_1"
+                return [{"type": nested_type, "kind": "PRIVATE_CLOUD", "params": params}]
             elif prov == "node_pool":
                 entries = np_list if np_list else ["unknown"]
                 return [{"kind": "ON_PREM", "type": "node_pool", "entries": entries}]
             elif prov == "static":
                 entries = np_list if np_list else ["unknown"]
                 return [{"kind": "ON_PREM", "type": "cluster", "entries": entries}]
-            return [{"kind": "ON_PREM", "type": "cluster_pool", "entries": ["global_nested_2.0"]}]
+            return [{"type": "nested", "kind": "PRIVATE_CLOUD", "params": {"category": "general"}}]
 
         infra = _build_infra(provider, resource_type, node_pools)
 
+        def _default_scheduling_options():
+            return {
+                "optimize_scheduling": True,
+                "force_imaging": False,
+                "task_priority": 10,
+                "skip_resource_spec_match": False,
+                "upgrade": False,
+                "deployment_distribution_algorithm": "test_time_based",
+                "retry_imaging": 1,
+                "check_image_compatibility": True,
+            }
+
+        def _default_requested_hardware(res_type):
+            hardware = {
+                "hypervisor": "kvm",
+                "hypervisor_version": "branch_symlink",
+                "imaging_options": {
+                    "enable_large_partitions": True,
+                    "min_vcpus": 8,
+                    "redundancy_factor": "default",
+                    "additional_parameters": [
+                        {
+                            "key": "svm_rescue_args",
+                            "value": "--large_partitions_enabled --boot_size=41940992 --home_nutanix_size=167770112",
+                        }
+                    ],
+                },
+            }
+            if res_type in ("nested_2.0", "nested"):
+                hardware["nested_params"] = {"version": "2.0", "is_nested": True}
+            elif res_type == "nested_1.0":
+                hardware["nested_params"] = {"version": "1.0", "is_nested": True}
+            return hardware
+
         # Build new JP payload
         if create_fresh:
-            new_jp_payload = {
-                "name": new_jp_name,
-                "description": f"Dynamic JP with {len(testcase_names)} testcase(s)",
-                "test_sets": [],
-                "git": {},
-                "build_selection": {},
-                "resource_manager_json": {},
-                "infra": infra,
-                "requested_hardware": {
-                    "hypervisor": "kvm",
-                    "hypervisor_version": "branch_symlink",
-                    "imaging_options": {"redundancy_factor": "default", "min_ram": 32},
-                },
-                "services": ["NOS"],
-                "service": "AOS",
-                "test_framework": "nutest-py3-tests",
-                "nutest-py3-tests_branch": nutest_branch,
-                "system_under_test": {"product": "aos", "component": "main", "branch": nos_branch},
-            }
+            import copy
+            template_jp = None
+            template_jp_id = os.getenv("DYNAMIC_JP_TEMPLATE_ID", "6a1e59718e79ce932625e7c0")
+            try:
+                template_resp = requests.get(
+                    f"{JITA_BASE}/job_profiles/{template_jp_id}",
+                    auth=JITA_SVC_AUTH,
+                    verify=False,
+                    timeout=30,
+                )
+                if template_resp.status_code == 200:
+                    template_jp = template_resp.json().get("data", {})
+                    if isinstance(template_jp, dict):
+                        logger.info(f"[create] Fresh mode — loaded template JP {template_jp_id}")
+                    else:
+                        template_jp = None
+                else:
+                    logger.warning(
+                        f"[create] Fresh mode — template JP fetch failed: HTTP {template_resp.status_code}"
+                    )
+            except Exception as exc:
+                logger.warning(f"[create] Fresh mode — template JP fetch error: {exc}")
+
+            if template_jp:
+                new_jp_payload = copy.deepcopy(template_jp)
+                for field in [
+                    "_id",
+                    "created_at",
+                    "updated_at",
+                    "created_by",
+                    "created_by_user",
+                    "__v",
+                    "v",
+                    "last_triggered",
+                    "scheduled_jobs",
+                    "auto_schedule_cron",
+                ]:
+                    new_jp_payload.pop(field, None)
+                
+                # Don't copy template's coupon - let QMS allocate a new one for this JP
+                # Coupons are JP-specific and managed by Jita's QMS
+                merged_infra = infra
+                
+                new_jp_payload.update({
+                    "name": new_jp_name,
+                    "description": f"Dynamic JP with {len(testcase_names)} testcase(s)",
+                    "test_sets": [],
+                    "git": {},
+                    "build_selection": {},
+                    "resource_manager_json": {},
+                    "infra": merged_infra,
+                    "requested_hardware": _default_requested_hardware(resource_type),
+                    "services": ["NOS"],
+                    "service": "AOS",
+                    "test_framework": "nutest-py3-tests",
+                    "nutest-py3-tests_branch": nutest_branch,
+                    "scheduling_options": _default_scheduling_options(),
+                    "private": True,
+                    "user_groups": ["cdp_reg_jarvis"],
+                    "auto_schedule_cron": False,
+                    "allow_resource_sharing": False,
+                    "allow_resource_sharing_across_tasks": False,
+                    "advanced_options": {"run_tests_with_tags": False},
+                    "skip_bad_tests": True,
+                    "run_tests_with_priorities": [],
+                    "run_tests_with_additional_tags": [],
+                    "sdk_installation_options": {},
+                    "demo_mode": False,
+                    "image_build_type": "None",
+                    "system_under_test": {"product": "aos", "component": "main", "branch": nos_branch},
+                })
+                new_jp_payload.pop("test_set", None)
+            else:
+                new_jp_payload = {
+                    "name": new_jp_name,
+                    "description": f"Dynamic JP with {len(testcase_names)} testcase(s)",
+                    "test_sets": [],
+                    "git": {},
+                    "build_selection": {},
+                    "resource_manager_json": {},
+                    "infra": infra,
+                    "requested_hardware": _default_requested_hardware(resource_type),
+                    "services": ["NOS"],
+                    "service": "AOS",
+                    "test_framework": "nutest-py3-tests",
+                    "nutest-py3-tests_branch": nutest_branch,
+                    "scheduling_options": _default_scheduling_options(),
+                    "private": True,
+                    "user_groups": ["cdp_reg_jarvis"],
+                    "auto_schedule_cron": False,
+                    "allow_resource_sharing": False,
+                    "allow_resource_sharing_across_tasks": False,
+                    "advanced_options": {"run_tests_with_tags": False},
+                    "skip_bad_tests": True,
+                    "run_tests_with_priorities": [],
+                    "run_tests_with_additional_tags": [],
+                    "sdk_installation_options": {},
+                    "demo_mode": False,
+                    "image_build_type": "None",
+                    "system_under_test": {"product": "aos", "component": "main", "branch": nos_branch},
+                }
         else:
             import copy
             new_jp_payload = copy.deepcopy(source_jp)
@@ -8022,6 +8220,11 @@ def dynamic_jp_create():
             new_jp_payload.pop("test_set", None)
             new_jp_payload["test_sets"] = []
             logger.info(f"[create] Source JP keys: {list(source_jp.keys())}")
+            logger.info(f"[create] Source JP infra: {source_jp.get('infra')}")
+            # Log email-related fields from source JP to understand structure
+            for key in source_jp.keys():
+                if 'email' in key.lower() or 'mail' in key.lower() or key in ['emails', 'scheduling_options', 'user_groups']:
+                    logger.info(f"[create] Source JP email field '{key}': {source_jp.get(key)}")
 
         # Link to new test set if created
         if created_ts_id:
@@ -8040,23 +8243,54 @@ def dynamic_jp_create():
             nos_build_type = "opt" if nos_branch.strip().lower() == "master" else "release"
             pc_build_type = "opt" if pc_branch.strip().lower() == "master" else "release"
 
-            new_jp_payload["build_selection"] = {
-                "by_latest_smoked": nos_tag == "Latest Smoke Passed",
-                "commit_must_be_newer": False,
-                "build_type": nos_build_type,
-            }
+            # NOS build_selection based on update_type
+            if nos_update_type == "by_commit":
+                new_jp_payload["build_selection"] = {
+                    "by_commit_id": True,
+                    "commit_must_be_newer": False,
+                    "build_type": nos_build_type,
+                }
+                if nos_commit_id:
+                    new_jp_payload["build_selection"]["commit_id"] = nos_commit_id
+                if nos_gbn:
+                    try:
+                        new_jp_payload["build_selection"]["gbn"] = int(nos_gbn) if isinstance(nos_gbn, str) else nos_gbn
+                    except (ValueError, TypeError):
+                        new_jp_payload["build_selection"]["gbn"] = nos_gbn
+                # Remove tag-related fields
+                new_jp_payload["build_selection"].pop("by_latest_smoked", None)
+            else:
+                # by_tag (default)
+                new_jp_payload["build_selection"] = {
+                    "by_latest_smoked": nos_tag == "Latest Smoke Passed",
+                    "commit_must_be_newer": False,
+                    "build_type": nos_build_type,
+                }
+                # Remove commit-related fields
+                new_jp_payload["build_selection"].pop("by_commit_id", None)
+                new_jp_payload["build_selection"].pop("commit_id", None)
+                new_jp_payload["build_selection"].pop("gbn", None)
 
             resource_manager_json = new_jp_payload.get("resource_manager_json") or {}
             if not isinstance(resource_manager_json, dict):
                 resource_manager_json = {}
             if "NOS_CLUSTER" not in resource_manager_json:
                 resource_manager_json["NOS_CLUSTER"] = {}
+            
+            # PC configuration based on update_type
+            pc_build = {
+                "branch": pc_branch,
+                "build_selection_build_type": pc_build_type,
+            }
+            if pc_update_type == "by_commit":
+                if pc_commit_id:
+                    pc_build["build_selection_option"] = pc_commit_id
+            else:
+                # by_tag (default)
+                pc_build["build_selection_option"] = pc_tag
+            
             resource_manager_json["PRISM_CENTRAL"] = {
-                "build": {
-                    "branch": pc_branch,
-                    "build_selection_build_type": pc_build_type,
-                    "build_selection_option": pc_tag,
-                }
+                "build": pc_build
             }
             new_jp_payload["resource_manager_json"] = resource_manager_json
 
@@ -8098,9 +8332,6 @@ def dynamic_jp_create():
             # Only update name, description, test_sets (already done above)
             logger.info(f"[create] Clone mode — preserving source JP config "
                         f"(infra={new_jp_payload.get('infra', 'N/A')[:80] if isinstance(new_jp_payload.get('infra'), str) else 'present'})")
-            _disable_tcms_sync_flags(new_jp_payload)
-            if retain_setup_on_failure:
-                _apply_retain_setup_on_failure(new_jp_payload)
             # User-supplied patch URLs (clone flow): fresh-create applied these above; clone had skipped them
             if test_patch_url or framework_patch_url:
                 logger.info(
@@ -8129,6 +8360,101 @@ def dynamic_jp_create():
                 if framework_patch_url:
                     new_jp_payload["patch_url"] = framework_patch_url
 
+            # Use Latest Commit: override build selection to Latest Smoke Passed with optimal build type
+            if use_latest_commit:
+                logger.info(f"[create] Clone mode — applying use_latest_commit configuration")
+                
+                # Extract actual branches from source JP (not from request)
+                source_git = new_jp_payload.get("git") or {}
+                actual_nos_branch = source_git.get("branch", "master") if isinstance(source_git, dict) else "master"
+                
+                # For PC branch, check resource_manager_json
+                resource_manager_json = new_jp_payload.get("resource_manager_json") or {}
+                if isinstance(resource_manager_json, dict):
+                    pc_config = resource_manager_json.get("PRISM_CENTRAL") or {}
+                    if isinstance(pc_config, dict):
+                        pc_build = pc_config.get("build") or {}
+                        if isinstance(pc_build, dict):
+                            actual_pc_branch = pc_build.get("branch", actual_nos_branch)
+                        else:
+                            actual_pc_branch = actual_nos_branch
+                    else:
+                        actual_pc_branch = actual_nos_branch
+                else:
+                    actual_pc_branch = actual_nos_branch
+                    resource_manager_json = {}
+                
+                # Determine build types based on actual branches from source JP
+                nos_build_type = "opt" if actual_nos_branch.strip().lower() == "master" else "release"
+                pc_build_type = "opt" if actual_pc_branch.strip().lower() == "master" else "release"
+                
+                logger.info(f"[create] Extracted branches from source JP: nos={actual_nos_branch}, pc={actual_pc_branch}")
+                
+                # Update git config (keep source branch)
+                git = new_jp_payload.get("git") or {}
+                if not isinstance(git, dict):
+                    git = {}
+                git["branch"] = actual_nos_branch
+                git["repo"] = "main"
+                new_jp_payload["git"] = git
+                
+                # Update build selection for NOS
+                new_jp_payload["build_selection"] = {
+                    "by_latest_smoked": True,  # Always true for Latest Smoke Passed
+                    "commit_must_be_newer": False,
+                    "build_type": nos_build_type,
+                }
+                # Ensure conflicting fields are removed
+                new_jp_payload["build_selection"].pop("by_commit_id", None)
+                new_jp_payload["build_selection"].pop("commit_id", None)
+                new_jp_payload["build_selection"].pop("gbn", None)
+                
+                # Update resource_manager_json for PC
+                if "NOS_CLUSTER" not in resource_manager_json:
+                    resource_manager_json["NOS_CLUSTER"] = {}
+                resource_manager_json["PRISM_CENTRAL"] = {
+                    "build": {
+                        "branch": actual_pc_branch,
+                        "build_selection_build_type": pc_build_type,
+                        "build_selection_option": "Latest Smoke Passed",
+                    }
+                }
+                new_jp_payload["resource_manager_json"] = resource_manager_json
+                
+                logger.info(f"[create] Clone mode — set build_selection: nos_build_type={nos_build_type}, "
+                           f"pc_build_type={pc_build_type}, by_latest_smoked=True, nos_branch={actual_nos_branch}, pc_branch={actual_pc_branch}")
+
+        if retain_setup_on_failure:
+            _apply_retain_setup_on_failure(new_jp_payload)
+
+        _set_tcms_sync_flags(new_jp_payload, sync_to_tcms)
+
+        # Always disable "Run Tests With Tags" when cloning to avoid inheriting source JP's tag configuration
+        if not create_fresh:
+            adv_opts = new_jp_payload.get("advanced_options")
+            if not isinstance(adv_opts, dict):
+                adv_opts = {}
+            adv_opts["run_tests_with_tags"] = False
+            new_jp_payload["advanced_options"] = adv_opts
+            logger.info("[create] Clone mode — forcing run_tests_with_tags=False in advanced_options")
+
+        # Always set logged-in user's email - trying ALL email-related fields
+        if current_user_email:
+            new_jp_payload["emails"] = [current_user_email]
+            new_jp_payload["email_ids"] = [current_user_email]  # Alternative field name
+            new_jp_payload["send_email_on_completion"] = True  # Top-level field
+            new_jp_payload["private"] = True
+            new_jp_payload["user_groups"] = ["cdp_reg_jarvis"]
+            logger.info(f"[create] EMAIL FIELDS SET - emails=[{current_user_email}], email_ids=[{current_user_email}], send_email_on_completion=True")
+
+        scheduling_opts = new_jp_payload.get("scheduling_options")
+        if not scheduling_opts or not isinstance(scheduling_opts, dict):
+            scheduling_opts = _default_scheduling_options()
+        # Try adding send_email_on_completion to scheduling_options
+        scheduling_opts["send_email_on_completion"] = True
+        new_jp_payload["scheduling_options"] = scheduling_opts
+        logger.info(f"[create] scheduling_options set (keys={list(scheduling_opts.keys())}, send_email_on_completion={scheduling_opts.get('send_email_on_completion')})")
+
         # Tags will be applied via a separate PUT after creation (same
         # approach as Run Plan) because JITA's POST ignores tag fields.
 
@@ -8150,6 +8476,7 @@ def dynamic_jp_create():
         serializable_payload = sanitize_value(new_jp_payload)
         logger.info(f"[create] Final JP payload — name: {serializable_payload.get('name')}, "
                     f"tags: {serializable_payload.get('tags', 'MISSING')}, "
+                    f"build_selection: {serializable_payload.get('build_selection', 'MISSING')}, "
                     f"adv_opts_keys: {list((serializable_payload.get('advanced_options') or {}).keys())}, "
                     f"adv_tags: {(serializable_payload.get('advanced_options') or {}).get('tags', 'MISSING')}, "
                     f"test_sets: {serializable_payload.get('test_sets', 'MISSING')}")
@@ -8189,10 +8516,10 @@ def dynamic_jp_create():
 
         logger.info(f"Created JP: {new_jp_name} (ID: {created_jp_id})")
 
-        # JITA fills TCMS fields back to defaults during POST. In clone mode,
-        # immediately re-fetch and clear them via PUT so UI toggle is off.
+        # JITA can fill TCMS fields back to defaults during POST. Unless the
+        # user explicitly enabled Sync TCMS, re-fetch and clear them via PUT.
         tcms_cleanup_warning = None
-        if not create_fresh and created_jp_id:
+        if not sync_to_tcms and created_jp_id:
             try:
                 get_resp = requests.get(
                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
@@ -8203,15 +8530,57 @@ def dynamic_jp_create():
                 if get_resp.status_code == 200:
                     jp_data = get_resp.json().get("data", {})
                     if isinstance(jp_data, dict):
-                        jp_data["sync_to_tcms"] = False
-                        tester_tags = jp_data.get("tester_tags")
-                        if isinstance(tester_tags, list):
-                            jp_data["tester_tags"] = [t for t in tester_tags if t != "official"]
-                        sut = jp_data.get("system_under_test")
-                        if isinstance(sut, dict):
-                            sut["sync_to_tcms"] = False
-                        for k in ("service", "package_type", "test_service"):
-                            jp_data[k] = ""
+                        _set_tcms_sync_flags(jp_data, False)
+                        # Log infra from Jita's perspective after JP creation
+                        infra_after = jp_data.get('infra', [])
+                        coupon_allocated = None
+                        if isinstance(infra_after, list) and len(infra_after) > 0:
+                            params = infra_after[0].get('params', {})
+                            coupon_allocated = params.get('coupon')
+                        logger.info(
+                            f"[create] Jita GET after POST: "
+                            f"infra={infra_after}, "
+                            f"coupon={coupon_allocated}, "
+                            f"emails={jp_data.get('emails')}, "
+                            f"email_ids={jp_data.get('email_ids')}, "
+                            f"send_email_on_completion={jp_data.get('send_email_on_completion')}, "
+                            f"private={jp_data.get('private')}, "
+                            f"user_groups={jp_data.get('user_groups')}"
+                        )
+                        sched_opts_after_get = jp_data.get('scheduling_options', {})
+                        logger.info(f"[create] scheduling_options after GET: {sched_opts_after_get}")
+                        # Re-apply email settings since Jita may reset them on POST - try ALL possible fields
+                        if current_user_email:
+                            jp_data["emails"] = [current_user_email]
+                            jp_data["email_ids"] = [current_user_email]
+                            jp_data["send_email_on_completion"] = True  # Try top-level field
+                            jp_data["private"] = True
+                            jp_data["user_groups"] = ["cdp_reg_jarvis"]
+                            jp_data["auto_schedule_cron"] = False
+                            jp_data["allow_resource_sharing"] = False
+                            jp_data["allow_resource_sharing_across_tasks"] = False
+                            jp_data["skip_bad_tests"] = True
+                            jp_data["run_tests_with_priorities"] = jp_data.get("run_tests_with_priorities") or []
+                            jp_data["run_tests_with_additional_tags"] = jp_data.get("run_tests_with_additional_tags") or []
+                            jp_data["sdk_installation_options"] = jp_data.get("sdk_installation_options") or {}
+                            jp_data["demo_mode"] = False
+                            jp_data["image_build_type"] = jp_data.get("image_build_type") or "None"
+                            adv = jp_data.get("advanced_options")
+                            if not isinstance(adv, dict):
+                                adv = {}
+                            adv["run_tests_with_tags"] = False
+                            jp_data["advanced_options"] = adv
+                            if create_fresh:
+                                jp_data["requested_hardware"] = _default_requested_hardware(resource_type)
+                            sched = jp_data.get("scheduling_options")
+                            if not sched or not isinstance(sched, dict):
+                                sched = _default_scheduling_options()
+                            # Try adding send_email_on_completion to scheduling_options too
+                            sched["send_email_on_completion"] = True
+                            # Remove send_email_on_completion if Jita added it
+                            sched.pop("send_email_on_completion", None)
+                            jp_data["scheduling_options"] = sched
+                            logger.info(f"[create] Re-applied scheduling_options (keys={list(sched.keys())})")
                         put_resp = requests.put(
                             f"{JITA_BASE}/job_profiles/{created_jp_id}",
                             json=sanitize_value(jp_data),
@@ -8221,8 +8590,36 @@ def dynamic_jp_create():
                         )
                         if put_resp.status_code == 200:
                             logger.info(
-                                f"[create] Clone mode — TCMS fields cleared via PUT for JP {created_jp_id}"
+                                f"[create] TCMS fields cleared via PUT for JP {created_jp_id}"
                             )
+                            # Log final state after PUT
+                            try:
+                                final_get = requests.get(
+                                    f"{JITA_BASE}/job_profiles/{created_jp_id}",
+                                    auth=JITA_SVC_AUTH,
+                                    verify=False,
+                                    timeout=15,
+                                )
+                                if final_get.status_code == 200:
+                                    final_data = final_get.json().get("data", {})
+                                    final_infra = final_data.get('infra', [])
+                                    final_coupon = None
+                                    if isinstance(final_infra, list) and len(final_infra) > 0:
+                                        final_coupon = final_infra[0].get('params', {}).get('coupon')
+                                    final_sched = final_data.get('scheduling_options', {})
+                                    logger.info(
+                                        f"[create] Final state after PUT: "
+                                        f"emails={final_data.get('emails')}, "
+                                        f"email_ids={final_data.get('email_ids')}, "
+                                        f"send_email_on_completion(top)={final_data.get('send_email_on_completion')}, "
+                                        f"send_email_on_completion(sched)={final_sched.get('send_email_on_completion')}, "
+                                        f"private={final_data.get('private')}, "
+                                        f"user_groups={final_data.get('user_groups')}, "
+                                        f"coupon={final_coupon}, "
+                                        f"scheduling_options_keys={list(final_sched.keys())}"
+                                    )
+                            except Exception as e:
+                                logger.warning(f"[create] Could not GET final state: {e}")
                         else:
                             tcms_cleanup_warning = (
                                 f"JP created but TCMS sync cleanup failed (HTTP {put_resp.status_code})"
@@ -8246,8 +8643,11 @@ def dynamic_jp_create():
         # 7. Apply tags via PUT (same approach as Run Plan — JITA ignores
         # tag fields on POST but accepts them on PUT via tester_tags)
         tag_warning = None
-        if jp_tags and created_jp_id:
-            logger.info(f"[create] Applying tags {jp_tags} to JP {created_jp_id} via PUT (tester_tags)")
+        if (jp_tags or sync_to_tcms) and created_jp_id:
+            effective_tags = list(dict.fromkeys(jp_tags + (["official"] if sync_to_tcms else [])))
+            if not sync_to_tcms:
+                effective_tags = [t for t in effective_tags if t != "official"]
+            logger.info(f"[create] Applying tags {effective_tags} to JP {created_jp_id} via PUT (tester_tags)")
             try:
                 get_resp = requests.get(
                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
@@ -8259,8 +8659,11 @@ def dynamic_jp_create():
                         tester_tags = jp_data.get("tester_tags", [])
                         if not isinstance(tester_tags, list):
                             tester_tags = []
-                        merged = list(dict.fromkeys(tester_tags + jp_tags))
+                        merged = list(dict.fromkeys(tester_tags + effective_tags))
+                        if not sync_to_tcms:
+                            merged = [t for t in merged if t != "official"]
                         jp_data["tester_tags"] = merged
+                        _set_tcms_sync_flags(jp_data, sync_to_tcms)
 
                         put_payload = {}
                         for k, v in jp_data.items():
@@ -8606,6 +9009,38 @@ def dynamic_jp_delete():
         return jsonify({"success": all_ok, "results": results})
     except Exception as e:
         logger.error(f"Error in dynamic-jp delete: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/debug/inspect-jp/<jp_id>", methods=["GET"])
+def debug_inspect_jp(jp_id):
+    """Debug endpoint to inspect JP structure from JITA"""
+    try:
+        jp_resp = requests.get(
+            f"{JITA_BASE}/job_profiles/{jp_id}",
+            auth=JITA_SVC_AUTH,
+            verify=False,
+            timeout=30
+        )
+        if jp_resp.status_code != 200:
+            return jsonify({"error": f"Failed to fetch JP (HTTP {jp_resp.status_code})"}), jp_resp.status_code
+        
+        jp_data = jp_resp.json().get("data", {})
+        
+        # Extract email-related fields
+        email_fields = {}
+        for key in jp_data.keys():
+            if 'email' in key.lower() or 'mail' in key.lower() or key in ['emails', 'user_groups', 'scheduling_options']:
+                email_fields[key] = jp_data.get(key)
+        
+        return jsonify({
+            "jp_id": jp_id,
+            "jp_name": jp_data.get("name"),
+            "all_keys": list(jp_data.keys()),
+            "email_related_fields": email_fields
+        })
+    except Exception as e:
+        logger.error(f"Error inspecting JP: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
