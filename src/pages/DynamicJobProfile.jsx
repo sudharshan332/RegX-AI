@@ -1,6 +1,8 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import axios from 'axios';
-import { API_BASE_URL } from '../config';
+import api from '../api';
+import { API_BASE_URL, jitaJobProfileWebUrl, jitaTestSetWebUrl } from '../config';
+import ManageJobProfile from './ManageJobProfile';
+import { useAuth } from '../context/AuthContext';
 import './DynamicJobProfile.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/dynamic-jp`;
@@ -11,8 +13,13 @@ const derivePcBranch = (branch) =>
 const buildDefaultConfig = (branchName = 'master') => ({
   nosBranch: branchName,
   nosTag: 'Latest Smoke Passed',
+  nosUpdateType: 'by_tag',
+  nosCommitId: '',
+  nosGbn: '',
   pcBranch: derivePcBranch(branchName),
   pcTag: 'Latest Smoke Passed',
+  pcUpdateType: 'by_tag',
+  pcCommitId: '',
   nutestBranch: branchName,
   provider: 'global_pool',
   resourceType: 'nested_2.0',
@@ -30,7 +37,7 @@ const RESOURCE_TYPE_OPTIONS = [
   { value: 'physical',   label: 'Physical' },
 ];
 
-/** Local calendar YYYYMMDD — matches backend `dyn_name_date` for User_Dyn_<date>_JP_/TS_ names. */
+/** Local calendar YYYYMMDD — matches backend `dyn_name_date` for generated names. */
 const formatLocalYyyymmdd = () => {
   const d = new Date();
   const y = d.getFullYear();
@@ -39,8 +46,78 @@ const formatLocalYyyymmdd = () => {
   return `${y}${m}${day}`;
 };
 
+const formatLocalDdmm = () => {
+  const d = new Date();
+  return `${String(d.getDate()).padStart(2, '0')}${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
+const userInitials = (user) => {
+  const raw = user?.email || user?.sub || user?.username || user?.name || 'john.doe';
+  const local = String(raw).split('@')[0];
+  const parts = local.split(/[._\-\s]+/).filter(Boolean);
+  if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  return local.slice(0, 2).toUpperCase();
+};
+
+const meaningfulNameSuffix = (name) => {
+  const cleaned = String(name || '')
+    .trim()
+    .replace(/^CDP[_-]+/i, '')
+    .replace(/>=/g, '_GTE_')
+    .replace(/<=/g, '_LTE_')
+    .replace(/>/g, '_GT_')
+    .replace(/</g, '_LT_')
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return cleaned.slice(0, 80);
+};
+
+const PATCH_TEST_MARKER = 'TEMP_PATCH_TEST';
+
+const formatPatchTestName = (name) => {
+  const raw = String(name || '').trim();
+  if (!raw) return raw;
+
+  return raw
+    .replace(new RegExp(`_${PATCH_TEST_MARKER}(?=_|$)`, 'g'), '')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+};
+
+const buildSuggestedEntityName = (prefix, num, kind, suffix = '') => {
+  const cleanSuffix = suffix ? `_${suffix}` : '';
+  if (new RegExp(`_${kind}_$`, 'i').test(prefix)) {
+    return `${prefix}${num}${cleanSuffix}`;
+  }
+  return `${prefix}${num}${cleanSuffix}`;
+};
+
+/** Clipboard icon for JP/TS result copy buttons */
+function DjpCopyGlyph() {
+  return (
+    <svg
+      className="djp-copy-glyph"
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
 export default function DynamicJobProfile() {
+  const { user } = useAuth();
   const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
   const [showExisting, setShowExisting] = useState(false);
   const [testcaseInput, setTestcaseInput] = useState('');
@@ -49,6 +126,7 @@ export default function DynamicJobProfile() {
   // Search results (showExisting mode)
   const [execHistoryFetched, setExecHistoryFetched] = useState(false);
   const [uniquePairs, setUniquePairs] = useState([]);
+  const historySearchReqId = useRef(0);
 
   // Selected source JP / TS
   const [selectedJP, setSelectedJP] = useState(null);
@@ -64,19 +142,32 @@ export default function DynamicJobProfile() {
   const [customTSName, setCustomTSName] = useState('');
   /** Clone mode only: link new JP to source TS instead of creating a TS with only the typed testcases. */
   const [reuseSourceTS, setReuseSourceTS] = useState(false);
-  /** Keeps the last "New Testset" name if user toggles to Use Existing (field hidden) and back. */
+  /** Clone mode only: retain deployment after each test failure, without DataCorruptionError exception. */
+  const [retainSetupOnFailure, setRetainSetupOnFailure] = useState(false);
+  /** Clone mode only: use latest commit configuration (Latest Smoke Passed + auto build type). Default OFF to preserve source JP config. */
+  const [useLatestCommit, setUseLatestCommit] = useState(false);
+  /** Keeps the last "New test set" name if user toggles to use existing (field hidden) and back. */
   const newTestSetNameWhenNewMode = useRef('');
 
   // Tag support
   const [showTagInput, setShowTagInput] = useState(false);
   const [tagInput, setTagInput] = useState('');
   const [jpTags, setJpTags] = useState([]);
+  const [syncToTcms, setSyncToTcms] = useState(false);
+
+  // Test Arguments
+  const [showTestArgs, setShowTestArgs] = useState(false);
+  const [testArgs, setTestArgs] = useState([{ key: '', value: '' }]);
+  const [frameworkOptions, setFrameworkOptions] = useState([{ key: '', value: '' }]);
 
   // Config for fresh creation
   const [config, setConfig] = useState(() => buildDefaultConfig(branch));
   const [nextJPNum, setNextJPNum] = useState(1);
   const [nextTSNum, setNextTSNum] = useState(1);
   const [createResult, setCreateResult] = useState(null);
+  /** Brief feedback after copying JP/TS line ('jp' | 'ts'). */
+  const [createResultCopyFlash, setCreateResultCopyFlash] = useState(null);
+  const createResultCopyTimerRef = useRef(null);
   const [readyToConfigure, setReadyToConfigure] = useState(false);
 
   // Patch toggle and search helpers
@@ -98,11 +189,42 @@ export default function DynamicJobProfile() {
   const branchReqId = useRef(0);
   const branchDebounce = useRef(null);
 
+  const [djpSubView, setDjpSubView] = useState('create');
+  const [showDjpManageMenu, setShowDjpManageMenu] = useState(false);
+  const djpManageMenuRef = useRef(null);
+
+  useEffect(() => {
+    const onDocMouseDown = (e) => {
+      if (djpManageMenuRef.current && !djpManageMenuRef.current.contains(e.target)) {
+        setShowDjpManageMenu(false);
+      }
+    };
+    if (showDjpManageMenu) {
+      document.addEventListener('mousedown', onDocMouseDown);
+    }
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [showDjpManageMenu]);
+
+  useEffect(
+    () => () => {
+      if (createResultCopyTimerRef.current) clearTimeout(createResultCopyTimerRef.current);
+    },
+    []
+  );
+
   useEffect(() => {
     if (!reuseSourceTS) {
       newTestSetNameWhenNewMode.current = customTSName;
     }
   }, [customTSName, reuseSourceTS]);
+
+  useEffect(() => {
+    if (!readyToConfigure) return;
+    setCustomJPName((prev) => formatPatchTestName(prev, showPatch));
+    if (!reuseSourceTS) {
+      setCustomTSName((prev) => formatPatchTestName(prev, showPatch));
+    }
+  }, [showPatch, readyToConfigure, reuseSourceTS]);
 
   const parseTestcaseNames = () =>
     testcaseInput
@@ -119,6 +241,14 @@ export default function DynamicJobProfile() {
     return error.message || 'An unknown error occurred';
   };
 
+  const clearPatchUrls = () => {
+    setConfig((prev) => ({
+      ...prev,
+      frameworkPatchUrl: '',
+      testPatchUrl: '',
+    }));
+  };
+
   const resetSelections = () => {
     setSelectedJP(null);
     setSelectedJPName('');
@@ -131,16 +261,28 @@ export default function DynamicJobProfile() {
     setJpTags([]);
     setTagInput('');
     setShowTagInput(false);
+    setSyncToTcms(false);
     setReuseSourceTS(false);
+    setRetainSetupOnFailure(false);
+    setShowTestArgs(false);
+    setTestArgs([{ key: '', value: '' }]);
+    setFrameworkOptions([{ key: '', value: '' }]);
   };
 
-  const fetchNextNumbers = async () => {
+  const fetchNextNumbers = async ({ jpName = '', tsName = '' } = {}) => {
     const dynNameDate = formatLocalYyyymmdd();
-    const fallbackJpPrefix = `User_Dyn_${dynNameDate}_JP_`;
-    const fallbackTsPrefix = `User_Dyn_${dynNameDate}_TS_`;
+    const userPrefix = `${userInitials(user)}_${formatLocalDdmm()}_P`;
+    const fallbackJpPrefix = userPrefix;
+    const fallbackTsPrefix = userPrefix;
+    const jpSuffix = meaningfulNameSuffix(jpName);
+    const tsSuffix = meaningfulNameSuffix(tsName);
     try {
-      const response = await axios.post(`${API_BASE}/check-existing`, {
+      const response = await api.post(`${API_BASE}/check-existing`, {
         dyn_name_date: dynNameDate,
+        jp_pattern: fallbackJpPrefix,
+        ts_pattern: fallbackTsPrefix,
+        jp_suffix: jpSuffix,
+        ts_suffix: tsSuffix,
       });
       const data = response.data || {};
       const jpNum = typeof data.next_jp_number === 'number' ? data.next_jp_number : 1;
@@ -159,17 +301,48 @@ export default function DynamicJobProfile() {
     }
   };
 
-  /** Apply suggested User_Dyn names from a check-existing result (no extra network). */
+  /** Apply suggested temporary JP/TS names from a check-existing result (no extra network). */
   const applyNamesFromCheckData = (d, jpName, tsName) => {
+    // For JP: Check if source name has _P{number} pattern and increment it directly
     if (jpName) {
-      setCustomJPName(`${d.jpPrefix}${d.jpNum}_${jpName}`);
+      const jpPNumberMatch = String(jpName).match(/^(.+)(_P)(\d+)(.*)$/);
+      if (jpPNumberMatch) {
+        // Source has _P{number} pattern - increment the number in place
+        const [, beforeP, pMarker, oldNum, afterP] = jpPNumberMatch;
+        const newNum = d.jpNum;
+        setCustomJPName(formatPatchTestName(`${beforeP}${pMarker}${newNum}${afterP}`, showPatch));
+      } else {
+        // No _P{number} pattern - use normal suffix logic
+        const jpSuffix = meaningfulNameSuffix(jpName);
+        if (jpSuffix) {
+          setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP', jpSuffix), showPatch));
+        } else {
+          setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
+        }
+      }
     } else {
-      setCustomJPName(`${d.jpPrefix}${d.jpNum}`);
+      setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
     }
+
+    // For TS: Check if source name has _P{number} pattern and increment it directly
     if (tsName) {
-      setCustomTSName(`${d.tsPrefix}${d.tsNum}_${tsName}`);
+      const tsPNumberMatch = String(tsName).match(/^(.+)(_P)(\d+)(.*)$/);
+      if (tsPNumberMatch) {
+        // Source has _P{number} pattern - increment the number in place
+        const [, beforeP, pMarker, oldNum, afterP] = tsPNumberMatch;
+        const newNum = d.tsNum;
+        setCustomTSName(formatPatchTestName(`${beforeP}${pMarker}${newNum}${afterP}`, showPatch));
+      } else {
+        // No _P{number} pattern - use normal suffix logic
+        const tsSuffix = meaningfulNameSuffix(tsName);
+        if (tsSuffix) {
+          setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS', tsSuffix), showPatch));
+        } else {
+          setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
+        }
+      }
     } else {
-      setCustomTSName(`${d.tsPrefix}${d.tsNum}`);
+      setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
     }
   };
 
@@ -184,29 +357,35 @@ export default function DynamicJobProfile() {
     setErrorMsg(null);
     (async () => {
       const d = await fetchNextNumbers();
-      setCustomJPName(`${d.jpPrefix}${d.jpNum}`);
-      setCustomTSName(`${d.tsPrefix}${d.tsNum}`);
+      setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
+      setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
     })();
   };
 
-  const handleSelectJP = async (jpName) => {
-    const tsName = selectedTestSetName || null;
+  /**
+   * @param {string} jpName
+   * @param {{ testSetName?: string | null }} [pair] — use when batching with TS so naming sees both before state updates.
+   */
+  const handleSelectJP = async (jpName, pair = {}) => {
+    const tsName =
+      pair.testSetName !== undefined ? pair.testSetName : (selectedTestSetName || null);
     setSelectedJPName(jpName);
     setResolvedJPId(null);
     setResolving(true);
     setErrorMsg(null);
     try {
       const [resp, d] = await Promise.all([
-        axios.post(`${API_BASE}/resolve-names`, { jp_name: jpName }),
-        fetchNextNumbers(),
+        api.post(`${API_BASE}/resolve-names`, { jp_name: jpName }),
+        fetchNextNumbers({ jpName, tsName }),
       ]);
       if (resp.data?.jp?._id) {
         setSelectedJP(resp.data.jp._id);
         setResolvedJPId(resp.data.jp._id);
         applyNamesFromCheckData(d, jpName, tsName);
+        setShowTagInput(false);
       } else {
         setSelectedJP(null);
-        setErrorMsg(`Could not resolve Job Profile "${jpName}" to an ID. It may not exist in JITA.`);
+        setErrorMsg(`Could not resolve job profile "${jpName}" to an ID. It may not exist in JITA.`);
       }
     } catch (err) {
       if (err.response?.status === 404) {
@@ -219,8 +398,13 @@ export default function DynamicJobProfile() {
     }
   };
 
-  const handleSelectTS = async (tsName) => {
-    const jpName = selectedJPName || null;
+  /**
+   * @param {string} tsName
+   * @param {{ jobProfileName?: string | null }} [pair] — use when batching with JP so naming sees both before state updates.
+   */
+  const handleSelectTS = async (tsName, pair = {}) => {
+    const jpName =
+      pair.jobProfileName !== undefined ? pair.jobProfileName : (selectedJPName || null);
     setSelectedTestSetName(tsName);
     setResolvedTSId(null);
     setTestSetDetails(null);
@@ -228,15 +412,15 @@ export default function DynamicJobProfile() {
     setErrorMsg(null);
     try {
       const [resp, d] = await Promise.all([
-        axios.post(`${API_BASE}/resolve-names`, { ts_name: tsName }),
-        fetchNextNumbers(),
+        api.post(`${API_BASE}/resolve-names`, { ts_name: tsName }),
+        fetchNextNumbers({ jpName, tsName }),
       ]);
       if (resp.data?.ts?._id) {
         setResolvedTSId(resp.data.ts._id);
         setTestSetDetails(resp.data.ts);
         applyNamesFromCheckData(d, jpName, tsName);
       } else {
-        setErrorMsg(`Could not resolve Test Set "${tsName}" to an ID. It may not exist in JITA.`);
+        setErrorMsg(`Could not resolve test set "${tsName}" to an ID. It may not exist in JITA.`);
       }
     } catch (err) {
       if (err.response?.status === 404) {
@@ -262,14 +446,17 @@ export default function DynamicJobProfile() {
   };
 
   const handleSearch = async () => {
+    const reqId = ++historySearchReqId.current;
     const names = parseTestcaseNames();
     if (names.length === 0 && showExisting) {
-      setErrorMsg('Please enter at least one testcase name');
+      setErrorMsg('Please enter at least one testcase name.');
       return;
     }
 
     setCreateResult(null);
     setErrorMsg(null);
+    clearPatchUrls();
+    setSyncToTcms(false);
 
     if (showExisting) {
       setLoading(true);
@@ -278,7 +465,7 @@ export default function DynamicJobProfile() {
       resetSelections();
       try {
         const [histResp, numData] = await Promise.all([
-          axios.post(`${API_BASE}/test-execution-history`, {
+          api.post(`${API_BASE}/test-execution-history`, {
             test_name: names[0],
             page: 1,
             limit: 200,
@@ -287,26 +474,62 @@ export default function DynamicJobProfile() {
           }),
           fetchNextNumbers(),
         ]);
+        if (reqId !== historySearchReqId.current) return;
         const data = histResp.data || {};
-        setUniquePairs(Array.isArray(data.unique_pairs) ? data.unique_pairs : []);
+        const pairRows = Array.isArray(data.unique_pairs) ? data.unique_pairs : [];
+        setUniquePairs(pairRows);
         setExecHistoryFetched(true);
         const num = Math.max(numData.jpNum, numData.tsNum);
-        setCustomJPName(`${numData.jpPrefix}${num}`);
-        setCustomTSName(`${numData.tsPrefix}${num}`);
+        setCustomJPName(formatPatchTestName(buildSuggestedEntityName(numData.jpPrefix, num, 'JP'), showPatch));
+        setCustomTSName(formatPatchTestName(buildSuggestedEntityName(numData.tsPrefix, num, 'TS'), showPatch));
         setReadyToConfigure(true);
+        setLoading(false);
+
+        const firstFullPair = pairRows.find(
+          (p) =>
+            p &&
+            String(p.test_set || '').trim() &&
+            String(p.job_profile || '').trim()
+        );
+        if (firstFullPair) {
+          const tsN = String(firstFullPair.test_set).trim();
+          const jpN = String(firstFullPair.job_profile).trim();
+          await handleSelectTS(tsN, { jobProfileName: jpN });
+          await handleSelectJP(jpN, { testSetName: tsN });
+        } else {
+          const tsSet = new Set();
+          const jpSet = new Set();
+          for (const p of pairRows) {
+            if (p.test_set) tsSet.add(p.test_set.trim());
+            if (p.job_profile) jpSet.add(p.job_profile.trim());
+          }
+          const sortedTS = [...tsSet].sort();
+          const sortedJP = [...jpSet].sort();
+          const ts0 = sortedTS[0];
+          const jp0 = sortedJP[0];
+          if (ts0 && jp0) {
+            await handleSelectTS(ts0, { jobProfileName: jp0 });
+            await handleSelectJP(jp0, { testSetName: ts0 });
+          } else if (ts0) {
+            await handleSelectTS(ts0);
+          } else if (jp0) {
+            await handleSelectJP(jp0);
+          }
+        }
       } catch (error) {
+        if (reqId !== historySearchReqId.current) return;
         console.error('Error fetching execution history:', error);
         setErrorMsg(`Failed to fetch test history: ${getErrorMessage(error)}`);
       } finally {
-        setLoading(false);
+        if (reqId === historySearchReqId.current) setLoading(false);
       }
     } else {
       resetSelections();
       setReadyToConfigure(true);
       const numData = await fetchNextNumbers();
       const num = Math.max(numData.jpNum, numData.tsNum);
-      setCustomJPName(`${numData.jpPrefix}${num}`);
-      setCustomTSName(`${numData.tsPrefix}${num}`);
+      setCustomJPName(formatPatchTestName(buildSuggestedEntityName(numData.jpPrefix, num, 'JP'), showPatch));
+      setCustomTSName(formatPatchTestName(buildSuggestedEntityName(numData.tsPrefix, num, 'TS'), showPatch));
     }
   };
 
@@ -327,7 +550,7 @@ export default function DynamicJobProfile() {
     nodePoolDebounce.current = setTimeout(async () => {
       const reqId = ++nodePoolReqId.current;
       try {
-        const response = await axios.post(`${API_BASE}/search-node-pools`, { query });
+        const response = await api.post(`${API_BASE}/search-node-pools`, { query });
         if (reqId === nodePoolReqId.current) {
           setNodePoolResults(Array.isArray(response.data?.pools) ? response.data.pools : []);
         }
@@ -351,7 +574,7 @@ export default function DynamicJobProfile() {
     clusterDebounce.current = setTimeout(async () => {
       const reqId = ++clusterReqId.current;
       try {
-        const response = await axios.post(`${API_BASE}/search-clusters`, { query });
+        const response = await api.post(`${API_BASE}/search-clusters`, { query });
         if (reqId === clusterReqId.current) {
           setClusterResults(Array.isArray(response.data?.clusters) ? response.data.clusters : []);
         }
@@ -374,7 +597,7 @@ export default function DynamicJobProfile() {
     branchDebounce.current = setTimeout(async () => {
       const reqId = ++branchReqId.current;
       try {
-        const response = await axios.post(`${API_BASE}/search-branches`, { query });
+        const response = await api.post(`${API_BASE}/search-branches`, { query });
         if (reqId === branchReqId.current) {
           setBranchResults(Array.isArray(response.data?.branches) ? response.data.branches : []);
         }
@@ -389,44 +612,99 @@ export default function DynamicJobProfile() {
   const handleCreate = async () => {
     const names = parseTestcaseNames();
     if (names.length === 0 && !(showExisting && reuseSourceTS)) {
-      setErrorMsg('Please enter at least one testcase name (or enable “Use existing test set” in clone mode)');
+      setErrorMsg('Please enter at least one testcase name, or enable "Use Existing Test Set" in clone mode.');
       return;
     }
     if (showExisting && !selectedJP) {
-      setErrorMsg('Please select a source Job Profile from the list');
+      setErrorMsg('Please select a source job profile from the list.');
       return;
     }
 
     setLoading(true);
+    setCreating(true);
     setCreateResult(null);
+    setCreateResultCopyFlash(null);
+    if (createResultCopyTimerRef.current) {
+      clearTimeout(createResultCopyTimerRef.current);
+      createResultCopyTimerRef.current = null;
+    }
     setErrorMsg(null);
     try {
       const allTags = [...new Set(jpTags)];
 
-      const response = await axios.post(`${API_BASE}/create`, {
+      // When "Use Latest Commit" is ON, override config to use Latest Smoke Passed (both fresh create and clone)
+      // Preserve user's provider and resourceType selection
+      const effectiveConfig = useLatestCommit ? {
+        ...config,
+        nosTag: 'Latest Smoke Passed',
+        pcTag: 'Latest Smoke Passed',
+        provider: config.provider || 'global_pool',
+        resourceType: config.resourceType || 'nested_2.0',
+      } : config;
+
+      // Build test args and framework options from key-value pairs
+      const customTestArgs = showTestArgs 
+        ? testArgs.filter(pair => pair.key.trim()).reduce((acc, pair) => {
+            acc[pair.key.trim()] = pair.value;
+            return acc;
+          }, {})
+        : {};
+      
+      const customFrameworkOptions = showTestArgs
+        ? frameworkOptions.filter(pair => pair.key.trim()).reduce((acc, pair) => {
+            acc[pair.key.trim()] = pair.value;
+            return acc;
+          }, {})
+        : {};
+
+      // Log custom args for debugging
+      if (Object.keys(customTestArgs).length > 0) {
+        console.log('[DynamicJobProfile] Sending custom_test_args:', customTestArgs);
+      }
+      if (Object.keys(customFrameworkOptions).length > 0) {
+        console.log('[DynamicJobProfile] Sending custom_framework_options:', customFrameworkOptions);
+      }
+
+      const response = await api.post(`${API_BASE}/create`, {
         source_jp_id: showExisting ? selectedJP : null,
         source_testset_id: showExisting ? (resolvedTSId || testSetDetails?._id || null) : null,
         source_testset_name: showExisting ? (selectedTestSetName || null) : null,
-        nos_branch: config.nosBranch || 'master',
-        nos_tag: config.nosTag || 'Latest Smoke Passed',
-        pc_branch: config.pcBranch || 'master',
-        pc_tag: config.pcTag || 'Latest Smoke Passed',
-        nutest_branch: config.nutestBranch || 'master',
-        provider: config.provider || 'global_pool',
-        resource_type: config.resourceType || 'nested_2.0',
-        node_pool: Array.isArray(config.nodePool) ? config.nodePool : [],
-        framework_patch_url: showPatch ? (config.frameworkPatchUrl || '') : '',
-        test_patch_url: showPatch ? (config.testPatchUrl || '') : '',
+        nos_branch: effectiveConfig.nosBranch || 'master',
+        nos_tag: effectiveConfig.nosTag || 'Latest Smoke Passed',
+        nos_update_type: effectiveConfig.nosUpdateType || 'by_tag',
+        nos_commit_id: effectiveConfig.nosCommitId || '',
+        nos_gbn: effectiveConfig.nosGbn || '',
+        pc_branch: effectiveConfig.pcBranch || 'master',
+        pc_tag: effectiveConfig.pcTag || 'Latest Smoke Passed',
+        pc_update_type: effectiveConfig.pcUpdateType || 'by_tag',
+        pc_commit_id: effectiveConfig.pcCommitId || '',
+        nutest_branch: effectiveConfig.nutestBranch || 'master',
+        provider: effectiveConfig.provider || 'global_pool',
+        resource_type: effectiveConfig.resourceType || 'nested_2.0',
+        node_pool: Array.isArray(effectiveConfig.nodePool) ? effectiveConfig.nodePool : [],
+        framework_patch_url: showPatch ? (effectiveConfig.frameworkPatchUrl || '') : '',
+        test_patch_url: showPatch ? (effectiveConfig.testPatchUrl || '') : '',
         testcase_names: names,
         create_fresh: !showExisting,
         custom_jp_name: customJPName || null,
         custom_ts_name: customTSName || null,
         dyn_name_date: formatLocalYyyymmdd(),
         jp_tags: allTags.length > 0 ? allTags : [],
+        sync_to_tcms: syncToTcms,
         reuse_source_ts: !!(showExisting && reuseSourceTS),
+        retain_setup_on_failure: !!retainSetupOnFailure,
+        use_latest_commit: !!useLatestCommit,
+        custom_test_args: Object.keys(customTestArgs).length > 0 ? customTestArgs : null,
+        custom_framework_options: Object.keys(customFrameworkOptions).length > 0 ? customFrameworkOptions : null,
       });
       if (response.data?.success) {
         setCreateResult(response.data);
+        clearPatchUrls();
+        setShowPatch(false);
+        setSyncToTcms(false);
+        setShowTestArgs(false);
+        setTestArgs([{ key: '', value: '' }]);
+        setFrameworkOptions([{ key: '', value: '' }]);
       } else {
         setErrorMsg(response.data?.error || 'Creation returned without success flag');
       }
@@ -439,9 +717,44 @@ export default function DynamicJobProfile() {
         setErrorMsg(`Failed to create dynamic profile: ${getErrorMessage(error)}`);
       }
     } finally {
+      setCreating(false);
       setLoading(false);
     }
   };
+
+  const handleCopyResultEntity = useCallback((which, text) => {
+    const t = (text || '').trim();
+    if (!t) return;
+    const flash = () => {
+      if (createResultCopyTimerRef.current) clearTimeout(createResultCopyTimerRef.current);
+      setCreateResultCopyFlash(which);
+      createResultCopyTimerRef.current = setTimeout(() => {
+        setCreateResultCopyFlash(null);
+        createResultCopyTimerRef.current = null;
+      }, 1600);
+    };
+    const fallback = () => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = t;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        flash();
+      } catch (_) {
+        /* ignore */
+      }
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(t).then(flash).catch(fallback);
+    } else {
+      fallback();
+    }
+  }, []);
 
   // Shared tag input UI used by both clone and fresh modes
   const renderErrorMsg = () =>
@@ -455,11 +768,46 @@ export default function DynamicJobProfile() {
   /** Add tags and Patch toggles on one row; tag fields then patch fields open below. */
   const renderTagsAndPatchSection = () => (
     <div className="djp-tag-section">
-      <div className="djp-tag-patch-toggles" role="group" aria-label="Tags and patches">
-        <div className="djp-toggle-row djp-toggle-row--inline">
-          <label>Add tags</label>
+      <div className="djp-tag-patch-toggles djp-toggles-compact" role="group" aria-label="Options">
+        <div className="djp-toggle-row djp-toggle-row--sm">
+          <label>Latest</label>
           <div
-            className={`djp-toggle ${showTagInput ? 'active' : ''}`}
+            className={`djp-toggle djp-toggle--sm ${useLatestCommit ? 'active' : ''}`}
+            onClick={() => setUseLatestCommit(!useLatestCommit)}
+            role="switch"
+            aria-checked={useLatestCommit}
+            title="Auto-select Latest Smoke Passed"
+          >
+            <div className="djp-toggle-knob" />
+          </div>
+        </div>
+        <div className="djp-toggle-row djp-toggle-row--sm">
+          <label>Test Args</label>
+          <div
+            className={`djp-toggle djp-toggle--sm ${showTestArgs ? 'active' : ''}`}
+            onClick={() => setShowTestArgs(!showTestArgs)}
+            role="switch"
+            aria-checked={showTestArgs}
+            title="Add custom test arguments"
+          >
+            <div className="djp-toggle-knob" />
+          </div>
+        </div>
+        <div className="djp-toggle-row djp-toggle-row--sm">
+          <label>Patch</label>
+          <div
+            className={`djp-toggle djp-toggle--sm ${showPatch ? 'active' : ''}`}
+            onClick={() => setShowPatch(!showPatch)}
+            role="switch"
+            aria-checked={showPatch}
+          >
+            <div className="djp-toggle-knob" />
+          </div>
+        </div>
+        <div className="djp-toggle-row djp-toggle-row--sm">
+          <label>Add Tags</label>
+          <div
+            className={`djp-toggle djp-toggle--sm ${showTagInput ? 'active' : ''}`}
             onClick={() => setShowTagInput(!showTagInput)}
             role="switch"
             aria-checked={showTagInput}
@@ -467,13 +815,26 @@ export default function DynamicJobProfile() {
             <div className="djp-toggle-knob" />
           </div>
         </div>
-        <div className="djp-toggle-row djp-toggle-row--inline">
-          <label>Patch</label>
+        <div className="djp-toggle-row djp-toggle-row--sm">
+          <label>Retain Setup</label>
           <div
-            className={`djp-toggle ${showPatch ? 'active' : ''}`}
-            onClick={() => setShowPatch(!showPatch)}
+            className={`djp-toggle djp-toggle--sm ${retainSetupOnFailure ? 'active' : ''}`}
+            onClick={() => setRetainSetupOnFailure(!retainSetupOnFailure)}
             role="switch"
-            aria-checked={showPatch}
+            aria-checked={retainSetupOnFailure}
+            title="Retain live deployments on failure"
+          >
+            <div className="djp-toggle-knob" />
+          </div>
+        </div>
+        <div className="djp-toggle-row djp-toggle-row--sm">
+          <label>Sync TCMS</label>
+          <div
+            className={`djp-toggle djp-toggle--sm ${syncToTcms ? 'active' : ''}`}
+            onClick={() => setSyncToTcms(!syncToTcms)}
+            role="switch"
+            aria-checked={syncToTcms}
+            title="Enable JITA Sync to TCMS"
           >
             <div className="djp-toggle-knob" />
           </div>
@@ -507,13 +868,13 @@ export default function DynamicJobProfile() {
               ))}
             </div>
           )}
-          <small style={{ color: '#64748b' }}>Tags will be added to the JP's advanced options</small>
+          <small className="djp-section-note">Tags will be added to the job profile's advanced options.</small>
         </div>
       )}
       {showPatch && (
         <div className="djp-patch-fields djp-tag-patch-expand">
           <div className="djp-form-group">
-            <label>Framework Patch URL</label>
+            <label>Framework patch URL</label>
             <input
               type="text"
               value={config.frameworkPatchUrl}
@@ -522,7 +883,7 @@ export default function DynamicJobProfile() {
             />
           </div>
           <div className="djp-form-group">
-            <label>Nutest-Py3-Tests Patch URL</label>
+            <label>NuTest Py3 tests patch URL</label>
             <input
               type="text"
               value={config.testPatchUrl}
@@ -532,42 +893,192 @@ export default function DynamicJobProfile() {
           </div>
         </div>
       )}
+      {showTestArgs && (
+        <div className="djp-test-args-fields djp-tag-patch-expand">
+          <div className="djp-test-args-section">
+            <h4>Test Arguments</h4>
+            {testArgs.map((pair, idx) => (
+              <div key={idx} className="djp-kv-row">
+                <input
+                  type="text"
+                  value={pair.key}
+                  onChange={(e) => {
+                    const updated = [...testArgs];
+                    updated[idx].key = e.target.value;
+                    setTestArgs(updated);
+                  }}
+                  placeholder="Key"
+                />
+                <input
+                  type="text"
+                  value={pair.value}
+                  onChange={(e) => {
+                    const updated = [...testArgs];
+                    updated[idx].value = e.target.value;
+                    setTestArgs(updated);
+                  }}
+                  placeholder="Value"
+                />
+                <button
+                  className="djp-btn djp-btn-sm"
+                  onClick={() => {
+                    if (testArgs.length > 1) {
+                      setTestArgs(testArgs.filter((_, i) => i !== idx));
+                    }
+                  }}
+                  disabled={testArgs.length === 1}
+                  title="Remove"
+                >
+                  &times;
+                </button>
+              </div>
+            ))}
+            <button
+              className="djp-btn djp-btn-primary djp-btn-sm"
+              onClick={() => setTestArgs([...testArgs, { key: '', value: '' }])}
+            >
+              + Add Test Arg
+            </button>
+          </div>
+          <div className="djp-test-args-section">
+            <h4>Framework Options</h4>
+            {frameworkOptions.map((pair, idx) => (
+              <div key={idx} className="djp-kv-row">
+                <input
+                  type="text"
+                  value={pair.key}
+                  onChange={(e) => {
+                    const updated = [...frameworkOptions];
+                    updated[idx].key = e.target.value;
+                    setFrameworkOptions(updated);
+                  }}
+                  placeholder="Key"
+                />
+                <input
+                  type="text"
+                  value={pair.value}
+                  onChange={(e) => {
+                    const updated = [...frameworkOptions];
+                    updated[idx].value = e.target.value;
+                    setFrameworkOptions(updated);
+                  }}
+                  placeholder="Value"
+                />
+                <button
+                  className="djp-btn djp-btn-sm"
+                  onClick={() => {
+                    if (frameworkOptions.length > 1) {
+                      setFrameworkOptions(frameworkOptions.filter((_, i) => i !== idx));
+                    }
+                  }}
+                  disabled={frameworkOptions.length === 1}
+                  title="Remove"
+                >
+                  &times;
+                </button>
+              </div>
+            ))}
+            <button
+              className="djp-btn djp-btn-primary djp-btn-sm"
+              onClick={() => setFrameworkOptions([...frameworkOptions, { key: '', value: '' }])}
+            >
+              + Add Framework Option
+            </button>
+          </div>
+          <small className="djp-section-note">Custom arguments will be merged with default test set configuration.</small>
+        </div>
+      )}
     </div>
   );
 
   // Shared result box UI
   const renderResultBox = (title) => {
     if (!createResult?.success) return null;
+    const jp = createResult.job_profile;
+    const ts = createResult.test_set;
+    const jpName = jp?.name || 'Unknown';
+    const tsName = ts?.name || 'Unknown';
+    const jpId = jp?._id;
+    const tsId = ts?._id;
+    const jpHref = jp?.ui_url || jitaJobProfileWebUrl(jpId, jpName);
+    const tsHref = ts?.ui_url || jitaTestSetWebUrl(tsId, tsName);
     return (
       <div className="djp-result-box">
         <h3>{title}</h3>
-        <p>
-          Job Profile: <code>{createResult.job_profile?.name || 'Unknown'}</code>
-          {createResult.job_profile?._id && (
-            <> &mdash; <a
-              href={`https://jita.eng.nutanix.com/job_profiles/${createResult.job_profile._id}`}
+        <p className="djp-result-entity-line">
+          {jpHref ? (
+            <a
+              href={jpHref}
               target="_blank"
               rel="noreferrer"
-              style={{ color: '#3498db' }}
+              className="djp-jita-entity-link"
+              aria-label={`Open job profile ${jpName} in JITA`}
             >
-              View in JITA
-            </a></>
+              <span className="djp-jita-entity-prefix">JP</span>
+              <code>{jpName}</code>
+            </a>
+          ) : (
+            <>
+              <span className="djp-jita-entity-prefix djp-jita-entity-prefix--static">JP</span>
+              <code>{jpName}</code>
+            </>
+          )}
+          <button
+            type="button"
+            className="djp-result-copy-btn"
+            title="Copy job profile name"
+            aria-label="Copy job profile name"
+            onClick={() => handleCopyResultEntity('jp', jpName)}
+          >
+            <DjpCopyGlyph />
+          </button>
+          {createResultCopyFlash === 'jp' && (
+            <span className="djp-result-copied" role="status">
+              Copied
+            </span>
           )}
         </p>
-        {createResult.test_set && (
-          <p>
-            Test Set: <code>{createResult.test_set.name || 'Unknown'}</code>
-            {createResult.test_set.reused && (
+        {ts && (
+          <p className="djp-result-entity-line">
+            {tsHref ? (
+              <a
+                href={tsHref}
+                target="_blank"
+                rel="noreferrer"
+                className="djp-jita-entity-link"
+                aria-label={`Open test set ${tsName} in JITA`}
+              >
+                <span className="djp-jita-entity-prefix">TS</span>
+                <code>{tsName}</code>
+              </a>
+            ) : (
+              <>
+                <span className="djp-jita-entity-prefix djp-jita-entity-prefix--static">TS</span>
+                <code>{tsName}</code>
+              </>
+            )}
+            <button
+              type="button"
+              className="djp-result-copy-btn"
+              title="Copy test set name"
+              aria-label="Copy test set name"
+              onClick={() => handleCopyResultEntity('ts', tsName)}
+            >
+              <DjpCopyGlyph />
+            </button>
+            {createResultCopyFlash === 'ts' && (
+              <span className="djp-result-copied" role="status">
+                Copied
+              </span>
+            )}
+            {ts.reused && (
               <span className="djp-info-banner info" style={{ display: 'inline', marginLeft: '8px', padding: '2px 8px', fontSize: '11px' }}>
                 Already existed &mdash; reused
               </span>
             )}
-            {createResult.test_set._id && (
-              <span style={{ color: '#7f8c8d', marginLeft: '8px', fontSize: '12px' }}>ID: {createResult.test_set._id}</span>
-            )}
           </p>
         )}
-        {!createResult.test_set && (
+        {!ts && (
           <p style={{ color: '#856404', fontSize: '13px' }}>
             Note: No test set was created (test set creation may have failed).
           </p>
@@ -588,26 +1099,74 @@ export default function DynamicJobProfile() {
   return (
     <div className="djp-container">
       <div className="djp-header">
-        <h1>Dynamic Job Profile Creation</h1>
+        <h1>Dynamic Job Profile</h1>
+        <div className="djp-header-actions">
+          <div className="djp-actions-wrapper" ref={djpManageMenuRef}>
+            <button
+              type="button"
+              className="djp-btn djp-btn-manage-actions"
+              onClick={() => setShowDjpManageMenu((v) => !v)}
+              aria-expanded={showDjpManageMenu}
+              aria-haspopup="true"
+            >
+              Action ▾
+            </button>
+            {showDjpManageMenu && (
+              <div className="djp-actions-dropdown" role="menu">
+                <button
+                  type="button"
+                  className="djp-actions-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setDjpSubView('create');
+                    setShowDjpManageMenu(false);
+                  }}
+                >
+                  Create
+                </button>
+                <button
+                  type="button"
+                  className="djp-actions-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setDjpSubView('manage');
+                    setShowDjpManageMenu(false);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
+      {djpSubView === 'manage' ? (
+        <ManageJobProfile embedded />
+      ) : (
+      <>
       {/* Error messages are displayed below the Create buttons */}
 
-      {/* Step 1: Testcase input + Branch + Toggle */}
-      <div className="djp-section">
-        <h3 className="djp-section-title">Step 1: Enter Testcase Names</h3>
+      {/* Testcase input, branch, and mode selection */}
+      <div className="djp-section djp-step1-section">
+        <h3 className="djp-section-title">Testcase names</h3>
         <div className="djp-form-group">
           <textarea
             value={testcaseInput}
             onChange={(e) => setTestcaseInput(e.target.value)}
-            placeholder="Enter fully qualified testcase names (space, comma, or line break between names)&#10;e.g.&#10;cdp.stargate.storage_policy.api.test_storage_policy.TestStoragePolicy.test_storage_policy___duplicate_name"
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' || e.shiftKey) return;
+              e.preventDefault();
+              if (loading) return;
+              handleSearch();
+            }}
+            placeholder="Testcase names separated by commas, spaces, or newlines"
             rows={4}
           />
-          <small>Space, comma, or newline between testcase names</small>
         </div>
 
         <div className="djp-search-row">
-          <div className="djp-form-group" style={{ flex: 1, minWidth: 0, position: 'relative' }}>
+          <div className="djp-form-group djp-branch-field">
             <label>Branch</label>
             <input
               type="text"
@@ -626,9 +1185,9 @@ export default function DynamicJobProfile() {
               onBlur={() => setTimeout(() => setBranchResults([]), 150)}
               placeholder="Type to search (e.g., master, ganges-7.6)"
             />
-            {branchLoading && <small style={{ color: '#64748b' }}>Searching...</small>}
+            {branchLoading && <small className="djp-field-status">Searching...</small>}
             {branchResults.length > 0 && (
-              <div className="djp-pool-results" style={{ position: 'absolute', zIndex: 10, left: 0, right: 0, marginTop: '2px' }}>
+              <div className="djp-pool-results djp-branch-results">
                 {branchResults.map((b) => (
                   <div
                     key={b}
@@ -653,10 +1212,12 @@ export default function DynamicJobProfile() {
           </div>
 
           <div className="djp-toggle-group">
-            <label className="djp-toggle-label">Show Existing</label>
+            <label className="djp-toggle-label">Show existing</label>
             <div
               className={`djp-toggle ${showExisting ? 'active' : ''}`}
               onClick={() => {
+                historySearchReqId.current += 1;
+                setLoading(false);
                 setShowExisting(!showExisting);
                 setReadyToConfigure(false);
                 setExecHistoryFetched(false);
@@ -667,26 +1228,18 @@ export default function DynamicJobProfile() {
             >
               <div className="djp-toggle-knob" />
             </div>
-            <small className="djp-toggle-hint">
-              {showExisting ? 'Show execution history' : 'Create new JP & test set'}
-            </small>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+          <div className="djp-search-action" style={{ marginLeft: 'auto' }}>
             <button
               className="djp-btn djp-btn-primary"
               onClick={handleSearch}
-              disabled={loading || (showExisting && !testcaseInput.trim())}
+              disabled={loading}
             >
-              {loading ? 'Searching...' : showExisting ? 'Search History' : 'Proceed'}
+              {loading ? 'Searching...' : showExisting ? 'Search' : 'Continue'}
             </button>
           </div>
         </div>
-        {!showExisting && (
-          <small className="djp-toggle-hint" style={{ display: 'block', marginTop: '8px' }}>
-            In direct create you can proceed with an empty testcase list and add names later in the box above.
-          </small>
-        )}
       </div>
 
       {/* Clone mode: selectable JP & TS lists */}
@@ -707,23 +1260,22 @@ export default function DynamicJobProfile() {
               </div>
             ) : (
               <>
-                <h3 className="djp-section-title">Step 2: Select Source JP & Test Set to Clone</h3>
-                {(selectedJPName || selectedTestSetName || resolvedJPId || resolvedTSId) && (
-                  <div className="djp-clear-selection-row">
+                <div className="djp-section-title-row djp-section-title-row--compact">
+                  <h3 className="djp-section-title">Source JP &amp; TS</h3>
+                  {(selectedJPName || selectedTestSetName || resolvedJPId || resolvedTSId) && (
                     <button
                       type="button"
-                      className="djp-btn djp-btn-secondary"
-                      style={{ fontSize: '12px', padding: '4px 10px' }}
+                      className="djp-btn djp-btn-secondary djp-btn-sm"
                       onClick={clearJPAndTSSelection}
                     >
-                      Clear selection
+                      Clear
                     </button>
-                  </div>
-                )}
+                  )}
+                </div>
                 <div className="djp-unique-lists">
                   <div className="djp-unique-list-col">
-                    <div className="djp-list-heading-row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
-                      <h4 className="djp-list-heading" style={{ margin: 0 }}>
+                    <div className="djp-list-heading-row">
+                      <h4 className="djp-list-heading">
                         Test Sets <span className="djp-list-count">{uniqueTS.length}</span>
                       </h4>
                     </div>
@@ -742,15 +1294,15 @@ export default function DynamicJobProfile() {
                             <span className="djp-resolved-badge">ID: {resolvedTSId.slice(-8)}</span>
                           )}
                           {selectedTestSetName === name && resolving && (
-                            <span className="djp-resolving-text">resolving...</span>
+                            <span className="djp-resolving-text">Resolving...</span>
                           )}
                         </li>
                       ))}
                     </ul>
                   </div>
                   <div className="djp-unique-list-col">
-                    <div className="djp-list-heading-row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
-                      <h4 className="djp-list-heading" style={{ margin: 0 }}>
+                    <div className="djp-list-heading-row">
+                      <h4 className="djp-list-heading">
                         Job Profiles <span className="djp-list-count">{uniqueJP.length}</span>
                       </h4>
                     </div>
@@ -769,7 +1321,7 @@ export default function DynamicJobProfile() {
                             <span className="djp-resolved-badge">ID: {resolvedJPId.slice(-8)}</span>
                           )}
                           {selectedJPName === name && resolving && (
-                            <span className="djp-resolving-text">resolving...</span>
+                            <span className="djp-resolving-text">Resolving...</span>
                           )}
                         </li>
                       ))}
@@ -778,11 +1330,8 @@ export default function DynamicJobProfile() {
                 </div>
 
                 <div className="djp-clone-config">
-                  <h4 className="djp-list-heading" style={{ marginTop: '20px', marginBottom: '12px' }}>
-                    Test set for cloned job profile
-                  </h4>
-                  <div className="djp-ts-mode-row" role="radiogroup" aria-label="Test set for cloned job profile">
-                    <label className="djp-ts-mode-option">
+                  <div className="djp-ts-mode-row" role="radiogroup" aria-label="Test set mode">
+                    <label className={`djp-ts-mode-option ${!reuseSourceTS ? 'selected' : ''}`}>
                       <input
                         type="radio"
                         name="djp-ts-mode"
@@ -795,11 +1344,10 @@ export default function DynamicJobProfile() {
                         }}
                       />
                       <span>
-                        <strong>New Testset</strong> — contains only the testcase above, copies <code>test_args</code> /{' '}
-                        <code>framework_args</code>
+                        <strong>New Test Set</strong>
                       </span>
                     </label>
-                    <label className="djp-ts-mode-option">
+                    <label className={`djp-ts-mode-option ${reuseSourceTS ? 'selected' : ''}`}>
                       <input
                         type="radio"
                         name="djp-ts-mode"
@@ -810,57 +1358,39 @@ export default function DynamicJobProfile() {
                         }}
                       />
                       <span>
-                        <strong>Use Existing Testset</strong> — no clone; new job profile uses that test set. pick a
-                        test set below, or clear ts selection to use the source job profile’s first test set
+                        <strong>Use Existing Test Set</strong>
                       </span>
                     </label>
                   </div>
-                  <h4 className="djp-list-heading" style={{ marginTop: '8px', marginBottom: '12px' }}>
-                    {reuseSourceTS ? 'New job profile name' : 'New JP & TS names'}
-                  </h4>
                   {reuseSourceTS ? (
-                    <div className="djp-form-group" style={{ maxWidth: '520px' }}>
-                      <label>New job profile name</label>
+                    <div className="djp-form-group djp-single-name-field">
+                      <label>New JP</label>
                       <input
                         type="text"
                         value={customJPName}
                         onChange={(e) => setCustomJPName(e.target.value)}
-                        placeholder="e.g., User_Dyn_20260424_JP_1"
+                        placeholder="e.g., SW_2005_P1"
                       />
-                      {selectedJPName && (
-                        <small>Cloning <strong>JP</strong></small>
-                      )}
-                      {selectedTestSetName && (
-                        <small style={{ display: 'block', marginTop: '6px' }}>
-                          Test set linked to the new JP
-                        </small>
-                      )}
                     </div>
                   ) : (
                     <div className="djp-name-editor-row">
-                      <div className="djp-form-group" style={{ flex: 1 }}>
-                        <label>New TestSet</label>
+                      <div className="djp-form-group djp-flex-field">
+                      <label>New Test Set</label>
                         <input
                           type="text"
                           value={customTSName}
                           onChange={(e) => setCustomTSName(e.target.value)}
-                          placeholder="e.g., User_Dyn_20260424_TS_1"
+                          placeholder="e.g., SW_2005_P1"
                         />
-                        {selectedTestSetName && (
-                          <small>Cloning <strong>TS</strong></small>
-                        )}
                       </div>
-                      <div className="djp-form-group" style={{ flex: 1 }}>
+                      <div className="djp-form-group djp-flex-field">
                         <label>New Job Profile</label>
                         <input
                           type="text"
                           value={customJPName}
                           onChange={(e) => setCustomJPName(e.target.value)}
-                          placeholder="e.g., User_Dyn_20260424_JP_1"
+                          placeholder="e.g., SW_2005_P1"
                         />
-                        {selectedJPName && (
-                          <small>Cloning <strong>JP</strong></small>
-                        )}
                       </div>
                     </div>
                   )}
@@ -871,75 +1401,50 @@ export default function DynamicJobProfile() {
                   <button
                     className="djp-btn djp-btn-success djp-btn-lg"
                     onClick={handleCreate}
-                    disabled={loading || !selectedJP || resolving}
+                    disabled={creating || loading || !selectedJP || resolving}
                   >
-                    {loading ? 'Cloning...' : 'Clone & Create'}
+                    {creating ? 'Creating...' : 'Clone and create'}
                   </button>
                   {!selectedJP && (
-                    <small style={{ color: '#e74c3c', marginLeft: '12px', alignSelf: 'center' }}>
-                      select a source job profile
+                    <small className="djp-action-hint djp-action-hint-error">
+                      Select a source JP.
                     </small>
                   )}
                 </div>
                 {renderErrorMsg()}
-                {renderResultBox('Profile Cloned Successfully')}
+                {renderResultBox('Profile cloned successfully')}
               </>
             )}
           </div>
         );
       })()}
 
-      {/* Fresh create: info banner */}
-      {!showExisting && readyToConfigure && (
-        <div className="djp-section">
-          <div className="djp-info-banner info">
-            <strong>Direct Create Mode</strong> — A new test set and job profile will be created
-            {parseTestcaseNames().length > 0
-              ? (
-                <>
-                  {' '}containing <strong>{parseTestcaseNames().length}</strong> testcase{parseTestcaseNames().length !== 1 ? 's' : ''}.
-                </>
-                )
-              : ' — add testcases above, or use Add Tags below if you need JP tags.'}
-          </div>
-        </div>
-      )}
-
-      {/* Fresh create: configuration */}
+      {/* Configuration: shown only in fresh create mode */}
       {readyToConfigure && !showExisting && (
         <div className="djp-section">
-          <div className="djp-section-title-row">
-            <h3 className="djp-section-title">Step 2: Configuration</h3>
-            <button
-              className="djp-btn djp-btn-latest"
-              onClick={handleApplyLatest}
-              title={`Auto-fill: Latest Smoke Passed on ${branch}, nutest ${branch}, global_nested_2.0`}
-            >
-              Latest
-            </button>
-          </div>
+          <h3 className="djp-section-title">Configuration</h3>
 
-          <div className="djp-clone-config" style={{ marginBottom: '16px' }}>
-            <h4 className="djp-list-heading" style={{ marginBottom: '12px' }}>
-              New JP &amp; TS Names
+          <div className="djp-clone-config djp-name-panel">
+            <h4 className="djp-list-heading">
+              New Job Profile and Test Set Names
             </h4>
             <div className="djp-name-editor-row">
-              <div className="djp-form-group" style={{ flex: 1 }}>
+              <div className="djp-form-group djp-flex-field">
                 <label>Job Profile Name</label>
                 <input
                   type="text"
                   value={customJPName}
                   onChange={(e) => setCustomJPName(e.target.value)}
-                  placeholder="e.g., User_Dyn_20260424_JP_1"
+                  placeholder="e.g., SW_2005_P1"
                 />
               </div>
-              <div className="djp-form-group" style={{ flex: 1 }}>
+              <div className="djp-form-group djp-flex-field">
                 <label>Test Set Name</label>
                 <input
                   type="text"
                   value={customTSName}
                   onChange={(e) => setCustomTSName(e.target.value)}
-                  placeholder="e.g., User_Dyn_20260424_TS_1"
+                  placeholder="e.g., SW_2005_P1"
                 />
               </div>
             </div>
@@ -988,7 +1493,7 @@ export default function DynamicJobProfile() {
                     {nodePoolLoading && <small style={{ color: '#7f8c8d' }}>Searching...</small>}
                   </div>
                   {nodePoolSearch.length >= 2 && !nodePoolLoading && nodePoolResults.length === 0 && (
-                    <small style={{ color: '#e74c3c' }}>No node pools matching "{nodePoolSearch}"</small>
+                    <small style={{ color: '#e74c3c' }}>No node pools match "{nodePoolSearch}".</small>
                   )}
                   {nodePoolResults.length > 0 && (
                     <div className="djp-pool-results">
@@ -1005,7 +1510,7 @@ export default function DynamicJobProfile() {
                             }}
                           >
                             {pool}
-                            {alreadySelected && <span style={{ marginLeft: '8px', color: '#27ae60', fontSize: '12px' }}>selected</span>}
+                            {alreadySelected && <span style={{ marginLeft: '8px', color: '#27ae60', fontSize: '12px' }}>Selected</span>}
                           </div>
                         );
                       })}
@@ -1053,7 +1558,7 @@ export default function DynamicJobProfile() {
                     {clusterLoading && <small style={{ color: '#7f8c8d' }}>Searching...</small>}
                   </div>
                   {clusterSearch.length >= 2 && !clusterLoading && clusterResults.length === 0 && (
-                    <small style={{ color: '#e74c3c' }}>No clusters matching "{clusterSearch}"</small>
+                    <small style={{ color: '#e74c3c' }}>No clusters match "{clusterSearch}".</small>
                   )}
                   {clusterResults.length > 0 && (
                     <div className="djp-pool-results">
@@ -1079,7 +1584,7 @@ export default function DynamicJobProfile() {
                                 {cluster.status}
                               </span>
                             )}
-                            {alreadySelected && <span style={{ marginLeft: '8px', color: '#27ae60', fontSize: '12px' }}>selected</span>}
+                            {alreadySelected && <span style={{ marginLeft: '8px', color: '#27ae60', fontSize: '12px' }}>Selected</span>}
                           </div>
                         );
                       })}
@@ -1105,45 +1610,146 @@ export default function DynamicJobProfile() {
             </div>
 
             <div className="djp-config-card">
-              <h4>NOS_CLUSTER</h4>
+              <h4>NOS Cluster</h4>
               <div className="djp-form-group">
-                <label>Branch</label>
-                <input type="text" value={config.nosBranch} onChange={(e) => setConfig({ ...config, nosBranch: e.target.value })} placeholder="e.g., master" />
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+                  <label style={{ marginBottom: 0 }}>Branch</label>
+                  <span className={`djp-release-badge ${getReleaseType(config.nosBranch)}`} style={{ fontSize: '12px', padding: '2px 6px', fontWeight: 'bold', borderRadius: '4px' }}>
+                    {getReleaseType(config.nosBranch).toUpperCase()}
+                  </span>
+                </div>
+                <input 
+                  type="text" 
+                  value={config.nosBranch} 
+                  onChange={(e) => setConfig({ ...config, nosBranch: e.target.value })} 
+                  placeholder="e.g., ganges-7.3-stable" 
+                />
               </div>
+              
               <div className="djp-form-group">
-                <label>Release Type</label>
-                <span className={`djp-release-badge ${getReleaseType(config.nosBranch)}`}>{getReleaseType(config.nosBranch)}</span>
+                <label>Update Type</label>
+                <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.5rem' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontWeight: 'normal' }}>
+                    <input
+                      type="radio"
+                      name="nosUpdateType"
+                      value="by_tag"
+                      checked={config.nosUpdateType === 'by_tag'}
+                      onChange={(e) => setConfig({ ...config, nosUpdateType: e.target.value })}
+                    />
+                    By Tag
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontWeight: 'normal' }}>
+                    <input
+                      type="radio"
+                      name="nosUpdateType"
+                      value="by_commit"
+                      checked={config.nosUpdateType === 'by_commit'}
+                      onChange={(e) => setConfig({ ...config, nosUpdateType: e.target.value })}
+                    />
+                    By Commit
+                  </label>
+                </div>
               </div>
-              <div className="djp-form-group">
-                <label>Tag</label>
-                <select value={config.nosTag} onChange={(e) => setConfig({ ...config, nosTag: e.target.value })}>
-                  <option value="Latest Smoke Passed">Latest Smoke Passed</option>
-                  <option value="Latest DIAL Passed">Latest DIAL Passed</option>
-                </select>
-              </div>
+
+              {config.nosUpdateType === 'by_tag' ? (
+                <div className="djp-form-group">
+                  <label>Tag</label>
+                  <select value={config.nosTag} onChange={(e) => setConfig({ ...config, nosTag: e.target.value })}>
+                    <option value="Latest Smoke Passed">Latest Smoke Passed</option>
+                    <option value="Latest DIAL Passed">Latest DIAL Passed</option>
+                  </select>
+                </div>
+              ) : (
+                <>
+                  <div className="djp-form-group">
+                    <label>Commit ID</label>
+                    <input 
+                      type="text" 
+                      value={config.nosCommitId} 
+                      onChange={(e) => setConfig({ ...config, nosCommitId: e.target.value })} 
+                      placeholder="e.g., cd8cd937b6288cf2c58a44a0bc1c58d85bf5c0bb" 
+                    />
+                  </div>
+                  <div className="djp-form-group">
+                    <label>GBN</label>
+                    <input 
+                      type="text" 
+                      value={config.nosGbn} 
+                      onChange={(e) => setConfig({ ...config, nosGbn: e.target.value })} 
+                      placeholder="e.g., 1764602295" 
+                    />
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="djp-config-card">
-              <h4>PRISM_CENTRAL</h4>
+              <h4>Prism Central</h4>
               <div className="djp-form-group">
-                <label>Branch</label>
-                <input type="text" value={config.pcBranch} onChange={(e) => setConfig({ ...config, pcBranch: e.target.value })} placeholder="e.g., master" />
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+                  <label style={{ marginBottom: 0 }}>Branch</label>
+                  <span className={`djp-release-badge ${getReleaseType(config.pcBranch)}`} style={{ fontSize: '12px', padding: '2px 6px', fontWeight: 'bold', borderRadius: '4px' }}>
+                    {getReleaseType(config.pcBranch).toUpperCase()}
+                  </span>
+                </div>
+                <input 
+                  type="text" 
+                  value={config.pcBranch} 
+                  onChange={(e) => setConfig({ ...config, pcBranch: e.target.value })} 
+                  placeholder="e.g., master" 
+                />
               </div>
+              
               <div className="djp-form-group">
-                <label>Release Type</label>
-                <span className={`djp-release-badge ${getReleaseType(config.pcBranch)}`}>{getReleaseType(config.pcBranch)}</span>
+                <label>Update Type</label>
+                <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.5rem' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontWeight: 'normal' }}>
+                    <input
+                      type="radio"
+                      name="pcUpdateType"
+                      value="by_tag"
+                      checked={config.pcUpdateType === 'by_tag'}
+                      onChange={(e) => setConfig({ ...config, pcUpdateType: e.target.value })}
+                    />
+                    By Tag
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontWeight: 'normal' }}>
+                    <input
+                      type="radio"
+                      name="pcUpdateType"
+                      value="by_commit"
+                      checked={config.pcUpdateType === 'by_commit'}
+                      onChange={(e) => setConfig({ ...config, pcUpdateType: e.target.value })}
+                    />
+                    By Commit
+                  </label>
+                </div>
               </div>
-              <div className="djp-form-group">
-                <label>Tag</label>
-                <select value={config.pcTag} onChange={(e) => setConfig({ ...config, pcTag: e.target.value })}>
-                  <option value="Latest Smoke Passed">Latest Smoke Passed</option>
-                  <option value="Latest DIAL Passed">Latest DIAL Passed</option>
-                </select>
-              </div>
+
+              {config.pcUpdateType === 'by_tag' ? (
+                <div className="djp-form-group">
+                  <label>Tag</label>
+                  <select value={config.pcTag} onChange={(e) => setConfig({ ...config, pcTag: e.target.value })}>
+                    <option value="Latest Smoke Passed">Latest Smoke Passed</option>
+                    <option value="Latest DIAL Passed">Latest DIAL Passed</option>
+                  </select>
+                </div>
+              ) : (
+                <div className="djp-form-group">
+                  <label>Commit ID</label>
+                  <input 
+                    type="text" 
+                    value={config.pcCommitId} 
+                    onChange={(e) => setConfig({ ...config, pcCommitId: e.target.value })} 
+                    placeholder="e.g., cd8cd937b6288cf2c58a44a0bc1c58d85bf5c0bb" 
+                  />
+                </div>
+              )}
             </div>
 
             <div className="djp-config-card">
-              <h4>Nutest</h4>
+              <h4>NuTest</h4>
               <div className="djp-form-group">
                 <label>Branch</label>
                 <input type="text" value={config.nutestBranch} onChange={(e) => setConfig({ ...config, nutestBranch: e.target.value })} placeholder="e.g., master" />
@@ -1155,14 +1761,21 @@ export default function DynamicJobProfile() {
             <button
               className="djp-btn djp-btn-success djp-btn-lg"
               onClick={handleCreate}
-              disabled={loading}
+              disabled={loading || (showExisting && (!selectedJP || resolving))}
             >
-              {loading ? 'Creating...' : 'Create Job Profile'}
+              {loading ? 'Creating...' : showExisting ? 'Clone and create' : 'Create Job Profile'}
             </button>
+            {showExisting && !selectedJP && (
+              <small className="djp-action-hint djp-action-hint-error">
+                Select a source JP.
+              </small>
+            )}
           </div>
           {renderErrorMsg()}
-          {renderResultBox('Profile Created Successfully')}
+          {renderResultBox(showExisting ? 'Profile cloned successfully' : 'Profile created successfully')}
         </div>
+      )}
+      </>
       )}
     </div>
   );
