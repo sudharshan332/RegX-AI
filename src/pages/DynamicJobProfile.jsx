@@ -140,6 +140,31 @@ export default function DynamicJobProfile() {
   // Custom names for the new JP and TS
   const [customJPName, setCustomJPName] = useState('');
   const [customTSName, setCustomTSName] = useState('');
+  /**
+   * Track whether the user has manually edited a name field. Once touched, async
+   * auto-suggestion (resolve-names / next-number lookups) must NOT overwrite it.
+   * Reset on a fresh search / selection clear so suggestions can repopulate.
+   */
+  const jpNameTouched = useRef(false);
+  const tsNameTouched = useRef(false);
+  /** Set the suggested JP name only when the user hasn't typed their own. */
+  const setSuggestedJPName = useCallback((val) => {
+    if (!jpNameTouched.current) setCustomJPName(val);
+  }, []);
+  /** Set the suggested TS name only when the user hasn't typed their own. */
+  const setSuggestedTSName = useCallback((val) => {
+    if (!tsNameTouched.current) setCustomTSName(val);
+  }, []);
+  /** User edited the JP name field — lock it from async auto-suggestion overwrite. */
+  const handleJPNameChange = (e) => {
+    jpNameTouched.current = true;
+    setCustomJPName(e.target.value);
+  };
+  /** User edited the TS name field — lock it from async auto-suggestion overwrite. */
+  const handleTSNameChange = (e) => {
+    tsNameTouched.current = true;
+    setCustomTSName(e.target.value);
+  };
   /** Clone mode only: link new JP to source TS instead of creating a TS with only the typed testcases. */
   const [reuseSourceTS, setReuseSourceTS] = useState(false);
   /** Clone mode only: retain deployment after each test failure, without DataCorruptionError exception. */
@@ -159,9 +184,14 @@ export default function DynamicJobProfile() {
   const [showTestArgs, setShowTestArgs] = useState(false);
   const [testArgs, setTestArgs] = useState([{ key: '', value: '' }]);
   const [frameworkOptions, setFrameworkOptions] = useState([{ key: '', value: '' }]);
+  const [includeOptionalDefaults, setIncludeOptionalDefaults] = useState(false);
 
   // Config for fresh creation
   const [config, setConfig] = useState(() => buildDefaultConfig(branch));
+  // Global Pool coupon (optional). Validation must pass before a coupon is used.
+  const [couponCode, setCouponCode] = useState('');
+  /** { status: 'idle'|'validating'|'valid'|'invalid', message: string } */
+  const [couponValidation, setCouponValidation] = useState({ status: 'idle', message: '' });
   const [nextJPNum, setNextJPNum] = useState(1);
   const [nextTSNum, setNextTSNum] = useState(1);
   const [createResult, setCreateResult] = useState(null);
@@ -258,6 +288,8 @@ export default function DynamicJobProfile() {
     setResolvedTSId(null);
     setCustomJPName('');
     setCustomTSName('');
+    jpNameTouched.current = false;
+    tsNameTouched.current = false;
     setJpTags([]);
     setTagInput('');
     setShowTagInput(false);
@@ -301,6 +333,12 @@ export default function DynamicJobProfile() {
     }
   };
 
+  /** Best-effort suggestion data from cached next-numbers, for instant (no-network) name fill. */
+  const cachedSuggestionData = () => {
+    const prefix = `${userInitials(user)}_${formatLocalDdmm()}_P`;
+    return { jpNum: nextJPNum, tsNum: nextTSNum, jpPrefix: prefix, tsPrefix: prefix };
+  };
+
   /** Apply suggested temporary JP/TS names from a check-existing result (no extra network). */
   const applyNamesFromCheckData = (d, jpName, tsName) => {
     // For JP: Check if source name has _P{number} pattern and increment it directly
@@ -310,18 +348,18 @@ export default function DynamicJobProfile() {
         // Source has _P{number} pattern - increment the number in place
         const [, beforeP, pMarker, oldNum, afterP] = jpPNumberMatch;
         const newNum = d.jpNum;
-        setCustomJPName(formatPatchTestName(`${beforeP}${pMarker}${newNum}${afterP}`, showPatch));
+        setSuggestedJPName(formatPatchTestName(`${beforeP}${pMarker}${newNum}${afterP}`, showPatch));
       } else {
         // No _P{number} pattern - use normal suffix logic
         const jpSuffix = meaningfulNameSuffix(jpName);
         if (jpSuffix) {
-          setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP', jpSuffix), showPatch));
+          setSuggestedJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP', jpSuffix), showPatch));
         } else {
-          setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
+          setSuggestedJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
         }
       }
     } else {
-      setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
+      setSuggestedJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
     }
 
     // For TS: Check if source name has _P{number} pattern and increment it directly
@@ -331,18 +369,18 @@ export default function DynamicJobProfile() {
         // Source has _P{number} pattern - increment the number in place
         const [, beforeP, pMarker, oldNum, afterP] = tsPNumberMatch;
         const newNum = d.tsNum;
-        setCustomTSName(formatPatchTestName(`${beforeP}${pMarker}${newNum}${afterP}`, showPatch));
+        setSuggestedTSName(formatPatchTestName(`${beforeP}${pMarker}${newNum}${afterP}`, showPatch));
       } else {
         // No _P{number} pattern - use normal suffix logic
         const tsSuffix = meaningfulNameSuffix(tsName);
         if (tsSuffix) {
-          setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS', tsSuffix), showPatch));
+          setSuggestedTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS', tsSuffix), showPatch));
         } else {
-          setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
+          setSuggestedTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
         }
       }
     } else {
-      setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
+      setSuggestedTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
     }
   };
 
@@ -355,10 +393,12 @@ export default function DynamicJobProfile() {
     setResolvedTSId(null);
     setTestSetDetails(null);
     setErrorMsg(null);
+    jpNameTouched.current = false;
+    tsNameTouched.current = false;
     (async () => {
       const d = await fetchNextNumbers();
-      setCustomJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
-      setCustomTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
+      setSuggestedJPName(formatPatchTestName(buildSuggestedEntityName(d.jpPrefix, d.jpNum, 'JP'), showPatch));
+      setSuggestedTSName(formatPatchTestName(buildSuggestedEntityName(d.tsPrefix, d.tsNum, 'TS'), showPatch));
     })();
   };
 
@@ -373,6 +413,9 @@ export default function DynamicJobProfile() {
     setResolvedJPId(null);
     setResolving(true);
     setErrorMsg(null);
+    // Fill suggested names instantly from cached numbers so the fields don't appear
+    // empty while the network lookup runs; the async result refines them below.
+    applyNamesFromCheckData(cachedSuggestionData(), jpName, tsName);
     try {
       const [resp, d] = await Promise.all([
         api.post(`${API_BASE}/resolve-names`, { jp_name: jpName }),
@@ -410,6 +453,8 @@ export default function DynamicJobProfile() {
     setTestSetDetails(null);
     setResolving(true);
     setErrorMsg(null);
+    // Fill suggested names instantly from cached numbers (refined by the async result below).
+    applyNamesFromCheckData(cachedSuggestionData(), jpName, tsName);
     try {
       const [resp, d] = await Promise.all([
         api.post(`${API_BASE}/resolve-names`, { ts_name: tsName }),
@@ -480,8 +525,8 @@ export default function DynamicJobProfile() {
         setUniquePairs(pairRows);
         setExecHistoryFetched(true);
         const num = Math.max(numData.jpNum, numData.tsNum);
-        setCustomJPName(formatPatchTestName(buildSuggestedEntityName(numData.jpPrefix, num, 'JP'), showPatch));
-        setCustomTSName(formatPatchTestName(buildSuggestedEntityName(numData.tsPrefix, num, 'TS'), showPatch));
+        setSuggestedJPName(formatPatchTestName(buildSuggestedEntityName(numData.jpPrefix, num, 'JP'), showPatch));
+        setSuggestedTSName(formatPatchTestName(buildSuggestedEntityName(numData.tsPrefix, num, 'TS'), showPatch));
         setReadyToConfigure(true);
         setLoading(false);
 
@@ -528,14 +573,39 @@ export default function DynamicJobProfile() {
       setReadyToConfigure(true);
       const numData = await fetchNextNumbers();
       const num = Math.max(numData.jpNum, numData.tsNum);
-      setCustomJPName(formatPatchTestName(buildSuggestedEntityName(numData.jpPrefix, num, 'JP'), showPatch));
-      setCustomTSName(formatPatchTestName(buildSuggestedEntityName(numData.tsPrefix, num, 'TS'), showPatch));
+      setSuggestedJPName(formatPatchTestName(buildSuggestedEntityName(numData.jpPrefix, num, 'JP'), showPatch));
+      setSuggestedTSName(formatPatchTestName(buildSuggestedEntityName(numData.tsPrefix, num, 'TS'), showPatch));
     }
   };
 
   const handleApplyLatest = () => {
     setConfig(buildDefaultConfig(branch));
     setShowPatch(false);
+    setCouponCode('');
+    setCouponValidation({ status: 'idle', message: '' });
+  };
+
+  const handleValidateCoupon = async () => {
+    const code = couponCode.trim();
+    if (!code) {
+      setCouponValidation({ status: 'invalid', message: 'Enter a coupon to validate.' });
+      return;
+    }
+    setCouponValidation({ status: 'validating', message: '' });
+    try {
+      const resp = await api.post(`${API_BASE}/validate-coupon`, {
+        coupon: code,
+        resource_type: config.resourceType || 'nested_2.0',
+      });
+      if (resp.data?.valid) {
+        const cat = resp.data?.category ? ` (category: ${resp.data.category})` : '';
+        setCouponValidation({ status: 'valid', message: `Coupon is valid${cat}.` });
+      } else {
+        setCouponValidation({ status: 'invalid', message: resp.data?.error || 'Invalid coupon.' });
+      }
+    } catch (err) {
+      setCouponValidation({ status: 'invalid', message: `Validation failed: ${getErrorMessage(err)}` });
+    }
   };
 
   const handleSearchNodePools = useCallback((query) => {
@@ -619,6 +689,12 @@ export default function DynamicJobProfile() {
       setErrorMsg('Please select a source job profile from the list.');
       return;
     }
+    // Fresh create with Global Pool: if a coupon was typed, it must be validated first.
+    if (!showExisting && config.provider === 'global_pool' && couponCode.trim()
+        && couponValidation.status !== 'valid') {
+      setErrorMsg('Please validate the coupon (or clear it) before creating.');
+      return;
+    }
 
     setLoading(true);
     setCreating(true);
@@ -630,7 +706,9 @@ export default function DynamicJobProfile() {
     }
     setErrorMsg(null);
     try {
-      const allTags = [...new Set(jpTags)];
+      // Include a tag typed into the input but not yet committed via Enter/Add.
+      const pendingTag = showTagInput ? tagInput.trim() : '';
+      const allTags = [...new Set([...jpTags, ...(pendingTag ? [pendingTag] : [])])];
 
       // When "Use Latest Commit" is ON, override config to use Latest Smoke Passed (both fresh create and clone)
       // Preserve user's provider and resourceType selection
@@ -657,14 +735,6 @@ export default function DynamicJobProfile() {
           }, {})
         : {};
 
-      // Log custom args for debugging
-      if (Object.keys(customTestArgs).length > 0) {
-        console.log('[DynamicJobProfile] Sending custom_test_args:', customTestArgs);
-      }
-      if (Object.keys(customFrameworkOptions).length > 0) {
-        console.log('[DynamicJobProfile] Sending custom_framework_options:', customFrameworkOptions);
-      }
-
       const response = await api.post(`${API_BASE}/create`, {
         source_jp_id: showExisting ? selectedJP : null,
         source_testset_id: showExisting ? (resolvedTSId || testSetDetails?._id || null) : null,
@@ -681,6 +751,8 @@ export default function DynamicJobProfile() {
         nutest_branch: effectiveConfig.nutestBranch || 'master',
         provider: effectiveConfig.provider || 'global_pool',
         resource_type: effectiveConfig.resourceType || 'nested_2.0',
+        coupon: (!showExisting && effectiveConfig.provider === 'global_pool'
+          && couponValidation.status === 'valid') ? couponCode.trim() : null,
         node_pool: Array.isArray(effectiveConfig.nodePool) ? effectiveConfig.nodePool : [],
         framework_patch_url: showPatch ? (effectiveConfig.frameworkPatchUrl || '') : '',
         test_patch_url: showPatch ? (effectiveConfig.testPatchUrl || '') : '',
@@ -696,6 +768,7 @@ export default function DynamicJobProfile() {
         use_latest_commit: !!useLatestCommit,
         custom_test_args: Object.keys(customTestArgs).length > 0 ? customTestArgs : null,
         custom_framework_options: Object.keys(customFrameworkOptions).length > 0 ? customFrameworkOptions : null,
+        include_optional_defaults: includeOptionalDefaults,
       });
       if (response.data?.success) {
         setCreateResult(response.data);
@@ -705,6 +778,9 @@ export default function DynamicJobProfile() {
         setShowTestArgs(false);
         setTestArgs([{ key: '', value: '' }]);
         setFrameworkOptions([{ key: '', value: '' }]);
+        setIncludeOptionalDefaults(false);
+        setCouponCode('');
+        setCouponValidation({ status: 'idle', message: '' });
       } else {
         setErrorMsg(response.data?.error || 'Creation returned without success flag');
       }
@@ -985,7 +1061,28 @@ export default function DynamicJobProfile() {
               + Add Framework Option
             </button>
           </div>
-          <small className="djp-section-note">Custom arguments will be merged with default test set configuration.</small>
+          <div className="djp-defaults-row">
+            <button
+              type="button"
+              className={`djp-defaults-btn ${includeOptionalDefaults ? 'is-on' : ''}`}
+              onClick={() => setIncludeOptionalDefaults(v => !v)}
+            >
+              <span className="djp-defaults-btn-check">{includeOptionalDefaults ? '✓' : '+'}</span>
+              {includeOptionalDefaults ? 'Default framework options added' : 'Add default framework options'}
+            </button>
+            <span
+              className="djp-info-badge"
+              tabIndex={0}
+              data-tip={
+                'When enabled, these framework options are added to the test set:\n' +
+                'no_log_collection = false\n' +
+                'use_logbay = true\n' +
+                'log_level = DEBUG\n\n' +
+                'Existing test args and framework args from the source test set are always preserved.'
+              }
+              aria-label="What does Add default framework options do?"
+            >i</span>
+          </div>
         </div>
       )}
     </div>
@@ -1368,7 +1465,7 @@ export default function DynamicJobProfile() {
                       <input
                         type="text"
                         value={customJPName}
-                        onChange={(e) => setCustomJPName(e.target.value)}
+                        onChange={handleJPNameChange}
                         placeholder="e.g., SW_2005_P1"
                       />
                     </div>
@@ -1379,7 +1476,7 @@ export default function DynamicJobProfile() {
                         <input
                           type="text"
                           value={customTSName}
-                          onChange={(e) => setCustomTSName(e.target.value)}
+                          onChange={handleTSNameChange}
                           placeholder="e.g., SW_2005_P1"
                         />
                       </div>
@@ -1388,7 +1485,7 @@ export default function DynamicJobProfile() {
                         <input
                           type="text"
                           value={customJPName}
-                          onChange={(e) => setCustomJPName(e.target.value)}
+                          onChange={handleJPNameChange}
                           placeholder="e.g., SW_2005_P1"
                         />
                       </div>
@@ -1434,7 +1531,7 @@ export default function DynamicJobProfile() {
                 <input
                   type="text"
                   value={customJPName}
-                  onChange={(e) => setCustomJPName(e.target.value)}
+                  onChange={handleJPNameChange}
                   placeholder="e.g., SW_2005_P1"
                 />
               </div>
@@ -1443,7 +1540,7 @@ export default function DynamicJobProfile() {
                 <input
                   type="text"
                   value={customTSName}
-                  onChange={(e) => setCustomTSName(e.target.value)}
+                  onChange={handleTSNameChange}
                   placeholder="e.g., SW_2005_P1"
                 />
               </div>
@@ -1467,17 +1564,58 @@ export default function DynamicJobProfile() {
               </div>
 
               {config.provider === 'global_pool' && (
-                <div className="djp-form-group">
-                  <label>Resource Type</label>
-                  <select
-                    value={config.resourceType}
-                    onChange={(e) => setConfig({ ...config, resourceType: e.target.value })}
-                  >
-                    {RESOURCE_TYPE_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </select>
-                </div>
+                <>
+                  <div className="djp-form-group">
+                    <label>Resource Type</label>
+                    <select
+                      value={config.resourceType}
+                      onChange={(e) => {
+                        setConfig({ ...config, resourceType: e.target.value });
+                        // Coupon validity depends on resource type — re-validation required.
+                        setCouponValidation({ status: 'idle', message: '' });
+                      }}
+                    >
+                      {RESOURCE_TYPE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="djp-form-group">
+                    <label>Coupon (optional)</label>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input
+                        type="text"
+                        style={{ flex: 1 }}
+                        value={couponCode}
+                        onChange={(e) => {
+                          setCouponCode(e.target.value);
+                          if (couponValidation.status !== 'idle') {
+                            setCouponValidation({ status: 'idle', message: '' });
+                          }
+                        }}
+                        placeholder="Leave empty to auto-allocate"
+                      />
+                      <button
+                        type="button"
+                        className="djp-btn djp-btn-primary"
+                        onClick={handleValidateCoupon}
+                        disabled={!couponCode.trim() || couponValidation.status === 'validating'}
+                      >
+                        {couponValidation.status === 'validating' ? 'Validating...' : 'Validate'}
+                      </button>
+                    </div>
+                    {couponValidation.status === 'valid' && (
+                      <small style={{ color: '#16a34a' }}>{couponValidation.message}</small>
+                    )}
+                    {couponValidation.status === 'invalid' && (
+                      <small style={{ color: '#e74c3c' }}>{couponValidation.message}</small>
+                    )}
+                    {couponValidation.status === 'idle' && couponCode.trim() && (
+                      <small style={{ color: '#b45309' }}>Click Validate before creating.</small>
+                    )}
+                  </div>
+                </>
               )}
 
               {config.provider === 'node_pool' && (

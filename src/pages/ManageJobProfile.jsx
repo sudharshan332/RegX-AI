@@ -5,8 +5,18 @@ import './DynamicJobProfile.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/dynamic-jp`;
 
+// Tool went live in April 2026 — no entities exist before this date.
+const TOOL_START_DATE = '2026-04-01';
+const todayLocalDate = () => {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+};
+
 export default function ManageJobProfile({ embedded = false }) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedDate, setSelectedDate] = useState('');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
@@ -25,8 +35,8 @@ export default function ManageJobProfile({ embedded = false }) {
 
   const handleSearch = async () => {
     const q = searchQuery.trim();
-    if (q.length < 2) {
-      setErrorMsg('Please enter at least 2 characters to search');
+    if (q.length < 2 && !selectedDate) {
+      setErrorMsg('Enter at least 2 characters or pick a date to search');
       return;
     }
     setLoading(true);
@@ -36,12 +46,20 @@ export default function ManageJobProfile({ embedded = false }) {
     setSelectedJPs(new Set());
     setSelectedTSs(new Set());
     try {
-      const resp = await axios.post(`${API_BASE}/search`, { query: q, limit: 30 });
+      const resp = await axios.post(`${API_BASE}/search`, {
+        query: q,
+        date: selectedDate || null,
+        limit: 30,
+      });
       setJobProfiles(resp.data?.job_profiles || []);
       setTestSets(resp.data?.test_sets || []);
       setSearched(true);
       if (!resp.data?.job_profiles?.length && !resp.data?.test_sets?.length) {
-        setErrorMsg(`No Job Profiles or Test Sets found matching "${q}"`);
+        const where = [
+          q.length >= 2 ? `matching "${q}"` : '',
+          selectedDate ? `created on ${selectedDate}` : '',
+        ].filter(Boolean).join(' and ');
+        setErrorMsg(`No Job Profiles or Test Sets found ${where}`);
       }
     } catch (err) {
       setErrorMsg(`Search failed: ${getErrorMessage(err)}`);
@@ -136,26 +154,58 @@ export default function ManageJobProfile({ embedded = false }) {
 
       {/* Search bar */}
       <div className="djp-section">
-        <label className="djp-label">Search by name</label>
-        <div style={{ display: 'flex', gap: 10 }}>
-          <input
-            className="djp-input"
-            style={{ flex: 1 }}
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
-            placeholder="Enter JP or Test Set name (partial match)..."
-            disabled={loading}
-          />
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <div style={{ flex: '1 1 320px', minWidth: 240 }}>
+            <label className="djp-label">Search by name</label>
+            <input
+              className="djp-input"
+              style={{ width: '100%' }}
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
+              placeholder="Enter JP or Test Set name (partial match)..."
+              disabled={loading}
+            />
+          </div>
+          <div style={{ flex: '0 0 auto' }}>
+            <label className="djp-label">Created on (optional)</label>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                className="djp-input"
+                type="date"
+                value={selectedDate}
+                min={TOOL_START_DATE}
+                max={todayLocalDate()}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                disabled={loading}
+              />
+              {selectedDate && (
+                <button
+                  type="button"
+                  className="djp-btn"
+                  style={{ padding: '6px 10px' }}
+                  onClick={() => setSelectedDate('')}
+                  disabled={loading}
+                  title="Clear date filter"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
           <button
             className="djp-btn djp-btn-primary"
             onClick={handleSearch}
-            disabled={loading || searchQuery.trim().length < 2}
+            disabled={loading || (searchQuery.trim().length < 2 && !selectedDate)}
           >
             {loading ? 'Searching...' : 'Search'}
           </button>
         </div>
+        <p style={{ margin: '8px 0 0', fontSize: 12, color: '#64748b' }}>
+          Pick a date to list only items this tool created that day. The name search
+          is optional and can be combined with the date.
+        </p>
       </div>
 
       {/* Messages */}
