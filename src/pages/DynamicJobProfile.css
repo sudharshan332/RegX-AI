@@ -197,6 +197,132 @@
   border-radius: 6px;
 }
 
+.djp-defaults-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.djp-defaults-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  border-radius: 6px;
+  border: 1px solid var(--djp-border-strong);
+  background: var(--djp-surface);
+  color: var(--djp-muted);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.djp-defaults-btn:hover {
+  border-color: var(--djp-green);
+  color: var(--djp-green-dark);
+  background: var(--djp-green-soft);
+}
+
+.djp-defaults-btn.is-on {
+  background: var(--djp-green);
+  border-color: var(--djp-green);
+  color: #fff;
+}
+
+.djp-defaults-btn-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.djp-defaults-btn.is-on .djp-defaults-btn-check {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* Info badge with hover tooltip (uses data-tip, no glyph fonts) */
+.djp-info-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--djp-border-strong);
+  background: var(--djp-surface-muted);
+  color: var(--djp-muted);
+  font-size: 11px;
+  font-weight: 700;
+  font-style: italic;
+  font-family: Georgia, "Times New Roman", serif;
+  cursor: help;
+  outline: none;
+}
+
+.djp-info-badge:hover,
+.djp-info-badge:focus {
+  border-color: var(--djp-green);
+  color: var(--djp-green-dark);
+}
+
+.djp-info-badge::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: pre-line;
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #1f2937;
+  color: #f8fafc;
+  font-size: 11px;
+  font-weight: 400;
+  font-style: normal;
+  font-family: inherit;
+  line-height: 1.5;
+  text-align: left;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.25);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.djp-info-badge::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #1f2937;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease;
+  z-index: 50;
+}
+
+.djp-info-badge:hover::after,
+.djp-info-badge:focus::after,
+.djp-info-badge:hover::before,
+.djp-info-badge:focus::before {
+  opacity: 1;
+  visibility: visible;
+}
+
 .djp-btn-lg {
   padding: 10px 28px;
   font-size: 14px;
@@ -1798,15 +1924,23 @@
 .djp-toggle--sm {
   width: 32px !important;
   height: 18px !important;
+  border-radius: 999px !important;
 }
 
+/* Self-contained knob geometry. Uses `left` (matching the base toggle mechanism)
+   and explicitly clears any inherited transform so the active knob can't be pushed
+   off the track by the larger base-toggle rules. */
 .djp-toggle--sm .djp-toggle-knob {
   width: 14px !important;
   height: 14px !important;
+  top: 2px !important;
+  left: 2px !important;
+  transform: none !important;
 }
 
 .djp-toggle--sm.active .djp-toggle-knob {
-  transform: translateX(14px) !important;
+  left: 16px !important;
+  transform: none !important;
 }
 
 .djp-form-actions {
@@ -1887,4 +2021,125 @@
   .djp-ts-mode-option {
     min-width: 0;
   }
+}
+
+/* ============================================================
+   Compact density pass — JITA-like dense layout (keep last so
+   these win). Shrinks fonts, paddings and control heights to
+   fit more on screen.
+   ============================================================ */
+.djp-container {
+  padding: 10px 8px;
+  font-size: 11px;
+}
+
+.djp-header {
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+}
+
+.djp-header h1 {
+  font-size: 16px;
+}
+
+.djp-section {
+  margin-top: 8px !important;
+  padding: 10px 12px !important;
+}
+
+.djp-section-title,
+.djp-section-title-row {
+  margin-bottom: 8px !important;
+  padding-bottom: 6px !important;
+}
+
+.djp-section-title {
+  font-size: 12px;
+}
+
+.djp-section-title h3,
+.djp-section-title-row h3 {
+  font-size: 12px;
+}
+
+.djp-form-group {
+  margin-bottom: 10px;
+}
+
+.djp-form-group label {
+  margin-bottom: 3px;
+  font-size: 10px;
+}
+
+.djp-form-group textarea,
+.djp-form-group input[type="text"],
+.djp-form-group select,
+.djp-kv-row input[type="text"],
+.djp-tag-input-row input {
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
+.djp-form-group textarea {
+  min-height: 64px;
+  line-height: 1.45;
+}
+
+.djp-btn {
+  min-height: 26px;
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.djp-btn-sm {
+  min-height: 22px !important;
+  padding: 2px 8px !important;
+  font-size: 10px !important;
+}
+
+.djp-search-row {
+  gap: 8px;
+}
+
+.djp-search-row .djp-btn {
+  height: 28px;
+}
+
+.djp-toggle-row,
+.djp-toggle-group {
+  gap: 6px;
+}
+
+.djp-toggle-row label,
+.djp-toggle-label {
+  font-size: 10px;
+}
+
+.djp-kv-row {
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.djp-tag-chip {
+  font-size: 10px;
+  padding: 2px 7px;
+}
+
+.djp-info-banner,
+.djp-inline-error {
+  padding: 6px 9px;
+  font-size: 10px;
+}
+
+.djp-result-box {
+  padding: 10px 12px;
+}
+
+.djp-result-box h3 {
+  font-size: 11px;
+}
+
+.djp-defaults-btn {
+  padding: 4px 10px;
+  font-size: 10px;
 }
