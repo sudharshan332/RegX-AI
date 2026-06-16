@@ -1,19 +1,38 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import api from '../api';
 import { API_BASE_URL } from '../config';
 import { useTaskContext } from '../context/TaskContext';
+import AiMarkdown from '../components/AiMarkdown';
 import './RunPlan.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/run-plan`;
 const JITA_BASE = 'https://jita.eng.nutanix.com/api/v2';
 
+const ADDITIONAL_TAG_OPTIONS = [
+  'CDP_Regression_Qual',
+  'CDP_Smart_Qual',
+  'NESTED_QUALIFIED',
+  'critical',
+  'major',
+  'minor',
+  'unstable',
+];
+
 export default function RunPlan() {
   const { addTask, updateTask: updateTaskCtx } = useTaskContext();
-  const [view, setView] = useState('list'); // 'list', 'create', 'edit', 'history', 'batch-update'
+  const [view, setView] = useState('list'); // 'list', 'create', 'edit', 'history', 'batch-update', 'calendar'
   const [runPlans, setRunPlans] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedRunPlan, setSelectedRunPlan] = useState(null);
   const [historyData, setHistoryData] = useState([]);
+
+  // Calendar state
+  const [calendarMonth, setCalendarMonth] = useState(new Date());
+  const [calendarEvents, setCalendarEvents] = useState([]);
+  const [calendarRunPlans, setCalendarRunPlans] = useState([]);
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(null);
+  const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
+  const [scheduleForm, setScheduleForm] = useState({ runPlanId: '', time: '09:00' });
 
   // Create/Edit form state
   const [formData, setFormData] = useState({
@@ -53,14 +72,34 @@ export default function RunPlan() {
     patchUrl: '',
     frameworkPatchUrl: '',
     testerTagsAction: '', // 'add' or 'remove' or ''
-    testerTagValue: '' // Tag value to add/remove
+    testerTagValue: '', // Tag value to add/remove
+    // Additional tags (overwrites run_tests_with_additional_tags)
+    updateAdditionalTags: false,
+    additionalTags: []
   });
 
   const [availableTags, setAvailableTags] = useState([]);
+  const [showAdditionalTagsDropdown, setShowAdditionalTagsDropdown] = useState(false);
+  const additionalTagsRef = useRef(null);
+
+  // AI Risk Score state
+  const [riskScores, setRiskScores] = useState({});
+  const [loadingRisk, setLoadingRisk] = useState({});
+  const [showRiskPanel, setShowRiskPanel] = useState(null);
 
   // Job Profile search results
   const [jobProfileResults, setJobProfileResults] = useState([]);
   const [searching, setSearching] = useState(false);
+
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (additionalTagsRef.current && !additionalTagsRef.current.contains(e.target)) {
+        setShowAdditionalTagsDropdown(false);
+      }
+    }
+    if (showAdditionalTagsDropdown) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showAdditionalTagsDropdown]);
 
   useEffect(() => {
     if (view === 'list') {
@@ -76,6 +115,116 @@ export default function RunPlan() {
     } catch (error) {
       console.error('Error fetching run plans:', error);
       alert('Failed to fetch run plans');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ── Calendar helpers ──
+  const fetchCalendarData = async () => {
+    setLoading(true);
+    try {
+      const response = await api.get(`${API_BASE}/calendar`);
+      setCalendarEvents(response.data.events || []);
+      setCalendarRunPlans(response.data.run_plans || []);
+    } catch (error) {
+      console.error('Error fetching calendar data:', error);
+      alert('Failed to load calendar data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOpenCalendar = () => {
+    setCalendarMonth(new Date());
+    setView('calendar');
+    fetchCalendarData();
+  };
+
+  const getDaysInMonth = (date) => {
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    const startPad = firstDay.getDay();
+    const days = [];
+    for (let i = 0; i < startPad; i++) days.push(null);
+    for (let d = 1; d <= lastDay.getDate(); d++) {
+      days.push(new Date(year, month, d));
+    }
+    return days;
+  };
+
+  const fmtDate = (d) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+
+  const eventsForDate = (dateStr) => calendarEvents.filter((e) => e.date === dateStr);
+
+  const handleCalendarDateClick = (dateObj) => {
+    setSelectedCalendarDate(dateObj);
+    setScheduleDialogOpen(false);
+  };
+
+  const handleOpenScheduleDialog = () => {
+    setScheduleForm({ runPlanId: '', time: '09:00' });
+    setScheduleDialogOpen(true);
+  };
+
+  const handleScheduleFromCalendar = async () => {
+    if (!scheduleForm.runPlanId || !selectedCalendarDate) return;
+    const dateStr = fmtDate(selectedCalendarDate);
+    const scheduleDateTime = `${dateStr}T${scheduleForm.time}`;
+    setLoading(true);
+    try {
+      await api.put(`${API_BASE}/${scheduleForm.runPlanId}/schedule`, {
+        schedule_date: scheduleDateTime,
+      });
+      alert('Run plan scheduled successfully!');
+      setScheduleDialogOpen(false);
+      fetchCalendarData();
+    } catch (error) {
+      console.error('Error scheduling run plan:', error);
+      alert(`Failed to schedule: ${error.response?.data?.error || error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ── Kill all tasks in a history entry ──
+  const handleKillTasks = async (historyEntryId, taskCount) => {
+    if (!window.confirm(`Are you sure you want to kill all ${taskCount} task(s)? This will abort any running tests.`)) {
+      return;
+    }
+
+    setLoading(true);
+    const taskId = addTask({ label: `Kill ${taskCount} task(s)`, page: 'Run Plan' });
+    try {
+      const response = await api.post(`${API_BASE}/history/${historyEntryId}/kill`);
+      const killedCount = response.data.total_killed || 0;
+      const failedCount = response.data.total_failed || 0;
+      if (failedCount > 0) {
+        alert(`Kill completed with errors:\nKilled: ${killedCount}\nFailed: ${failedCount}`);
+        updateTaskCtx(taskId, { status: 'error', detail: `${killedCount} killed, ${failedCount} failed` });
+      } else {
+        alert(`Successfully killed ${killedCount} task(s)`);
+        updateTaskCtx(taskId, { status: 'success', detail: `Killed ${killedCount} task(s)` });
+      }
+      if (selectedRunPlan) {
+        handleViewHistory(selectedRunPlan.id);
+      }
+    } catch (error) {
+      console.error('Error killing tasks:', error);
+      const errData = error.response?.data;
+      if (errData?.code === 'CREDENTIALS_EXPIRED') {
+        alert('Your session credentials have expired. Please log out and log back in.');
+      } else {
+        alert(`Failed to kill tasks: ${errData?.error || error.message}`);
+      }
+      updateTaskCtx(taskId, { status: 'error', detail: errData?.error || error.message });
     } finally {
       setLoading(false);
     }
@@ -258,13 +407,19 @@ export default function RunPlan() {
     try {
       const response = await api.post(`${API_BASE}/${runPlanId}/trigger`);
       const count = response.data.task_ids?.length || 0;
-      alert(`Triggered successfully! Created ${count} task(s)`);
-      updateTaskCtx(taskId, { status: 'success', detail: `Created ${count} JITA task(s)` });
+      const triggeredBy = response.data.triggered_by || '';
+      alert(`Triggered successfully by ${triggeredBy}! Created ${count} task(s)`);
+      updateTaskCtx(taskId, { status: 'success', detail: `Created ${count} JITA task(s) as ${triggeredBy}` });
       fetchRunPlans();
     } catch (error) {
       console.error('Error triggering run plan:', error);
-      alert('Failed to trigger run plan');
-      updateTaskCtx(taskId, { status: 'error', detail: error.message });
+      const errData = error.response?.data;
+      if (errData?.code === 'CREDENTIALS_EXPIRED') {
+        alert('Your session credentials have expired. Please log out and log back in to trigger runs.');
+      } else {
+        alert(`Failed to trigger run plan: ${errData?.error || error.message}`);
+      }
+      updateTaskCtx(taskId, { status: 'error', detail: errData?.error || error.message });
     } finally {
       setLoading(false);
     }
@@ -295,9 +450,11 @@ export default function RunPlan() {
       patchUrl: '',
       frameworkPatchUrl: '',
       testerTagsAction: '',
-      testerTagValue: ''
+      testerTagValue: '',
+      updateAdditionalTags: false,
+      additionalTags: []
     });
-    
+    setShowAdditionalTagsDropdown(false);
     setView('batch-update');
   };
 
@@ -377,6 +534,11 @@ export default function RunPlan() {
         payload.tester_tag_value = batchUpdateData.testerTagValue;
       }
 
+      // Add run_tests_with_additional_tags overwrite if enabled
+      if (batchUpdateData.updateAdditionalTags) {
+        payload.run_tests_with_additional_tags = batchUpdateData.additionalTags;
+      }
+
       const batchTaskId = addTask({ label: `Batch Update: ${selectedRunPlan.name}`, page: 'Run Plan' });
       const response = await api.post(
         `${API_BASE}/${selectedRunPlan.id}/batch-update`,
@@ -402,6 +564,15 @@ export default function RunPlan() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const toggleAdditionalTag = (tag) => {
+    setBatchUpdateData(prev => {
+      const tags = prev.additionalTags.includes(tag)
+        ? prev.additionalTags.filter(t => t !== tag)
+        : [...prev.additionalTags, tag];
+      return { ...prev, additionalTags: tags };
+    });
   };
 
   const handleViewHistory = async (runPlanId) => {
@@ -553,15 +724,51 @@ export default function RunPlan() {
     }
   };
 
+  const handleLoadRiskScore = async (plan) => {
+    const planId = plan.id;
+    setLoadingRisk(prev => ({ ...prev, [planId]: true }));
+    try {
+      const historyResp = await api.get(`${API_BASE}/${planId}/history`);
+      const history = historyResp.data.history || [];
+
+      const response = await api.post(
+        `${API_BASE_URL}/mcp/regression/ai-analysis/run-plan-risk`,
+        {
+          name: plan.name,
+          tag_name: plan.tag_name || '',
+          job_profile_count: plan.job_profiles?.length || 0,
+          history: history.slice(0, 10),
+        },
+        { timeout: 90000 }
+      );
+
+      if (response.data.success) {
+        setRiskScores(prev => ({ ...prev, [planId]: response.data }));
+      } else {
+        alert(`Risk analysis failed: ${response.data.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error loading risk score:', error);
+      alert(`Failed to load risk score: ${error.response?.data?.error || error.message}`);
+    } finally {
+      setLoadingRisk(prev => ({ ...prev, [planId]: false }));
+    }
+  };
+
   // Render List View
   if (view === 'list') {
     return (
       <div className="run-plan-container">
         <div className="run-plan-header">
           <h1>Run Plan - Regression Scheduling</h1>
-          <button className="btn-primary" onClick={handleCreate}>
-            + Create Run Plan
-          </button>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button className="btn-calendar" onClick={handleOpenCalendar}>
+              Calendar View
+            </button>
+            <button className="btn-primary" onClick={handleCreate}>
+              + Create Run Plan
+            </button>
+          </div>
         </div>
 
         {loading ? (
@@ -619,7 +826,36 @@ export default function RunPlan() {
                         >
                           Clone
                         </button>
+                        <button
+                          onClick={() => handleLoadRiskScore(plan)}
+                          disabled={loadingRisk[plan.id]}
+                          className="btn-risk-score"
+                        >
+                          {loadingRisk[plan.id] ? '...' : riskScores[plan.id] ? `Risk: ${riskScores[plan.id].risk_score}` : 'AI Risk'}
+                        </button>
                       </div>
+                      {riskScores[plan.id] && (
+                        <div className="risk-score-badge-row">
+                          <span
+                            className={`risk-badge risk-${riskScores[plan.id].risk_level?.toLowerCase()}`}
+                            onClick={() => setShowRiskPanel(showRiskPanel === plan.id ? null : plan.id)}
+                            title="Click to see details"
+                          >
+                            {riskScores[plan.id].risk_level} ({riskScores[plan.id].risk_score}/100)
+                          </span>
+                        </div>
+                      )}
+                      {showRiskPanel === plan.id && riskScores[plan.id] && (
+                        <div className="risk-detail-panel">
+                          <div className="risk-detail-header">
+                            <strong>AI Risk Analysis — {plan.name}</strong>
+                            <button onClick={() => setShowRiskPanel(null)}>✕</button>
+                          </div>
+                          <div className="risk-detail-body">
+                            <AiMarkdown content={riskScores[plan.id].analysis} />
+                          </div>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))
@@ -1147,6 +1383,97 @@ export default function RunPlan() {
             )}
           </div>
 
+          {/* Additional Tags (run_tests_with_additional_tags) */}
+          <div className="form-group" style={{ marginTop: '30px', paddingTop: '20px', borderTop: '1px solid #ddd' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={batchUpdateData.updateAdditionalTags}
+                onChange={(e) => setBatchUpdateData({
+                  ...batchUpdateData,
+                  updateAdditionalTags: e.target.checked,
+                  additionalTags: e.target.checked ? batchUpdateData.additionalTags : []
+                })}
+              />
+              <span style={{ fontWeight: 'bold', fontSize: '16px' }}>
+                Update Additional Tags (run_tests_with_additional_tags)
+              </span>
+            </label>
+            <small style={{ display: 'block', marginTop: '4px', color: '#888' }}>
+              Enable to overwrite <code>run_tests_with_additional_tags</code> on all job profiles in this run plan.
+            </small>
+
+            {batchUpdateData.updateAdditionalTags && (
+              <div style={{ marginTop: '12px' }}>
+                <div className="additional-tags-picker" ref={additionalTagsRef}>
+                  <button
+                    type="button"
+                    className="additional-tags-trigger"
+                    onClick={() => setShowAdditionalTagsDropdown(v => !v)}
+                  >
+                    {batchUpdateData.additionalTags.length > 0
+                      ? `${batchUpdateData.additionalTags.length} tag(s) selected`
+                      : 'Disabled (empty list)'}
+                    <span className="additional-tags-arrow">{showAdditionalTagsDropdown ? '▴' : '▾'}</span>
+                  </button>
+
+                  {showAdditionalTagsDropdown && (
+                    <div className="additional-tags-dropdown">
+                      <label className="additional-tags-option additional-tags-disable-all">
+                        <input
+                          type="checkbox"
+                          checked={batchUpdateData.additionalTags.length === 0}
+                          onChange={() => setBatchUpdateData({ ...batchUpdateData, additionalTags: [] })}
+                        />
+                        Disable All (empty list)
+                      </label>
+                      <div className="additional-tags-divider" />
+                      {ADDITIONAL_TAG_OPTIONS.map(tag => (
+                        <label key={tag} className="additional-tags-option">
+                          <input
+                            type="checkbox"
+                            checked={batchUpdateData.additionalTags.includes(tag)}
+                            onChange={() => toggleAdditionalTag(tag)}
+                          />
+                          {tag}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {batchUpdateData.additionalTags.length > 0 && (
+                  <div className="additional-tags-selected">
+                    {batchUpdateData.additionalTags.map(tag => (
+                      <span key={tag} className="additional-tag-chip">
+                        {tag}
+                        <button
+                          type="button"
+                          onClick={() => toggleAdditionalTag(tag)}
+                          className="additional-tag-remove"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                    <button
+                      type="button"
+                      className="additional-tags-clear"
+                      onClick={() => setBatchUpdateData({ ...batchUpdateData, additionalTags: [] })}
+                    >
+                      Clear all
+                    </button>
+                  </div>
+                )}
+
+                <small style={{ color: '#e67e22', marginTop: '6px', display: 'block' }}>
+                  This will <strong>overwrite</strong> existing additional tags on all selected job profiles.
+                  {batchUpdateData.additionalTags.length === 0 && ' Leaving empty will clear all additional tags.'}
+                </small>
+              </div>
+            )}
+          </div>
+
           <div className="form-actions">
             <button onClick={() => setView('list')}>Cancel</button>
             <button className="btn-primary" onClick={handleExecuteBatchUpdate} disabled={loading}>
@@ -1189,19 +1516,20 @@ export default function RunPlan() {
                   <tr key={entry.id}>
                     <td>{entry.triggered_at}</td>
                     <td>
-                      <div className="task-ids">
-                        {entry.task_ids?.slice(0, 3).map((tid) => (
-                          <a
-                            key={tid}
-                            href={`https://jita.eng.nutanix.com/results?task_ids=${tid}`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            {tid.substring(0, 8)}...
-                          </a>
-                        ))}
-                        {entry.task_ids?.length > 3 && <span>+{entry.task_ids.length - 3} more</span>}
-                      </div>
+                      {entry.task_ids?.length > 0 ? (
+                        <a
+                          href={`https://jita.eng.nutanix.com/results?task_ids=${entry.task_ids.join(',')}&active_tab=1&merge_tests=true`}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ color: '#3498db', textDecoration: 'none', fontSize: '13px' }}
+                          onMouseEnter={(e) => e.target.style.textDecoration = 'underline'}
+                          onMouseLeave={(e) => e.target.style.textDecoration = 'none'}
+                        >
+                          {entry.task_ids.length} task{entry.task_ids.length > 1 ? 's' : ''} — View in JITA
+                        </a>
+                      ) : (
+                        <span style={{ color: '#7f8c8d' }}>-</span>
+                      )}
                     </td>
                     <td>
                       <span className={`status-badge ${entry.status?.toLowerCase()}`}>
@@ -1212,6 +1540,14 @@ export default function RunPlan() {
                       <div className="action-buttons">
                         <button onClick={() => handleRetryTrigger(entry.id)}>Retry</button>
                         <button onClick={() => handleDeleteHistory(entry.id)}>Delete</button>
+                        {entry.task_ids?.length > 0 && (
+                          <button
+                            onClick={() => handleKillTasks(entry.id, entry.task_ids.length)}
+                            style={{ background: '#e74c3c', color: 'white' }}
+                          >
+                            Kill All Tasks
+                          </button>
+                        )}
                         <button 
                           onClick={() => handleCreateTriageGenieJob(entry)}
                           style={{ background: '#27ae60', color: 'white' }}
@@ -1225,6 +1561,161 @@ export default function RunPlan() {
               )}
             </tbody>
           </table>
+        )}
+      </div>
+    );
+  }
+
+  // Render Calendar View
+  if (view === 'calendar') {
+    const days = getDaysInMonth(calendarMonth);
+    const monthLabel = calendarMonth.toLocaleString('default', { month: 'long', year: 'numeric' });
+    const todayStr = fmtDate(new Date());
+    const selectedDateStr = selectedCalendarDate ? fmtDate(selectedCalendarDate) : null;
+    const selectedEvents = selectedDateStr ? eventsForDate(selectedDateStr) : [];
+
+    return (
+      <div className="run-plan-container">
+        <div className="run-plan-header">
+          <h1>Run Plan Calendar</h1>
+          <button onClick={() => setView('list')}>← Back to List</button>
+        </div>
+
+        {loading ? (
+          <div className="loading">Loading...</div>
+        ) : (
+          <div className="calendar-wrapper">
+            {/* Month navigation */}
+            <div className="calendar-nav">
+              <button onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1))}>◀ Prev</button>
+              <h2>{monthLabel}</h2>
+              <button onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1))}>Next ▶</button>
+            </div>
+
+            {/* Calendar grid */}
+            <div className="calendar-grid">
+              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
+                <div key={d} className="calendar-day-header">{d}</div>
+              ))}
+              {days.map((dayObj, idx) => {
+                if (!dayObj) return <div key={`pad-${idx}`} className="calendar-cell empty" />;
+                const ds = fmtDate(dayObj);
+                const dayEvents = eventsForDate(ds);
+                const triggered = dayEvents.filter((e) => e.type === 'triggered');
+                const scheduled = dayEvents.filter((e) => e.type === 'scheduled');
+                const isToday = ds === todayStr;
+                const isSelected = ds === selectedDateStr;
+
+                return (
+                  <div
+                    key={ds}
+                    className={`calendar-cell${isToday ? ' today' : ''}${isSelected ? ' selected' : ''}${dayEvents.length ? ' has-events' : ''}`}
+                    onClick={() => handleCalendarDateClick(dayObj)}
+                  >
+                    <span className="calendar-date-num">{dayObj.getDate()}</span>
+                    {triggered.length > 0 && (
+                      <span className="cal-badge triggered">{triggered.length} run{triggered.length > 1 ? 's' : ''}</span>
+                    )}
+                    {scheduled.length > 0 && (
+                      <span className="cal-badge scheduled">{scheduled.length} sched</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Detail panel for selected date */}
+            {selectedCalendarDate && (
+              <div className="calendar-detail">
+                <div className="calendar-detail-header">
+                  <h3>{selectedCalendarDate.toDateString()}</h3>
+                  <button className="btn-primary" onClick={handleOpenScheduleDialog}>
+                    + Schedule a Run Plan
+                  </button>
+                </div>
+
+                {/* Schedule dialog */}
+                {scheduleDialogOpen && (
+                  <div className="schedule-dialog">
+                    <h4>Schedule Run Plan on {selectedCalendarDate.toDateString()}</h4>
+                    <div className="form-group" style={{ marginBottom: 12 }}>
+                      <label>Select Run Plan</label>
+                      <select
+                        value={scheduleForm.runPlanId}
+                        onChange={(e) => setScheduleForm({ ...scheduleForm, runPlanId: e.target.value })}
+                      >
+                        <option value="">-- Pick a Run Plan --</option>
+                        {calendarRunPlans.map((rp) => (
+                          <option key={rp.id} value={rp.id}>{rp.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="form-group" style={{ marginBottom: 12 }}>
+                      <label>Time</label>
+                      <input
+                        type="time"
+                        value={scheduleForm.time}
+                        onChange={(e) => setScheduleForm({ ...scheduleForm, time: e.target.value })}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button className="btn-primary" onClick={handleScheduleFromCalendar} disabled={!scheduleForm.runPlanId || loading}>
+                        {loading ? 'Scheduling...' : 'Schedule'}
+                      </button>
+                      <button onClick={() => setScheduleDialogOpen(false)}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Events list */}
+                {selectedEvents.length === 0 && !scheduleDialogOpen && (
+                  <p style={{ color: '#7f8c8d' }}>No events on this date.</p>
+                )}
+
+                {selectedEvents.filter(e => e.type === 'triggered').length > 0 && (
+                  <div className="cal-event-section">
+                    <h4 className="cal-section-title triggered-title">Triggered Runs</h4>
+                    {selectedEvents.filter(e => e.type === 'triggered').map((ev, i) => (
+                      <div key={`t-${i}`} className="cal-event-card triggered-card">
+                        <div className="cal-event-name">{ev.run_plan_name}</div>
+                        <div className="cal-event-meta">
+                          <span>At: {ev.datetime}</span>
+                          <span>By: {ev.triggered_by || 'N/A'}</span>
+                          <span className={`status-badge ${ev.status?.toLowerCase()}`}>{ev.status}</span>
+                        </div>
+                        {ev.task_ids?.length > 0 && (
+                          <div className="cal-event-tasks">
+                            <a
+                              href={`https://jita.eng.nutanix.com/results?task_ids=${ev.task_ids.join(',')}&active_tab=1&merge_tests=true`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {ev.task_ids.length} task{ev.task_ids.length > 1 ? 's' : ''} — View in JITA
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {selectedEvents.filter(e => e.type === 'scheduled').length > 0 && (
+                  <div className="cal-event-section">
+                    <h4 className="cal-section-title scheduled-title">Scheduled Runs</h4>
+                    {selectedEvents.filter(e => e.type === 'scheduled').map((ev, i) => (
+                      <div key={`s-${i}`} className="cal-event-card scheduled-card">
+                        <div className="cal-event-name">{ev.run_plan_name}</div>
+                        <div className="cal-event-meta">
+                          <span>Scheduled for: {ev.datetime}</span>
+                          <span>{ev.schedule_triggered ? 'Already triggered' : 'Pending'}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
     );

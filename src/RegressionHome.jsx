@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import api from "./api";
 import { API_BASE_URL } from "./config";
+import AiMarkdown from "./components/AiMarkdown";
 import "./RegressionHome.css";
 
 const API_URL = `${API_BASE_URL}/mcp/regression/home`;
@@ -82,6 +83,12 @@ export default function RegressionHome() {
   const [branchQiData, setBranchQiData] = useState({});
   const [branchQiLoading, setBranchQiLoading] = useState({});
   const [teamConfig, setTeamConfig] = useState(null);
+  const [bulkIssuesAiAnalysis, setBulkIssuesAiAnalysis] = useState(null);
+  const [loadingBulkAi, setLoadingBulkAi] = useState(false);
+  const [ownerTicketsAiAnalysis, setOwnerTicketsAiAnalysis] = useState(null);
+  const [loadingOwnerAi, setLoadingOwnerAi] = useState(false);
+  const [ownerJiraDetails, setOwnerJiraDetails] = useState({});
+  const [loadingJiraDetails, setLoadingJiraDetails] = useState(false);
 
   // Parse JITA task link or comma-separated task IDs
   const parseTaskIds = (input) => {
@@ -315,6 +322,36 @@ export default function RegressionHome() {
       }
     }
   }, [advancedOptions.triageAccuracy, tag, inputMode, taskIdsKey]);
+
+  // Fetch JIRA details (status, issue type) for all tickets in owner_ticket_map
+  const fetchOwnerJiraDetails = async () => {
+    if (!triageCount || !triageCount.owner_ticket_map) return;
+    const allTickets = new Set();
+    Object.values(triageCount.owner_ticket_map).forEach(tickets => {
+      Object.keys(tickets).forEach(t => allTickets.add(t));
+    });
+    if (allTickets.size === 0) return;
+    setLoadingJiraDetails(true);
+    try {
+      const resp = await api.post(`${API_BASE_URL}/mcp/regression/jira-ticket-details`, {
+        ticket_ids: Array.from(allTickets)
+      }, { timeout: 120000 });
+      if (resp.data.success && resp.data.details) {
+        setOwnerJiraDetails(resp.data.details);
+      }
+    } catch (err) {
+      console.error("Error fetching JIRA details:", err);
+    } finally {
+      setLoadingJiraDetails(false);
+    }
+  };
+
+  // Auto-fetch JIRA details when owner_ticket_map becomes available
+  useEffect(() => {
+    if (!triageCount || !triageCount.owner_ticket_map) return;
+    if (Object.keys(ownerJiraDetails).length > 0) return;
+    fetchOwnerJiraDetails();
+  }, [triageCount]);
 
   // Fetch manual tasks for all branches
   const fetchManualTasksForBranches = async (branches) => {
@@ -806,6 +843,65 @@ export default function RegressionHome() {
       // Don't set error, just log it
     } finally {
       setLoadingBulkQi(false);
+    }
+  };
+
+  const fetchBulkIssuesAiAnalysis = async () => {
+    if (!triageCount || !triageCount.bulk_issues) return;
+    setLoadingBulkAi(true);
+    setBulkIssuesAiAnalysis(null);
+    try {
+      const response = await api.post(
+        `${API_BASE_URL}/mcp/regression/ai-analysis/bulk-issues`,
+        {
+          bulk_issues: triageCount.bulk_issues,
+          bulk_issues_with_qi: triageCount.bulk_issues_with_qi || {},
+          tag: triageCount.tag || tag || "",
+          total_tests_processed: triageCount.total_tests_processed || 0
+        },
+        { timeout: 120000 }
+      );
+      if (response.data.success) {
+        setBulkIssuesAiAnalysis(response.data.analysis);
+      } else {
+        setBulkIssuesAiAnalysis(`Error: ${response.data.error || "Unknown error"}`);
+      }
+    } catch (err) {
+      console.error("Error fetching bulk issues AI analysis:", err);
+      setBulkIssuesAiAnalysis(`Error: ${err.response?.data?.error || err.message}`);
+    } finally {
+      setLoadingBulkAi(false);
+    }
+  };
+
+  const fetchOwnerTicketsAiAnalysis = async () => {
+    if (!triageCount || !triageCount.owner_ticket_map) return;
+    setLoadingOwnerAi(true);
+    setOwnerTicketsAiAnalysis(null);
+    try {
+      const response = await api.post(
+        `${API_BASE_URL}/mcp/regression/ai-analysis/owner-tickets`,
+        {
+          owner_ticket_map: triageCount.owner_ticket_map,
+          triage_summary: triageCount.triage_summary || {},
+          tag: triageCount.tag || tag || "",
+          total_tests_processed: triageCount.total_tests_processed || 0
+        },
+        { timeout: 180000 }
+      );
+      if (response.data.success) {
+        setOwnerTicketsAiAnalysis(response.data.analysis);
+        if (response.data.jira_details) {
+          setOwnerJiraDetails(response.data.jira_details);
+        }
+      } else {
+        setOwnerTicketsAiAnalysis(`Error: ${response.data.error || "Unknown error"}`);
+      }
+    } catch (err) {
+      console.error("Error fetching owner tickets AI analysis:", err);
+      setOwnerTicketsAiAnalysis(`Error: ${err.response?.data?.error || err.message}`);
+    } finally {
+      setLoadingOwnerAi(false);
     }
   };
 
@@ -1894,6 +1990,68 @@ export default function RegressionHome() {
                           Calculating QI impact for all bulk issues... This may take a few minutes...
                         </div>
                       )}
+
+                      {/* AI Analysis for Bulk Issues */}
+                      <div style={{ marginTop: "15px", display: "flex", alignItems: "center", gap: "10px" }}>
+                        <button
+                          onClick={fetchBulkIssuesAiAnalysis}
+                          disabled={loadingBulkAi}
+                          style={{
+                            padding: "8px 16px",
+                            background: loadingBulkAi ? "#6c757d" : "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+                            color: "white",
+                            border: "none",
+                            borderRadius: "6px",
+                            cursor: loadingBulkAi ? "not-allowed" : "pointer",
+                            fontSize: "13px",
+                            fontWeight: "600",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "6px"
+                          }}
+                        >
+                          {loadingBulkAi ? "Analyzing..." : "Load AI Analysis"}
+                        </button>
+                        {bulkIssuesAiAnalysis && !loadingBulkAi && (
+                          <button
+                            onClick={() => setBulkIssuesAiAnalysis(null)}
+                            style={{
+                              padding: "6px 10px",
+                              background: "#dc3545",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "4px",
+                              cursor: "pointer",
+                              fontSize: "11px"
+                            }}
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+
+                      {loadingBulkAi && (
+                        <div style={{ marginTop: "10px", color: "#667eea", fontStyle: "italic", fontSize: "12px" }}>
+                          AI is analyzing bulk issue patterns and risk... This may take 30-60 seconds...
+                        </div>
+                      )}
+
+                      {bulkIssuesAiAnalysis && (
+                        <div style={{
+                          marginTop: "15px",
+                          padding: "16px",
+                          background: "linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%)",
+                          borderRadius: "8px",
+                          border: "1px solid #c4b5fd",
+                          maxHeight: "500px",
+                          overflowY: "auto"
+                        }}>
+                          <div style={{ fontWeight: "700", marginBottom: "8px", color: "#5b21b6", fontSize: "14px" }}>
+                            AI Analysis — Bulk Issues
+                          </div>
+                          <AiMarkdown content={bulkIssuesAiAnalysis} />
+                        </div>
+                      )}
                     </div>
                   )}
                   
@@ -1904,24 +2062,175 @@ export default function RegressionHome() {
                     </div>
                   )}
                   
-                  {/* Display Owner Ticket Map */}
-                  {triageCount.owner_ticket_map && (
+                  {/* Display Owner Ticket Map as Table */}
+                  {triageCount.owner_ticket_map && Object.keys(triageCount.owner_ticket_map).length > 0 && (
                     <div style={{ marginTop: "20px" }}>
-                      <h4 style={{ marginBottom: "10px" }}>Owner-wise Jira Ticket Breakdown:</h4>
-                      {Object.entries(triageCount.owner_ticket_map).map(([owner, tickets]) => (
-                        <div key={owner} style={{ marginBottom: "15px" }}>
-                          <strong>{owner}:</strong>
-                          <ul style={{ marginLeft: "20px", marginTop: "5px" }}>
-                            {Object.entries(tickets).map(([ticket, count]) => (
-                              <li key={ticket}>
-                                <a href={`${JIRA_URL}${ticket}`} target="_blank" rel="noreferrer" style={{ color: "#007bff" }}>
-                                  {ticket}
-                                </a>: {count} test(s)
-                              </li>
-                            ))}
-                          </ul>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                        <h4 style={{ margin: 0 }}>
+                          Owner-wise Jira Ticket Breakdown:
+                          {loadingJiraDetails && (
+                            <span style={{ fontSize: "11px", color: "#6c757d", fontWeight: "normal", marginLeft: "10px" }}>
+                              Loading JIRA details...
+                            </span>
+                          )}
+                        </h4>
+                        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                          <button
+                            onClick={fetchOwnerJiraDetails}
+                            disabled={loadingJiraDetails}
+                            style={{
+                              padding: "7px 14px",
+                              background: loadingJiraDetails ? "#6c757d" : "linear-gradient(135deg, #36d1dc 0%, #5b86e5 100%)",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "6px",
+                              cursor: loadingJiraDetails ? "not-allowed" : "pointer",
+                              fontSize: "12px",
+                              fontWeight: "600"
+                            }}
+                          >
+                            {loadingJiraDetails ? "Fetching..." : Object.keys(ownerJiraDetails).length > 0 ? "Refresh Status" : "Load Status & Type"}
+                          </button>
+                          <button
+                            onClick={fetchOwnerTicketsAiAnalysis}
+                            disabled={loadingOwnerAi}
+                            style={{
+                              padding: "7px 14px",
+                              background: loadingOwnerAi ? "#6c757d" : "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "6px",
+                              cursor: loadingOwnerAi ? "not-allowed" : "pointer",
+                              fontSize: "12px",
+                              fontWeight: "600"
+                            }}
+                          >
+                            {loadingOwnerAi ? "Analyzing..." : "Load AI Analysis"}
+                          </button>
+                          {ownerTicketsAiAnalysis && !loadingOwnerAi && (
+                            <button
+                              onClick={() => setOwnerTicketsAiAnalysis(null)}
+                              style={{
+                                padding: "5px 9px",
+                                background: "#dc3545",
+                                color: "white",
+                                border: "none",
+                                borderRadius: "4px",
+                                cursor: "pointer",
+                                fontSize: "11px"
+                              }}
+                            >
+                              Clear
+                            </button>
+                          )}
                         </div>
-                      ))}
+                      </div>
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                          <thead>
+                            <tr style={{ background: "#e9ecef" }}>
+                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "left" }}>Owner</th>
+                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "left" }}>Jira Ticket</th>
+                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>Testcase(s)</th>
+                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>Status</th>
+                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>Issue Type</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Object.entries(triageCount.owner_ticket_map).map(([owner, tickets]) => {
+                              const ticketEntries = Object.entries(tickets);
+                              return ticketEntries.map(([ticket, count], idx) => {
+                                const jiraInfo = ownerJiraDetails[ticket];
+                                return (
+                                  <tr key={`${owner}-${ticket}`} style={{ borderBottom: idx === ticketEntries.length - 1 ? "2px solid #ccc" : undefined }}>
+                                    {idx === 0 && (
+                                      <td
+                                        rowSpan={ticketEntries.length}
+                                        style={{ padding: "8px 12px", border: "1px solid #ddd", fontWeight: "600", verticalAlign: "top", background: "#f8f9fa" }}
+                                      >
+                                        {owner}
+                                      </td>
+                                    )}
+                                    <td style={{ padding: "6px 12px", border: "1px solid #ddd" }}>
+                                      <a href={`${JIRA_URL}${ticket}`} target="_blank" rel="noreferrer" style={{ color: "#0066cc", textDecoration: "none" }}>
+                                        {ticket}
+                                      </a>
+                                    </td>
+                                    <td style={{ padding: "6px 12px", border: "1px solid #ddd", textAlign: "center" }}>
+                                      {count}
+                                    </td>
+                                    <td style={{ padding: "6px 12px", border: "1px solid #ddd", textAlign: "center" }}>
+                                      {jiraInfo ? (
+                                        <span style={{
+                                          padding: "2px 8px",
+                                          borderRadius: "10px",
+                                          fontSize: "11px",
+                                          fontWeight: "600",
+                                          background: jiraInfo.status === "Closed" || jiraInfo.status === "Resolved" ? "#d1fae5"
+                                            : jiraInfo.status === "In Progress" ? "#dbeafe"
+                                            : jiraInfo.status === "Open" || jiraInfo.status === "To Do" ? "#fee2e2"
+                                            : "#f3f4f6",
+                                          color: jiraInfo.status === "Closed" || jiraInfo.status === "Resolved" ? "#065f46"
+                                            : jiraInfo.status === "In Progress" ? "#1e40af"
+                                            : jiraInfo.status === "Open" || jiraInfo.status === "To Do" ? "#991b1b"
+                                            : "#374151"
+                                        }}>
+                                          {jiraInfo.status}
+                                        </span>
+                                      ) : (
+                                        <span style={{ color: "#9ca3af", fontSize: "11px" }}>—</span>
+                                      )}
+                                    </td>
+                                    <td style={{ padding: "6px 12px", border: "1px solid #ddd", textAlign: "center" }}>
+                                      {jiraInfo ? (
+                                        <span style={{
+                                          padding: "2px 8px",
+                                          borderRadius: "10px",
+                                          fontSize: "11px",
+                                          fontWeight: "500",
+                                          background: jiraInfo.issue_type === "Bug" ? "#fef3c7"
+                                            : jiraInfo.issue_type === "Task" ? "#e0e7ff"
+                                            : "#f3f4f6",
+                                          color: jiraInfo.issue_type === "Bug" ? "#92400e"
+                                            : jiraInfo.issue_type === "Task" ? "#3730a3"
+                                            : "#374151"
+                                        }}>
+                                          {jiraInfo.issue_type}
+                                        </span>
+                                      ) : (
+                                        <span style={{ color: "#9ca3af", fontSize: "11px" }}>—</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              });
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {loadingOwnerAi && (
+                        <div style={{ marginTop: "10px", color: "#667eea", fontStyle: "italic", fontSize: "12px" }}>
+                          AI is analyzing owner ticket patterns... This may take 30-60 seconds...
+                        </div>
+                      )}
+
+                      {ownerTicketsAiAnalysis && (
+                        <div style={{
+                          marginTop: "15px",
+                          padding: "16px",
+                          background: "linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%)",
+                          borderRadius: "8px",
+                          border: "1px solid #c4b5fd",
+                          maxHeight: "500px",
+                          overflowY: "auto"
+                        }}>
+                          <div style={{ fontWeight: "700", marginBottom: "8px", color: "#5b21b6", fontSize: "14px" }}>
+                            AI Analysis — Owner Ticket Breakdown
+                          </div>
+                          <AiMarkdown content={ownerTicketsAiAnalysis} />
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

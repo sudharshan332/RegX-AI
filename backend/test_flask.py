@@ -28,6 +28,34 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from auth import LDAPAuth, create_jwt, decode_jwt, jwt_required
 
 # ======================================================
+# In-memory credential cache (stores LDAP passwords for Jita calls)
+# Passwords are cached on login and expire after the same TTL as JWT.
+# ======================================================
+_credential_cache = {}  # {username: {"password": str, "expires_at": float}}
+_credential_cache_lock = threading.Lock()
+CREDENTIAL_TTL_SECONDS = int(os.environ.get("JWT_EXPIRY_HOURS", "24")) * 3600
+
+
+def _store_user_credentials(username, password):
+    """Cache user credentials on successful login."""
+    with _credential_cache_lock:
+        _credential_cache[username] = {
+            "password": password,
+            "expires_at": time.time() + CREDENTIAL_TTL_SECONDS,
+        }
+
+
+def _get_user_credentials(username):
+    """Retrieve cached credentials. Returns (username, password) tuple or None."""
+    with _credential_cache_lock:
+        entry = _credential_cache.get(username)
+        if entry and entry["expires_at"] > time.time():
+            return (username, entry["password"])
+        _credential_cache.pop(username, None)
+        return None
+
+
+# ======================================================
 # Flask App
 # ======================================================
 app = Flask(__name__)
@@ -178,6 +206,105 @@ def save_run_plans(data):
     except Exception as e:
         logger.error(f"Error saving run plans: {e}")
         raise
+
+# ======================================================
+# Run Plan Scheduler — checks every 30 min for due scheduled runs
+# Uses service account (JITA_SVC_AUTH) so no user session is needed.
+# ======================================================
+_scheduler_lock = threading.Lock()
+SCHEDULER_INTERVAL_SECONDS = int(os.environ.get("SCHEDULER_INTERVAL_SECONDS", "1800"))
+
+
+def _trigger_scheduled_run_plan(run_plan, data):
+    """Trigger a single run plan via the service account and record history."""
+    rp_id = run_plan["id"]
+    rp_name = run_plan.get("name", rp_id)
+    job_profile_ids = [
+        jp for jp in run_plan.get("job_profiles", [])
+        if jp and isinstance(jp, str) and jp.strip()
+    ]
+    if not job_profile_ids:
+        logger.warning(f"[scheduler] Run plan '{rp_name}' has no valid job profiles — skipping")
+        return
+
+    logger.info(f"[scheduler] Triggering '{rp_name}' ({len(job_profile_ids)} JP(s)) via service account")
+    task_ids = []
+    failed_jobs = []
+
+    for jp_id in job_profile_ids:
+        try:
+            url = f"{JITA_BASE}/job_profiles/{jp_id}/trigger"
+            resp = requests.post(
+                url, json={}, headers={"Content-Type": "application/json"},
+                auth=JITA_SVC_AUTH, verify=False, timeout=60
+            )
+            if resp.status_code == 200:
+                res_data = resp.json()
+                if res_data.get("success") and "task_ids" in res_data:
+                    ids = [
+                        item["$oid"] if isinstance(item, dict) and "$oid" in item else item
+                        for item in res_data["task_ids"]
+                    ]
+                    task_ids.extend(ids)
+                else:
+                    failed_jobs.append({
+                        "job_id": jp_id, "success": False,
+                        "error": res_data.get("message", "Trigger returned failure")
+                    })
+            else:
+                failed_jobs.append({
+                    "job_id": jp_id, "success": False,
+                    "error": f"HTTP {resp.status_code}: {resp.text[:200]}"
+                })
+        except Exception as exc:
+            failed_jobs.append({"job_id": jp_id, "success": False, "error": str(exc)})
+
+    now_iso = datetime.now().isoformat()
+    run_plan["last_triggered"] = now_iso
+    run_plan["schedule_triggered"] = True
+
+    if "history" not in data:
+        data["history"] = []
+    data["history"].append({
+        "id": str(int(time.time() * 1000)),
+        "run_plan_id": rp_id,
+        "triggered_at": now_iso,
+        "triggered_by": "scheduler (service account)",
+        "task_ids": task_ids,
+        "failed_jobs": failed_jobs,
+        "status": "success" if not failed_jobs else "partial"
+    })
+    logger.info(
+        f"[scheduler] '{rp_name}' done — {len(task_ids)} task(s), {len(failed_jobs)} failure(s)"
+    )
+
+
+def _run_plan_scheduler_loop():
+    """Background loop: every SCHEDULER_INTERVAL_SECONDS, check for due scheduled run plans."""
+    while True:
+        try:
+            with _scheduler_lock:
+                data = load_run_plans()
+                now = datetime.now()
+                triggered_any = False
+                for rp in data.get("run_plans", []):
+                    sched = rp.get("schedule_date")
+                    if not sched:
+                        continue
+                    if rp.get("schedule_triggered"):
+                        continue
+                    try:
+                        sched_dt = datetime.fromisoformat(sched)
+                    except (ValueError, TypeError):
+                        continue
+                    if sched_dt <= now:
+                        _trigger_scheduled_run_plan(rp, data)
+                        triggered_any = True
+                if triggered_any:
+                    save_run_plans(data)
+        except Exception as exc:
+            logger.error(f"[scheduler] Unhandled error: {exc}", exc_info=True)
+        time.sleep(SCHEDULER_INTERVAL_SECONDS)
 
 # Triage Genie jobs storage file
 TRIAGE_GENIE_STORAGE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "triage_genie_jobs.json")
@@ -587,6 +714,9 @@ def auth_login():
     user_info = ldap_auth.authenticate(username, password)
     if user_info is None:
         return jsonify({"error": "Invalid username or password"}), 401
+
+    # Cache credentials for downstream Jita calls (trigger, triage, etc.)
+    _store_user_credentials(user_info["username"], password)
 
     token = create_jwt(
         user_info["username"],
@@ -3409,6 +3539,7 @@ def create_run_plan():
             "job_profiles": job_profiles,
             "tag_name": tag_name,
             "schedule_date": req_data.get("schedule_date"),
+            "schedule_triggered": False,
             "created_at": datetime.now().isoformat(),
             "last_triggered": None
         }
@@ -3443,6 +3574,7 @@ def update_run_plan(run_plan_id):
                     # Only allow editing schedule_date, name, and tag_name
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data["schedule_date"]
+                        rp["schedule_triggered"] = False
                     if "name" in req_data:
                         rp["name"] = req_data["name"]
                     if "tag_name" in req_data:
@@ -3466,6 +3598,7 @@ def update_run_plan(run_plan_id):
                     
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data.get("schedule_date")
+                        rp["schedule_triggered"] = False
                 
                 save_run_plans(data)
                 
@@ -3546,9 +3679,22 @@ def search_job_profiles():
 @app.route("/mcp/regression/run-plan/<run_plan_id>/trigger", methods=["POST"])
 @jwt_required
 def trigger_run_plan(run_plan_id):
-    """Trigger a run plan now"""
+    """Trigger a run plan now using the logged-in user's LDAP credentials."""
     try:
         logger.info(f"[START] Trigger Run Plan | run_plan_id={run_plan_id}")
+
+        # Resolve trigger credentials from the logged-in user's cached LDAP creds
+        current_username = g.current_user.get("sub", "")
+        user_auth = _get_user_credentials(current_username)
+        if not user_auth:
+            logger.warning(f"No cached credentials for user '{current_username}' — asking for re-auth")
+            return jsonify({
+                "error": "Session credentials expired. Please re-login to trigger runs.",
+                "code": "CREDENTIALS_EXPIRED"
+            }), 401
+
+        logger.info(f"Using LDAP credentials of '{current_username}' for Jita trigger")
+
         data = load_run_plans()
         
         # Find run plan
@@ -3636,12 +3782,12 @@ def trigger_run_plan(run_plan_id):
                             if update_resp.status_code != 200:
                                 logger.warning(f"Failed to update commit for {job_id}: {update_resp.text[:200]}")
                 
-                # Trigger using user credentials (matching reference script)
-                logger.info(f"Triggering Job Profile ID: {job_id}")
+                # Trigger using the logged-in user's LDAP credentials
+                logger.info(f"Triggering Job Profile ID: {job_id} as user '{user_auth[0]}'")
                 resp = requests.post(
                     url,
                     headers=headers,
-                    auth=JITA_AUTH,
+                    auth=user_auth,
                     json=payload,
                     verify=False,
                     timeout=60
@@ -3695,6 +3841,7 @@ def trigger_run_plan(run_plan_id):
             "id": str(int(time.time() * 1000)),
             "run_plan_id": run_plan_id,
             "triggered_at": datetime.now().isoformat(),
+            "triggered_by": current_username,
             "task_ids": task_ids,
             "failed_jobs": failed_jobs,
             "status": "success" if not failed_jobs else "partial"
@@ -3710,6 +3857,7 @@ def trigger_run_plan(run_plan_id):
         
         return jsonify({
             "success": True,
+            "triggered_by": current_username,
             "task_ids": task_ids,
             "failed_jobs": failed_jobs,
             "total_triggered": len(task_ids),
@@ -3968,6 +4116,14 @@ def batch_update_job_profiles(run_plan_id):
                                 tester_tags.remove(tester_tag_value)
                                 updated_profile["tester_tags"] = tester_tags
                 
+                # Overwrite run_tests_with_additional_tags if provided in the request
+                if "run_tests_with_additional_tags" in req_data:
+                    new_additional_tags = req_data["run_tests_with_additional_tags"]
+                    if not isinstance(new_additional_tags, list):
+                        new_additional_tags = []
+                    updated_profile["run_tests_with_additional_tags"] = new_additional_tags
+                    logger.info(f"Overwriting run_tests_with_additional_tags for {job_id}: {new_additional_tags}")
+                
                 # Ensure JSON serializable (following reference script pattern)
                 serializable_payload = {}
                 for k, v in updated_profile.items():
@@ -4084,6 +4240,81 @@ def delete_history_entry(history_id):
         logger.error(f"Error deleting history entry: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/mcp/regression/run-plan/history/<history_id>/kill", methods=["POST"])
+@jwt_required
+def kill_history_tasks(history_id):
+    """Kill (abort) all JITA tasks associated with a history entry."""
+    try:
+        current_username = g.current_user.get("sub", "")
+        user_auth = _get_user_credentials(current_username)
+        if not user_auth:
+            return jsonify({
+                "error": "Session credentials expired. Please re-login to kill tasks.",
+                "code": "CREDENTIALS_EXPIRED"
+            }), 401
+
+        data = load_run_plans()
+        history_entry = None
+        for entry in data.get("history", []):
+            if entry.get("id") == history_id:
+                history_entry = entry
+                break
+
+        if not history_entry:
+            return jsonify({"error": "History entry not found"}), 404
+
+        task_ids = history_entry.get("task_ids", [])
+        if not task_ids:
+            return jsonify({"error": "No task IDs to kill"}), 400
+
+        killed = []
+        failed = []
+
+        def kill_single_task(tid):
+            try:
+                resp = requests.put(
+                    f"{JITA_BASE}/tasks/{tid}",
+                    headers={"Content-Type": "application/json"},
+                    json={"status": "killed"},
+                    auth=user_auth,
+                    verify=False,
+                    timeout=30
+                )
+                if resp.status_code == 200:
+                    return {"task_id": tid, "success": True}
+                return {"task_id": tid, "success": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+            except Exception as exc:
+                return {"task_id": tid, "success": False, "error": str(exc)}
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(kill_single_task, tid) for tid in task_ids]
+            for future in as_completed(futures):
+                result = future.result()
+                if result["success"]:
+                    killed.append(result["task_id"])
+                else:
+                    failed.append(result)
+
+        if len(killed) == len(task_ids):
+            history_entry["status"] = "killed"
+        elif killed:
+            history_entry["status"] = "partially_killed"
+        save_run_plans(data)
+
+        logger.info(f"Kill tasks for history {history_id}: {len(killed)} killed, {len(failed)} failed (by {current_username})")
+        return jsonify({
+            "success": len(failed) == 0,
+            "killed": killed,
+            "failed": failed,
+            "total_killed": len(killed),
+            "total_failed": len(failed),
+            "status": history_entry["status"]
+        })
+    except Exception as e:
+        logger.error(f"Error killing tasks for history {history_id}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/mcp/regression/run-plan/<run_plan_id>/clone", methods=["POST"])
 @jwt_required
 def clone_run_plan(run_plan_id):
@@ -4126,8 +4357,9 @@ def clone_run_plan(run_plan_id):
             "job_profiles": source_run_plan.get("job_profiles", []).copy(),
             "tag_name": new_tag_name,
             "schedule_date": source_run_plan.get("schedule_date"),
+            "schedule_triggered": False,
             "created_at": datetime.now().isoformat(),
-            "last_triggered": None  # Reset trigger status
+            "last_triggered": None
         }
         
         data["run_plans"].append(cloned_run_plan)
@@ -4237,6 +4469,10 @@ def delete_tag_from_job_profiles(run_plan_id):
 def get_available_tags():
     """Get list of available tags from JITA"""
     try:
+        # Use logged-in user's credentials, fall back to service account for read-only ops
+        current_username = g.current_user.get("sub", "")
+        auth_creds = _get_user_credentials(current_username) or JITA_SVC_AUTH
+
         # Fetch recent tasks to get unique tags
         params = {
             "limit": 1000,
@@ -4246,7 +4482,7 @@ def get_available_tags():
         response = session.get(
             f"{JITA_BASE}/tasks",
             params=params,
-            auth=JITA_AUTH,
+            auth=auth_creds,
             timeout=30
         )
         
@@ -4267,6 +4503,81 @@ def get_available_tags():
     except Exception as e:
         logger.error(f"Error fetching tags: {e}")
         return jsonify({"error": str(e)}), 500
+
+# ======================================================
+# Run Plan Calendar Endpoints
+# ======================================================
+@app.route("/mcp/regression/run-plan/calendar", methods=["GET"])
+@jwt_required
+def run_plan_calendar():
+    """Return all triggered and scheduled events grouped by date for calendar view."""
+    try:
+        data = load_run_plans()
+        run_plans = data.get("run_plans", [])
+        history = data.get("history", [])
+
+        rp_map = {rp["id"]: rp for rp in run_plans}
+        events = []
+
+        for entry in history:
+            triggered_at = entry.get("triggered_at", "")
+            date_str = triggered_at[:10] if len(triggered_at) >= 10 else ""
+            rp = rp_map.get(entry.get("run_plan_id", ""))
+            events.append({
+                "type": "triggered",
+                "date": date_str,
+                "datetime": triggered_at,
+                "run_plan_id": entry.get("run_plan_id"),
+                "run_plan_name": rp.get("name") if rp else "Deleted Run Plan",
+                "status": entry.get("status"),
+                "triggered_by": entry.get("triggered_by", ""),
+                "task_ids": entry.get("task_ids", []),
+                "history_id": entry.get("id"),
+            })
+
+        for rp in run_plans:
+            sched = rp.get("schedule_date")
+            if not sched:
+                continue
+            date_str = sched[:10] if len(sched) >= 10 else ""
+            events.append({
+                "type": "scheduled",
+                "date": date_str,
+                "datetime": sched,
+                "run_plan_id": rp["id"],
+                "run_plan_name": rp.get("name", ""),
+                "schedule_triggered": rp.get("schedule_triggered", False),
+                "last_triggered": rp.get("last_triggered"),
+            })
+
+        return jsonify({"events": events, "run_plans": run_plans})
+    except Exception as e:
+        logger.error(f"Error building calendar data: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/run-plan/<run_plan_id>/schedule", methods=["PUT"])
+@jwt_required
+def schedule_run_plan(run_plan_id):
+    """Set or update the schedule_date on an existing run plan."""
+    try:
+        req_data = request.json
+        schedule_date = req_data.get("schedule_date")
+        if not schedule_date:
+            return jsonify({"error": "schedule_date is required"}), 400
+
+        data = load_run_plans()
+        for rp in data.get("run_plans", []):
+            if rp.get("id") == run_plan_id:
+                rp["schedule_date"] = schedule_date
+                rp["schedule_triggered"] = False
+                save_run_plans(data)
+                return jsonify({"success": True, "run_plan": rp})
+        return jsonify({"error": "Run plan not found"}), 404
+    except Exception as e:
+        logger.error(f"Error scheduling run plan: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 
 # ======================================================
 # Triage Genie Endpoints
@@ -5419,10 +5730,19 @@ def update_triage_comments():
         jira_ticket = data.get("jira_ticket")
         if not test_id:
             return jsonify({"error": "test_id is required"}), 400
-        triaged_by = os.getenv("TRIAGED_BY_USER", "sudharshan.musali")
+
+        # Use logged-in user's identity for triaged_by and Jita auth
+        current_username = g.current_user.get("sub", "")
+        user_auth = _get_user_credentials(current_username)
+        if not user_auth:
+            return jsonify({
+                "error": "Session credentials expired. Please re-login to update triage.",
+                "code": "CREDENTIALS_EXPIRED"
+            }), 401
+
         update_fields = {
             "comments": comment,
-            "triaged_by": triaged_by
+            "triaged_by": current_username
         }
         if jira_ticket is not None:
             update_fields["jira_ticket"] = jira_ticket
@@ -5436,12 +5756,12 @@ def update_triage_comments():
             url,
             headers={"Content-Type": "application/json"},
             json=payload,
-            auth=JITA_AUTH,
+            auth=user_auth,
             verify=False,
             timeout=30
         )
         if resp.status_code == 200:
-            return jsonify({"success": True, "message": "Updated"})
+            return jsonify({"success": True, "message": "Updated", "triaged_by": current_username})
         return jsonify({"error": resp.text or f"HTTP {resp.status_code}"}), resp.status_code if resp.status_code >= 400 else 500
     except Exception as e:
         logger.error(f"Error updating triage: {e}", exc_info=True)
@@ -5810,7 +6130,13 @@ def testcase_mgmt_get_testcases():
         ]
 
     if name_filter:
-        testcases = [tc for tc in testcases if name_filter in tc.get("name", "").lower()]
+        exact_match = request.args.get("exact_match", "false").lower() in ("1", "true", "yes")
+        name_terms = [t.strip() for t in name_filter.split(",") if t.strip()]
+        if name_terms:
+            if exact_match:
+                testcases = [tc for tc in testcases if tc.get("name", "").lower() in name_terms]
+            else:
+                testcases = [tc for tc in testcases if any(term in tc.get("name", "").lower() for term in name_terms)]
 
     if status_filter:
         testcases = [tc for tc in testcases if tc.get("last_status", "").lower() == status_filter.lower()]
@@ -9298,10 +9624,454 @@ def debug_inspect_jp(jp_id):
 
 
 # ======================================================
+# AI Analysis Endpoints
+# ======================================================
+
+def _call_ai_chat(system_prompt, user_content, max_tokens=2048):
+    """Helper to call the Nutanix AI chat endpoint."""
+    payload = {
+        "model": "hack-reason",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ],
+        "max_tokens": max_tokens,
+        "stream": False
+    }
+    url = f"{AI_BASE}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {AI_API_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, context=SSL_CTX, timeout=90) as resp:
+        if resp.getcode() != 200:
+            raise Exception(f"AI API returned HTTP {resp.getcode()}")
+        response_data = json.loads(resp.read().decode())
+        choices = response_data.get("choices", [])
+        if not choices:
+            raise Exception("AI returned no choices")
+        content = (choices[0].get("message") or {}).get("content", "")
+        return content.strip()
+
+
+@app.route("/mcp/regression/ai-analysis/bulk-issues", methods=["POST"])
+@app.route("/api/mcp/regression/ai-analysis/bulk-issues", methods=["POST"])
+@jwt_required
+def ai_analyze_bulk_issues():
+    """AI analysis for bulk issue JIRA tickets - analyzes patterns and provides risk assessment."""
+    try:
+        body = request.get_json(force=True) or {}
+        bulk_issues = body.get("bulk_issues", {})
+        bulk_issues_with_qi = body.get("bulk_issues_with_qi", {})
+        tag = body.get("tag", "")
+        total_tests = body.get("total_tests_processed", 0)
+
+        if not bulk_issues:
+            return jsonify({"error": "No bulk issues provided"}), 400
+
+        issue_detail_blocks = []
+        for ticket, tests in bulk_issues.items():
+            qi_data = bulk_issues_with_qi.get(ticket, {})
+            qi_impact = qi_data.get("overall_qi_impact", "N/A")
+            count = qi_data.get("testcase_count", len(tests)) if qi_data else len(tests)
+            tc_names = tests if isinstance(tests, list) else []
+            tc_sample = tc_names[:10]
+            tc_display = "\n".join(f"    - {name}" for name in tc_sample)
+            if len(tc_names) > 10:
+                tc_display += f"\n    ... and {len(tc_names) - 10} more"
+            issue_detail_blocks.append(
+                f"Ticket: {ticket}\n"
+                f"  Testcases Impacted: {count}\n"
+                f"  QI Impact: {qi_impact}{'%' if qi_impact != 'N/A' else ''}\n"
+                f"  Affected Testcases:\n{tc_display}"
+            )
+
+        user_content = (
+            f"Regression Tag: {tag}\n"
+            f"Total Tests in Run: {total_tests}\n"
+            f"Number of Bulk Issues (tickets affecting >5 testcases): {len(bulk_issues)}\n\n"
+            f"=== Bulk Issue Details ===\n\n" + "\n\n".join(issue_detail_blocks) + "\n\n"
+            "IMPORTANT: Use EXACTLY the ticket IDs and testcase counts from the data above. "
+            "Do NOT change or reorder the tickets. Analyse the actual testcase names to determine patterns.\n\n"
+            "For EACH ticket listed above (in the same order), provide:\n"
+            "1. Risk Level (Critical/High/Medium/Low) — based on testcase count and QI impact\n"
+            "2. Likely Root Cause Category — infer from the testcase names (e.g., if many share a common prefix or module)\n"
+            "3. Impact Assessment (one sentence)\n"
+            "4. Recommended Action\n\n"
+            "Then provide an overall summary:\n"
+            "- Overall Risk Score (0-100, where 100 is highest risk)\n"
+            "- Release Readiness assessment\n"
+            "- Top 3 priorities to address\n\n"
+            "Format using markdown. Use a table with columns: Ticket | Testcases Impacted | QI Impact | Risk Level | Root Cause Category | Impact | Action\n"
+            "The Ticket, Testcases Impacted, and QI Impact columns MUST match the input data exactly."
+        )
+
+        system_prompt = (
+            "You are a regression testing expert analyzing bulk failure patterns in a software QA pipeline. "
+            "Bulk issues are JIRA tickets that affect more than 5 testcases, indicating systemic problems. "
+            "QI Impact is the Quality Index impact - negative values mean the bug is reducing overall quality. "
+            "You MUST use the exact ticket IDs and counts provided — never invent or reorder them. "
+            "Infer likely root causes by analyzing the testcase names (common prefixes, modules, patterns). "
+            "Provide actionable, concise analysis. Use markdown tables for structured data."
+        )
+
+        analysis = _call_ai_chat(system_prompt, user_content)
+        return jsonify({"success": True, "analysis": analysis})
+
+    except Exception as e:
+        logger.error(f"Error in AI bulk issues analysis: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/jira-ticket-details", methods=["POST"])
+@app.route("/api/mcp/regression/jira-ticket-details", methods=["POST"])
+@jwt_required
+def get_jira_ticket_details():
+    """Fetch JIRA status and issue type for a list of ticket IDs."""
+    try:
+        body = request.get_json(force=True) or {}
+        ticket_ids = body.get("ticket_ids", [])
+        if not ticket_ids:
+            return jsonify({"error": "No ticket IDs provided"}), 400
+
+        results = {}
+        for ticket_id in ticket_ids[:50]:
+            jira_data = fetch_jira_ticket(ticket_id)
+            if jira_data:
+                fields = jira_data.get("fields", {})
+                results[ticket_id] = {
+                    "status": fields.get("status", {}).get("name", "Unknown"),
+                    "issue_type": fields.get("issuetype", {}).get("name", "Unknown")
+                }
+            else:
+                results[ticket_id] = {"status": "N/A", "issue_type": "N/A"}
+
+        return jsonify({"success": True, "details": results})
+    except Exception as e:
+        logger.error(f"Error fetching JIRA ticket details: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/ai-analysis/owner-tickets", methods=["POST"])
+@app.route("/api/mcp/regression/ai-analysis/owner-tickets", methods=["POST"])
+@jwt_required
+def ai_analyze_owner_tickets():
+    """AI analysis for owner-wise JIRA ticket breakdown with JIRA data fetch."""
+    try:
+        body = request.get_json(force=True) or {}
+        owner_ticket_map = body.get("owner_ticket_map", {})
+        triage_summary = body.get("triage_summary", {})
+        tag = body.get("tag", "")
+        total_tests = body.get("total_tests_processed", 0)
+
+        if not owner_ticket_map:
+            return jsonify({"error": "No owner ticket data provided"}), 400
+
+        # Collect all unique tickets and fetch JIRA data
+        all_tickets = set()
+        owner_for_ticket = {}
+        ticket_test_count = {}
+        for owner, tickets in owner_ticket_map.items():
+            for ticket, count in tickets.items():
+                all_tickets.add(ticket)
+                owner_for_ticket.setdefault(ticket, []).append(owner)
+                ticket_test_count[ticket] = ticket_test_count.get(ticket, 0) + count
+
+        # Fetch JIRA data for each ticket
+        jira_details = {}
+        for ticket_id in all_tickets:
+            jira_data = fetch_jira_ticket(ticket_id)
+            if jira_data:
+                fields = jira_data.get("fields", {})
+                status = fields.get("status", {}).get("name", "Unknown")
+                issue_type = fields.get("issuetype", {}).get("name", "Unknown")
+                summary = fields.get("summary", "")
+                description = (fields.get("description") or "")[:500]
+                priority = fields.get("priority", {}).get("name", "Unknown") if fields.get("priority") else "Unknown"
+                assignee = fields.get("assignee", {}).get("displayName", "Unassigned") if fields.get("assignee") else "Unassigned"
+                # Get latest comments
+                comments_data = fields.get("comment", {}).get("comments", [])
+                latest_comments = ""
+                for c in comments_data[-3:]:
+                    comment_body = (c.get("body") or "")[:200]
+                    latest_comments += f"  [{c.get('author', {}).get('displayName', 'Unknown')}]: {comment_body}\n"
+                jira_details[ticket_id] = {
+                    "status": status,
+                    "issue_type": issue_type,
+                    "summary": summary,
+                    "description": description,
+                    "priority": priority,
+                    "assignee": assignee,
+                    "comments": latest_comments.strip()
+                }
+            else:
+                jira_details[ticket_id] = {
+                    "status": "N/A",
+                    "issue_type": "N/A",
+                    "summary": "Unable to fetch",
+                    "description": "",
+                    "priority": "N/A",
+                    "assignee": "N/A",
+                    "comments": ""
+                }
+
+        # Build ticket detail lines for AI
+        ticket_detail_lines = []
+        for ticket_id in sorted(all_tickets):
+            jd = jira_details[ticket_id]
+            owners = ", ".join(owner_for_ticket.get(ticket_id, []))
+            tc_count = ticket_test_count.get(ticket_id, 0)
+            detail = (
+                f"Ticket: {ticket_id}\n"
+                f"  Owners: {owners}\n"
+                f"  Testcases Impacted: {tc_count}\n"
+                f"  JIRA Status: {jd['status']}\n"
+                f"  JIRA Issue Type: {jd['issue_type']}\n"
+                f"  Priority: {jd['priority']}\n"
+                f"  Assignee: {jd['assignee']}\n"
+                f"  Summary: {jd['summary']}\n"
+            )
+            if jd['description']:
+                detail += f"  Description: {jd['description'][:300]}\n"
+            if jd['comments']:
+                detail += f"  Latest Comments:\n{jd['comments']}\n"
+            ticket_detail_lines.append(detail)
+
+        user_content = (
+            f"Regression Tag: {tag}\n"
+            f"Total Tests in Run: {total_tests}\n"
+            f"Total Owners: {len(owner_ticket_map)}\n"
+            f"Total Unique Tickets: {len(all_tickets)}\n\n"
+            f"=== Ticket Details with JIRA Data ===\n\n"
+            + "\n".join(ticket_detail_lines) + "\n\n"
+            "Based on the JIRA data (status, description, comments), create a comprehensive analysis table:\n\n"
+            "Create a markdown table with these columns:\n"
+            "| Ticket ID | Owner | Status | Issue Type | Root Cause Category | Impact | AI Recommended Action |\n\n"
+            "For Root Cause Category, classify as one of: Product | Test | Infra | Framework\n"
+            "- Product: Bug in product code causing test failure\n"
+            "- Test: Test code issue (flaky, outdated assertions, bad test data)\n"
+            "- Infra: Infrastructure problem (environment, network, resources)\n"
+            "- Framework: Test framework issue (automation framework, libraries)\n\n"
+            "Base your classification on the JIRA description, comments, and issue type.\n"
+            "For Impact, one sentence on what this ticket affects.\n"
+            "For AI Recommended Action, provide a specific action based on the ticket status:\n"
+            "- If Open/To Do: suggest priority and who should work on it\n"
+            "- If In Progress: assess if it's on track\n"
+            "- If Resolved/Closed: suggest verifying the fix and closing test gaps\n\n"
+            "After the table, provide:\n"
+            "1. **Summary** — Overall triage health assessment\n"
+            "2. **Top 3 Priority Actions** — Most impactful actions to take now\n\n"
+            "Use the EXACT ticket IDs, owner names, and status from the data."
+        )
+
+        system_prompt = (
+            "You are a QA team lead analyzing JIRA tickets linked to regression test failures. "
+            "You have access to real JIRA data including status, description, and comments. "
+            "Classify each ticket's root cause category (Product/Test/Infra/Framework) based on the JIRA content. "
+            "Provide specific, actionable recommendations based on ticket status and context. "
+            "Use markdown tables. Use the exact ticket IDs and data provided — never invent data."
+        )
+
+        analysis = _call_ai_chat(system_prompt, user_content)
+
+        # Return both analysis and jira_details for the frontend table
+        return jsonify({
+            "success": True,
+            "analysis": analysis,
+            "jira_details": jira_details
+        })
+
+    except Exception as e:
+        logger.error(f"Error in AI owner tickets analysis: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/ai-analysis/testcase-summary", methods=["POST"])
+@app.route("/api/mcp/regression/ai-analysis/testcase-summary", methods=["POST"])
+@jwt_required
+def ai_analyze_testcases():
+    """AI analysis for ALL filtered testcase data across all pages - overall health, patterns, and recommendations."""
+    try:
+        body = request.get_json(force=True) or {}
+        stats = body.get("stats", {})
+        failed_testcases = body.get("failed_testcases", [])
+        branch = body.get("branch", "")
+        team = body.get("team", "")
+
+        total = stats.get("total", 0)
+        succeeded = stats.get("succeeded", 0)
+        failed = stats.get("failed", 0)
+        avg_stability = stats.get("avg_stability", "N/A")
+        avg_success = stats.get("avg_success", "N/A")
+        avg_qi = stats.get("avg_qi", "N/A")
+
+        issue_type_breakdown = stats.get("issue_type_breakdown", {})
+        component_breakdown = stats.get("component_breakdown", {})
+        unique_tickets = stats.get("unique_tickets", [])
+
+        if not issue_type_breakdown:
+            for tc in failed_testcases:
+                it = tc.get("issue_type", "Unknown")
+                issue_type_breakdown[it] = issue_type_breakdown.get(it, 0) + 1
+
+        if not unique_tickets:
+            ticket_set = set()
+            for tc in failed_testcases:
+                for t in tc.get("last_run_tickets", []):
+                    ticket_set.add(t)
+            unique_tickets = list(ticket_set)
+
+        failed_details = []
+        for tc in failed_testcases[:50]:
+            failed_details.append(
+                f"  - {tc.get('name', 'Unknown')}: issue_type={tc.get('issue_type', 'N/A')}, "
+                f"stability={tc.get('stability', 'N/A')}%, component={tc.get('primary_component', 'N/A')}, "
+                f"tickets={tc.get('last_run_tickets', [])}"
+            )
+
+        component_lines = "\n".join(
+            f"  {k}: {v} failed testcases" for k, v in sorted(component_breakdown.items(), key=lambda x: -x[1])[:15]
+        ) if component_breakdown else "  No component data available"
+
+        user_content = (
+            f"Branch: {branch}\nTeam: {team}\n\n"
+            f"=== Complete Test Suite Statistics (ALL filtered pages) ===\n"
+            f"Total Testcases (all pages): {total}\n"
+            f"Succeeded: {succeeded}\n"
+            f"Failed: {failed}\n"
+            f"Pass Rate: {(succeeded/total*100) if total else 0:.1f}%\n"
+            f"Avg Stability: {avg_stability}%\n"
+            f"Avg Success Rate: {avg_success}%\n"
+            f"Avg Quality Index: {avg_qi}%\n\n"
+            f"=== Issue Type Breakdown (ALL {failed} failed testcases) ===\n"
+            + "\n".join(f"  {k}: {v}" for k, v in issue_type_breakdown.items()) + "\n\n"
+            f"=== Component Breakdown (failed testcases by component) ===\n"
+            + component_lines + "\n\n"
+            f"=== Unique JIRA Tickets ({len(unique_tickets)}) ===\n"
+            + ", ".join(unique_tickets[:30]) + "\n\n"
+            f"=== Failed Testcase Samples (top 50 of {failed} total) ===\n"
+            + "\n".join(failed_details) + "\n\n"
+            "Provide a comprehensive analysis of the ENTIRE filtered dataset using markdown formatting with tables:\n"
+            "1. **Overall Health Assessment** - Use a table with Metric/Value/Interpretation columns\n"
+            "2. **Failure Pattern Analysis** - Common patterns across ALL failed testcases, systemic issues\n"
+            "3. **Issue Type Summary** - Use a table with Issue Type/Count/Percentage/Comment columns\n"
+            "4. **Component Risk Areas** - Table of components with highest failure concentration\n"
+            "5. **Ticket Analysis** - Assessment of JIRA tickets linked to failed tests in a table\n"
+            "6. **Recommendations** - Top 5 actionable items to improve test health\n"
+            "7. **Risk Score** - Overall risk score 0-100 (100=highest risk)\n"
+        )
+
+        system_prompt = (
+            "You are a QA analytics expert analyzing testcase data for a regression test suite. "
+            "The data represents ALL filtered testcases across all pages (not just the first page). "
+            "Provide actionable insights with specific recommendations. "
+            "Focus on identifying systemic issues, high-risk areas, and concrete steps to improve. "
+            "Use markdown formatting with tables (using | syntax) for structured data. "
+            "Be concise but thorough."
+        )
+
+        analysis = _call_ai_chat(system_prompt, user_content)
+        return jsonify({"success": True, "analysis": analysis})
+
+    except Exception as e:
+        logger.error(f"Error in AI testcase analysis: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/ai-analysis/run-plan-risk", methods=["POST"])
+@app.route("/api/mcp/regression/ai-analysis/run-plan-risk", methods=["POST"])
+@jwt_required
+def ai_run_plan_risk():
+    """AI risk analysis for a run plan based on its history and job profiles."""
+    try:
+        body = request.get_json(force=True) or {}
+        run_plan_name = body.get("name", "")
+        job_profile_count = body.get("job_profile_count", 0)
+        history = body.get("history", [])
+        tag_name = body.get("tag_name", "")
+
+        history_summary = []
+        success_count = 0
+        fail_count = 0
+        for entry in history[:10]:
+            status = entry.get("status", "unknown")
+            if status.lower() in ("success", "completed", "succeeded"):
+                success_count += 1
+            else:
+                fail_count += 1
+            history_summary.append(
+                f"  - Date: {entry.get('triggered_at', 'N/A')}, Status: {status}, "
+                f"Tasks: {len(entry.get('task_ids', []))}"
+            )
+
+        total_runs = success_count + fail_count
+        success_rate = (success_count / total_runs * 100) if total_runs else 0
+
+        user_content = (
+            f"Run Plan: {run_plan_name}\n"
+            f"Tag Name: {tag_name}\n"
+            f"Job Profiles: {job_profile_count}\n\n"
+            f"=== Run History (last {len(history[:10])} runs) ===\n"
+            f"Success Rate: {success_rate:.0f}% ({success_count}/{total_runs})\n"
+            + "\n".join(history_summary) + "\n\n"
+            "Provide using markdown formatting:\n"
+            "1. **Risk Score** (0-100, where 100 is highest risk)\n"
+            "2. **Risk Level** (Low/Medium/High/Critical)\n"
+            "3. **Confidence** (High/Medium/Low based on data available)\n"
+            "4. **Key Factors** - What contributes to the risk\n"
+            "5. **Recommendation** - One sentence actionable advice\n\n"
+            "Keep the response concise (under 200 words). Use a summary table."
+        )
+
+        system_prompt = (
+            "You are a regression testing risk analyst. Given run plan history, estimate "
+            "the risk of the next scheduled run failing. Consider success rate trends, "
+            "task counts, and patterns. Provide a numeric risk score and brief assessment. "
+            "Use markdown formatting with tables. Be direct and actionable."
+        )
+
+        analysis = _call_ai_chat(system_prompt, user_content, max_tokens=512)
+
+        risk_score_match = re.search(r"Risk Score[:\s]*(\d+)", analysis)
+        risk_score = int(risk_score_match.group(1)) if risk_score_match else (
+            90 if fail_count > success_count else
+            60 if success_rate < 70 else
+            30 if success_rate < 90 else 15
+        )
+
+        risk_level_match = re.search(r"Risk Level[:\s]*(Critical|High|Medium|Low)", analysis, re.IGNORECASE)
+        risk_level = risk_level_match.group(1) if risk_level_match else (
+            "Critical" if risk_score >= 80 else
+            "High" if risk_score >= 60 else
+            "Medium" if risk_score >= 40 else "Low"
+        )
+
+        return jsonify({
+            "success": True,
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "analysis": analysis,
+            "success_rate": round(success_rate, 1),
+            "total_runs": total_runs
+        })
+
+    except Exception as e:
+        logger.error(f"Error in AI run plan risk analysis: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
 # App Runner
 # ======================================================
 if __name__ == "__main__":
+    scheduler_thread = threading.Thread(target=_run_plan_scheduler_loop, daemon=True)
+    scheduler_thread.start()
+    logger.info(f"[scheduler] Started — checking every {SCHEDULER_INTERVAL_SECONDS}s for due scheduled run plans")
+
     host = os.getenv("FLASK_HOST", "0.0.0.0")
     port = int(os.getenv("FLASK_PORT", "5001"))
     debug = os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1", "yes")
-    app.run(host=host, port=port, debug=debug)
+    app.run(host=host, port=port, debug=debug, use_reloader=False)

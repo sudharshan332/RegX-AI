@@ -1,10 +1,10 @@
 {
   "input_mode": "tag",
-  "default_tag": "master|cdp-apr-25-2026|full_reg",
+  "default_tag": "7.6|reg3-apr-17-2026",
   "added_tags": [
-    "master|cdp-apr-25-2026|full_reg",
-    "7.6|reg3-apr-17-2026"
+    "7.6|reg3-apr-17-2026",
+    "7.6|reg1-mar-17-2026"
   ],
-  "tag": "master|cdp-apr-25-2026|full_reg",
+  "tag": "7.6|reg3-apr-17-2026",
   "task_ids": []
 }
