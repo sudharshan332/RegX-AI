@@ -1,10 +1,13 @@
 {
   "input_mode": "tag",
-  "default_tag": "7.6|reg3-apr-17-2026",
+  "default_tag": "7.6|RC2-june-29-2026",
   "added_tags": [
-    "7.6|reg3-apr-17-2026",
-    "7.6|reg1-mar-17-2026"
+    "master|cdp-apr-25-2026|full_reg",
+    "7.6|reg4-may-21-2026",
+    "central_regression_dry_run_cdp|11-jun-2026",
+    "7.6|RC1-june-15-2026",
+    "7.6|RC2-june-29-2026"
   ],
-  "tag": "7.6|reg3-apr-17-2026",
+  "tag": "7.6|RC2-june-29-2026",
   "task_ids": []
 }

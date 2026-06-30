@@ -8,10 +8,12 @@
       ],
       "nos_commit": null,
       "tag_name": "testtrigger_1769659267445",
-      "schedule_date": "2026-05-21T09:00",
+      "schedule_date": null,
       "created_at": "2026-01-29T00:36:37.170735",
-      "last_triggered": "2026-05-21T06:15:10.543258",
-      "schedule_triggered": false
+      "last_triggered": "2026-05-21T21:41:31.851347",
+      "schedule_triggered": false,
+      "branch": "",
+      "service_account": ""
     },
     {
       "id": "1770700028806",
@@ -69,10 +71,12 @@
         "696f5924d24d8280c39bb3f8"
       ],
       "tag_name": "Run2_1770700028798",
-      "schedule_date": "2026-02-11T10:37",
+      "schedule_date": null,
       "created_at": "2026-02-10T10:37:08.807010",
-      "last_triggered": "2026-05-20T10:57:08.913175",
-      "schedule_triggered": true
+      "last_triggered": "2026-05-21T21:42:38.983872",
+      "schedule_triggered": false,
+      "branch": "",
+      "service_account": ""
     },
     {
       "id": "1770700774865",
@@ -130,10 +134,12 @@
         "696f5924d24d8280c39bb3f8"
       ],
       "tag_name": "Run2_1770700774865",
-      "schedule_date": "2026-02-11T10:37",
+      "schedule_date": null,
       "created_at": "2026-02-10T10:49:34.865729",
       "last_triggered": "2026-05-20T10:57:17.685215",
-      "schedule_triggered": true
+      "schedule_triggered": false,
+      "branch": "",
+      "service_account": ""
     },
     {
       "id": "1771833330862",
@@ -161,10 +167,12 @@
         "6970a4c5b5e4759e4a318b05"
       ],
       "tag_name": "Run3_1771833330852",
-      "schedule_date": "2026-02-23T13:25",
+      "schedule_date": null,
       "created_at": "2026-02-23T13:25:30.862902",
-      "last_triggered": "2026-05-20T10:57:21.877643",
-      "schedule_triggered": true
+      "last_triggered": "2026-05-21T21:42:42.550818",
+      "schedule_triggered": false,
+      "branch": "",
+      "service_account": ""
     },
     {
       "id": "1771834822321",
@@ -176,38 +184,48 @@
         "698077578e79ce94f2d2a819"
       ],
       "tag_name": "751GSRun3_1771834822314",
-      "schedule_date": "2026-02-23T13:50",
+      "schedule_date": null,
       "created_at": "2026-02-23T13:50:22.321560",
-      "last_triggered": "2026-05-20T10:57:22.800988",
-      "schedule_triggered": true
+      "last_triggered": "2026-05-21T21:42:43.382913",
+      "schedule_triggered": false,
+      "branch": "",
+      "service_account": ""
     },
     {
       "id": "1773160958063",
       "name": "CDP_Regression_751Upgrade",
       "job_profiles": [
-        "696f5d5eb5e4750316f2b442",
-        "696f5d00d24d8280b120945e",
-        "696f5ca0b5e47503240d6f4f",
         "696f5a058e79ce6b35196dcb",
-        "696f5e18d24d8280bafb2601",
         "696f5c578e79ce6b2e8839ad",
+        "696f5ca0b5e47503240d6f4f",
+        "696f5d00d24d8280b120945e",
+        "696f5d5eb5e4750316f2b442",
+        "696f5e18d24d8280bafb2601",
         "696f5e89b5e47503240d6ff7"
       ],
       "tag_name": "751Upgrade_1773160958045",
       "schedule_date": null,
       "created_at": "2026-03-10T22:12:38.063525",
-      "last_triggered": null
+      "last_triggered": null,
+      "schedule_triggered": false,
+      "branch": "",
+      "service_account": ""
     },
     {
       "id": "1777389873143",
       "name": "test10",
       "job_profiles": [
-        "69ba1be02bc0c45a3c1f1c00"
+        "69ba1be02bc0c45a3c1f1c00",
+        "6a25cd7d2bc0c4cb84995d2f",
+        "68e55d5d2bc0c47ea1a67f68"
       ],
       "tag_name": "test10_1777389873143",
       "schedule_date": null,
       "created_at": "2026-04-28T15:24:33.143939",
-      "last_triggered": null
+      "last_triggered": null,
+      "schedule_triggered": false,
+      "branch": "",
+      "service_account": ""
     },
     {
       "id": "1777390548476",
@@ -235,7 +253,10 @@
       "tag_name": "10_1777390548476",
       "schedule_date": null,
       "created_at": "2026-04-28T15:35:48.476090",
-      "last_triggered": null
+      "last_triggered": null,
+      "schedule_triggered": false,
+      "branch": "",
+      "service_account": ""
     },
     {
       "id": "1777391598101",
@@ -246,6 +267,297 @@
       "tag_name": "test11_1777391598101",
       "schedule_date": null,
       "created_at": "2026-04-28T15:53:18.101874",
+      "last_triggered": null,
+      "schedule_triggered": false,
+      "branch": "",
+      "service_account": ""
+    },
+    {
+      "id": "1779349140341",
+      "name": "CDP_Regression_Master_Upgrade",
+      "job_profiles": [
+        "684d152b8e79ce43c69eddcb",
+        "684d15ecb5e475f67eb611e1",
+        "684d16272bc0c4b60574d75d",
+        "684d165eb5e475f6670c2bc5",
+        "684d1695b5e475f66e45784f",
+        "684d16d88e79ce43bc7f646a",
+        "684d1712d24d8251dcd95daf"
+      ],
+      "tag_name": "Upgrade_1779349139707",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "created_at": "2026-05-21T07:39:00.341462",
+      "last_triggered": "2026-05-21T11:30:27.963327",
+      "branch": "",
+      "service_account": ""
+    },
+    {
+      "id": "1779356172021",
+      "name": "CDP_LRIO_7.6.x",
+      "job_profiles": [
+        "69b5b7ccb5e475fe8060bab8",
+        "69b5b63cb5e475fe67faccfe",
+        "69b5b5c38e79ceaa8eac0f00",
+        "69b5b726d24d825b0ec35bd2",
+        "69b5b6018e79ceaa7fc74d73",
+        "69b5b6f62bc0c4708a0fa560",
+        "69b5b78a2bc0c470a57434dc"
+      ],
+      "tag_name": "7.6.x_1779356171371",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "created_at": "2026-05-21T09:36:12.021233",
+      "last_triggered": "2026-05-21T11:02:03.813744",
+      "branch": "",
+      "service_account": ""
+    },
+    {
+      "id": "1779363634954",
+      "name": "CDP_Regression_76_AHV_RC2",
+      "job_profiles": [
+        "69ba1b1f2bc0c45a4d21a698",
+        "69ba1b7f8e79ceaa614d6b67",
+        "69ba1be02bc0c45a3c1f1c00",
+        "69ba1c212bc0c45a46fd3e62",
+        "69ba1c4f2bc0c45a3909fdb8",
+        "69ba1c7a2bc0c45a3909fdc7",
+        "69ba1cbc2bc0c45a46fd3e95",
+        "69ba1cf68e79ceaa5effe7cd",
+        "69ba1d77d24d8219afd18fef",
+        "69ba1dff2bc0c45a48c8ac22",
+        "69ba1e9cd24d8219a3027381",
+        "69ba1ed38e79ceaa77646d78",
+        "69ba1f748e79ceaa7ac48c7a",
+        "69ba1fd48e79ceaa6cbae6cc"
+      ],
+      "tag_name": "Run4_1779363634434",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "created_at": "2026-05-21T11:40:34.954240",
+      "last_triggered": "2026-06-29T14:36:04.343620",
+      "branch": "ganges-7.6-stable",
+      "service_account": ""
+    },
+    {
+      "id": "1779419522418",
+      "name": "CDP_Regression_MasterFullAHV",
+      "branch": "master",
+      "job_profiles": [
+        "6773bba9b5e475c3f87e5334",
+        "682223bcd24d82121ac70b99",
+        "6773ba9fb5e475c3edd313d4",
+        "678532b4b5e4751edcf11e18",
+        "68221a9bd24d8212154d0f44",
+        "6773bc668e79ce91beab8951",
+        "6773bdfe8e79ce8583230a2d",
+        "6773ce1ed24d82c915aec2d8",
+        "6996a9b8b5e4756afa0caf22",
+        "6773c35c2bc0c4e6bff8aff8",
+        "67b44d338e79ced072a285e1",
+        "699cadcb2bc0c4ccb4b1dc89",
+        "6773c1012bc0c4e6a5081c62",
+        "67ef8e98b5e475b1011cf562",
+        "6773c7d4d24d82c905d9dc48",
+        "6773c6fbd24d82c919eab2cb",
+        "67cedfc4b5e47552ea801035",
+        "6773c76fd24d82c91a1baff0"
+      ],
+      "tag_name": "MasterFullAHV_1779419521849",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "created_at": "2026-05-22T03:12:02.418946",
+      "last_triggered": null,
+      "service_account": ""
+    },
+    {
+      "id": "1779419663537",
+      "name": "CDP_Regression_MasterExternalStorage",
+      "branch": "master",
+      "job_profiles": [
+        "69c3991e2bc0c40861578743",
+        "69c39a44b5e47588c9a84572",
+        "69c39aa7b5e47588c7e20c3b",
+        "69c39a778e79ce1e52ac1e08",
+        "69c39a138e79ce1e6d714461"
+      ],
+      "tag_name": "MasterExternalStorage_1779419663236",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "created_at": "2026-05-22T03:14:23.537037",
+      "last_triggered": null,
+      "service_account": ""
+    },
+    {
+      "id": "1780497768683",
+      "name": "CDP_Regression_MasterCustomRunPlan",
+      "branch": "master",
+      "job_profiles": [
+        "6773bba9b5e475c3f87e5334",
+        "682223bcd24d82121ac70b99",
+        "6773ba9fb5e475c3edd313d4",
+        "678532b4b5e4751edcf11e18",
+        "68221a9bd24d8212154d0f44",
+        "6773bc668e79ce91beab8951",
+        "6773bdfe8e79ce8583230a2d",
+        "6773ce1ed24d82c915aec2d8",
+        "6996a9b8b5e4756afa0caf22",
+        "6773c35c2bc0c4e6bff8aff8",
+        "67b44d338e79ced072a285e1",
+        "6773bf552bc0c4e6c191ba9f",
+        "699cadcb2bc0c4ccb4b1dc89",
+        "6895ef092bc0c4bb03d1e315",
+        "6773c014b5e475c3fbf13faa",
+        "6773cbf02bc0c4e6b38953e0",
+        "67d7f202d24d82a208091389",
+        "6773c29fb5e475c3f53c9258",
+        "6773c1012bc0c4e6a5081c62",
+        "67ef8e98b5e475b1011cf562",
+        "6773c7d4d24d82c905d9dc48",
+        "6773c6fbd24d82c919eab2cb",
+        "67cedfc4b5e47552ea801035",
+        "6773c76fd24d82c91a1baff0",
+        "69c3991e2bc0c40861578743",
+        "69c39a44b5e47588c9a84572",
+        "69c39aa7b5e47588c7e20c3b",
+        "69c39a778e79ce1e52ac1e08",
+        "69c39a138e79ce1e6d714461"
+      ],
+      "tag_name": "MasterCustomRunPlan_1780497768255",
+      "schedule_date": "2026-06-13T12:25",
+      "schedule_triggered": true,
+      "service_account": "",
+      "created_at": "2026-06-03T14:42:48.683349",
+      "last_triggered": "2026-06-13T12:29:49.179993"
+    },
+    {
+      "id": "1780560814180",
+      "name": "CDP_Regression_76CustomRunPlan",
+      "branch": "ganges-7.6-stable",
+      "job_profiles": [
+        "69ba1b1f2bc0c45a4d21a698",
+        "69ba1b7f8e79ceaa614d6b67",
+        "69ba1be02bc0c45a3c1f1c00",
+        "69ba1c212bc0c45a46fd3e62",
+        "69ba1c4f2bc0c45a3909fdb8",
+        "69ba1c7a2bc0c45a3909fdc7",
+        "69ba1cbc2bc0c45a46fd3e95",
+        "69ba1cf68e79ceaa5effe7cd",
+        "69ba1d77d24d8219afd18fef",
+        "69ba1dff2bc0c45a48c8ac22",
+        "69ba1e9cd24d8219a3027381",
+        "69ba1ed38e79ceaa77646d78",
+        "69ba1f748e79ceaa7ac48c7a",
+        "69ba1fd48e79ceaa6cbae6cc"
+      ],
+      "tag_name": "Run4_1780560814180",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "created_at": "2026-06-04T08:13:34.180083",
+      "last_triggered": "2026-06-04T14:29:21.948199"
+    },
+    {
+      "id": "1781508709933",
+      "name": "CDP_Regression_76_ESX_RC2",
+      "branch": "ganges-7.6-stable",
+      "job_profiles": [
+        "69ba20252bc0c45a46fd3fa9",
+        "69ba207b2bc0c45a4d21a82c",
+        "69ba20f3b5e475e72a9848f0",
+        "69ba213bb5e475e718c55f61",
+        "69ba21742bc0c45a3bb2b90b"
+      ],
+      "tag_name": "RC1_1781508709526",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "svc.teamchandra",
+      "created_at": "2026-06-15T07:31:49.933727",
+      "last_triggered": null
+    },
+    {
+      "id": "1781509022605",
+      "name": "CDP_Regression_76_external_storage_RC2",
+      "branch": "ganges-7.6-stable",
+      "job_profiles": [
+        "69c0be542bc0c432b547783f",
+        "6a0c82cb2bc0c4aea5860b91",
+        "6a0c83712bc0c4aeae138078",
+        "6a0c83f9d24d820ef555640b",
+        "6a0c843f2bc0c4aeb93e1ef0"
+      ],
+      "tag_name": "storage_1781509022195",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "created_at": "2026-06-15T07:37:02.605213",
+      "last_triggered": "2026-06-29T08:48:23.391367"
+    },
+    {
+      "id": "1781509381579",
+      "name": "CDP_Regression_76_upgrade_AHV_RC2",
+      "branch": "ganges-7.6-stable",
+      "job_profiles": [
+        "69bd66bf8e79ceaa6bfd04ea",
+        "69bd683dd24d82e34a008606",
+        "69bd68d7b5e475b2c9dbb6d8",
+        "69bd696c2bc0c432f333d163",
+        "69bd6db3b5e475b2c241b453",
+        "69bd6e998e79ceaa671cb8b8",
+        "69bd6f608e79ceaa6bfd07b8",
+        "6a2961598e79ced01fe82b89"
+      ],
+      "tag_name": "storage_1781509381579",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "created_at": "2026-06-15T07:43:01.579945",
+      "last_triggered": "2026-06-29T06:33:28.790176"
+    },
+    {
+      "id": "1781513297610",
+      "name": "CDP_Regression_76_upgrade_ESX_RC2",
+      "branch": "ganges-7.6-stable",
+      "job_profiles": [
+        "69bd69d1d24d82e3493aaa6d",
+        "69bd6fe82bc0c432e92bd8ea"
+      ],
+      "tag_name": "RC1_1781513297610",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "svc.teamchandra",
+      "created_at": "2026-06-15T08:48:17.610220",
+      "last_triggered": null
+    },
+    {
+      "id": "1781614357262",
+      "name": "CDP_Regression_MasterFullAHV_clone",
+      "branch": "master",
+      "job_profiles": [
+        "6773bba9b5e475c3f87e5334",
+        "682223bcd24d82121ac70b99",
+        "6773ba9fb5e475c3edd313d4",
+        "678532b4b5e4751edcf11e18",
+        "68221a9bd24d8212154d0f44",
+        "6773bc668e79ce91beab8951",
+        "6773bdfe8e79ce8583230a2d",
+        "6773ce1ed24d82c915aec2d8",
+        "6996a9b8b5e4756afa0caf22",
+        "6773c35c2bc0c4e6bff8aff8",
+        "67b44d338e79ced072a285e1",
+        "699cadcb2bc0c4ccb4b1dc89",
+        "6773c1012bc0c4e6a5081c62",
+        "67ef8e98b5e475b1011cf562",
+        "6773c7d4d24d82c905d9dc48",
+        "6773c6fbd24d82c919eab2cb",
+        "67cedfc4b5e47552ea801035",
+        "6773c76fd24d82c91a1baff0"
+      ],
+      "tag_name": "MasterFullAHV_1781614357262",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "created_at": "2026-06-16T12:52:37.262894",
       "last_triggered": null
     }
   ],
@@ -770,7 +1082,7 @@
           "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 41 seconds before re-triggering or change configuration"
         }
       ],
-      "status": "partial"
+      "status": "killed"
     },
     {
       "id": "1779276937194",
@@ -790,6 +1102,597 @@
       "triggered_by": "scheduler (service account)",
       "task_ids": [
         "6a0deacd8e79ce26e7ed6932"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1779354690869",
+      "run_plan_id": "1769627197170",
+      "triggered_at": "2026-05-21T09:11:30.869099",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [
+        "6a0ecc42d24d825c86e07f56"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1779358192902",
+      "run_plan_id": "1779349140341",
+      "triggered_at": "2026-05-21T10:09:52.902112",
+      "triggered_by": "sudharshan.musali",
+      "task_ids": [
+        "6a0ed9ef8e79ce988f0ca321",
+        "6a0ed9ef2bc0c406d673b17b",
+        "6a0ed9efd24d825c8cc70b21",
+        "6a0ed9f0d24d825c86e086fd",
+        "6a0ed9f02bc0c406ccb8d6f5",
+        "6a0ed9f0d24d825c86e086ff",
+        "6a0ed9f02bc0c406cf080a0c"
+      ],
+      "failed_jobs": [],
+      "status": "killed"
+    },
+    {
+      "id": "1779361323813",
+      "run_plan_id": "1779356172021",
+      "triggered_at": "2026-05-21T11:02:03.813767",
+      "triggered_by": "sudharshan.musali",
+      "task_ids": [
+        "6a0ee62a8e79ce26d266573e",
+        "6a0ee62ab5e475c9e6588b6d",
+        "6a0ee62a2bc0c406d404c8d9",
+        "6a0ee62ab5e475c9ed6b451e",
+        "6a0ee62b8e79ce26ebcd77ca",
+        "6a0ee62a8e79ce84762c2dd2",
+        "6a0ee62b8e79ce26ef7c3ec6"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1779363027963",
+      "run_plan_id": "1779349140341",
+      "triggered_at": "2026-05-21T11:30:27.963357",
+      "triggered_by": "sudharshan.musali",
+      "task_ids": [
+        "6a0eecd2b5e475c9d99334ad",
+        "6a0eecd22bc0c406df575ff5",
+        "6a0eecd38e79ce26d9d44dde",
+        "6a0eecd38e79ce26dff05ab9",
+        "6a0eecd32bc0c406c78e5510",
+        "6a0eecd38e79ce9b9ad52063",
+        "6a0eecd38e79ce84762c324b"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1779364135589",
+      "run_plan_id": "1779363634954",
+      "triggered_at": "2026-05-21T11:48:55.589975",
+      "triggered_by": "shilpa.sattigeri",
+      "task_ids": [
+        "6a0ef11d2bc0c406d336ba57",
+        "6a0ef11dd24d825c8016efdb",
+        "6a0ef11d2bc0c406d8c45890",
+        "6a0ef11ed24d825c89bcdea0",
+        "6a0ef11fb5e475c9ef2c9c97",
+        "6a0ef11ed24d825c7ef9d28c",
+        "6a0ef11fb5e475c9f7d93c8a",
+        "6a0ef1202bc0c406d5ba8cf0",
+        "6a0ef120d24d825c8d5205fa",
+        "6a0ef1218e79ce26ea3f25cc",
+        "6a0ef122d24d825c83368332",
+        "6a0ef1228e79ce863335a103",
+        "6a0ef11fd24d825c86e09453",
+        "6a0ef11eb5e475c9eb2e2569"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1779399691851",
+      "run_plan_id": "1769627197170",
+      "triggered_at": "2026-05-21T21:41:31.851347",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [
+        "6a0f7c0b8e79ce26d266b0fd"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1779399758983",
+      "run_plan_id": "1770700028806",
+      "triggered_at": "2026-05-21T21:42:38.983872",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [
+        "6a0f7c0d8e79ce863335f428",
+        "6a0f7c0dd24d825c82d96f52",
+        "6a0f7c0f8e79ce26ee50ac8e",
+        "6a0f7c0f8e79ce26d9d4a354",
+        "6a0f7c11b5e475c9dd567d39",
+        "6a0f7c17b5e475c9ed6b981a",
+        "6a0f7c198e79ce26e63be467",
+        "6a0f7c1ab5e475c9e970478e",
+        "6a0f7c1b8e79ce95c33ace51",
+        "6a0f7c1c2bc0c406ccb9290d",
+        "6a0f7c1d8e79ce26ddc4386d",
+        "6a0f7c1e2bc0c406d5bad3c2",
+        "6a0f7c1fd24d825c9702daff",
+        "6a0f7c202bc0c406ccb9291e",
+        "6a0f7c212bc0c406d337012a",
+        "6a0f7c21b5e475c9dcfbc051",
+        "6a0f7c232bc0c406d7b218c5",
+        "6a0f7c24b5e475c9e2436466",
+        "6a0f7c252bc0c406dba91623",
+        "6a0f7c268e79ce89e13c9ea4",
+        "6a0f7c28b5e475c9eb2e74ff",
+        "6a0f7c2b8e79ce26ecd745ab",
+        "6a0f7c2d2bc0c406d7b218f5",
+        "6a0f7c2eb5e475c9f4d07481",
+        "6a0f7c2f8e79ce26e1f6570b",
+        "6a0f7c31b5e475c9e0fafd23",
+        "6a0f7c338e79ce8f83103cfa",
+        "6a0f7c348e79ce863335f447",
+        "6a0f7c358e79ce863335f453",
+        "6a0f7c36b5e475c9f360962c",
+        "6a0f7c372bc0c406cd59e4f7",
+        "6a0f7c382bc0c406c91b14b5",
+        "6a0f7c3ad24d825c90483e6f",
+        "6a0f7c3bb5e475c9f1e8354b",
+        "6a0f7c3c2bc0c406d3370142",
+        "6a0f7c3eb5e475c9e1947025",
+        "6a0f7c3fb5e475c9f2339301",
+        "6a0f7c40b5e475c9f56a7ce8",
+        "6a0f7c41b5e475c9ef2cea5f",
+        "6a0f7c412bc0c406d1b2a190",
+        "6a0f7c428e79ce26ddc4388d",
+        "6a0f7c432bc0c406deaee088",
+        "6a0f7c44d24d825c7efa1c50",
+        "6a0f7c468e79ce26d9d4a376",
+        "6a0f7c4b8e79ce26e0f25897",
+        "6a0f7c4d8e79ce26da45fc6a"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "696f5ca0b5e47503240d6f4f",
+          "success": false,
+          "error": "Failed to trigger job: No commit exists with build tagged as SMOKE_PASSED for Product : aos"
+        },
+        {
+          "job_id": "696f5d5eb5e4750316f2b442",
+          "success": false,
+          "error": "Failed to trigger job: No commit exists with build tagged as SMOKE_PASSED for Product : aos"
+        },
+        {
+          "job_id": "696f5e18d24d8280bafb2601",
+          "success": false,
+          "error": "Failed to trigger job: No commit exists with build tagged as SMOKE_PASSED for Product : aos"
+        },
+        {
+          "job_id": "696f5e89b5e47503240d6ff7",
+          "success": false,
+          "error": "Failed to trigger job: No commit exists with build tagged as SMOKE_PASSED for Product : aos"
+        }
+      ],
+      "status": "killed"
+    },
+    {
+      "id": "1779399762550",
+      "run_plan_id": "1771833330862",
+      "triggered_at": "2026-05-21T21:42:42.550818",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [],
+      "failed_jobs": [
+        {
+          "job_id": "6970a282b5e4759e5a9325ee",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 13 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a1d82bc0c4fe1f6f4f85",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 11 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709f43b5e4759e4d556e11",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 4 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a23cd24d82176a39ea54",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 12 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a34cb5e4759e44b2492a",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 14 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a50e8e79ce6b38201e6f",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 22 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a557b5e4759e41c3e252",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 24 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a391d24d82176654aab6",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 15 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a46c8e79ce6b20f4960d",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 17 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709fac2bc0c4fe10fe4c71",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 5 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a015d24d82177aa4b6f9",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 6 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a0f88e79ce6b2917430d",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 7 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a0a42bc0c4fe097e9cac",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 6 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709d81d24d8217788c4210",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 54 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a164d24d821780c4aa3f",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 8 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a2d88e79ce6b291743ac",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 11 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709ebf2bc0c4fe218f26e4",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 1 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "69709e318e79ce6b2d11cace",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 54 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a41dd24d821772f10716",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 15 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6970a4c5b5e4759e4a318b05",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 4 minutes 17 seconds before re-triggering or change configuration"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1779399763382",
+      "run_plan_id": "1771834822321",
+      "triggered_at": "2026-05-21T21:42:43.382913",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [
+        "6a0f7c538e79ce9b9ad576af"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "6980793c2bc0c487ab869e7f",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 50 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "6980796b8e79ce35e9382967",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 51 seconds before re-triggering or change configuration"
+        },
+        {
+          "job_id": "698077578e79ce94f2d2a819",
+          "success": false,
+          "error": "Failed to trigger job: Job profile triggered recently with same configuration. Please wait for 3 minutes 48 seconds before re-triggering or change configuration"
+        }
+      ],
+      "status": "killed"
+    },
+    {
+      "id": "1780498203832",
+      "run_plan_id": "1780497768683",
+      "triggered_at": "2026-06-03T14:50:03.832418",
+      "triggered_by": "sudharshan.musali",
+      "task_ids": [
+        "6a203f10d24d8210cdd1f1ea",
+        "6a203f10b5e475cee149fbf2",
+        "6a203f108e79ce9315e64bbe",
+        "6a203f102bc0c4df6993d747",
+        "6a203f112bc0c4df5f85bf30",
+        "6a203f128e79ce9315e64bc8",
+        "6a203f128e79ce9315e64bf6",
+        "6a203f12d24d8210bb3dcabb",
+        "6a203f12d24d8210c973f957",
+        "6a203f13b5e475ceda82f274",
+        "6a203f12b5e475cede2d38f4",
+        "6a203f132bc0c4df4c2f48b1",
+        "6a203f138e79ce9318520bf0",
+        "6a203f132bc0c4df4c2f489a",
+        "6a203f14b5e475cecddd6d24",
+        "6a203f142bc0c4df62a200ca",
+        "6a203f148e79ce931f9b10d2",
+        "6a203f14b5e475ced8b5445f",
+        "6a203f14b5e475cee3ae9881",
+        "6a203f15d24d8210c2d4678d",
+        "6a203f158e79ce931a335b2d",
+        "6a203f162bc0c4df5c9dbab2",
+        "6a203f16b5e475cee57a0937",
+        "6a203f17d24d8210cac5b228",
+        "6a203f178e79ce932c4d1ee8",
+        "6a203f17b5e475ced390fe58",
+        "6a203f15d24d8210c101dedd",
+        "6a203f162bc0c4df5c9dbab4"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "699cadcb2bc0c4ccb4b1dc89",
+          "success": false,
+          "error": "Failed to trigger job: Invalid clusters: auto_cluster_prod_shilpa_sattigeri_e92affaa83f0,auto_cluster_prod_shilpa_sattigeri_3617062a32d1"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1780583361948",
+      "run_plan_id": "1780560814180",
+      "triggered_at": "2026-06-04T14:29:21.948223",
+      "triggered_by": "shilpa.sattigeri",
+      "task_ids": [
+        "6a218baeb5e47507e76cde21",
+        "6a218bafb5e47507e14b94e0",
+        "6a218baed24d8244aa9ca324",
+        "6a218bb02bc0c416f014be98",
+        "6a218bb18e79ce9326271bdf",
+        "6a218bb2b5e47507cf693b77",
+        "6a218bafd24d824491a06e67",
+        "6a218bb4d24d824498de1178",
+        "6a218bb58e79ce93174a1f80",
+        "6a218bb4d24d82449fbc4b2d",
+        "6a218bb68e79ce9321a81b8a",
+        "6a218bb72bc0c416e738a86f",
+        "6a218bb08e79ce932c4d9e01",
+        "6a218bb0d24d824491a06e75"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1781333749376",
+      "run_plan_id": "1780497768683",
+      "triggered_at": "2026-06-13T06:55:49.376948",
+      "triggered_by": "sudharshan.musali",
+      "task_ids": [
+        "6a2cfeead24d82dcab78d8f5",
+        "6a2cfeead24d82dc9b1252fe",
+        "6a2cfeea2bc0c4cee100a400",
+        "6a2cfeeab5e475dc59462be2",
+        "6a2cfeeab5e475dc59462be4",
+        "6a2cfeeb2bc0c4ced9b0224c",
+        "6a2cfeebd24d82dca9412411",
+        "6a2cfeec2bc0c4ced8ad6550",
+        "6a2cfeebd24d82dc93a0ddc2",
+        "6a2cfeec8e79ce4b823dc5a8",
+        "6a2cfeecb5e475dc5e2f70ea",
+        "6a2cfeecb5e475dc5702c5fd",
+        "6a2cfeed8e79ce2510fd4560",
+        "6a2cfeedd24d82dc93a0de24",
+        "6a2cfeed2bc0c4ceeab021af",
+        "6a2cfeed2bc0c4cee6121394",
+        "6a2cfeedd24d82dc98a9bac8",
+        "6a2cfeed2bc0c4ced6df3e07",
+        "6a2cfeeeb5e475dc6eec7361",
+        "6a2cfeeed24d82dc9d8745ec",
+        "6a2cfeef2bc0c4ceeba540f7",
+        "6a2cfeef2bc0c4ceeab021bf",
+        "6a2cfef02bc0c4cee5215965",
+        "6a2cfef0d24d82dc96af7ef0",
+        "6a2cfef0d24d82dc97e9bcbd",
+        "6a2cfef12bc0c4cef3aaf127",
+        "6a2cfeefd24d82dca19db314",
+        "6a2cfeef2bc0c4cedd51671d"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "699cadcb2bc0c4ccb4b1dc89",
+          "success": false,
+          "error": "Failed to trigger job: Invalid clusters: auto_cluster_prod_shilpa_sattigeri_e92affaa83f0,auto_cluster_prod_shilpa_sattigeri_3617062a32d1"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1781353789180",
+      "run_plan_id": "1780497768683",
+      "triggered_at": "2026-06-13T12:29:49.179993",
+      "triggered_by": "scheduler (service account)",
+      "task_ids": [
+        "6a2d4d1b8e79ce2510fd5dea",
+        "6a2d4d1cb5e475dc56857b2b",
+        "6a2d4d1d8e79cefc1536d154",
+        "6a2d4d1ed24d82dc8e4f1efd",
+        "6a2d4d1fb5e475dc64cc6429",
+        "6a2d4d20b5e475dc6d4ba674",
+        "6a2d4d212bc0c4ced5548d57",
+        "6a2d4d23d24d82dc91312734",
+        "6a2d4d248e79ced0292a2cd8",
+        "6a2d4d25b5e475dc6b7fdc7e",
+        "6a2d4d27d24d82dcaadf8716",
+        "6a2d4d278e79cefbc772271e",
+        "6a2d4d288e79ce52361df9fe",
+        "6a2d4d292bc0c4cee4449cf4",
+        "6a2d4d2a2bc0c4ceedee5a29",
+        "6a2d4d2ab5e475dc6d4ba6a7",
+        "6a2d4d2bb5e475dc7229f28a",
+        "6a2d4d2c2bc0c4cee100b97c",
+        "6a2d4d2db5e475dc6f971fdb",
+        "6a2d4d2ed24d82dcab78f064",
+        "6a2d4d30b5e475dc548a9344",
+        "6a2d4d35b5e475dc5c72d8fb",
+        "6a2d4d36d24d82dca4e7bf2f",
+        "6a2d4d398e79ce4b823dde1d",
+        "6a2d4d3ab5e475dc5faadc29",
+        "6a2d4d3bd24d82dc9b126a5c",
+        "6a2d4d3c2bc0c4ceec5a49aa",
+        "6a2d4d3d2bc0c4ceeab03698"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "699cadcb2bc0c4ccb4b1dc89",
+          "success": false,
+          "error": "Failed to trigger job: Invalid clusters: auto_cluster_prod_shilpa_sattigeri_e92affaa83f0,auto_cluster_prod_shilpa_sattigeri_3617062a32d1"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1781515041527",
+      "run_plan_id": "1781509381579",
+      "triggered_at": "2026-06-15T09:17:21.527172",
+      "triggered_by": "shilpa.sattigeri",
+      "task_ids": [
+        "6a2fc31eb5e47545c789cb99",
+        "6a2fc31f2bc0c439a0671da3",
+        "6a2fc320d24d82337681f69a",
+        "6a2fc320d24d82337681f699",
+        "6a2fc3212bc0c439aded7994",
+        "6a2fc3218e79cea9b5ce27ff",
+        "6a2fc321d24d8233781455de"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "69bd66bf8e79ceaa6bfd04ea",
+          "success": false,
+          "error": "Failed to trigger job: Incompatible PE-PC versions: PC branch ganges-7.5-stable-pc is not compatible with PE branch ganges-7.5.1-stable"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1781520656509",
+      "run_plan_id": "1781509022605",
+      "triggered_at": "2026-06-15T10:50:56.509903",
+      "triggered_by": "shilpa.sattigeri",
+      "task_ids": [
+        "6a2fd910b5e47545b8f65aa0",
+        "6a2fd910d24d82337681ff60",
+        "6a2fd910b5e47545b2c833ff",
+        "6a2fd9102bc0c439a52ab94f"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "6a0c82cb2bc0c4aea5860b91",
+          "success": false,
+          "error": "Failed to trigger job: No commit exists with build tagged as PC_SMOKE_PASSED for Product : pc"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1781524318861",
+      "run_plan_id": "1779363634954",
+      "triggered_at": "2026-06-15T11:51:58.861643",
+      "triggered_by": "shilpa.sattigeri",
+      "task_ids": [
+        "6a2fe73d2bc0c4399ad63ceb",
+        "6a2fe73d8e79cea9b654e285",
+        "6a2fe73db5e47545ca678ffc",
+        "6a2fe73ed24d82337af3858f",
+        "6a2fe73fd24d823387500eac",
+        "6a2fe73dd24d82337c7e5e18",
+        "6a2fe73fb5e47545c0e6ecd6",
+        "6a2fe742d24d82337b0580dc",
+        "6a2fe742d24d823387500edf",
+        "6a2fe7438e79cea9af7ca1ec",
+        "6a2fe742d24d8233747e9e05",
+        "6a2fe744b5e47545c9292bd7",
+        "6a2fe73fb5e47545cbf43113",
+        "6a2fe73e8e79cea9a8097a11"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1782714808790",
+      "run_plan_id": "1781509381579",
+      "triggered_at": "2026-06-29T06:33:28.790198",
+      "triggered_by": "shilpa.sattigeri",
+      "task_ids": [
+        "6a4211b7d24d827e36deed00",
+        "6a4211b7d24d827e1e725977",
+        "6a4211b72bc0c4cd864a084d",
+        "6a4211b72bc0c4cd6ea3afb6",
+        "6a4211b7b5e475f2e8cd77d8",
+        "6a4211b8b5e475f2e4d7a981",
+        "6a4211b8d24d827e35b9da13",
+        "6a4211b8b5e475f2e4d7a982"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1782722903391",
+      "run_plan_id": "1781509022605",
+      "triggered_at": "2026-06-29T08:48:23.391400",
+      "triggered_by": "shilpa.sattigeri",
+      "task_ids": [
+        "6a423156b5e475f2ce7f4e54",
+        "6a423156d24d827e31228a3e",
+        "6a4231562bc0c4cd71583d0a",
+        "6a423156d24d827e302e9e61",
+        "6a423157d24d827e336e7558"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1782743764343",
+      "run_plan_id": "1779363634954",
+      "triggered_at": "2026-06-29T14:36:04.343642",
+      "triggered_by": "shilpa.sattigeri",
+      "task_ids": [
+        "6a4282ccb5e4752b1a725922",
+        "6a4282ccb5e4752b16497ead",
+        "6a4282cd2bc0c403595d31ea",
+        "6a4282ce2bc0c4034a2fd4f5",
+        "6a4282cdd24d82ae5843774f",
+        "6a4282ced24d82ae5bc1aeb6",
+        "6a4282cfd24d82ae4d9a996f",
+        "6a4282cf8e79cee808b59b89",
+        "6a4282d02bc0c40349042ab6",
+        "6a4282ce2bc0c40352864511",
+        "6a4282d0b5e4752b0c3c1ec7",
+        "6a4282d08e79cee811d823b7",
+        "6a4282d12bc0c403561b32f6",
+        "6a4282ce2bc0c403595d31ee"
       ],
       "failed_jobs": [],
       "status": "success"

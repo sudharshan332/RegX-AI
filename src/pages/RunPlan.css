@@ -893,3 +893,245 @@
   cursor: pointer;
   font-size: 13px;
 }
+
+/* ── List Toolbar (filter + view toggle) ── */
+.list-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toolbar-right {
+  display: flex;
+  gap: 0;
+}
+
+.branch-filter-select {
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+  min-width: 180px;
+  background: white;
+}
+
+.branch-filter-select:focus {
+  outline: none;
+  border-color: #3498db;
+  box-shadow: 0 0 0 3px rgba(52,152,219,0.1);
+}
+
+.plan-count {
+  font-size: 13px;
+  color: #7f8c8d;
+}
+
+.view-toggle-btn {
+  padding: 8px 16px;
+  border: 1px solid #ddd;
+  background: white;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #555;
+  transition: all 0.15s;
+}
+
+.view-toggle-btn:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.view-toggle-btn:last-child {
+  border-radius: 0 4px 4px 0;
+  border-left: none;
+}
+
+.view-toggle-btn.active {
+  background: #34495e;
+  color: white;
+  border-color: #34495e;
+}
+
+/* ── Branch Tag ── */
+.branch-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  background: #eef2ff;
+  color: #3730a3;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.branch-tag.large {
+  font-size: 15px;
+  padding: 4px 14px;
+}
+
+/* ── Category View ── */
+.category-view {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.category-group {
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+.category-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 20px;
+  background: linear-gradient(135deg, #f0f4ff 0%, #e8ecf8 100%);
+  border-bottom: 1px solid #ddd;
+}
+
+.category-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.category-count {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.category-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.category-actions button {
+  padding: 7px 14px;
+  border: 1px solid #ddd;
+  background: white;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.category-actions button:hover {
+  background: #f0f0f0;
+  border-color: #3498db;
+}
+
+.category-table {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* ── Bulk Schedule Bar ── */
+.bulk-schedule-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  background: #fffbeb;
+  border-bottom: 1px solid #fde68a;
+}
+
+.bulk-schedule-bar input[type="datetime-local"] {
+  padding: 7px 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.bulk-schedule-bar button {
+  padding: 7px 14px;
+  border: 1px solid #ddd;
+  background: white;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* ── Schedule Date Row (edit form) ── */
+.schedule-date-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn-clear-schedule {
+  padding: 6px 14px;
+  background: #e74c3c;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+  transition: background 0.2s;
+}
+.btn-clear-schedule:hover {
+  background: #c0392b;
+}
+
+/* ── Missed Schedule Warning ── */
+.schedule-missed {
+  color: #e67e22;
+  font-weight: 600;
+}
+
+.schedule-warn-icon {
+  color: #e74c3c;
+  font-size: 16px;
+  margin-right: 5px;
+  vertical-align: middle;
+  animation: pulse-warn 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-warn {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.schedule-ok-icon {
+  color: #27ae60;
+  font-size: 14px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* ── Service Account ── */
+.svc-account-select {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+  background: white;
+}
+
+.svc-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6c3483;
+  background: #f4ecf7;
+  border: 1px solid #d2b4de;
+  border-radius: 10px;
+  vertical-align: middle;
+  white-space: nowrap;
+}

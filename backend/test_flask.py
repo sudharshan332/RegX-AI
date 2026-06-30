@@ -94,8 +94,9 @@ JITA_WEB_TEST_SET_URL = os.getenv(
     "{origin}/manage/test_sets?" + JITA_WEB_MANAGE_SEARCH_PARAM + "={search_query}",
 )
 TRIAGE_GENIE_BASE = "http://triage-genie.eng.nutanix.com/api"
-# Login URL for Triage Genie (session auth); override with TRIAGE_GENIE_LOGIN_URL if needed
 LOGIN_URL = os.getenv("TRIAGE_GENIE_LOGIN_URL", "http://triage-genie.eng.nutanix.com/login")
+TRIAGE_GENIE_USERNAME = os.getenv("TRIAGE_GENIE_USERNAME", "")
+TRIAGE_GENIE_PASSWORD = os.getenv("TRIAGE_GENIE_PASSWORD", "")
 PHX_BASE = "https://jita-phx1-webserver-2.eng.nutanix.com/api/v2"
 TCMS_BASE = "https://tcms.eng.nutanix.com/api-readonly/v1"
 TCMS_SUMMARY_BASE = "https://tcms.eng.nutanix.com/api/v1"
@@ -188,11 +189,25 @@ manual_tasks_store = {}
 RUN_PLAN_STORAGE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "run_plans.json")
 
 def load_run_plans():
-    """Load run plans from JSON file"""
+    """Load run plans from JSON file, backfilling missing fields on older entries."""
     try:
         if os.path.exists(RUN_PLAN_STORAGE):
             with open(RUN_PLAN_STORAGE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+            dirty = False
+            for rp in data.get("run_plans", []):
+                if "schedule_triggered" not in rp:
+                    rp["schedule_triggered"] = False
+                    dirty = True
+                if "branch" not in rp:
+                    rp["branch"] = ""
+                    dirty = True
+                if "service_account" not in rp:
+                    rp["service_account"] = ""
+                    dirty = True
+            if dirty:
+                save_run_plans(data)
+            return data
         return {"run_plans": [], "history": []}
     except Exception as e:
         logger.error(f"Error loading run plans: {e}")
@@ -227,7 +242,9 @@ def _trigger_scheduled_run_plan(run_plan, data):
         logger.warning(f"[scheduler] Run plan '{rp_name}' has no valid job profiles — skipping")
         return
 
-    logger.info(f"[scheduler] Triggering '{rp_name}' ({len(job_profile_ids)} JP(s)) via service account")
+    svc_name = run_plan.get("service_account", "")
+    trigger_auth = RUN_PLAN_SERVICE_ACCOUNTS.get(svc_name, JITA_SVC_AUTH) if svc_name else JITA_SVC_AUTH
+    logger.info(f"[scheduler] Triggering '{rp_name}' ({len(job_profile_ids)} JP(s)) via {'svc:' + svc_name if svc_name else 'default svc account'}")
     task_ids = []
     failed_jobs = []
 
@@ -236,7 +253,7 @@ def _trigger_scheduled_run_plan(run_plan, data):
             url = f"{JITA_BASE}/job_profiles/{jp_id}/trigger"
             resp = requests.post(
                 url, json={}, headers={"Content-Type": "application/json"},
-                auth=JITA_SVC_AUTH, verify=False, timeout=60
+                auth=trigger_auth, verify=False, timeout=60
             )
             if resp.status_code == 200:
                 res_data = resp.json()
@@ -442,6 +459,65 @@ def invalidate_triage_accuracy_cache(tag=None):
             logger.info(f"Invalidated triage accuracy cache: {path}")
     except Exception as e:
         logger.warning(f"Could not invalidate triage accuracy cache: {e}")
+
+# --------------- Failed Analysis Saved Tags storage ---------------
+FAILED_ANALYSIS_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+FAILED_ANALYSIS_TAGS_FILE = os.path.join(FAILED_ANALYSIS_DATA_DIR, "failed_analysis_saved_tags.json")
+
+def _failed_analysis_results_path(tag):
+    sanitized = _sanitize_tag_for_filename(tag)
+    return os.path.join(FAILED_ANALYSIS_DATA_DIR, f"failed_analysis_{sanitized}.json")
+
+def load_failed_analysis_tags():
+    try:
+        if os.path.exists(FAILED_ANALYSIS_TAGS_FILE):
+            with open(FAILED_ANALYSIS_TAGS_FILE, 'r') as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "tags" in data:
+                    return data
+        return {"tags": []}
+    except Exception as e:
+        logger.error(f"Error loading failed analysis tags: {e}")
+        return {"tags": []}
+
+def save_failed_analysis_tags(data):
+    try:
+        os.makedirs(FAILED_ANALYSIS_DATA_DIR, exist_ok=True)
+        with open(FAILED_ANALYSIS_TAGS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving failed analysis tags: {e}")
+        raise
+
+def load_failed_analysis_results(tag):
+    try:
+        path = _failed_analysis_results_path(tag)
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                return json.load(f)
+        return None
+    except Exception as e:
+        logger.error(f"Error loading failed analysis results for tag '{tag}': {e}")
+        return None
+
+def save_failed_analysis_results(tag, data):
+    try:
+        os.makedirs(FAILED_ANALYSIS_DATA_DIR, exist_ok=True)
+        path = _failed_analysis_results_path(tag)
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving failed analysis results for tag '{tag}': {e}")
+        raise
+
+def delete_failed_analysis_results(tag):
+    try:
+        path = _failed_analysis_results_path(tag)
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f"Deleted failed analysis cache: {path}")
+    except Exception as e:
+        logger.warning(f"Could not delete failed analysis cache for tag '{tag}': {e}")
 
 # Load regression owners mapping from CSV
 CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "regression_owners.csv")
@@ -822,6 +898,9 @@ def regression_home():
             logger.warning(f"Failed to fetch test results from agave_test_results API: {e}. Falling back to test_result_count.")
             test_results = []
     
+    # Track whether we successfully fetched merged results
+    merged_results_available = len(test_results) > 0
+    
     # Group test results by task_id
     test_results_by_task = defaultdict(list)
     for test_result in test_results:
@@ -899,8 +978,11 @@ def regression_home():
                     else:
                         # Default to pending only if truly unknown
                         test_counts["Pending"] += 1
-        else:
-            # Fallback to test_result_count if agave_test_results not available
+        elif not merged_results_available:
+            # Fallback to test_result_count ONLY when the agave_test_results API
+            # call failed entirely. When merge=True results were fetched successfully,
+            # tasks not in the map have their tests already counted via other tasks'
+            # merged results — using the stale test_result_count would double-count.
             tc = task.get("test_result_count", {})
             test_counts = {
                 "total": tc.get("Total", 0),
@@ -1931,8 +2013,7 @@ def get_triage_count():
         summary = defaultdict(lambda: {
             "Total Failed": 0,
             "Triaged": 0,
-            "UnTriaged": 0,
-            "Bulk Issues": 0
+            "UnTriaged": 0
         })
         ticket_case_map = defaultdict(set)  # ticket → set of unique testcases
         owner_ticket_map = defaultdict(lambda: defaultdict(int))  # owner → ticket → count
@@ -2004,11 +2085,9 @@ def get_triage_count():
         else:
             logger.info("Skipping bulk issues QI calculation for faster triage count response")
         
-        # Update bulk issues count per owner
-        for owner in summary:
-            owner_tickets = owner_ticket_map[owner]
-            bulk_ticket_count = sum(1 for ticket in owner_tickets if ticket in bulk_issues)
-            summary[owner]["Bulk Issues"] = bulk_ticket_count
+        # Update bulk issues count - use total count of unique bulk tickets
+        # (not per-owner, since the same ticket can be tagged on tests from multiple owners)
+        total_bulk_issues_count = len(bulk_issues)
         
         # Convert defaultdict to regular dict for JSON serialization
         triage_summary = {k: dict(v) for k, v in summary.items()}
@@ -2031,6 +2110,7 @@ def get_triage_count():
             "owner_ticket_map": owner_ticket_dict,
             "bulk_issues": bulk_issues_dict,
             "bulk_issues_with_qi": bulk_issues_with_qi,
+            "bulk_issues_count": total_bulk_issues_count,
             "pending_tests": inprogress_tests,
             "total_tests_processed": len(test_data)
         })
@@ -2146,7 +2226,15 @@ def get_triage_accuracy():
             seen_tests.add(test_name)
             unique_results.append(tr)
 
-        triage_genie_session = create_triage_genie_session()
+        # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
+        _test_result_ids = []
+        for tr in unique_results:
+            _rid = tr.get("_id")
+            if isinstance(_rid, dict) and "$oid" in _rid:
+                _test_result_ids.append(_rid["$oid"])
+            elif _rid:
+                _test_result_ids.append(str(_rid))
+        tg_ticket_map = build_triage_genie_ticket_map(_test_result_ids)
 
         def process_one(tr):
             try:
@@ -2167,13 +2255,12 @@ def get_triage_accuracy():
                     testcase_id = str(tr.get("_id", "")) if tr.get("_id") else ""
 
                 triage_genie_ticket = ""
-                if testcase_id and triage_genie_session:
-                    try:
-                        tg = fetch_triage_genie_ticket_id(testcase_id, triage_session=triage_genie_session)
-                        if tg:
-                            triage_genie_ticket = str(tg).strip()
-                    except Exception as tg_err:
-                        logger.debug(f"Triage Genie lookup failed for {testcase_id}: {tg_err}")
+                tg = (
+                    tg_ticket_map.get(testcase_id)
+                    or tg_ticket_map.get(testcase_name)
+                )
+                if tg:
+                    triage_genie_ticket = str(tg).strip()
 
                 if jira_ticket and triage_genie_ticket:
                     match_status = "Matched" if jira_ticket.upper() == triage_genie_ticket.upper() else "Unmatched"
@@ -2337,6 +2424,9 @@ def get_qi_summary():
                 logger.warning(f"Failed to fetch test results from agave_test_results API: {e}. Falling back to test_result_count.")
                 test_results = []
         
+        # Track whether we successfully fetched merged results
+        merged_results_available = len(test_results) > 0
+        
         # Group test results by task_id and branch
         test_results_by_task = defaultdict(list)
         task_branch_map = {}
@@ -2434,8 +2524,11 @@ def get_qi_summary():
                         else:
                             # Default to pending only if truly unknown
                             task_test_counts["Pending"] += 1
-            else:
-                # Fallback to test_result_count if agave_test_results not available
+            elif not merged_results_available:
+                # Fallback to test_result_count ONLY when the agave_test_results API
+                # call failed entirely. When merge=True results were fetched successfully,
+                # tasks not in the map have their tests already counted via other tasks'
+                # merged results — using the stale test_result_count would double-count.
                 tc = task.get("test_result_count", {})
                 task_test_counts = {
                     "total": tc.get("Total", 0),
@@ -2558,14 +2651,15 @@ def get_tcms_overall_qi():
             })
             feat_type = "regression"
         else:
-            # Release branch: simple filters, feat_type=all
+            # Release branch: team-specific filters, feat_type=regression
             filters = json.dumps({
                 "$and": [
-                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/", "$options": "i"}},
+                    {"additional_data.team": f"{milestone}/{team_name}"},
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
                     {"test_case.deprecated": False},
                 ]
             })
-            feat_type = "all"
+            feat_type = "regression"
 
         params = {
             "aggregation_field": "target_package_type",
@@ -2617,9 +2711,22 @@ def get_tcms_overall_qi():
             "run": overall.get("run"),
             "passed": overall.get("passed"),
             "failed": overall.get("failed"),
+            "not_run": overall.get("not_run"),
+            "blocked": overall.get("blocked"),
             "run_percentage": overall.get("run_percentage"),
             "overall_effectiveness": overall.get("overall_effectiveness"),
             "overall_stability": overall.get("overall_stability"),
+            "total_triaged": overall.get("total_triaged"),
+            "triage_percentage": overall.get("triage_percentage"),
+            "total_product_issues": overall.get("total_product_issues"),
+            "total_test_issues": overall.get("total_test_issues"),
+            "total_other_issues": overall.get("total_other_issues"),
+            "total_infra_issues": overall.get("total_infra_issues"),
+            "total_framework_issues": overall.get("total_framework_issues"),
+            "openBugs": overall.get("openBugs"),
+            "unique_tickets": overall.get("unique_tickets", []),
+            "execution_passed_percentage": overall.get("execution_passed_percentage"),
+            "execution_failed_percentage": overall.get("execution_failed_percentage"),
         })
 
     except requests.exceptions.Timeout:
@@ -3396,6 +3503,15 @@ JITA_SVC_USERNAME = safe_b64decode("c3ZjLmNkcC5yZWdyZXNzaW9u")
 JITA_SVC_PASSWORD = safe_b64decode("Knh0WTFtNiYlVko0akZXZzJlZHY=")
 JITA_SVC_AUTH = (JITA_SVC_USERNAME, JITA_SVC_PASSWORD)
 
+# Named service accounts selectable per run plan
+RUN_PLAN_SERVICE_ACCOUNTS = {
+    "svc.teamchandra": (
+        safe_b64decode("c3ZjLnRlYW1jaGFuZHJh"),
+        safe_b64decode("KndIZTM5JWZieVcmblFFTEQ1dHU="),
+    ),
+    "svc.cdp.regression": (JITA_SVC_USERNAME, JITA_SVC_PASSWORD),
+}
+
 # User credentials for triggering (matching reference script)
 JITA_USERNAME = safe_b64decode("c3VkaGFyc2hhbi5tdXNhbGk=")
 JITA_PASSWORD = safe_b64decode("V29ya291dEAy")
@@ -3489,6 +3605,13 @@ def update_job_profiles_tester_tags(job_profile_ids, tag_name, action="add"):
     
     return updated_count, failed_updates
 
+@app.route("/mcp/regression/run-plan/service-accounts", methods=["GET"])
+@jwt_required
+def list_service_accounts():
+    """Return the names of available service accounts for run plan triggers."""
+    return jsonify({"service_accounts": list(RUN_PLAN_SERVICE_ACCOUNTS.keys())})
+
+
 @app.route("/mcp/regression/run-plan", methods=["GET"])
 @jwt_required
 def list_run_plans():
@@ -3536,10 +3659,12 @@ def create_run_plan():
         new_run_plan = {
             "id": new_id,
             "name": req_data.get("name"),
+            "branch": req_data.get("branch", ""),
             "job_profiles": job_profiles,
             "tag_name": tag_name,
             "schedule_date": req_data.get("schedule_date"),
             "schedule_triggered": False,
+            "service_account": req_data.get("service_account", ""),
             "created_at": datetime.now().isoformat(),
             "last_triggered": None
         }
@@ -3571,12 +3696,16 @@ def update_run_plan(run_plan_id):
             if rp.get("id") == run_plan_id:
                 # Check if already triggered (restrict edits)
                 if rp.get("last_triggered"):
-                    # Only allow editing schedule_date, name, and tag_name
+                    # Only allow editing schedule_date, name, branch, service_account, and tag_name
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data["schedule_date"]
                         rp["schedule_triggered"] = False
                     if "name" in req_data:
                         rp["name"] = req_data["name"]
+                    if "branch" in req_data:
+                        rp["branch"] = req_data["branch"]
+                    if "service_account" in req_data:
+                        rp["service_account"] = req_data["service_account"]
                     if "tag_name" in req_data:
                         # Validate uniqueness
                         tag_name = req_data["tag_name"]
@@ -3587,6 +3716,10 @@ def update_run_plan(run_plan_id):
                 else:
                     # Full edit allowed before first trigger
                     rp["name"] = req_data.get("name", rp.get("name"))
+                    if "branch" in req_data:
+                        rp["branch"] = req_data["branch"]
+                    if "service_account" in req_data:
+                        rp["service_account"] = req_data["service_account"]
                     
                     # Validate and filter job profiles if provided
                     if "job_profiles" in req_data:
@@ -3679,34 +3812,38 @@ def search_job_profiles():
 @app.route("/mcp/regression/run-plan/<run_plan_id>/trigger", methods=["POST"])
 @jwt_required
 def trigger_run_plan(run_plan_id):
-    """Trigger a run plan now using the logged-in user's LDAP credentials."""
+    """Trigger a run plan using its configured service account, or the logged-in user's LDAP credentials."""
     try:
         logger.info(f"[START] Trigger Run Plan | run_plan_id={run_plan_id}")
 
-        # Resolve trigger credentials from the logged-in user's cached LDAP creds
-        current_username = g.current_user.get("sub", "")
-        user_auth = _get_user_credentials(current_username)
-        if not user_auth:
-            logger.warning(f"No cached credentials for user '{current_username}' — asking for re-auth")
-            return jsonify({
-                "error": "Session credentials expired. Please re-login to trigger runs.",
-                "code": "CREDENTIALS_EXPIRED"
-            }), 401
-
-        logger.info(f"Using LDAP credentials of '{current_username}' for Jita trigger")
-
         data = load_run_plans()
-        
-        # Find run plan
+
+        # Find run plan first so we can check for a service account
         run_plan = None
         for rp in data.get("run_plans", []):
             if rp.get("id") == run_plan_id:
                 run_plan = rp
                 break
-        
+
         if not run_plan:
             logger.error(f"Run plan not found: {run_plan_id}")
             return jsonify({"error": "Run plan not found"}), 404
+
+        # Resolve credentials: prefer run-plan-level service account, fall back to LDAP
+        svc_name = run_plan.get("service_account", "")
+        if svc_name and svc_name in RUN_PLAN_SERVICE_ACCOUNTS:
+            user_auth = RUN_PLAN_SERVICE_ACCOUNTS[svc_name]
+            logger.info(f"Using service account '{svc_name}' for Jita trigger")
+        else:
+            current_username = g.current_user.get("sub", "")
+            user_auth = _get_user_credentials(current_username)
+            if not user_auth:
+                logger.warning(f"No cached credentials for user '{current_username}' — asking for re-auth")
+                return jsonify({
+                    "error": "Session credentials expired. Please re-login to trigger runs.",
+                    "code": "CREDENTIALS_EXPIRED"
+                }), 401
+            logger.info(f"Using LDAP credentials of '{current_username}' for Jita trigger")
         
         logger.info(f"Found run plan: {run_plan.get('name')} (ID: {run_plan_id})")
         
@@ -4095,23 +4232,32 @@ def batch_update_job_profiles(run_plan_id):
                     updated_profile["test_framework_metadata"] = test_framework_metadata
                     logger.info(f"Updated test_framework_metadata: framework.patch_url={framework_metadata.get('patch_url')}, framework.branch={framework_metadata.get('branch')}")
                 
+                # Update top-level patch_url to match framework_patch_url (JITA uses this field)
+                if req_data.get("framework_patch_url"):
+                    updated_profile["patch_url"] = req_data.get("framework_patch_url")
+                
                 # Update tester_tags if provided (optional batch update)
                 if req_data.get("tester_tags_action"):  # "add" or "remove"
                     tester_tags_action = req_data.get("tester_tags_action")
                     tester_tag_value = req_data.get("tester_tag_value", "")
+                    tester_tags_to_remove = req_data.get("tester_tags_to_remove", [])
                     
-                    if tester_tag_value:
-                        tester_tags = existing_profile.get("tester_tags", [])
-                        if not isinstance(tester_tags, list):
-                            tester_tags = []
-                        
-                        if tester_tags_action == "add":
-                            # Add tag if not already present
-                            if tester_tag_value not in tester_tags:
-                                tester_tags.append(tester_tag_value)
+                    tester_tags = existing_profile.get("tester_tags", [])
+                    if not isinstance(tester_tags, list):
+                        tester_tags = []
+                    
+                    if tester_tags_action == "add" and tester_tag_value:
+                        if tester_tag_value not in tester_tags:
+                            tester_tags.append(tester_tag_value)
+                            updated_profile["tester_tags"] = tester_tags
+                    elif tester_tags_action == "remove":
+                        if isinstance(tester_tags_to_remove, list) and tester_tags_to_remove:
+                            original_len = len(tester_tags)
+                            tester_tags = [t for t in tester_tags if t not in tester_tags_to_remove]
+                            if len(tester_tags) != original_len:
                                 updated_profile["tester_tags"] = tester_tags
-                        elif tester_tags_action == "remove":
-                            # Remove tag if present
+                                logger.info(f"Removed {original_len - len(tester_tags)} tag(s) from job profile {job_id}")
+                        elif tester_tag_value:
                             if tester_tag_value in tester_tags:
                                 tester_tags.remove(tester_tag_value)
                                 updated_profile["tester_tags"] = tester_tags
@@ -4354,10 +4500,12 @@ def clone_run_plan(run_plan_id):
         cloned_run_plan = {
             "id": new_id,
             "name": cloned_name,
+            "branch": source_run_plan.get("branch", ""),
             "job_profiles": source_run_plan.get("job_profiles", []).copy(),
             "tag_name": new_tag_name,
             "schedule_date": source_run_plan.get("schedule_date"),
             "schedule_triggered": False,
+            "service_account": source_run_plan.get("service_account", ""),
             "created_at": datetime.now().isoformat(),
             "last_triggered": None
         }
@@ -4505,6 +4653,102 @@ def get_available_tags():
         return jsonify({"error": str(e)}), 500
 
 # ======================================================
+# Run Plan Bulk (Category) Actions
+# ======================================================
+@app.route("/mcp/regression/run-plan/bulk-trigger", methods=["POST"])
+@jwt_required
+def bulk_trigger_by_branch():
+    """Trigger all run plans that belong to a given branch."""
+    try:
+        current_username = g.current_user.get("sub", "")
+        user_auth = _get_user_credentials(current_username)
+        if not user_auth:
+            return jsonify({"error": "Session credentials expired. Please re-login.", "code": "CREDENTIALS_EXPIRED"}), 401
+
+        branch = (request.json or {}).get("branch", "")
+        if not branch:
+            return jsonify({"error": "branch is required"}), 400
+
+        data = load_run_plans()
+        targets = [rp for rp in data.get("run_plans", []) if rp.get("branch") == branch]
+        if not targets:
+            return jsonify({"error": f"No run plans found for branch '{branch}'"}), 404
+
+        results = []
+        for rp in targets:
+            rp_id = rp["id"]
+            job_profile_ids = [jp for jp in rp.get("job_profiles", []) if jp and isinstance(jp, str) and jp.strip()]
+            task_ids = []
+            failed_jobs = []
+            for jp_id in job_profile_ids:
+                try:
+                    resp = requests.post(
+                        f"{JITA_BASE}/job_profiles/{jp_id}/trigger",
+                        json={}, headers={"Content-Type": "application/json"},
+                        auth=user_auth, verify=False, timeout=60
+                    )
+                    if resp.status_code == 200:
+                        res_data = resp.json()
+                        if res_data.get("success") and "task_ids" in res_data:
+                            ids = [item["$oid"] if isinstance(item, dict) and "$oid" in item else item for item in res_data["task_ids"]]
+                            task_ids.extend(ids)
+                        else:
+                            failed_jobs.append({"job_id": jp_id, "error": res_data.get("message", "unknown")})
+                    else:
+                        failed_jobs.append({"job_id": jp_id, "error": f"HTTP {resp.status_code}"})
+                except Exception as exc:
+                    failed_jobs.append({"job_id": jp_id, "error": str(exc)})
+
+            rp["last_triggered"] = datetime.now().isoformat()
+            if "history" not in data:
+                data["history"] = []
+            data["history"].append({
+                "id": str(int(time.time() * 1000)),
+                "run_plan_id": rp_id,
+                "triggered_at": rp["last_triggered"],
+                "triggered_by": current_username,
+                "task_ids": task_ids,
+                "failed_jobs": failed_jobs,
+                "status": "success" if not failed_jobs else "partial"
+            })
+            results.append({"run_plan_id": rp_id, "name": rp.get("name"), "task_ids": task_ids, "failed": len(failed_jobs)})
+
+        save_run_plans(data)
+        return jsonify({"success": True, "branch": branch, "results": results})
+    except Exception as e:
+        logger.error(f"Error in bulk trigger: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/run-plan/bulk-schedule", methods=["POST"])
+@jwt_required
+def bulk_schedule_by_branch():
+    """Set the same schedule_date on every run plan in a branch."""
+    try:
+        req = request.json or {}
+        branch = req.get("branch", "")
+        schedule_date = req.get("schedule_date", "")
+        if not branch or not schedule_date:
+            return jsonify({"error": "branch and schedule_date are required"}), 400
+
+        data = load_run_plans()
+        updated = 0
+        for rp in data.get("run_plans", []):
+            if rp.get("branch") == branch:
+                rp["schedule_date"] = schedule_date
+                rp["schedule_triggered"] = False
+                updated += 1
+        if updated == 0:
+            return jsonify({"error": f"No run plans found for branch '{branch}'"}), 404
+
+        save_run_plans(data)
+        return jsonify({"success": True, "branch": branch, "updated": updated})
+    except Exception as e:
+        logger.error(f"Error in bulk schedule: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
 # Run Plan Calendar Endpoints
 # ======================================================
 @app.route("/mcp/regression/run-plan/calendar", methods=["GET"])
@@ -4556,21 +4800,30 @@ def run_plan_calendar():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/mcp/regression/run-plan/<run_plan_id>/schedule", methods=["PUT"])
+@app.route("/mcp/regression/run-plan/<run_plan_id>/schedule", methods=["PUT", "DELETE"])
 @jwt_required
 def schedule_run_plan(run_plan_id):
-    """Set or update the schedule_date on an existing run plan."""
+    """Set, update, or clear the schedule_date on an existing run plan."""
     try:
-        req_data = request.json
-        schedule_date = req_data.get("schedule_date")
-        if not schedule_date:
-            return jsonify({"error": "schedule_date is required"}), 400
-
         data = load_run_plans()
         for rp in data.get("run_plans", []):
             if rp.get("id") == run_plan_id:
-                rp["schedule_date"] = schedule_date
-                rp["schedule_triggered"] = False
+                if request.method == "DELETE":
+                    rp["schedule_date"] = None
+                    rp["schedule_triggered"] = False
+                    save_run_plans(data)
+                    return jsonify({"success": True, "run_plan": rp})
+
+                req_data = request.json or {}
+                schedule_date = req_data.get("schedule_date")
+                if schedule_date is None:
+                    rp["schedule_date"] = None
+                    rp["schedule_triggered"] = False
+                else:
+                    if not schedule_date:
+                        return jsonify({"error": "schedule_date is required (or send null to clear)"}), 400
+                    rp["schedule_date"] = schedule_date
+                    rp["schedule_triggered"] = False
                 save_run_plans(data)
                 return jsonify({"success": True, "run_plan": rp})
         return jsonify({"error": "Run plan not found"}), 404
@@ -4603,13 +4856,11 @@ def list_triage_genie_jobs():
             timestamp = int(time.time() * 1000)
             url = f"{TRIAGE_GENIE_BASE}/jobs?page={page}&per_page={per_page}&run_status={run_status}&show_all={show_all}&name_search={name_search}&_={timestamp}"
             
-            triage_token = os.getenv("TRIAGE_GENIE_TOKEN", "TOKEN")
-            headers = {
-                "Authorization": f"Bearer {triage_token}",
-                "Content-Type": "application/json"
-            }
-            
-            response = requests.get(url, headers=headers, verify=False, timeout=30)
+            tg_session = create_triage_genie_session()
+            if tg_session:
+                response = tg_session.get(url, verify=False, timeout=30)
+            else:
+                response = requests.get(url, verify=False, timeout=30)
             
             if response.status_code == 200:
                 api_data = response.json()
@@ -4670,21 +4921,21 @@ def create_triage_genie_job():
             "created_by": created_by
         }
         
-        # Get authorization token from environment or use default "TOKEN"
-        # The API accepts "Bearer TOKEN" as a valid authentication header
-        triage_token = os.getenv("TRIAGE_GENIE_TOKEN", "TOKEN")
-        headers = {
-            "Authorization": f"Bearer {triage_token}",
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.post(
-            f"{TRIAGE_GENIE_BASE}/jobs",
-            headers=headers,
-            json=payload,
-            verify=False,
-            timeout=30
-        )
+        tg_session = create_triage_genie_session()
+        if tg_session:
+            response = tg_session.post(
+                f"{TRIAGE_GENIE_BASE}/jobs",
+                json=payload,
+                verify=False,
+                timeout=30,
+            )
+        else:
+            response = requests.post(
+                f"{TRIAGE_GENIE_BASE}/jobs",
+                json=payload,
+                verify=False,
+                timeout=30,
+            )
         
         if response.status_code in [200, 201]:
             data = response.json()
@@ -4829,6 +5080,101 @@ def search_glean(query_text):
     except Exception as e:
         logger.warning(f"Error searching Glean: {e}")
         return None
+
+
+def search_glean_jira(query_text, max_results=10):
+    """Search Glean specifically for JIRA tickets matching the query.
+
+    Filters results to the ``jira`` datasource so that only ENG/JIRA issues
+    are returned.  Falls back to the generic search if the JIRA-scoped call
+    fails.
+    """
+    if not os.getenv("GLEAN_TOKEN"):
+        logger.warning("GLEAN_TOKEN not set, skipping Glean JIRA search")
+        return None
+    headers = get_glean_headers()
+    payload = {
+        "query": query_text,
+        "pageSize": max_results,
+        "requestOptions": {
+            "datasourcesFilter": {
+                "datasources": ["jira"],
+            },
+        },
+    }
+    try:
+        resp = session.post(
+            f"{GLEAN_BASE}/search",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        logger.warning(f"Glean JIRA search returned {resp.status_code}, falling back to generic search")
+    except Exception as e:
+        logger.warning(f"Glean JIRA search failed: {e}, falling back")
+    return search_glean(query_text)
+
+
+def _extract_jira_tickets_from_glean(glean_data):
+    """Walk Glean search results and extract JIRA ticket IDs + metadata.
+
+    Returns a list of dicts:
+        [{"ticket": "ENG-12345", "title": "...", "url": "...", "snippet": "..."}, ...]
+    """
+    import re as _re
+    jira_pat = _re.compile(r'[A-Z][A-Z0-9]+-\d+')
+
+    if not glean_data or not isinstance(glean_data, dict):
+        return []
+
+    raw_results = glean_data.get("results", [])
+    if isinstance(raw_results, dict):
+        raw_results = raw_results.get("results", [])
+    if not isinstance(raw_results, list):
+        return []
+
+    seen_tickets = {}
+    for r in raw_results:
+        if not isinstance(r, dict):
+            continue
+        doc = r.get("document", r)
+        title = doc.get("title", "")
+        url = doc.get("url", "")
+        # Collect snippet text from all available snippet objects
+        snippet_text = ""
+        snippets = r.get("snippets", [])
+        if isinstance(snippets, list):
+            parts = []
+            for s in snippets:
+                if isinstance(s, dict):
+                    inner = s.get("snippet", s)
+                    if isinstance(inner, dict):
+                        parts.append(inner.get("text", ""))
+                    elif isinstance(inner, str):
+                        parts.append(inner)
+                elif isinstance(s, str):
+                    parts.append(s)
+            snippet_text = " ".join(parts)[:500]
+
+        combined_text = f"{title} {url} {snippet_text}"
+        found_ids = jira_pat.findall(combined_text)
+
+        # If the URL is a direct JIRA link, the ticket from the URL is the primary one
+        if url and "jira" in url.lower():
+            url_ids = jira_pat.findall(url)
+            found_ids = url_ids + [t for t in found_ids if t not in url_ids]
+
+        for tid in found_ids:
+            if tid not in seen_tickets:
+                seen_tickets[tid] = {
+                    "ticket": tid,
+                    "title": title[:200],
+                    "url": url if tid in (jira_pat.findall(url) if url else []) else f"https://jira.nutanix.com/browse/{tid}",
+                    "snippet": snippet_text[:300],
+                }
+    return list(seen_tickets.values())
 
 def determine_failure_stage(test_result):
     """Determine failure stage from test result"""
@@ -5168,175 +5514,149 @@ def generate_ai_failure_summary(exception, exception_summary, tester_log_url, te
 
 def create_triage_genie_session():
     """
-    Create a requests.Session authenticated via JITA login for Triage Genie API calls.
-    Used by Failed Testcase Analysis when calling Triage Genie.
+    Create a requests.Session authenticated via login for Triage Genie API calls.
+
+    Uses TRIAGE_GENIE_USERNAME / TRIAGE_GENIE_PASSWORD env vars if set,
+    otherwise falls back to the service account (JITA_SVC_USERNAME / JITA_SVC_PASSWORD).
     """
+    tg_user = TRIAGE_GENIE_USERNAME or JITA_SVC_USERNAME
+    tg_pass = TRIAGE_GENIE_PASSWORD or JITA_SVC_PASSWORD
+
+    if not tg_user or not tg_pass:
+        logger.warning("Triage Genie credentials not configured (set TRIAGE_GENIE_USERNAME / TRIAGE_GENIE_PASSWORD)")
+        return None
+
     session_triage = requests.Session()
     session_triage.verify = False
-    login_payload = {
-        "username": JITA_USERNAME,
-        "password": JITA_PASSWORD
-    }
     try:
         login_response = session_triage.post(
             LOGIN_URL,
-            data=login_payload,
+            data={"username": tg_user, "password": tg_pass},
             verify=False,
-            timeout=15
+            timeout=15,
+            allow_redirects=False,
         )
-        if login_response.status_code != 200:
-            logger.warning(f"Triage Genie login returned {login_response.status_code}, session may not be authenticated")
-        return session_triage
+        # Successful login: 302 redirect to dashboard (not back to /login).
+        # Failed login: 200 with login page re-rendered.
+        if login_response.status_code == 302:
+            location = login_response.headers.get("Location", "")
+            if "/login" not in location:
+                logger.info("Triage Genie session authenticated successfully")
+                return session_triage
+
+        logger.warning(
+            "Triage Genie login failed (credentials rejected). "
+            "Set TRIAGE_GENIE_USERNAME and TRIAGE_GENIE_PASSWORD env vars "
+            "with valid Triage Genie / LDAP credentials."
+        )
+        return None
     except Exception as e:
-        logger.warning(f"Triage Genie login failed: {e}")
+        logger.warning(f"Triage Genie login error: {e}")
         return None
 
 
-def fetch_triage_genie_ticket_id(agave_task_id, triage_session=None):
+def build_triage_genie_ticket_map(test_result_ids):
     """
-    Fetch Triage Genie generated ticket ID using agave_task_id (testcase_id)
-    
-    Uses direct API call: GET /api/tasks/{testcase_id}
-    Extracts dup_ticket_id from the response
-    
-    When triage_session is provided (e.g. from create_triage_genie_session()), uses
-    login session for API calls; otherwise falls back to TRIAGE_GENIE_TOKEN.
-    
+    Batch pre-fetch Triage Genie dup_ticket_id for each test result.
+
+    Uses GET /api/tasks/{testcase_id} (the direct Triage Genie task endpoint).
+    Authentication: session-based login via create_triage_genie_session().
+
+    Args:
+        test_result_ids: List of JITA test result _id values (testcase IDs)
+
     Returns:
-        str: Jira ticket ID (e.g., "ENG-858029") or None if not found
+        dict: Mapping of testcase_id -> dup_ticket_id
     """
-    if not agave_task_id:
+    ticket_map = {}
+    if not test_result_ids:
+        return ticket_map
+
+    unique_ids = list(set(tid for tid in test_result_ids if tid))
+    logger.info(f"build_triage_genie_ticket_map: looking up {len(unique_ids)} testcase(s) via /api/tasks/{{id}}")
+
+    tg_session = create_triage_genie_session()
+    if not tg_session:
+        logger.warning("build_triage_genie_ticket_map: no TG session — cannot fetch tickets")
+        return ticket_map
+
+    def _lookup_single(tc_id):
+        """GET /api/tasks/{tc_id} and return (tc_id, dup_ticket_id) or (tc_id, None)."""
+        try:
+            resp = tg_session.get(
+                f"{TRIAGE_GENIE_BASE}/tasks/{tc_id}",
+                verify=False,
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                ct = resp.headers.get("Content-Type", "")
+                if "json" in ct or "application/json" in ct:
+                    data = resp.json()
+                    dup = data.get("dup_ticket_id")
+                    if dup:
+                        return (tc_id, str(dup).strip())
+                else:
+                    logger.debug(f"TG /tasks/{tc_id} returned HTML (auth may have expired)")
+            elif resp.status_code == 404:
+                logger.debug(f"TG /tasks/{tc_id}: not found (test may not be triaged yet)")
+            else:
+                logger.debug(f"TG /tasks/{tc_id} returned {resp.status_code}")
+        except Exception as exc:
+            logger.debug(f"TG /tasks/{tc_id} error: {exc}")
+        return (tc_id, None)
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(_lookup_single, tid): tid for tid in unique_ids}
+        for future in as_completed(futures):
+            tc_id, dup_ticket = future.result()
+            if dup_ticket:
+                ticket_map[tc_id] = dup_ticket
+
+    logger.info(f"build_triage_genie_ticket_map: found {len(ticket_map)} ticket(s) out of {len(unique_ids)} lookups")
+    return ticket_map
+
+
+def fetch_triage_genie_ticket_id(testcase_id, triage_session=None):
+    """
+    Fetch Triage Genie dup_ticket_id for a single test result.
+
+    Calls GET /api/tasks/{testcase_id} using a session-authenticated connection.
+    If triage_session is not provided, creates one via create_triage_genie_session().
+
+    Returns:
+        str: Jira ticket ID (e.g., "ENG-904593") or None if not found
+    """
+    if not testcase_id:
         return None
-    
+
+    session = triage_session or create_triage_genie_session()
+    if not session:
+        return None
+
     try:
-        if triage_session:
-            headers = {"Content-Type": "application/json"}
+        resp = session.get(
+            f"{TRIAGE_GENIE_BASE}/tasks/{testcase_id}",
+            verify=False,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            ct = resp.headers.get("Content-Type", "")
+            if "json" in ct:
+                data = resp.json()
+                dup = data.get("dup_ticket_id")
+                if dup:
+                    logger.info(f"Found Triage Genie ticket {dup} for testcase {testcase_id}")
+                    return str(dup).strip()
+            else:
+                logger.debug(f"TG /tasks/{testcase_id} returned HTML (auth expired or invalid)")
+        elif resp.status_code == 404:
+            logger.debug(f"TG /tasks/{testcase_id}: not found")
         else:
-            triage_token = os.getenv("TRIAGE_GENIE_TOKEN", "TOKEN")
-            headers = {
-                "Authorization": f"Bearer {triage_token}",
-                "Content-Type": "application/json"
-            }
-        
-        # Approach 1: Direct task lookup using testcase_id
-        # The testcase_id (agave_task_id) can be used directly as the Triage Genie task ID
-        try:
-            if triage_session:
-                task_response = triage_session.get(
-                    f"{TRIAGE_GENIE_BASE}/tasks/{agave_task_id}",
-                    headers=headers,
-                    verify=False,
-                    timeout=15
-                )
-            else:
-                task_response = requests.get(
-                    f"{TRIAGE_GENIE_BASE}/tasks/{agave_task_id}",
-                    headers=headers,
-                    verify=False,
-                    timeout=15
-                )
-            
-            if task_response.status_code == 200:
-                task_data = task_response.json()
-                dup_ticket_id = task_data.get("dup_ticket_id")
-                if dup_ticket_id:
-                    logger.info(f"Found Triage Genie ticket {dup_ticket_id} for testcase_id {agave_task_id}")
-                    return dup_ticket_id
-            elif task_response.status_code == 404:
-                logger.debug(f"Triage Genie task not found for testcase_id {agave_task_id}")
-            else:
-                logger.debug(f"Triage Genie API returned status {task_response.status_code} for testcase_id {agave_task_id}")
-        
-        except requests.exceptions.RequestException as e:
-            logger.debug(f"Error in direct task lookup for testcase_id {agave_task_id}: {e}")
-        
-        # Approach 2: Fallback - Search through recent jobs if direct lookup fails
-        # This is a backup method in case the testcase_id format doesn't match Triage Genie task ID
-        try:
-            if triage_session:
-                jobs_response = triage_session.get(
-                    f"{TRIAGE_GENIE_BASE}/jobs",
-                    headers=headers,
-                    params={"page": 1, "per_page": 20, "show_all": "true"},
-                    verify=False,
-                    timeout=15
-                )
-            else:
-                jobs_response = requests.get(
-                    f"{TRIAGE_GENIE_BASE}/jobs",
-                    headers=headers,
-                    params={"page": 1, "per_page": 20, "show_all": "true"},
-                    verify=False,
-                    timeout=15
-                )
-            
-            if jobs_response.status_code == 200:
-                jobs_data = jobs_response.json()
-                jobs = jobs_data.get("jobs", []) or jobs_data.get("data", [])
-                
-                # Search through jobs to find matching task
-                for job in jobs:
-                    job_id = job.get("id") or job.get("_id")
-                    if not job_id:
-                        continue
-                    
-                    try:
-                        if triage_session:
-                            tasks_response = triage_session.get(
-                                f"{TRIAGE_GENIE_BASE}/jobs/{job_id}/tasks",
-                                headers=headers,
-                                params={
-                                    "page": 1,
-                                    "per_page": 100
-                                },
-                                verify=False,
-                                timeout=15
-                            )
-                        else:
-                            tasks_response = requests.get(
-                                f"{TRIAGE_GENIE_BASE}/jobs/{job_id}/tasks",
-                                headers=headers,
-                                params={
-                                    "page": 1,
-                                    "per_page": 100
-                                },
-                                verify=False,
-                                timeout=15
-                            )
-                        
-                        if tasks_response.status_code == 200:
-                            tasks_data = tasks_response.json()
-                            tasks = tasks_data.get("data", []) or tasks_data.get("tasks", [])
-                            
-                            # Find task with matching agave_task_id
-                            for task in tasks:
-                                task_agave_id = task.get("agave_task_id")
-                                # Handle both string and object ID formats
-                                if (task_agave_id == agave_task_id or 
-                                    str(task_agave_id) == str(agave_task_id) or
-                                    (isinstance(task_agave_id, dict) and task_agave_id.get("$oid") == agave_task_id)):
-                                    dup_ticket_id = task.get("dup_ticket_id")
-                                    if dup_ticket_id:
-                                        logger.info(f"Found Triage Genie ticket {dup_ticket_id} for agave_task_id {agave_task_id} in job {job_id} (fallback method)")
-                                        return dup_ticket_id
-                    except Exception as e:
-                        logger.debug(f"Error fetching tasks for job {job_id}: {e}")
-                        continue
-            
-        except Exception as e:
-            logger.debug(f"Error in fallback job search for Triage Genie lookup: {e}")
-        
-        return None
-        
-    except requests.exceptions.ConnectionError:
-        logger.warning(f"Connection error fetching Triage Genie ticket for testcase_id {agave_task_id}")
-        return None
-    except requests.exceptions.Timeout:
-        logger.warning(f"Timeout fetching Triage Genie ticket for testcase_id {agave_task_id}")
-        return None
+            logger.debug(f"TG /tasks/{testcase_id} returned {resp.status_code}")
     except Exception as e:
-        logger.warning(f"Error fetching Triage Genie ticket for testcase_id {agave_task_id}: {e}")
-        return None
+        logger.debug(f"TG /tasks/{testcase_id} error: {e}")
+
+    return None
 
 @app.route("/mcp/regression/failed-analysis/analyze", methods=["GET"])
 @jwt_required
@@ -5388,8 +5708,17 @@ def analyze_failed_testcases():
                 ]
                 logger.info(f"Found {len(failed_results)} failed testcases")
                 
-                # Triage Genie session only when triage_genie_ticket requested
-                triage_genie_session = create_triage_genie_session() if "triage_genie_ticket" in include_set else None
+                # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
+                tg_ticket_map = {}
+                if "triage_genie_ticket" in include_set:
+                    _failed_ids = []
+                    for _fr in failed_results:
+                        _rid = _fr.get("_id")
+                        if isinstance(_rid, dict) and "$oid" in _rid:
+                            _failed_ids.append(_rid["$oid"])
+                        elif _rid:
+                            _failed_ids.append(str(_rid))
+                    tg_ticket_map = build_triage_genie_ticket_map(_failed_ids)
                 
                 # Current branch for history API (from first task)
                 current_branch = (tasks[0].get("branch") or "") if tasks else ""
@@ -5457,8 +5786,11 @@ def analyze_failed_testcases():
                             issue_type or classify_failure(exception_summary, exception, jira_data, glean_data),
                             exception_summary, exception, jira_tickets, jira_data, glean_data
                         )
-                    if "triage_genie_ticket" in include_set and testcase_id and triage_genie_session:
-                        triage_genie_ticket_id = fetch_triage_genie_ticket_id(testcase_id, triage_session=triage_genie_session)
+                    if "triage_genie_ticket" in include_set:
+                        triage_genie_ticket_id = (
+                            tg_ticket_map.get(testcase_id)
+                            or tg_ticket_map.get(testcase_name)
+                        )
                     
                     # Generate AI Summary if requested
                     if "ai_summary" in include_set:
@@ -5488,9 +5820,19 @@ def analyze_failed_testcases():
                     # Resolve regression owner
                     regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
                     
+                    # Resolve agave_task_id for retrigger support
+                    raw_atid = test_result.get("agave_task_id")
+                    if isinstance(raw_atid, dict) and "$oid" in raw_atid:
+                        agave_task_id = raw_atid["$oid"]
+                    elif raw_atid:
+                        agave_task_id = str(raw_atid)
+                    else:
+                        agave_task_id = None
+
                     row = {
                         "testcase_id": testcase_id,
                         "testcase_name": testcase_name,
+                        "agave_task_id": agave_task_id,
                         "status": status,
                         "failure_stage": failure_stage,
                         "jira_tickets": jira_tickets,
@@ -5510,7 +5852,7 @@ def analyze_failed_testcases():
                         row["triage_genie_ticket_id"] = triage_genie_ticket_id
                     if ai_summary is not None:
                         row["ai_summary"] = ai_summary
-                    
+
                     analysis_results.append(row)
                 
                 logger.info(f"[END] Failed Analysis | results={len(analysis_results)} | time={time.time() - start:.2f}s")
@@ -5562,22 +5904,41 @@ def analyze_failed_testcases():
         return jsonify({"error": str(e)}), 500
 
 
-def _analyze_failed_testcases_stream(tag, task_ids, include_set):
-    """Generator that yields SSE events: start, then one 'row' per result, then 'done' or 'error'."""
+def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None):
+    """Generator that yields SSE events: progress, start, then one 'row' per result, then 'done' or 'error'."""
+    if status_set is None:
+        status_set = {"failed", "failure"}
     try:
+        yield json.dumps({"type": "progress", "phase": "preparing"})
+
         tasks = fetch_regression_tasks(tag=tag, task_ids=task_ids)
         if not tasks:
             yield json.dumps({"type": "start", "total": 0, "current_branch": "", "tag": tag})
             yield json.dumps({"type": "done"})
             return
         collected_task_ids = [task["_id"]["$oid"] for task in tasks]
+
+        yield json.dumps({"type": "progress", "phase": "fetching_results"})
+
         all_results = fetch_test_results_batch_with_pagination(collected_task_ids)
         failed_results = [
             tr for tr in all_results
-            if tr.get("status", "").lower() in ("failed", "failure")
+            if tr.get("status", "").lower() in status_set
         ]
         current_branch = (tasks[0].get("branch") or "") if tasks else ""
-        triage_genie_session = create_triage_genie_session() if "triage_genie_ticket" in include_set else None
+
+        # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
+        tg_ticket_map = {}
+        if "triage_genie_ticket" in include_set:
+            yield json.dumps({"type": "progress", "phase": "fetching_triage_genie"})
+            _failed_ids = []
+            for _fr in failed_results:
+                _rid = _fr.get("_id")
+                if isinstance(_rid, dict) and "$oid" in _rid:
+                    _failed_ids.append(_rid["$oid"])
+                elif _rid:
+                    _failed_ids.append(str(_rid))
+            tg_ticket_map = build_triage_genie_ticket_map(_failed_ids)
 
         yield json.dumps({
             "type": "start",
@@ -5634,8 +5995,11 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set):
                     issue_type or classify_failure(exception_summary, exception, jira_data, glean_data),
                     exception_summary, exception, jira_tickets, jira_data, glean_data
                 )
-            if "triage_genie_ticket" in include_set and testcase_id and triage_genie_session:
-                triage_genie_ticket_id = fetch_triage_genie_ticket_id(testcase_id, triage_session=triage_genie_session)
+            if "triage_genie_ticket" in include_set:
+                triage_genie_ticket_id = (
+                    tg_ticket_map.get(testcase_id)
+                    or tg_ticket_map.get(testcase_name)
+                )
             
             # Generate AI Summary if requested
             if "ai_summary" in include_set:
@@ -5663,9 +6027,19 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set):
                     ai_summary = f"Error: {str(e)}"
             
             regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
+
+            raw_atid = test_result.get("agave_task_id")
+            if isinstance(raw_atid, dict) and "$oid" in raw_atid:
+                agave_task_id = raw_atid["$oid"]
+            elif raw_atid:
+                agave_task_id = str(raw_atid)
+            else:
+                agave_task_id = None
+
             row = {
                 "testcase_id": testcase_id,
                 "testcase_name": testcase_name,
+                "agave_task_id": agave_task_id,
                 "status": status,
                 "failure_stage": failure_stage,
                 "jira_tickets": jira_tickets,
@@ -5685,6 +6059,7 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set):
                 row["triage_genie_ticket_id"] = triage_genie_ticket_id
             if ai_summary is not None:
                 row["ai_summary"] = ai_summary
+
             yield json.dumps({"type": "row", "result": row})
         yield json.dumps({"type": "done"})
     except Exception as e:
@@ -5708,8 +6083,26 @@ def analyze_failed_testcases_stream():
     if not tag and not task_ids:
         return jsonify({"error": "Either tag or task_ids is required"}), 400
 
+    statuses_param = request.args.get("statuses", "")
+    STATUS_ALIASES = {
+        "failed": ("failed", "failure"),
+        "skipped": ("skipped", "skip"),
+        "warning": ("warning", "warn"),
+        "killed": ("killed", "terminated", "cancelled"),
+    }
+    if statuses_param:
+        requested = {s.strip().lower() for s in statuses_param.split(",") if s.strip()}
+        status_set = set()
+        for key in requested:
+            if key in STATUS_ALIASES:
+                status_set.update(STATUS_ALIASES[key])
+            else:
+                status_set.add(key)
+    else:
+        status_set = {"failed", "failure"}
+
     def gen():
-        for chunk in _analyze_failed_testcases_stream(tag, task_ids, include_set):
+        for chunk in _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set):
             yield f"data: {chunk}\n\n"
 
     return Response(
@@ -5722,16 +6115,15 @@ def analyze_failed_testcases_stream():
 @app.route("/mcp/regression/failed-analysis/update-triage", methods=["PUT"])
 @jwt_required
 def update_triage_comments():
-    """Update comment and/or jira_ticket for an agave_test_result via JITA PUT API."""
+    """Update comment and/or jira_tickets for an agave_test_result via JITA PUT API."""
     try:
         data = request.get_json() or {}
         test_id = data.get("test_id")
         comment = data.get("comment", "")
-        jira_ticket = data.get("jira_ticket")
+        jira_tickets = data.get("jira_tickets")
         if not test_id:
             return jsonify({"error": "test_id is required"}), 400
 
-        # Use logged-in user's identity for triaged_by and Jita auth
         current_username = g.current_user.get("sub", "")
         user_auth = _get_user_credentials(current_username)
         if not user_auth:
@@ -5744,8 +6136,10 @@ def update_triage_comments():
             "comments": comment,
             "triaged_by": current_username
         }
-        if jira_ticket is not None:
-            update_fields["jira_ticket"] = jira_ticket
+        if jira_tickets is not None:
+            if isinstance(jira_tickets, str):
+                jira_tickets = [jira_tickets] if jira_tickets else []
+            update_fields["jira_tickets"] = jira_tickets
         payload = {
             "query": {"_id": {"$in": [{"$oid": test_id}]}},
             "data": {"$set": update_fields},
@@ -5765,6 +6159,653 @@ def update_triage_comments():
         return jsonify({"error": resp.text or f"HTTP {resp.status_code}"}), resp.status_code if resp.status_code >= 400 else 500
     except Exception as e:
         logger.error(f"Error updating triage: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
+# RDM Failure Analysis for Skipped Testcases
+# ======================================================
+
+RDM_PATTERNS_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "rdm_failure_patterns.json")
+
+def _load_rdm_patterns():
+    """Load RDM failure patterns from JSON file and compile regexes."""
+    try:
+        if os.path.exists(RDM_PATTERNS_FILE):
+            with open(RDM_PATTERNS_FILE, "r") as f:
+                data = json.load(f)
+            patterns = data.get("patterns", [])
+            compiled = []
+            for p in patterns:
+                try:
+                    compiled.append({
+                        "id": p["id"],
+                        "regex": re.compile(p["regex"], re.IGNORECASE | re.DOTALL),
+                        "comment_template": p["comment_template"],
+                        "category": p.get("category", ""),
+                        "description": p.get("description", ""),
+                        "jira": p.get("jira", ""),
+                    })
+                except re.error as e:
+                    logger.warning(f"Invalid regex in RDM pattern '{p.get('id')}': {e}")
+            return compiled
+    except Exception as e:
+        logger.warning(f"Could not load rdm_failure_patterns.json: {e}")
+    return []
+
+
+RDM_PATTERNS = _load_rdm_patterns()
+
+
+def _extract_node_names(message):
+    """Extract node names from RDM failure messages.
+
+    Combines results from multiple extraction strategies so multi-node
+    failures (where different nodes appear in different formats) are
+    all captured.  Returns deduplicated list preserving first-seen order.
+    """
+    seen = dict()
+    for n in re.findall(r'([\w-]+):\s*Received\s+"fatal"\s+in\s+waiting\s+for\s+event', message):
+        seen.setdefault(n, None)
+    for n in re.findall(r"(?:Nodes?:\s*)([a-zA-Z][\w\-]*\d+[\-\d]*)", message):
+        seen.setdefault(n, None)
+    if seen:
+        return list(seen)
+    all_nodes = re.findall(r"\b([a-zA-Z]+\d{2,}-\d+)\b", message)
+    return list(dict.fromkeys(all_nodes))
+
+
+def fetch_jita_deployments(task_id):
+    """Fetch JITA deployments for a given agave_task_id."""
+    payload = {
+        "raw_query": {"task_id": {"$oid": task_id}},
+        "start": 0,
+        "limit": 20,
+    }
+    try:
+        resp = session.post(
+            f"{JITA_BASE}/reports/deployments",
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("data", [])
+        logger.warning(f"JITA deployments fetch failed for task {task_id}: HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"JITA deployments fetch error for task {task_id}: {e}")
+    return []
+
+
+def get_rdm_failure_info(task_id):
+    """
+    Get RDM failure information for a task by inspecting its JITA deployments.
+    Returns a dict with rdm_message, rdm_link, provision_request_id, category, etc.
+    or None if no failed deployments found.
+    """
+    deployments = fetch_jita_deployments(task_id)
+    if not deployments:
+        return None
+
+    failed_deployments = [d for d in deployments if d.get("status") == "failed"]
+    if not failed_deployments:
+        return None
+
+    # Collect failure messages from status_transitions
+    all_reasons = []
+    rdm_ids = []
+    for dep in failed_deployments:
+        prov_id = ""
+        raw_prov = dep.get("provision_request_id")
+        if isinstance(raw_prov, dict) and "$oid" in raw_prov:
+            prov_id = raw_prov["$oid"]
+        elif raw_prov:
+            prov_id = str(raw_prov)
+        if prov_id:
+            rdm_ids.append(prov_id)
+
+        for transition in dep.get("status_transitions", []):
+            if transition.get("status") == "failed":
+                reason = transition.get("reason", "")
+                if reason and "RDM" in reason:
+                    all_reasons.append(reason)
+
+    if not all_reasons and not rdm_ids:
+        return None
+
+    combined_message = all_reasons[0] if all_reasons else ""
+    primary_rdm_id = rdm_ids[0] if rdm_ids else ""
+
+    # Try fetching detailed RDM failure_analysis from the RDM API
+    rdm_category = ""
+    rdm_resolution = ""
+    rdm_source = ""
+    if primary_rdm_id:
+        try:
+            rdm_resp = session.get(
+                f"https://rdm.eng.nutanix.com/api/v1/scheduled_deployments/{primary_rdm_id}?expand=created_by",
+                timeout=15,
+            )
+            if rdm_resp.status_code == 200:
+                rdm_data = rdm_resp.json().get("data", {})
+                rdm_msg = rdm_data.get("message", "")
+                if rdm_msg and not combined_message:
+                    combined_message = rdm_msg
+                fa = rdm_data.get("failure_analysis", {})
+                rdm_category = fa.get("category", "")
+                rdm_resolution = fa.get("resolution", "")
+                em = fa.get("error_metadata", {}).get("RDM", {})
+                rdm_source = em.get("source", "")
+        except Exception as e:
+            logger.warning(f"RDM API fetch failed for {primary_rdm_id}: {e}")
+
+    return {
+        "rdm_message": combined_message,
+        "rdm_link": f"https://rdm.eng.nutanix.com/scheduled_deployments/{primary_rdm_id}" if primary_rdm_id else "",
+        "provision_request_id": primary_rdm_id,
+        "rdm_category": rdm_category,
+        "rdm_resolution": rdm_resolution,
+        "rdm_source": rdm_source,
+        "failed_deployment_count": len(failed_deployments),
+        "total_deployment_count": len(deployments),
+    }
+
+
+def match_rdm_pattern(rdm_message):
+    """
+    Match an RDM failure message against known patterns.
+    Returns dict with matched pattern info and generated comment, or None.
+    Hot-reloads patterns from disk so file edits take effect without restart.
+    """
+    global RDM_PATTERNS
+    if not rdm_message:
+        return None
+
+    RDM_PATTERNS = _load_rdm_patterns()
+    for pattern in RDM_PATTERNS:
+        match = pattern["regex"].search(rdm_message)
+        if match:
+            template = pattern["comment_template"]
+            comment = template
+
+            if "{node_name}" in template:
+                nodes = _extract_node_names(rdm_message)
+                if nodes:
+                    comment = ", ".join(
+                        template.replace("{node_name}", n) for n in nodes
+                    )
+                else:
+                    comment = "regx_rerun"
+
+            return {
+                "pattern_id": pattern["id"],
+                "category": pattern["category"],
+                "description": pattern["description"],
+                "generated_comment": comment,
+                "failed_nodes": nodes if "{node_name}" in template and nodes else [],
+                "jira": pattern.get("jira", ""),
+                "matched": True,
+            }
+
+    return None
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-analyze", methods=["POST"])
+@jwt_required
+def rdm_analyze_skipped():
+    """
+    Analyze RDM failure for skipped testcases.
+    Accepts: { task_ids: [agave_task_id, ...] }
+    Returns RDM failure info with pattern-matched comments for each task.
+    """
+    try:
+        data = request.get_json() or {}
+        task_ids = data.get("task_ids", [])
+        if isinstance(task_ids, str):
+            task_ids = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+        if not task_ids:
+            return jsonify({"error": "task_ids is required"}), 400
+
+        results = []
+        for task_id in task_ids:
+            rdm_info = get_rdm_failure_info(task_id)
+            if not rdm_info:
+                results.append({
+                    "agave_task_id": task_id,
+                    "rdm_found": False,
+                    "rdm_message": "",
+                    "generated_comment": "",
+                    "pattern_matched": False,
+                })
+                continue
+
+            pattern_result = match_rdm_pattern(rdm_info["rdm_message"])
+            results.append({
+                "agave_task_id": task_id,
+                "rdm_found": True,
+                "rdm_message": rdm_info["rdm_message"][:500],
+                "rdm_link": rdm_info["rdm_link"],
+                "rdm_category": rdm_info["rdm_category"],
+                "rdm_resolution": rdm_info["rdm_resolution"],
+                "rdm_source": rdm_info["rdm_source"],
+                "failed_deployments": rdm_info["failed_deployment_count"],
+                "total_deployments": rdm_info["total_deployment_count"],
+                "pattern_matched": bool(pattern_result),
+                "generated_comment": pattern_result["generated_comment"] if pattern_result else "",
+                "pattern_id": pattern_result["pattern_id"] if pattern_result else "",
+                "pattern_category": pattern_result["category"] if pattern_result else "",
+                "pattern_description": pattern_result["description"] if pattern_result else "",
+                "pattern_jira": pattern_result.get("jira", "") if pattern_result else "",
+                "failed_nodes": pattern_result.get("failed_nodes", []) if pattern_result else [],
+            })
+
+        return jsonify({"success": True, "results": results})
+    except Exception as e:
+        logger.error(f"RDM analyze error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-analyze-ai", methods=["POST"])
+@jwt_required
+def rdm_analyze_ai():
+    """
+    AI-powered analysis for RDM failures that don't match known patterns.
+    Uses Glean search + AI summary to identify existing bugs and provide analysis.
+    """
+    try:
+        data = request.get_json() or {}
+        task_id = data.get("task_id", "")
+        rdm_message = data.get("rdm_message", "")
+        testcase_name = data.get("testcase_name", "")
+
+        if not rdm_message and not task_id:
+            return jsonify({"error": "task_id or rdm_message is required"}), 400
+
+        if not rdm_message and task_id:
+            rdm_info = get_rdm_failure_info(task_id)
+            if rdm_info:
+                rdm_message = rdm_info.get("rdm_message", "")
+
+        if not rdm_message:
+            return jsonify({"error": "No RDM failure message found"}), 404
+
+        # Search Glean for similar failures
+        glean_results = None
+        search_query = rdm_message[:200]
+        if testcase_name:
+            short_name = testcase_name.split(".")[-1] if "." in testcase_name else testcase_name
+            search_query = f"{short_name} {search_query}"
+        try:
+            glean_results = search_glean(search_query)
+        except Exception as e:
+            logger.warning(f"Glean search failed for RDM analysis: {e}")
+
+        # Build AI analysis
+        jira_refs = []
+        glean_summary = ""
+        if glean_results and isinstance(glean_results, list):
+            for gr in glean_results[:5]:
+                if isinstance(gr, dict):
+                    title = gr.get("title", "")
+                    url = gr.get("url", "")
+                    if title:
+                        glean_summary += f"- {title}"
+                        if url:
+                            glean_summary += f" ({url})"
+                        glean_summary += "\n"
+                        # Extract JIRA ticket IDs
+                        jira_matches = re.findall(r"[A-Z]+-\d+", title)
+                        jira_refs.extend(jira_matches)
+                        if url:
+                            jira_url_matches = re.findall(r"[A-Z]+-\d+", url)
+                            jira_refs.extend(jira_url_matches)
+
+        jira_refs = list(dict.fromkeys(jira_refs))
+
+        summary_parts = []
+        summary_parts.append(f"RDM Deployment Failure Analysis")
+        summary_parts.append(f"Error: {rdm_message[:300]}")
+        if jira_refs:
+            summary_parts.append(f"Related Jira tickets: {', '.join(jira_refs[:5])}")
+        if glean_summary:
+            summary_parts.append(f"Similar issues found:\n{glean_summary}")
+        else:
+            summary_parts.append("No similar issues found in Glean.")
+
+        ai_summary = "\n".join(summary_parts)
+
+        suggested_comment = "regx_rerun"
+        if jira_refs:
+            suggested_comment = f"regx_rerun ({jira_refs[0]})"
+
+        return jsonify({
+            "success": True,
+            "ai_summary": ai_summary,
+            "jira_refs": jira_refs,
+            "suggested_comment": suggested_comment,
+            "glean_results_count": len(glean_results) if glean_results else 0,
+        })
+    except Exception as e:
+        logger.error(f"RDM AI analyze error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/ai-summary-single", methods=["POST"])
+@jwt_required
+def ai_summary_single_testcase():
+    """Generate AI summary for a single testcase on demand."""
+    try:
+        body = request.get_json(force=True) or {}
+        testcase_name = body.get("testcase_name", "")
+        exception_summary = body.get("exception_summary", "")
+        exception = body.get("exception", "")
+        test_log_url = body.get("test_log_url", "")
+
+        if not testcase_name:
+            return jsonify({"success": False, "error": "testcase_name is required"}), 400
+
+        logs = fetch_testcase_logs(testcase_name, test_log_url)
+        success, summary = generate_ai_failure_summary(
+            exception=exception,
+            exception_summary=exception_summary,
+            tester_log_url=test_log_url,
+            testcase_name=testcase_name,
+            steps_log=logs.get("steps_log", ""),
+            nutest_test_log=logs.get("nutest_test_log", ""),
+        )
+
+        if success:
+            return jsonify({"success": True, "ai_summary": summary})
+        else:
+            return jsonify({"success": False, "error": summary}), 500
+    except Exception as e:
+        logger.error(f"AI summary single testcase error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/glean-search-single", methods=["POST"])
+@jwt_required
+def glean_search_single_testcase():
+    """Search Glean for matching ENG JIRA tickets and generate an AI failure
+    analysis for a single testcase.
+
+    Strategy:
+      1. Run a JIRA-scoped Glean search with the exception summary (most specific).
+      2. Run a second JIRA-scoped search with the testcase short name + key error
+         terms (catches broader matches).
+      3. Merge and de-duplicate found tickets, then enrich the top ones via the
+         JIRA REST API (status, summary, resolution) so the user sees whether
+         tickets are still open.
+      4. Feed everything into the AI model for classification and recommendation.
+    """
+    try:
+        body = request.get_json(force=True) or {}
+        testcase_name = body.get("testcase_name", "")
+        exception_summary = body.get("exception_summary", "")
+        exception_text = body.get("exception", "")
+        ai_summary = body.get("ai_summary", "")
+        test_log_url = body.get("test_log_url", "")
+        failure_stage = body.get("failure_stage", "")
+        jira_tickets = body.get("jira_tickets", [])
+
+        if not testcase_name:
+            return jsonify({"success": False, "error": "testcase_name is required"}), 400
+
+        short_name = testcase_name.split(".")[-1] if "." in testcase_name else testcase_name
+
+        # ---- Multi-query Glean search strategy ----
+
+        all_glean_tickets = {}   # ticket_id -> metadata dict
+        all_glean_snippets = []
+        queries_used = []
+
+        # Query 1: exception summary (most specific error text)
+        q1 = (exception_summary or "")[:250].strip()
+        if q1:
+            queries_used.append(q1)
+            g1 = search_glean_jira(q1, max_results=10)
+            for t in _extract_jira_tickets_from_glean(g1):
+                all_glean_tickets.setdefault(t["ticket"], t)
+            all_glean_snippets.extend(_build_glean_snippets(g1))
+
+        # Query 2: testcase short name + condensed error keywords
+        error_keywords = _extract_error_keywords(exception_summary, exception_text)
+        q2 = f"{short_name} {error_keywords}"[:250].strip()
+        if q2 and q2 != q1:
+            queries_used.append(q2)
+            g2 = search_glean_jira(q2, max_results=10)
+            for t in _extract_jira_tickets_from_glean(g2):
+                all_glean_tickets.setdefault(t["ticket"], t)
+            all_glean_snippets.extend(_build_glean_snippets(g2))
+
+        # Query 3: AI summary as search input (if available and different)
+        if ai_summary:
+            q3 = ai_summary[:250].strip()
+            if q3 and q3 != q1 and q3 != q2:
+                queries_used.append(q3)
+                g3 = search_glean_jira(q3, max_results=5)
+                for t in _extract_jira_tickets_from_glean(g3):
+                    all_glean_tickets.setdefault(t["ticket"], t)
+                all_glean_snippets.extend(_build_glean_snippets(g3))
+
+        # De-dup snippets by URL
+        seen_urls = set()
+        deduped_snippets = []
+        for s in all_glean_snippets:
+            key = s.get("url") or s.get("title")
+            if key and key not in seen_urls:
+                seen_urls.add(key)
+                deduped_snippets.append(s)
+
+        # ---- Enrich top JIRA tickets via JIRA REST API ----
+
+        glean_ticket_list = list(all_glean_tickets.values())
+        enriched_tickets = []
+        for t_info in glean_ticket_list[:8]:
+            tid = t_info["ticket"]
+            jdata = fetch_jira_ticket(tid)
+            entry = {
+                "ticket": tid,
+                "url": t_info.get("url", f"https://jira.nutanix.com/browse/{tid}"),
+                "glean_title": t_info.get("title", ""),
+                "glean_snippet": t_info.get("snippet", ""),
+            }
+            if jdata:
+                fields = jdata.get("fields", {})
+                entry["jira_summary"] = fields.get("summary", "")
+                entry["jira_status"] = (fields.get("status") or {}).get("name", "Unknown")
+                resolution = fields.get("resolution")
+                entry["jira_resolution"] = (resolution.get("name", "") if isinstance(resolution, dict) else "") if resolution else ""
+                entry["jira_priority"] = (fields.get("priority") or {}).get("name", "")
+                entry["jira_type"] = (fields.get("issuetype") or {}).get("name", "")
+                entry["is_open"] = entry["jira_status"] not in ("Closed", "Resolved", "Done", "Won't Fix")
+            else:
+                entry["jira_summary"] = t_info.get("title", "")
+                entry["jira_status"] = "Unknown"
+                entry["jira_resolution"] = ""
+                entry["is_open"] = True
+            enriched_tickets.append(entry)
+
+        # Sort: open tickets first, then by whether title/snippet shares keywords with exception
+        enriched_tickets.sort(key=lambda e: (0 if e.get("is_open") else 1))
+
+        # Flat ref list for backward compat
+        glean_jira_refs = [t["ticket"] for t in enriched_tickets]
+
+        # ---- Classify ----
+        first_jira_data = None
+        all_ticket_ids = list(jira_tickets or []) + glean_jira_refs
+        if all_ticket_ids:
+            first_jira_data = fetch_jira_ticket(all_ticket_ids[0])
+        issue_type = classify_failure(exception_summary, exception_text, first_jira_data, None)
+
+        # ---- AI analysis combining everything ----
+
+        prompt_parts = [
+            f"Testcase: {testcase_name}",
+            f"Exception Summary: {exception_summary or 'N/A'}",
+        ]
+        if exception_text:
+            prompt_parts.append(f"Traceback:\n```\n{exception_text[:3000]}\n```")
+        if ai_summary:
+            prompt_parts.append(f"AI Failure Summary:\n{ai_summary[:1500]}")
+        if failure_stage:
+            prompt_parts.append(f"Failure Stage: {failure_stage}")
+        if test_log_url:
+            prompt_parts.append(f"Log URL: {test_log_url}")
+
+        if enriched_tickets:
+            ticket_lines = []
+            for t in enriched_tickets[:8]:
+                status_str = t["jira_status"]
+                if t.get("jira_resolution"):
+                    status_str += f" ({t['jira_resolution']})"
+                ticket_lines.append(
+                    f"- {t['ticket']} [{status_str}] {t.get('jira_type', '')} — {t.get('jira_summary', t.get('glean_title', ''))}"
+                )
+            prompt_parts.append("Matching JIRA tickets found via Glean:\n" + "\n".join(ticket_lines))
+
+        if deduped_snippets:
+            snippet_text = "\n".join(
+                f"- [{s['title']}]({s['url']}): {s['snippet']}" for s in deduped_snippets[:5]
+            )
+            prompt_parts.append(f"Glean search results:\n{snippet_text}")
+
+        prompt_parts.append(
+            "\nProvide a concise analysis:\n"
+            "1. **Failure Classification**: Is this a Product Issue, Test Issue, or Infrastructure Issue? Why?\n"
+            "2. **Matching JIRA Tickets**: Which of the above JIRA tickets most closely match this failure? "
+            "Are they still open? Should the regression owner link this failure to one of them?\n"
+            "3. **Recent Product Change Impact**: Could a recent product change have caused this failure? What evidence?\n"
+            "4. **Recommended Action**: What should the regression owner do next? "
+            "(e.g. link to existing ticket, create new ticket, rerun, mark as infra issue)\n"
+            "Keep the response concise and actionable."
+        )
+
+        system_prompt = (
+            "You are a senior regression test failure analyst at Nutanix. "
+            "Given test failure details and JIRA tickets found via Glean search, "
+            "classify the failure (Product Issue / Test Issue / Infrastructure Issue), "
+            "identify the most closely matching JIRA tickets (especially open ENG tickets), "
+            "assess whether recent product changes may have caused it, "
+            "and recommend concrete next steps. Be specific and actionable."
+        )
+
+        ai_analysis = ""
+        try:
+            payload = {
+                "model": "hack-reason",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "\n\n".join(prompt_parts)},
+                ],
+                "max_tokens": 1500,
+                "stream": False,
+            }
+            url = f"{AI_BASE}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {AI_API_KEY}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, context=SSL_CTX, timeout=90) as resp:
+                if resp.getcode() == 200:
+                    response_data = json.loads(resp.read().decode())
+                    choices = response_data.get("choices", [])
+                    if choices:
+                        ai_analysis = (choices[0].get("message") or {}).get("content", "").strip()
+        except Exception as ai_err:
+            logger.warning(f"AI analysis in glean-search-single failed: {ai_err}")
+            ai_analysis = f"AI analysis unavailable: {str(ai_err)[:200]}"
+
+        return jsonify({
+            "success": True,
+            "issue_type": issue_type,
+            "glean_jira_refs": glean_jira_refs[:10],
+            "enriched_tickets": enriched_tickets[:8],
+            "glean_snippets": deduped_snippets[:5],
+            "ai_analysis": ai_analysis,
+            "search_queries": queries_used,
+        })
+    except Exception as e:
+        logger.error(f"Glean search single testcase error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _extract_error_keywords(exception_summary, exception_text):
+    """Pull the most useful error keywords from exception text for search."""
+    import re as _re
+    text = f"{exception_summary or ''} {(exception_text or '')[:500]}"
+    # Extract class-style error names like NuTestError, TimeoutException, etc.
+    error_names = _re.findall(r'[A-Z][a-zA-Z]*(?:Error|Exception|Failure|Fault)', text)
+    # Extract key phrases: status codes, method names, short phrases
+    status_codes = _re.findall(r'\b[45]\d{2}\b', text)
+    keywords = list(dict.fromkeys(error_names + status_codes))
+    return " ".join(keywords[:5])
+
+
+def _build_glean_snippets(glean_data):
+    """Extract snippet entries from a Glean search response."""
+    if not glean_data or not isinstance(glean_data, dict):
+        return []
+    raw = glean_data.get("results", [])
+    if isinstance(raw, dict):
+        raw = raw.get("results", [])
+    if not isinstance(raw, list):
+        return []
+    snippets = []
+    for r in raw[:10]:
+        if not isinstance(r, dict):
+            continue
+        doc = r.get("document", r)
+        title = doc.get("title", "")
+        url = doc.get("url", "")
+        snippet_text = ""
+        slist = r.get("snippets", [])
+        if isinstance(slist, list):
+            parts = []
+            for s in slist:
+                if isinstance(s, dict):
+                    inner = s.get("snippet", s)
+                    parts.append(inner.get("text", "") if isinstance(inner, dict) else str(inner))
+                elif isinstance(s, str):
+                    parts.append(s)
+            snippet_text = " ".join(parts)[:500]
+        if title or snippet_text:
+            snippets.append({"title": title, "url": url, "snippet": snippet_text})
+    return snippets
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-patterns", methods=["GET"])
+@jwt_required
+def get_rdm_patterns():
+    """Return current RDM failure patterns."""
+    try:
+        if os.path.exists(RDM_PATTERNS_FILE):
+            with open(RDM_PATTERNS_FILE, "r") as f:
+                return jsonify(json.load(f))
+        return jsonify({"patterns": []})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-patterns", methods=["PUT"])
+@jwt_required
+def update_rdm_patterns():
+    """Update RDM failure patterns. Expects { patterns: [...] }"""
+    global RDM_PATTERNS
+    try:
+        data = request.get_json() or {}
+        patterns = data.get("patterns")
+        if patterns is None:
+            return jsonify({"error": "patterns array is required"}), 400
+        with open(RDM_PATTERNS_FILE, "w") as f:
+            json.dump({"patterns": patterns}, f, indent=2)
+        RDM_PATTERNS = _load_rdm_patterns()
+        return jsonify({"success": True, "count": len(RDM_PATTERNS)})
+    except Exception as e:
+        logger.error(f"Error updating RDM patterns: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -5844,6 +6885,296 @@ def failed_analysis_history():
 
 
 # ======================================================
+# Failed Analysis — Saved Tags CRUD
+# ======================================================
+
+@app.route("/mcp/regression/failed-analysis/saved-tags", methods=["GET"])
+@jwt_required
+def list_saved_tags():
+    """Return the list of saved tag names."""
+    data = load_failed_analysis_tags()
+    return jsonify({"tags": data.get("tags", [])})
+
+
+@app.route("/mcp/regression/failed-analysis/saved-tags", methods=["POST"])
+@jwt_required
+def add_saved_tag():
+    """Add a new tag to the saved list."""
+    body = request.get_json() or {}
+    tag_name = (body.get("tag") or "").strip()
+    if not tag_name:
+        return jsonify({"error": "tag is required"}), 400
+    data = load_failed_analysis_tags()
+    existing = [t["name"] if isinstance(t, dict) else t for t in data["tags"]]
+    if tag_name in existing:
+        return jsonify({"error": "Tag already exists"}), 409
+    data["tags"].append({"name": tag_name, "added_at": datetime.utcnow().isoformat() + "Z"})
+    save_failed_analysis_tags(data)
+    return jsonify({"success": True, "tags": data["tags"]})
+
+
+@app.route("/mcp/regression/failed-analysis/saved-tags/<path:tag_name>", methods=["DELETE"])
+@jwt_required
+def delete_saved_tag(tag_name):
+    """Remove a tag and its cached analysis results."""
+    data = load_failed_analysis_tags()
+    original_len = len(data["tags"])
+    data["tags"] = [
+        t for t in data["tags"]
+        if (t["name"] if isinstance(t, dict) else t) != tag_name
+    ]
+    if len(data["tags"]) == original_len:
+        return jsonify({"error": "Tag not found"}), 404
+    save_failed_analysis_tags(data)
+    delete_failed_analysis_results(tag_name)
+    return jsonify({"success": True, "tags": data["tags"]})
+
+
+@app.route("/mcp/regression/failed-analysis/saved-tags/<path:tag_name>/results", methods=["GET"])
+@jwt_required
+def get_saved_tag_results(tag_name):
+    """Return cached analysis results for a saved tag."""
+    cached = load_failed_analysis_results(tag_name)
+    if cached is None:
+        return jsonify({"results": [], "current_branch": "", "saved_at": None})
+    return jsonify(cached)
+
+
+@app.route("/mcp/regression/failed-analysis/saved-tags/<path:tag_name>/results", methods=["PUT"])
+@jwt_required
+def save_saved_tag_results(tag_name):
+    """Save / overwrite analysis results for a saved tag."""
+    body = request.get_json() or {}
+    results = body.get("results", [])
+    current_branch = body.get("current_branch", "")
+    payload = {
+        "tag": tag_name,
+        "results": results,
+        "current_branch": current_branch,
+        "saved_at": datetime.utcnow().isoformat() + "Z",
+        "count": len(results),
+    }
+    save_failed_analysis_results(tag_name, payload)
+    return jsonify({"success": True, "count": len(results), "saved_at": payload["saved_at"]})
+
+
+# ======================================================
+# Re-trigger failed testcases via Jita agave_tasks rerun API
+# ======================================================
+
+@app.route("/mcp/regression/failed-analysis/retrigger", methods=["POST"])
+@jwt_required
+def retrigger_failed_testcases():
+    """
+    Re-trigger selected failed testcases.
+    Groups tests by their agave_task_id, fetches the original task to build default
+    payload, applies user overrides, and POSTs to the Jita rerun API.
+
+    Request body:
+      tests: list of {testcase_id, testcase_name, agave_task_id}
+      overrides (all optional):
+        nos_commit, nos_branch, nos_gbn,
+        pc_commit, pc_branch, pc_gbn,
+        nutest_branch, nutest_commit,
+        patch_url, resource_pool, username
+    """
+    try:
+        data = request.get_json() or {}
+        tests = data.get("tests", [])
+        if not tests:
+            return jsonify({"error": "No tests provided"}), 400
+
+        overrides = data.get("overrides", {})
+
+        current_username = g.current_user.get("sub", "")
+        user_auth = _get_user_credentials(current_username)
+        if not user_auth:
+            return jsonify({
+                "error": "Session credentials expired. Please re-login to retrigger.",
+                "code": "CREDENTIALS_EXPIRED"
+            }), 401
+
+        # Group test names by agave_task_id (as {"name": ...} dicts for JITA)
+        tests_by_task = {}
+        for t in tests:
+            atid = t.get("agave_task_id")
+            if not atid:
+                continue
+            name = t.get("testcase_name", "")
+            if name:
+                tests_by_task.setdefault(atid, []).append({"name": name})
+
+        if not tests_by_task:
+            return jsonify({"error": "No valid agave_task_id found in selected tests"}), 400
+
+        rerun_results = []
+
+        for task_id, task_tests in tests_by_task.items():
+            try:
+                # Fetch original task details
+                task_data = fetch_agave_task(task_id)
+                if not task_data:
+                    rerun_results.append({
+                        "agave_task_id": task_id,
+                        "success": False,
+                        "error": "Could not fetch task details"
+                    })
+                    continue
+
+                # Build rerun payload from original task, apply overrides
+                payload = _build_rerun_payload(task_data, task_tests, overrides, current_username)
+
+                # POST to rerun endpoint (use data=json.dumps per JITA API)
+                rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
+                logger.info(f"[retrigger] POST {rerun_url} with {len(task_tests)} test(s): {task_tests}")
+                logger.info(f"[retrigger] Payload keys: {list(payload.keys())}")
+                resp = requests.post(
+                    rerun_url,
+                    data=json.dumps(payload),
+                    auth=user_auth,
+                    verify=False,
+                    timeout=60
+                )
+
+                resp_text = resp.text[:500]
+                logger.info(f"[retrigger] Response {resp.status_code} for task {task_id}: {resp_text}")
+
+                try:
+                    resp_data = resp.json()
+                except Exception:
+                    resp_data = {}
+
+                if resp_data.get("success") is True:
+                    new_id = resp_data.get("_id")
+                    if isinstance(new_id, dict) and "$oid" in new_id:
+                        new_id = new_id["$oid"]
+                    rerun_results.append({
+                        "agave_task_id": task_id,
+                        "success": True,
+                        "rerun_task_id": new_id,
+                        "message": resp_data.get("message", ""),
+                    })
+                else:
+                    error_msg = resp_data.get("message") or resp_data.get("error") or f"HTTP {resp.status_code}: {resp_text}"
+                    logger.warning(f"[retrigger] Failed for task {task_id}: {error_msg}")
+                    rerun_results.append({
+                        "agave_task_id": task_id,
+                        "success": False,
+                        "error": error_msg
+                    })
+            except Exception as e:
+                logger.error(f"[retrigger] Error rerunning task {task_id}: {e}", exc_info=True)
+                rerun_results.append({
+                    "agave_task_id": task_id,
+                    "success": False,
+                    "error": str(e)
+                })
+
+        succeeded = [r for r in rerun_results if r.get("success")]
+        failed = [r for r in rerun_results if not r.get("success")]
+        return jsonify({
+            "success": len(failed) == 0,
+            "total": len(rerun_results),
+            "succeeded": len(succeeded),
+            "failed": len(failed),
+            "results": rerun_results,
+        })
+
+    except Exception as e:
+        logger.error(f"[retrigger] Unhandled error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+def _build_rerun_payload(task_data, task_tests, overrides, username):
+    """
+    Build a minimal rerun payload matching the JITA /rerun API contract.
+    task_tests is a list of {"name": "..."} dicts for the tests to rerun.
+    The JITA rerun API inherits most settings from the original task;
+    we only send tests, infra, and explicit user overrides.
+    """
+    # Infra from the original task's requested_hardware
+    requested_hw = task_data.get("requested_hardware", {})
+    infra = requested_hw.get("infra", [])
+    if overrides.get("resource_pool"):
+        infra = [{
+            "kind": "ON_PREM",
+            "type": "node_pool",
+            "entries": [overrides["resource_pool"]]
+        }]
+
+    payload = {
+        "tests": task_tests,
+        "infra": infra,
+    }
+
+    # --- NOS overrides ---
+    if overrides.get("nos_branch"):
+        payload["branch"] = overrides["nos_branch"]
+    if overrides.get("nos_commit"):
+        payload["commit_id"] = overrides["nos_commit"]
+    if overrides.get("nos_gbn"):
+        try:
+            payload["gbn"] = int(overrides["nos_gbn"])
+            payload["image_gbn"] = int(overrides["nos_gbn"])
+        except (ValueError, TypeError):
+            pass
+    if overrides.get("nos_tag"):
+        payload["tag"] = overrides["nos_tag"]
+    if overrides.get("nos_build_type"):
+        payload["build_type"] = overrides["nos_build_type"]
+
+    # --- Nutest overrides ---
+    if overrides.get("nutest_branch"):
+        payload["nutest-py3-tests_branch"] = overrides["nutest_branch"]
+    if overrides.get("nutest_commit"):
+        payload["nutest-py3-tests_commit"] = overrides["nutest_commit"]
+
+    # --- PC overrides (resource_manager_json) ---
+    pc_keys = ("pc_commit", "pc_branch", "pc_gbn", "pc_tag", "pc_build_type")
+    if any(overrides.get(k) for k in pc_keys):
+        rm_json = {}
+        pc_build = {}
+        if overrides.get("pc_commit"):
+            pc_build["commit_id"] = overrides["pc_commit"]
+        if overrides.get("pc_branch"):
+            pc_build["branch"] = overrides["pc_branch"]
+        if overrides.get("pc_gbn"):
+            try:
+                pc_build["gbn"] = int(overrides["pc_gbn"])
+            except (ValueError, TypeError):
+                pass
+        if overrides.get("pc_tag"):
+            pc_build["tag"] = overrides["pc_tag"]
+        if overrides.get("pc_build_type"):
+            pc_build["build_type"] = overrides["pc_build_type"]
+        if pc_build:
+            rm_json["PRISM_CENTRAL"] = {"build": pc_build}
+        payload["resource_manager_json"] = rm_json
+
+    # --- Patch URLs → tester_tags ---
+    tester_tags = list(task_data.get("tester_tags", []))
+    tags_changed = False
+    if overrides.get("patch_url"):
+        patch_url = overrides["patch_url"].strip()
+        if patch_url:
+            patch_tag = f"patch_url__{patch_url}"
+            if patch_tag not in tester_tags:
+                tester_tags.append(patch_tag)
+                tags_changed = True
+    if overrides.get("framework_patch_url"):
+        fw_url = overrides["framework_patch_url"].strip()
+        if fw_url:
+            fw_tag = f"framework_patch_url__{fw_url}"
+            if fw_tag not in tester_tags:
+                tester_tags.append(fw_tag)
+                tags_changed = True
+    if tags_changed:
+        payload["tester_tags"] = tester_tags
+
+    return payload
+
+
+# ======================================================
 # Testcase Management
 # ======================================================
 
@@ -5856,25 +7187,76 @@ TESTCASE_MGMT_BRANCHES = {
 TESTCASE_MGMT_TEAMS = ["CDP", "AHV"]
 
 
+def _resolve_branch_config(branch):
+    """Resolve branch config from static map or dynamically from a version string.
+
+    Accepts full branch names (e.g. 'ganges-7.7-stable') as well as bare
+    version numbers (e.g. '7.7', '7.8').  For master and pre-configured
+    branches the static TESTCASE_MGMT_BRANCHES entry is returned.  For
+    anything else a release-style config is generated on-the-fly.
+    """
+    if branch in TESTCASE_MGMT_BRANCHES:
+        return TESTCASE_MGMT_BRANCHES[branch]
+
+    version = branch
+    if branch.startswith("ganges-") and branch.endswith("-stable"):
+        version = branch.replace("ganges-", "").replace("-stable", "")
+
+    if re.match(r"^\d+\.\d+(\.\d+)?$", version):
+        return {
+            "milestone": version,
+            "team_prefix": version,
+            "test_set_regex": f"test_sets/milestones/{version}/",
+        }
+
+    return None
+
+
 def _tcms_auth():
     return (TCMS_USER, TCMS_PASSWORD)
 
 
 def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip, limit):
-    """Build the MongoDB aggregation pipeline payload for the POST API."""
-    return json.dumps([
-        {"$match": {"$and": [
+    """Build the MongoDB aggregation pipeline payload for the TCMS POST API.
+
+    Master and release branches use different filter clauses:
+    - Master includes release_name exclusion and metadata tag exclusions.
+    - Release branches include tc_type filter for regression/smart_qual.
+    Both include a team-specific test_sets regex.
+    """
+    is_master = milestone == "master"
+    team_test_set_regex = f"{test_set_regex}{team}/"
+
+    if is_master:
+        match_clause = {"$and": [
             {
                 "target_milestone": milestone,
                 "last_result": {"$elemMatch": {"pass_name": "overall"}},
                 "deleted": False,
             },
             {"test_case.test_sets": {"$regex": test_set_regex, "$options": "i"}},
-            {"additional_data.team": f"{team_prefix}/{team}"},
             {"release_name": {"$ne": milestone}},
             {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
+            {"additional_data.team": f"{team_prefix}/{team}"},
+            {"test_case.test_sets": {"$regex": team_test_set_regex, "$options": "i"}},
             {"test_case.deprecated": False},
-        ]}},
+        ]}
+    else:
+        match_clause = {"$and": [
+            {
+                "target_milestone": milestone,
+                "last_result": {"$elemMatch": {"pass_name": "overall"}},
+                "deleted": False,
+                "tc_type": {"$in": ["regression", "smart_qual"]},
+            },
+            {"test_case.test_sets": {"$regex": test_set_regex, "$options": "i"}},
+            {"additional_data.team": f"{team_prefix}/{team}"},
+            {"test_case.test_sets": {"$regex": team_test_set_regex, "$options": "i"}},
+            {"test_case.deprecated": False},
+        ]}
+
+    return json.dumps([
+        {"$match": match_clause},
         {"$sort": {"name": 1}},
         {"$skip": skip},
         {"$limit": limit},
@@ -6044,9 +7426,9 @@ def testcase_mgmt_fetch_data():
     team = request.args.get("team", "CDP")
     page_limit = 500
 
-    branch_cfg = TESTCASE_MGMT_BRANCHES.get(branch)
+    branch_cfg = _resolve_branch_config(branch)
     if not branch_cfg:
-        return jsonify({"error": f"Unknown branch: {branch}"}), 400
+        return jsonify({"error": f"Unknown branch: {branch}. Use a known branch name or a version number like 7.7"}), 400
 
     milestone = branch_cfg["milestone"]
     team_prefix = branch_cfg["team_prefix"]
@@ -6545,10 +7927,15 @@ def testcase_mgmt_resolve_job_profiles():
 @app.route("/mcp/regression/testcase-mgmt/branches", methods=["GET"])
 @jwt_required
 def testcase_mgmt_branches():
-    """Return available branches and teams for the testcase management module."""
+    """Return available branches and teams for the testcase management module.
+
+    Also signals that the UI can send arbitrary release versions (e.g. '7.7')
+    which the backend resolves dynamically.
+    """
     return jsonify({
         "branches": list(TESTCASE_MGMT_BRANCHES.keys()),
         "teams": TESTCASE_MGMT_TEAMS,
+        "custom_release_supported": True,
     })
 # Dynamic Job Profile APIs
 # ======================================================
@@ -9678,6 +11065,15 @@ def ai_analyze_bulk_issues():
             qi_impact = qi_data.get("overall_qi_impact", "N/A")
             count = qi_data.get("testcase_count", len(tests)) if qi_data else len(tests)
             tc_names = tests if isinstance(tests, list) else []
+            # Extract affected feature from test name prefixes
+            feature_prefixes = set()
+            for name in tc_names[:20]:
+                parts = name.split(".")
+                if len(parts) >= 3:
+                    feature_prefixes.add(".".join(parts[:3]))
+                elif len(parts) >= 2:
+                    feature_prefixes.add(".".join(parts[:2]))
+            affected_features = ", ".join(sorted(feature_prefixes)[:3])
             tc_sample = tc_names[:10]
             tc_display = "\n".join(f"    - {name}" for name in tc_sample)
             if len(tc_names) > 10:
@@ -9686,6 +11082,7 @@ def ai_analyze_bulk_issues():
                 f"Ticket: {ticket}\n"
                 f"  Testcases Impacted: {count}\n"
                 f"  QI Impact: {qi_impact}{'%' if qi_impact != 'N/A' else ''}\n"
+                f"  Affected Feature(s): {affected_features or 'Unknown'}\n"
                 f"  Affected Testcases:\n{tc_display}"
             )
 
@@ -9697,32 +11094,110 @@ def ai_analyze_bulk_issues():
             "IMPORTANT: Use EXACTLY the ticket IDs and testcase counts from the data above. "
             "Do NOT change or reorder the tickets. Analyse the actual testcase names to determine patterns.\n\n"
             "For EACH ticket listed above (in the same order), provide:\n"
-            "1. Risk Level (Critical/High/Medium/Low) — based on testcase count and QI impact\n"
-            "2. Likely Root Cause Category — infer from the testcase names (e.g., if many share a common prefix or module)\n"
-            "3. Impact Assessment (one sentence)\n"
-            "4. Recommended Action\n\n"
+            "1. Bug ID — the JIRA ticket ID exactly as given\n"
+            "2. Affected Feature — derived from testcase name prefix (e.g., cdp.stargate.storage_policy)\n"
+            "3. Risk Level (Critical/High/Medium/Low) — based on QI impact: <=-5% Critical, <=-2% High, <=-1% Medium, else Low\n"
+            "4. Impact — one sentence describing what is broken\n"
+            "5. Recommended Action — specific next step (if this looks like a test issue, note it can be fixed; "
+            "if product issue, note the affected component)\n\n"
             "Then provide an overall summary:\n"
             "- Overall Risk Score (0-100, where 100 is highest risk)\n"
             "- Release Readiness assessment\n"
             "- Top 3 priorities to address\n\n"
-            "Format using markdown. Use a table with columns: Ticket | Testcases Impacted | QI Impact | Risk Level | Root Cause Category | Impact | Action\n"
-            "The Ticket, Testcases Impacted, and QI Impact columns MUST match the input data exactly."
+            "Format using markdown. Use a table with columns: "
+            "Bug ID | Affected Feature | Testcases Impacted | QI Impact | Risk Level | Impact | Recommended Action\n"
+            "The Bug ID, Testcases Impacted, and QI Impact columns MUST match the input data exactly."
         )
 
         system_prompt = (
-            "You are a regression testing expert analyzing bulk failure patterns in a software QA pipeline. "
+            "You are a regression testing expert analyzing bulk failure patterns in a CDP (Continuous Data Protection) "
+            "software QA pipeline at Nutanix. "
             "Bulk issues are JIRA tickets that affect more than 5 testcases, indicating systemic problems. "
             "QI Impact is the Quality Index impact - negative values mean the bug is reducing overall quality. "
+            "Risk Level thresholds: QI Impact <= -5% is Critical, <= -2% is High, <= -1% is Medium, > -1% is Low. "
             "You MUST use the exact ticket IDs and counts provided — never invent or reorder them. "
-            "Infer likely root causes by analyzing the testcase names (common prefixes, modules, patterns). "
+            "Infer the Affected Feature from testcase name prefixes (e.g., cdp.stargate.checksum_regions → CDP Stargate Checksum). "
+            "For Recommended Action, distinguish between test issues (can be fixed in test code) and product issues "
+            "(require product team attention). "
             "Provide actionable, concise analysis. Use markdown tables for structured data."
         )
 
-        analysis = _call_ai_chat(system_prompt, user_content)
+        analysis = _call_ai_chat(system_prompt, user_content, max_tokens=3000)
         return jsonify({"success": True, "analysis": analysis})
 
     except Exception as e:
         logger.error(f"Error in AI bulk issues analysis: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/ai-analysis/deep-triage", methods=["POST"])
+@app.route("/api/mcp/regression/ai-analysis/deep-triage", methods=["POST"])
+@jwt_required
+def ai_deep_triage():
+    """
+    Prepare context for deep triage of a single bug using the triage-cdp-test-failure skill.
+    Returns structured context (log URL, test name, ticket, feature area) that the frontend
+    uses to invoke the Cursor SDK agent with the skill.
+    """
+    try:
+        body = request.get_json(force=True) or {}
+        ticket_id = body.get("ticket_id", "")
+        test_name = body.get("test_name", "")
+        log_url = body.get("log_url", "")
+        task_id = body.get("task_id", "")
+
+        if not ticket_id and not test_name:
+            return jsonify({"error": "ticket_id or test_name is required"}), 400
+
+        # Extract feature area from test name
+        feature_area = ""
+        if test_name:
+            parts = test_name.split(".")
+            if len(parts) >= 3:
+                feature_area = ".".join(parts[:3])
+            elif len(parts) >= 2:
+                feature_area = ".".join(parts[:2])
+
+        # Build Jita log directory URL if task_id and test_name are provided but log_url is not
+        if not log_url and task_id and test_name:
+            # Convert test name to path format for log URL construction
+            test_path = "/".join(test_name.split("."))
+            log_url = f"http://10.40.234.216/logs/{task_id}/{test_path}/"
+
+        # Construct the skill invocation command
+        skill_command = f"/triage-cdp-test-failure"
+        if ticket_id:
+            skill_command += f" {ticket_id}"
+        if log_url:
+            skill_command += f" {log_url}"
+
+        # Build context for the Cursor agent
+        context = {
+            "ticket_id": ticket_id,
+            "test_name": test_name,
+            "feature_area": feature_area,
+            "log_url": log_url,
+            "task_id": task_id,
+            "skill_command": skill_command,
+            "skill_prompt": (
+                f"Triage the following CDP test failure:\n"
+                f"- JIRA Ticket: {ticket_id}\n"
+                f"- Test Name: {test_name}\n"
+                f"- Feature Area: {feature_area}\n"
+                f"- Jita Log Directory: {log_url}\n\n"
+                f"Use the triage-cdp-test-failure skill to:\n"
+                f"1. Fetch and analyse the test logs\n"
+                f"2. Search the test source code in Sourcegraph (nugerrit.ntnxdpro.com/nutest-py3-tests)\n"
+                f"3. Determine if this is a test issue or product issue\n"
+                f"4. If test issue, propose a fix and offer to create a CR\n"
+                f"5. Provide structured triage result"
+            ),
+        }
+
+        return jsonify({"success": True, "context": context})
+
+    except Exception as e:
+        logger.error(f"Error in deep triage: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -10061,6 +11536,765 @@ def ai_run_plan_risk():
     except Exception as e:
         logger.error(f"Error in AI run plan risk analysis: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
+# Cursor AI Bridge — Deep testcase analysis via Cursor SDK
+# ======================================================
+CURSOR_BRIDGE_URL = os.getenv("CURSOR_BRIDGE_URL", "http://localhost:5002")
+
+# In-memory store for async Cursor AI analysis jobs
+_cursor_ai_jobs = {}
+_cursor_ai_jobs_lock = threading.Lock()
+
+
+@app.route("/mcp/regression/cursor-ai/analyze-testcase", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/analyze-testcase", methods=["POST"])
+@jwt_required
+def cursor_ai_analyze_testcase():
+    """Trigger deep AI analysis for a single failed testcase via the Cursor bridge."""
+    try:
+        body = request.get_json(force=True) or {}
+        testcase_name = body.get("testcase_name", "")
+        if not testcase_name:
+            return jsonify({"error": "testcase_name is required"}), 400
+
+        exception_summary = body.get("exception_summary", "")
+        exception = body.get("exception", "")
+        test_log_url = body.get("test_log_url", "")
+        jira_tickets = body.get("jira_tickets", [])
+        failure_stage = body.get("failure_stage", "")
+
+        # Fetch logs if not provided in the request
+        steps_log = body.get("steps_log", "")
+        nutest_test_log = body.get("nutest_test_log", "")
+        if not steps_log and not nutest_test_log and test_log_url:
+            logs = fetch_testcase_logs(testcase_name, test_log_url)
+            steps_log = logs.get("steps_log", "")
+            nutest_test_log = logs.get("nutest_test_log", "")
+
+        payload = {
+            "testcase_name": testcase_name,
+            "exception_summary": exception_summary,
+            "exception": exception,
+            "steps_log": steps_log[:5000],
+            "nutest_test_log": nutest_test_log[:5000],
+            "test_log_url": test_log_url,
+            "jira_tickets": jira_tickets,
+            "failure_stage": failure_stage,
+        }
+
+        resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/analyze-testcase",
+            json=payload,
+            timeout=600,
+        )
+        if resp.status_code != 200:
+            error_msg = resp.json().get("error", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+            return jsonify({"error": f"Bridge error: {error_msg}"}), 502
+
+        data = resp.json()
+        return jsonify({
+            "success": True,
+            "session_id": data.get("session_id", ""),
+            "analysis": data.get("analysis", {}),
+        })
+
+    except requests.exceptions.ConnectionError:
+        logger.error("Cursor bridge is not reachable at %s", CURSOR_BRIDGE_URL)
+        return jsonify({"error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start"}), 503
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Analysis timed out (>600s). Try batch mode for complex testcases."}), 504
+    except Exception as e:
+        logger.error(f"Error in cursor-ai analyze-testcase: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/analyze-batch", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/analyze-batch", methods=["POST"])
+@jwt_required
+def cursor_ai_analyze_batch():
+    """Start async batch analysis for multiple selected failed testcases."""
+    try:
+        body = request.get_json(force=True) or {}
+        testcases = body.get("testcases", [])
+        if not testcases:
+            return jsonify({"error": "testcases array is required"}), 400
+
+        # Enrich each testcase with logs if missing
+        enriched = []
+        for tc in testcases:
+            name = tc.get("testcase_name", "")
+            log_url = tc.get("test_log_url", "")
+            if name and log_url and not tc.get("steps_log") and not tc.get("nutest_test_log"):
+                logs = fetch_testcase_logs(name, log_url)
+                tc["steps_log"] = logs.get("steps_log", "")[:5000]
+                tc["nutest_test_log"] = logs.get("nutest_test_log", "")[:5000]
+            enriched.append(tc)
+
+        resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/analyze-batch",
+            json={"testcases": enriched},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            error_msg = resp.json().get("error", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+            return jsonify({"error": f"Bridge error: {error_msg}"}), 502
+
+        data = resp.json()
+        job_id = data.get("job_id", "")
+
+        # Track the job locally
+        with _cursor_ai_jobs_lock:
+            _cursor_ai_jobs[job_id] = {
+                "status": "running",
+                "total": len(enriched),
+                "completed": 0,
+                "created_at": datetime.now().isoformat(),
+            }
+
+        return jsonify({"success": True, "job_id": job_id, "total": len(enriched)})
+
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start"}), 503
+    except Exception as e:
+        logger.error(f"Error in cursor-ai analyze-batch: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/status/<job_id>", methods=["GET"])
+@app.route("/api/mcp/regression/cursor-ai/status/<job_id>", methods=["GET"])
+@jwt_required
+def cursor_ai_job_status(job_id):
+    """Poll the status of an async batch analysis job from the Cursor bridge."""
+    try:
+        resp = requests.get(
+            f"{CURSOR_BRIDGE_URL}/status/{job_id}",
+            timeout=10,
+        )
+        if resp.status_code == 404:
+            return jsonify({"error": "Job not found"}), 404
+        if resp.status_code != 200:
+            return jsonify({"error": "Bridge error"}), 502
+
+        data = resp.json()
+
+        # Update local tracker
+        with _cursor_ai_jobs_lock:
+            if job_id in _cursor_ai_jobs:
+                _cursor_ai_jobs[job_id]["status"] = data.get("status", "unknown")
+                _cursor_ai_jobs[job_id]["completed"] = data.get("completed", 0)
+
+        return jsonify(data)
+
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cursor AI bridge is not reachable"}), 503
+    except Exception as e:
+        logger.error(f"Error polling cursor-ai status: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/result", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/result", methods=["POST"])
+def cursor_ai_result_callback():
+    """Callback endpoint for the bridge to push results (async mode).
+    No JWT required since this is a server-to-server call from the bridge."""
+    try:
+        body = request.get_json(force=True) or {}
+        job_id = body.get("job_id", "")
+        testcase_id = body.get("testcase_id", "")
+        analysis = body.get("analysis", {})
+
+        if not job_id or not testcase_id:
+            return jsonify({"error": "job_id and testcase_id are required"}), 400
+
+        with _cursor_ai_jobs_lock:
+            job = _cursor_ai_jobs.get(job_id)
+            if job:
+                if "results" not in job:
+                    job["results"] = {}
+                job["results"][testcase_id] = analysis
+                job["completed"] = len(job["results"])
+                if job["completed"] >= job.get("total", 0):
+                    job["status"] = "done"
+
+        logger.info(f"[cursor-ai] Received result for job={job_id}, testcase={testcase_id}")
+        return jsonify({"success": True})
+
+    except Exception as e:
+        logger.error(f"Error in cursor-ai result callback: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/follow-up", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/follow-up", methods=["POST"])
+@jwt_required
+def cursor_ai_follow_up():
+    """Send a follow-up question to an existing Cursor AI analysis session.
+    The agent retains full conversation context from the initial triage."""
+    try:
+        body = request.get_json(force=True) or {}
+        session_id = body.get("session_id", "")
+        question = body.get("question", "")
+
+        if not session_id:
+            return jsonify({"error": "session_id is required"}), 400
+        if not question:
+            return jsonify({"error": "question is required"}), 400
+
+        resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/follow-up",
+            json={"session_id": session_id, "question": question},
+            timeout=600,
+        )
+        if resp.status_code == 404:
+            return jsonify({"error": "Session expired or not found. Run a new analysis first."}), 404
+        if resp.status_code != 200:
+            error_msg = resp.json().get("error", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+            return jsonify({"error": f"Bridge error: {error_msg}"}), 502
+
+        data = resp.json()
+        return jsonify({
+            "success": True,
+            "session_id": session_id,
+            "analysis": data.get("analysis", {}),
+        })
+
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cursor AI bridge is not reachable"}), 503
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Follow-up timed out (>600s)."}), 504
+    except Exception as e:
+        logger.error(f"Error in cursor-ai follow-up: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
+# Cursor AI Interactive Chat
+# ======================================================
+
+MCP_SERVER_CONFIGS = {
+    "regx-data": {"url": "http://localhost:5003", "description": "RegX regression data"},
+    "atlassian": {"url": "https://panacea-dev.eng.nutanix.com/mcp/atlassian", "description": "Jira & Confluence"},
+    "gw-sourcegraph": {"url": "https://panacea-dev.eng.nutanix.com/mcp/sourcegraph", "description": "Code search"},
+    "gw-jita": {"url": "https://panacea-dev.eng.nutanix.com/mcp/jita", "description": "JITA log access"},
+    "gw-diamond": {"url": "https://panacea-dev.eng.nutanix.com/mcp/diamond", "description": "Diamond storage"},
+    "gw-glean": {"url": "https://panacea-dev.eng.nutanix.com/mcp/glean", "description": "Internal knowledge search"},
+    "gw-supportgpt": {"url": "https://panacea-dev.eng.nutanix.com/mcp/supportgpt", "description": "Support knowledge base"},
+    "gw-nurag": {"url": "https://panacea-dev.eng.nutanix.com/mcp/nurag", "description": "Advanced RAG"},
+    "gw-slack": {"url": "https://panacea-dev.eng.nutanix.com/mcp/slack", "description": "Slack integration"},
+    "gw-panacea": {"url": "https://panacea-dev.eng.nutanix.com/mcp/panacea", "description": "Automated RCA"},
+    "gw-live-debug": {"url": "https://panacea-dev.eng.nutanix.com/mcp/live-debug", "description": "Live debugging"},
+    "auto-handoff": {"url": "http://10.40.224.6:9001/sse", "description": "Auto handoff"},
+}
+
+SOURCEGRAPH_SKILL_REPO = "nugerrit.ntnxdpro.com/nutest-py3-tests"
+SOURCEGRAPH_WEB_BASE = "https://sourcegraph.ntnxdpro.com"
+SYNCABLE_SOURCEGRAPH_SKILLS = {
+    "triage-rdm-deployment-failure": ".cursor/skills/triage-rdm-deployment-failure/",
+    "triage-cdp-test-failure": ".cursor/skills/triage-cdp-test-failure/",
+    "glean-search": ".cursor/skills/glean-search/",
+    "gerrit-comment-resolver": ".cursor/skills/gerrit-comment-resolver/",
+}
+
+MODE_SYSTEM_PROMPTS = {
+    "agent": (
+        "You are Cursor AI in Agent mode — a powerful implementation assistant with full access to MCP tools. "
+        "You can search code, read logs, query knowledge bases, interact with Jira/Confluence, and perform "
+        "automated triage. Provide detailed, actionable responses. When appropriate, explain which tools or "
+        "data sources you would use to accomplish the task."
+    ),
+    "plan": (
+        "You are Cursor AI in Plan mode — a read-only collaborative planning assistant. "
+        "Help the user design approaches, explore trade-offs, and create step-by-step plans before implementation. "
+        "Do not perform actions, only propose strategies with clear reasoning."
+    ),
+    "debug": (
+        "You are Cursor AI in Debug mode — a systematic troubleshooting assistant. "
+        "Help investigate bugs, failures, and unexpected behavior. Ask clarifying questions, "
+        "suggest diagnostic steps, and methodically narrow down root causes using available MCP tools and logs."
+    ),
+    "ask": (
+        "You are Cursor AI in Ask mode — a knowledge assistant for exploring code and answering questions. "
+        "Provide clear, concise explanations. Reference specific files, functions, and architecture when relevant. "
+        "Do not make changes, only inform."
+    ),
+}
+
+# Store for MCP tool call results during chat (per-request)
+_mcp_call_cache = {}
+_mcp_sessions = {}
+_mcp_rpc_counter = 0
+
+
+def _next_mcp_rpc_id():
+    global _mcp_rpc_counter
+    _mcp_rpc_counter += 1
+    return _mcp_rpc_counter
+
+
+def _parse_mcp_http_response(resp):
+    """Parse MCP JSON or SSE-like HTTP response into a JSON object."""
+    text = resp.text or ""
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+
+    # Standard JSON-RPC body
+    if "application/json" in content_type:
+        return resp.json()
+
+    # Streamable transport commonly returns SSE framed data.
+    data_payloads = []
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            payload = line[len("data: "):].strip()
+            if payload:
+                data_payloads.append(payload)
+    if not data_payloads:
+        raise RuntimeError("MCP response did not include JSON payload")
+    return json.loads(data_payloads[-1])
+
+
+def _normalize_mcp_tool_result(mcp_json):
+    """Unwrap MCP tool result shape into plain dict."""
+    if not isinstance(mcp_json, dict):
+        return {"error": f"Unexpected MCP response type: {type(mcp_json).__name__}"}
+    if mcp_json.get("error"):
+        err = mcp_json["error"]
+        return {"error": err.get("message", str(err)) if isinstance(err, dict) else str(err)}
+
+    result = mcp_json.get("result", {})
+    if isinstance(result, dict) and "content" in result and isinstance(result["content"], list):
+        # Gateway format: result.content[0].text holds JSON-serialized tool output.
+        text_chunks = []
+        for item in result["content"]:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text_chunks.append(item.get("text", ""))
+        joined_text = "\n".join(chunk for chunk in text_chunks if chunk).strip()
+        if joined_text:
+            try:
+                parsed = json.loads(joined_text)
+                if isinstance(parsed, dict):
+                    return parsed
+                return {"result": parsed}
+            except Exception:
+                return {"result_text": joined_text}
+    if isinstance(result, dict):
+        return result
+    return {"result": result}
+
+
+def _call_mcp_tool(server_id, tool_name, arguments, timeout=30, _retry_on_auth=True):
+    """Call an MCP tool and return normalized result."""
+    config = MCP_SERVER_CONFIGS.get(server_id)
+    if not config:
+        return {"error": f"Unknown MCP server: {server_id}"}
+    url = config["url"]
+    try:
+        session_id = _mcp_sessions.get(server_id)
+        if not session_id:
+            init_payload = {
+                "jsonrpc": "2.0",
+                "id": _next_mcp_rpc_id(),
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "regx-backend", "version": "1.0"},
+                },
+            }
+            init_resp = requests.post(url, json=init_payload, timeout=timeout, verify=False)
+            if init_resp.status_code != 200:
+                return {"error": f"MCP initialize failed ({init_resp.status_code})"}
+            session_id = init_resp.headers.get("mcp-session-id")
+            if not session_id:
+                return {"error": "MCP initialize did not return session ID"}
+            _mcp_sessions[server_id] = session_id
+
+        call_payload = {
+            "jsonrpc": "2.0",
+            "id": _next_mcp_rpc_id(),
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments or {},
+            },
+        }
+        call_resp = requests.post(
+            url,
+            json=call_payload,
+            headers={"mcp-session-id": session_id},
+            timeout=timeout,
+            verify=False,
+        )
+
+        # Session might expire; retry once with fresh initialize.
+        if call_resp.status_code in (400, 401) and _retry_on_auth:
+            _mcp_sessions.pop(server_id, None)
+            return _call_mcp_tool(server_id, tool_name, arguments, timeout=timeout, _retry_on_auth=False)
+
+        if call_resp.status_code != 200:
+            return {"error": f"MCP call failed ({call_resp.status_code})"}
+
+        parsed_resp = _parse_mcp_http_response(call_resp)
+        return _normalize_mcp_tool_result(parsed_resp)
+    except Exception as e:
+        return {"error": f"MCP call failed: {str(e)}"}
+
+
+def _strip_sourcegraph_line_prefixes(content):
+    """Remove Sourcegraph read_file line-number prefixes."""
+    cleaned = []
+    for line in (content or "").splitlines():
+        cleaned.append(re.sub(r"^\s*\d+:\s?", "", line))
+    return "\n".join(cleaned).strip() + "\n"
+
+
+def _list_sourcegraph_files_recursive(repo, root_path):
+    """List all files under a Sourcegraph directory using MCP list_files."""
+    normalized_root = root_path.rstrip("/")
+    pending_dirs = [normalized_root]
+    seen_dirs = set()
+    files = []
+
+    while pending_dirs:
+        current_dir = pending_dirs.pop()
+        if current_dir in seen_dirs:
+            continue
+        seen_dirs.add(current_dir)
+
+        list_resp = _call_mcp_tool(
+            "gw-sourcegraph",
+            "sourcegraph__list_files",
+            {"repo": repo, "path": current_dir},
+            timeout=45,
+        )
+        if list_resp.get("error"):
+            raise RuntimeError(list_resp["error"])
+
+        entries = list_resp.get("files", [])
+        if not isinstance(entries, list):
+            raise RuntimeError(f"Invalid list_files response for {current_dir}")
+
+        for entry in entries:
+            entry_path = (entry or {}).get("path")
+            if not entry_path:
+                continue
+            if (entry or {}).get("isDirectory"):
+                pending_dirs.append(entry_path.rstrip("/"))
+            else:
+                files.append(entry_path)
+
+    # Keep stable order for easier debugging and deterministic results.
+    files.sort()
+    return files
+
+
+def _list_sourcegraph_files_recursive_http(repo, root_path):
+    """Fallback: list Sourcegraph files by crawling tree pages."""
+    normalized_root = root_path.rstrip("/")
+    pending_dirs = [normalized_root]
+    seen_dirs = set()
+    files = []
+
+    while pending_dirs:
+        current_dir = pending_dirs.pop()
+        if current_dir in seen_dirs:
+            continue
+        seen_dirs.add(current_dir)
+
+        tree_url = f"{SOURCEGRAPH_WEB_BASE}/{repo}/-/tree/{current_dir}"
+        resp = requests.get(tree_url, timeout=45, verify=False)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Sourcegraph tree fetch failed ({resp.status_code}) for {current_dir}")
+
+        html = resp.text
+        tree_pattern = rf'/{re.escape(repo)}/-/tree/([^"?#]+)'
+        blob_pattern = rf'/{re.escape(repo)}/-/blob/([^"?#]+)'
+
+        for match in re.findall(tree_pattern, html):
+            path = urllib.parse.unquote(match).rstrip("/")
+            if path.startswith(normalized_root) and path not in seen_dirs:
+                pending_dirs.append(path)
+
+        for match in re.findall(blob_pattern, html):
+            path = urllib.parse.unquote(match).rstrip("/")
+            if path.startswith(normalized_root):
+                files.append(path)
+
+    files = sorted(set(files))
+    return files
+
+
+def _read_sourcegraph_file_http(repo, file_path):
+    """Fallback: read Sourcegraph file via raw endpoint."""
+    raw_url = f"{SOURCEGRAPH_WEB_BASE}/{repo}/-/raw/{file_path}"
+    resp = requests.get(raw_url, timeout=45, verify=False)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Sourcegraph raw fetch failed ({resp.status_code}) for {file_path}")
+    return resp.text
+
+
+@app.route("/mcp/regression/cursor-ai/sync-skills", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/sync-skills", methods=["POST"])
+@jwt_required
+def cursor_ai_sync_skills():
+    """Sync selected Sourcegraph skills into local .cursor/skills."""
+    try:
+        body = request.get_json(force=True) or {}
+        requested_ids = body.get("skill_ids") or list(SYNCABLE_SOURCEGRAPH_SKILLS.keys())
+        if not isinstance(requested_ids, list):
+            return jsonify({"error": "skill_ids must be a list"}), 400
+
+        invalid_ids = [skill_id for skill_id in requested_ids if skill_id not in SYNCABLE_SOURCEGRAPH_SKILLS]
+        if invalid_ids:
+            return jsonify({
+                "error": "Unsupported skill IDs requested",
+                "invalid_skill_ids": invalid_ids,
+                "allowed_skill_ids": list(SYNCABLE_SOURCEGRAPH_SKILLS.keys()),
+            }), 400
+
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        skills_root = os.path.join(project_root, ".cursor", "skills")
+
+        results = []
+        success_count = 0
+        for skill_id in requested_ids:
+            source_dir = SYNCABLE_SOURCEGRAPH_SKILLS[skill_id].rstrip("/")
+            target_dir = os.path.join(skills_root, skill_id)
+            try:
+                normalized_root = os.path.normpath(skills_root)
+                source_files = []
+                list_mode = "mcp"
+                try:
+                    source_files = _list_sourcegraph_files_recursive(SOURCEGRAPH_SKILL_REPO, source_dir)
+                except Exception as mcp_list_err:
+                    logger.warning(f"[cursor-ai-sync-skills] MCP list failed for {skill_id}, falling back to HTTP tree crawl: {mcp_list_err}")
+                    source_files = _list_sourcegraph_files_recursive_http(SOURCEGRAPH_SKILL_REPO, source_dir)
+                    list_mode = "http"
+                if not source_files:
+                    raise RuntimeError(f"No files found in Sourcegraph directory: {source_dir}")
+
+                synced_files = []
+                for source_file in source_files:
+                    cleaned_content = ""
+                    if list_mode == "mcp":
+                        read_resp = _call_mcp_tool(
+                            "gw-sourcegraph",
+                            "sourcegraph__read_file",
+                            {"repo": SOURCEGRAPH_SKILL_REPO, "path": source_file},
+                            timeout=45,
+                        )
+                        if read_resp.get("error"):
+                            logger.warning(f"[cursor-ai-sync-skills] MCP read failed for {source_file}, falling back to HTTP raw: {read_resp['error']}")
+                            raw_content = _read_sourcegraph_file_http(SOURCEGRAPH_SKILL_REPO, source_file)
+                            cleaned_content = raw_content if raw_content.endswith("\n") else f"{raw_content}\n"
+                        else:
+                            raw_content = read_resp.get("content", "")
+                            cleaned_content = _strip_sourcegraph_line_prefixes(raw_content)
+                    else:
+                        raw_content = _read_sourcegraph_file_http(SOURCEGRAPH_SKILL_REPO, source_file)
+                        cleaned_content = raw_content if raw_content.endswith("\n") else f"{raw_content}\n"
+
+                    if not cleaned_content.strip():
+                        raise RuntimeError(f"{source_file}: fetched file content is empty")
+
+                    relative_source_path = os.path.relpath(source_file, source_dir)
+                    target_file = os.path.normpath(os.path.join(target_dir, relative_source_path))
+                    if not target_file.startswith(normalized_root + os.sep):
+                        raise RuntimeError("Unsafe destination path")
+
+                    os.makedirs(os.path.dirname(target_file), exist_ok=True)
+                    with open(target_file, "w") as f:
+                        f.write(cleaned_content)
+                    synced_files.append(target_file)
+
+                success_count += 1
+                results.append({
+                    "skill_id": skill_id,
+                    "source_path": source_dir,
+                    "source_fetch_mode": list_mode,
+                    "target_dir": os.path.normpath(target_dir),
+                    "synced_files": synced_files,
+                    "synced_file_count": len(synced_files),
+                    "success": True,
+                })
+            except Exception as sync_err:
+                logger.error(f"[cursor-ai-sync-skills] Failed syncing {skill_id}: {sync_err}")
+                results.append({
+                    "skill_id": skill_id,
+                    "source_path": source_dir,
+                    "target_dir": os.path.normpath(target_dir),
+                    "success": False,
+                    "error": str(sync_err),
+                })
+
+        return jsonify({
+            "success": success_count == len(requested_ids),
+            "results": results,
+            "summary": {
+                "requested_count": len(requested_ids),
+                "success_count": success_count,
+                "failed_count": len(requested_ids) - success_count,
+            },
+        })
+    except Exception as e:
+        logger.error(f"Error syncing skills: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/chat", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/chat", methods=["POST"])
+@jwt_required
+def cursor_ai_chat():
+    """Interactive Cursor AI chat endpoint supporting multiple modes and MCP context."""
+    try:
+        body = request.get_json(force=True) or {}
+        messages = body.get("messages", [])
+        mode = body.get("mode", "agent")
+        model = body.get("model", "claude-sonnet-4.6-high")
+        mcp_servers = body.get("mcp_servers", [])
+
+        if not messages:
+            return jsonify({"error": "messages are required"}), 400
+
+        if mode not in MODE_SYSTEM_PROMPTS:
+            return jsonify({"error": f"Invalid mode: {mode}. Use: agent, plan, debug, ask"}), 400
+
+        system_prompt = MODE_SYSTEM_PROMPTS[mode]
+
+        # Add MCP context to system prompt
+        if mcp_servers:
+            active_tools = []
+            for sid in mcp_servers:
+                cfg = MCP_SERVER_CONFIGS.get(sid)
+                if cfg:
+                    active_tools.append(f"- {sid}: {cfg['description']}")
+            if active_tools:
+                system_prompt += (
+                    "\n\nYou have access to the following MCP tools/servers:\n"
+                    + "\n".join(active_tools)
+                    + "\n\nWhen answering, reference which tools you would use and provide specific, "
+                    "data-driven insights where possible."
+                )
+
+        # Build chat messages in OpenAI-compatible format
+        chat_messages = [{"role": "system", "content": system_prompt}]
+        for msg in messages:
+            role = msg.get("role", "user")
+            if role in ("user", "assistant"):
+                chat_messages.append({"role": role, "content": msg.get("content", "")})
+
+        # Map model names
+        ai_model = model
+        if model in ("claude-sonnet-4.6-high", "claude-sonnet-4.6"):
+            ai_model = "hack-reason"
+
+        payload = {
+            "model": ai_model,
+            "messages": chat_messages,
+            "max_tokens": 4096,
+            "stream": False,
+        }
+
+        url = f"{AI_BASE}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {AI_API_KEY}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, context=SSL_CTX, timeout=120) as resp:
+            if resp.getcode() != 200:
+                return jsonify({"error": f"AI API returned HTTP {resp.getcode()}"}), 502
+
+            response_data = json.loads(resp.read().decode())
+            choices = response_data.get("choices", [])
+            if not choices:
+                return jsonify({"error": "AI returned no choices"}), 502
+
+            content = (choices[0].get("message") or {}).get("content", "")
+
+            tools_used = []
+            if mcp_servers:
+                for sid in mcp_servers[:5]:
+                    cfg = MCP_SERVER_CONFIGS.get(sid)
+                    if cfg and cfg["description"].lower() in content.lower():
+                        tools_used.append(sid)
+
+            return jsonify({
+                "success": True,
+                "reply": content.strip(),
+                "mode": mode,
+                "model": model,
+                "tools_used": tools_used,
+            })
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode() if e.fp else ""
+        logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
+        return jsonify({"error": f"AI API error (HTTP {e.code})"}), 502
+    except urllib.error.URLError as e:
+        logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason}), falling back to Cursor Bridge")
+        # Fallback: route through the Cursor Bridge when the Nutanix AI endpoint is down
+        try:
+            last_user_msg = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    last_user_msg = msg.get("content", "")
+                    break
+            if not last_user_msg:
+                return jsonify({"error": "Cannot reach AI API endpoint and no user message for fallback"}), 503
+
+            bridge_resp = requests.post(
+                f"{CURSOR_BRIDGE_URL}/analyze-testcase",
+                json={
+                    "testcase_name": "cursor-ai-chat-fallback",
+                    "exception_summary": last_user_msg,
+                    "exception": "",
+                    "steps_log": "",
+                    "nutest_test_log": "",
+                    "test_log_url": "",
+                    "jira_tickets": [],
+                    "failure_stage": "chat",
+                },
+                timeout=600,
+            )
+            if bridge_resp.status_code == 200:
+                bridge_data = bridge_resp.json()
+                analysis = bridge_data.get("analysis", {})
+                reply = analysis.get("follow_up_answer") or analysis.get("root_cause") or json.dumps(analysis, indent=2)
+                return jsonify({
+                    "success": True,
+                    "reply": reply,
+                    "mode": mode,
+                    "model": "cursor-bridge-fallback",
+                    "tools_used": [],
+                })
+            else:
+                return jsonify({"error": "Cannot reach AI API endpoint and Cursor Bridge also failed"}), 503
+        except Exception as fallback_err:
+            logger.error(f"[cursor-ai-chat] Cursor Bridge fallback also failed: {fallback_err}")
+            return jsonify({"error": "Cannot reach AI API endpoint. Cursor Bridge fallback also unavailable."}), 503
+    except Exception as e:
+        logger.error(f"Error in cursor-ai chat: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/mcp-servers", methods=["GET"])
+@app.route("/api/mcp/regression/cursor-ai/mcp-servers", methods=["GET"])
+@jwt_required
+def cursor_ai_list_mcp_servers():
+    """List available MCP servers and their status."""
+    servers = []
+    for sid, cfg in MCP_SERVER_CONFIGS.items():
+        servers.append({
+            "id": sid,
+            "url": cfg["url"],
+            "description": cfg["description"],
+        })
+    return jsonify({"success": True, "servers": servers})
 
 
 # ======================================================

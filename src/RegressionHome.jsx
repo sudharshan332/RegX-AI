@@ -5,7 +5,6 @@ import AiMarkdown from "./components/AiMarkdown";
 import "./RegressionHome.css";
 
 const API_URL = `${API_BASE_URL}/mcp/regression/home`;
-const MANUAL_TASKS_API = `${API_BASE_URL}/mcp/regression/manual-tasks`;
 const CONFIG_API = `${API_BASE_URL}/mcp/regression/config`;
 const CONFIG_TAGS_API = `${API_BASE_URL}/mcp/regression/config/tags`;
 const TCMS_OVERALL_QI_API = `${API_BASE_URL}/mcp/regression/tcms-overall-qi`;
@@ -64,9 +63,6 @@ export default function RegressionHome() {
     const savedTaskIds = localStorage.getItem("regressionDashboardTaskIds");
     return savedTaskIds ? savedTaskIds : null; // Store as string for comparison
   });
-  const [manualTasks, setManualTasks] = useState({}); // {branch: [task_ids]}
-  const [editingBranch, setEditingBranch] = useState(null);
-  const [newTaskId, setNewTaskId] = useState("");
   const [hiddenBranches, setHiddenBranches] = useState(getStoredHiddenBranches()); // Branches to hide
   const [newBranchTagInput, setNewBranchTagInput] = useState("");
   const [loadingBranches, setLoadingBranches] = useState(false);
@@ -82,6 +78,7 @@ export default function RegressionHome() {
   const [configLoaded, setConfigLoaded] = useState(false); // Track if config has been loaded from JSON
   const [branchQiData, setBranchQiData] = useState({});
   const [branchQiLoading, setBranchQiLoading] = useState({});
+  const [tcmsDetailModal, setTcmsDetailModal] = useState(null);
   const [teamConfig, setTeamConfig] = useState(null);
   const [bulkIssuesAiAnalysis, setBulkIssuesAiAnalysis] = useState(null);
   const [loadingBulkAi, setLoadingBulkAi] = useState(false);
@@ -89,6 +86,16 @@ export default function RegressionHome() {
   const [loadingOwnerAi, setLoadingOwnerAi] = useState(false);
   const [ownerJiraDetails, setOwnerJiraDetails] = useState({});
   const [loadingJiraDetails, setLoadingJiraDetails] = useState(false);
+
+  // Deep Analysis tabs state
+  const [activeTab, setActiveTab] = useState("home");
+  const [deepAnalysisTabs, setDeepAnalysisTabs] = useState([]);
+  const [deepAnalysisResults, setDeepAnalysisResults] = useState({});
+  const [deepAnalysisLoading, setDeepAnalysisLoading] = useState({});
+  const [deepAnalysisSessions, setDeepAnalysisSessions] = useState({});
+  const [deepAnalysisFollowUp, setDeepAnalysisFollowUp] = useState({});
+  const [deepAnalysisFollowUpLoading, setDeepAnalysisFollowUpLoading] = useState({});
+  const [deepAnalysisHistory, setDeepAnalysisHistory] = useState({});
 
   // Parse JITA task link or comma-separated task IDs
   const parseTaskIds = (input) => {
@@ -218,11 +225,6 @@ export default function RegressionHome() {
         
         setRows(filtered);
         
-        // Fetch manual tasks for each branch (only if tag mode)
-        if (params.tag) {
-          const branches = filtered.map(r => r.branch);
-          fetchManualTasksForBranches(branches);
-        }
       } else {
         console.error("Invalid response data or empty runs:", response.data);
         setRows([]);
@@ -352,63 +354,6 @@ export default function RegressionHome() {
     if (Object.keys(ownerJiraDetails).length > 0) return;
     fetchOwnerJiraDetails();
   }, [triageCount]);
-
-  // Fetch manual tasks for all branches
-  const fetchManualTasksForBranches = async (branches) => {
-    const tasks = {};
-    await Promise.all(
-      branches.map(async (branch) => {
-        try {
-          const res = await api.get(MANUAL_TASKS_API, {
-            params: { tag: tag, branch }
-          });
-          tasks[branch] = res.data.manual_tasks || [];
-        } catch (err) {
-          console.error(`Error fetching manual tasks for ${branch}:`, err);
-          tasks[branch] = [];
-        }
-      })
-    );
-    setManualTasks(tasks);
-  };
-
-  // Add manual task
-  const handleAddManualTask = async (branch) => {
-    if (!newTaskId.trim()) return;
-
-    try {
-      const res = await api.post(MANUAL_TASKS_API, {
-        tag: tag,
-        branch,
-        task_ids: [newTaskId.trim()]
-      });
-      setManualTasks(prev => ({
-        ...prev,
-        [branch]: res.data.manual_tasks
-      }));
-      setNewTaskId("");
-      setEditingBranch(null);
-    } catch (err) {
-      console.error("Error adding manual task:", err);
-      alert("Failed to add manual task. Please try again.");
-    }
-  };
-
-  // Remove manual task
-  const handleRemoveManualTask = async (branch, taskId) => {
-    try {
-      const res = await api.delete(MANUAL_TASKS_API, {
-        params: { tag: tag, branch, task_id: taskId }
-      });
-      setManualTasks(prev => ({
-        ...prev,
-        [branch]: res.data.manual_tasks
-      }));
-    } catch (err) {
-      console.error("Error removing manual task:", err);
-      alert("Failed to remove manual task. Please try again.");
-    }
-  };
 
   // Handle configuration save
   const handleSaveConfig = async () => {
@@ -905,6 +850,132 @@ export default function RegressionHome() {
     }
   };
 
+  // --- Deep Analysis Tab handlers ---
+  const openDeepAnalysisTab = async (ticket, testName, tests) => {
+    const existingTab = deepAnalysisTabs.find(t => t.ticket === ticket);
+    if (existingTab) {
+      setActiveTab(ticket);
+      return;
+    }
+    const featureParts = (testName || "").split(".");
+    const featureArea = featureParts.length >= 3
+      ? featureParts.slice(0, 3).join(".")
+      : featureParts.slice(0, 2).join(".");
+    const newTab = { ticket, testName, featureArea, tests: tests || [] };
+    setDeepAnalysisTabs(prev => [...prev, newTab]);
+    setActiveTab(ticket);
+    setDeepAnalysisLoading(prev => ({ ...prev, [ticket]: true }));
+    setDeepAnalysisHistory(prev => ({ ...prev, [ticket]: [] }));
+
+    try {
+      const resp = await api.post(
+        `${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase`,
+        {
+          testcase_name: testName,
+          exception_summary: `Bulk issue ticket ${ticket} affecting ${(tests || []).length} testcases in feature area: ${featureArea}`,
+          exception: "",
+          test_log_url: "",
+          jira_tickets: [ticket],
+          failure_stage: "bulk_issue_triage",
+        },
+        { timeout: 600000 }
+      );
+      if (resp.data?.success) {
+        setDeepAnalysisResults(prev => ({ ...prev, [ticket]: resp.data.analysis }));
+        if (resp.data.session_id) {
+          setDeepAnalysisSessions(prev => ({ ...prev, [ticket]: resp.data.session_id }));
+        }
+      } else {
+        setDeepAnalysisResults(prev => ({
+          ...prev,
+          [ticket]: { error: resp.data?.error || "Analysis failed" }
+        }));
+      }
+    } catch (err) {
+      const errMsg = err.response?.data?.error || err.message || "Cursor AI analysis failed";
+      setDeepAnalysisResults(prev => ({ ...prev, [ticket]: { error: errMsg } }));
+    } finally {
+      setDeepAnalysisLoading(prev => ({ ...prev, [ticket]: false }));
+    }
+  };
+
+  const handleDeepAnalysisFollowUp = async (ticket) => {
+    const question = (deepAnalysisFollowUp[ticket] || "").trim();
+    if (!question) return;
+    const sessionId = deepAnalysisSessions[ticket];
+
+    setDeepAnalysisFollowUpLoading(prev => ({ ...prev, [ticket]: true }));
+    setDeepAnalysisHistory(prev => ({
+      ...prev,
+      [ticket]: [...(prev[ticket] || []), { role: "user", text: question }]
+    }));
+    setDeepAnalysisFollowUp(prev => ({ ...prev, [ticket]: "" }));
+
+    try {
+      let resp;
+      if (sessionId) {
+        resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/follow-up`, {
+          session_id: sessionId,
+          question,
+        });
+      } else {
+        const tab = deepAnalysisTabs.find(t => t.ticket === ticket);
+        const prevResult = deepAnalysisResults[ticket] || {};
+        resp = await api.post(
+          `${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase`,
+          {
+            testcase_name: tab?.testName || "",
+            exception_summary: `Follow-up question on ${ticket}: ${question}\n\nPrevious analysis: ${prevResult.root_cause || "N/A"}`,
+            exception: "",
+            test_log_url: "",
+            jira_tickets: [ticket],
+            failure_stage: "follow_up",
+          },
+          { timeout: 600000 }
+        );
+        if (resp.data?.success) {
+          if (resp.data.session_id) {
+            setDeepAnalysisSessions(prev => ({ ...prev, [ticket]: resp.data.session_id }));
+          }
+          resp = { data: { success: true, analysis: resp.data.analysis } };
+        }
+      }
+      if (resp.data?.success) {
+        const analysis = resp.data.analysis;
+        setDeepAnalysisHistory(prev => ({
+          ...prev,
+          [ticket]: [...(prev[ticket] || []), { role: "assistant", data: analysis }]
+        }));
+        setDeepAnalysisResults(prev => ({
+          ...prev,
+          [ticket]: { ...(prev[ticket] || {}), ...analysis }
+        }));
+        if (resp.data.session_id) {
+          setDeepAnalysisSessions(prev => ({ ...prev, [ticket]: resp.data.session_id }));
+        }
+      } else {
+        setDeepAnalysisHistory(prev => ({
+          ...prev,
+          [ticket]: [...(prev[ticket] || []), { role: "error", text: resp.data?.error || "Follow-up failed" }]
+        }));
+      }
+    } catch (err) {
+      setDeepAnalysisHistory(prev => ({
+        ...prev,
+        [ticket]: [...(prev[ticket] || []), { role: "error", text: err.message || "Follow-up failed" }]
+      }));
+    } finally {
+      setDeepAnalysisFollowUpLoading(prev => ({ ...prev, [ticket]: false }));
+    }
+  };
+
+  const closeDeepAnalysisTab = (ticket) => {
+    setDeepAnalysisTabs(prev => prev.filter(t => t.ticket !== ticket));
+    if (activeTab === ticket) {
+      setActiveTab("home");
+    }
+  };
+
   // Fetch QI Summary Report - supports both tag and task_ids
   const fetchQiSummaryReport = async (tagToUse = null, taskIdsToUse = null) => {
     setLoadingQiSummary(true);
@@ -963,21 +1034,24 @@ export default function RegressionHome() {
         timeout: 60000,
       });
       const qiValue = response.data?.qi_value;
+      const dataKey = timeFilter === "all" ? "overall" : "current";
+      const detailKey = timeFilter === "all" ? "overallDetail" : "currentDetail";
       setBranchQiData((prev) => ({
         ...prev,
         [branch]: {
           ...prev[branch],
-          [timeFilter === "all" ? "overall" : "customDate"]: qiValue,
-          [timeFilter === "all" ? "overallDetail" : "customDateDetail"]: response.data,
+          [dataKey]: qiValue,
+          [detailKey]: response.data,
         },
       }));
     } catch (err) {
       console.error(`Error fetching QI for branch ${branch}:`, err);
+      const dataKey = timeFilter === "all" ? "overall" : "current";
       setBranchQiData((prev) => ({
         ...prev,
         [branch]: {
           ...prev[branch],
-          [timeFilter === "all" ? "overall" : "customDate"]: "error",
+          [dataKey]: "error",
         },
       }));
     } finally {
@@ -1000,6 +1074,305 @@ export default function RegressionHome() {
   
     return (
       <div className="container">
+      {/* Tab Bar */}
+      {deepAnalysisTabs.length > 0 && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: "0", borderBottom: "2px solid #dee2e6",
+          marginBottom: "15px", flexWrap: "wrap",
+        }}>
+          <button
+            onClick={() => setActiveTab("home")}
+            style={{
+              padding: "8px 16px", border: "1px solid #dee2e6", borderBottom: activeTab === "home" ? "2px solid white" : "none",
+              background: activeTab === "home" ? "#fff" : "#f8f9fa", cursor: "pointer",
+              fontWeight: activeTab === "home" ? "700" : "400", borderRadius: "6px 6px 0 0",
+              marginBottom: "-2px", fontSize: "13px", color: activeTab === "home" ? "#0066cc" : "#666",
+            }}
+          >
+            Home
+          </button>
+          {deepAnalysisTabs.map(tab => (
+            <div key={tab.ticket} style={{ display: "flex", alignItems: "center", marginLeft: "2px" }}>
+              <button
+                onClick={() => setActiveTab(tab.ticket)}
+                style={{
+                  padding: "8px 12px", border: "1px solid #dee2e6",
+                  borderBottom: activeTab === tab.ticket ? "2px solid white" : "none",
+                  background: activeTab === tab.ticket ? "#fff" : "#f8f9fa", cursor: "pointer",
+                  fontWeight: activeTab === tab.ticket ? "700" : "400", borderRadius: "6px 6px 0 0",
+                  marginBottom: "-2px", fontSize: "13px", color: activeTab === tab.ticket ? "#6f42c1" : "#666",
+                }}
+              >
+                {tab.ticket}
+              </button>
+              <button
+                onClick={() => closeDeepAnalysisTab(tab.ticket)}
+                style={{
+                  padding: "4px 6px", background: "none", border: "none", cursor: "pointer",
+                  color: "#999", fontSize: "14px", lineHeight: 1, marginBottom: "-2px",
+                }}
+                title="Close tab"
+              >
+                &times;
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Deep Analysis Tab Content */}
+      {activeTab !== "home" && (() => {
+        const tab = deepAnalysisTabs.find(t => t.ticket === activeTab);
+        if (!tab) return null;
+        const result = deepAnalysisResults[tab.ticket];
+        const isLoading = deepAnalysisLoading[tab.ticket];
+        const sessionId = deepAnalysisSessions[tab.ticket];
+        const history = deepAnalysisHistory[tab.ticket] || [];
+        const followUpText = deepAnalysisFollowUp[tab.ticket] || "";
+        const followUpLoading = deepAnalysisFollowUpLoading[tab.ticket];
+
+        return (
+          <div style={{ padding: "10px 0" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px" }}>
+              <div>
+                <h3 style={{ margin: 0, color: "#6f42c1" }}>
+                  Deep Analysis: <a href={`${JIRA_URL}${tab.ticket}`} target="_blank" rel="noopener noreferrer" style={{ color: "#0066cc" }}>{tab.ticket}</a>
+                </h3>
+                <div style={{ fontSize: "12px", color: "#666", marginTop: "4px" }}>
+                  Feature: <strong>{tab.featureArea}</strong> | Test: <code style={{ fontSize: "11px" }}>{tab.testName}</code>
+                </div>
+              </div>
+              <button
+                onClick={() => openDeepAnalysisTab(tab.ticket, tab.testName, tab.tests)}
+                disabled={isLoading}
+                style={{
+                  padding: "6px 12px", background: isLoading ? "#6c757d" : "#6f42c1", color: "white",
+                  border: "none", borderRadius: "4px", cursor: isLoading ? "not-allowed" : "pointer", fontSize: "12px",
+                }}
+              >
+                {isLoading ? "Analyzing..." : "Re-run Analysis"}
+              </button>
+            </div>
+
+            {isLoading && !result && (
+              <div style={{ padding: "40px", textAlign: "center", color: "#6f42c1" }}>
+                <div style={{ fontSize: "16px", marginBottom: "10px" }}>Cursor AI is analyzing...</div>
+                <div style={{ fontSize: "12px", color: "#666" }}>This may take a few minutes. The AI is examining logs, source code, and internal docs.</div>
+              </div>
+            )}
+
+            {/* Interactive Chat Window */}
+            {result && !isLoading && (
+              <div style={{
+                marginTop: "20px", border: "1px solid #dee2e6", borderRadius: "10px",
+                background: "#fff", display: "flex", flexDirection: "column",
+                height: "400px", overflow: "hidden", boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
+              }}>
+                {/* Chat Header */}
+                <div style={{
+                  padding: "12px 16px", borderBottom: "1px solid #e9ecef",
+                  background: "linear-gradient(135deg, #6f42c1, #5a32a3)",
+                  borderRadius: "10px 10px 0 0", display: "flex", alignItems: "center", gap: "10px",
+                }}>
+                  <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#4caf50" }} />
+                  <span style={{ color: "#fff", fontSize: "13px", fontWeight: "600" }}>
+                    Cursor AI Chat — {tab.ticket}
+                  </span>
+                  <span style={{ color: "rgba(255,255,255,0.7)", fontSize: "11px", marginLeft: "auto" }}>
+                    {sessionId ? "Session active" : "Interactive"}
+                  </span>
+                </div>
+
+                {/* Chat Messages Area */}
+                <div style={{
+                  flex: 1, overflowY: "auto", padding: "16px",
+                  display: "flex", flexDirection: "column", gap: "12px",
+                  background: "#fafbfc",
+                }}>
+                  {/* Initial AI response as first message */}
+                  {!result.error && (
+                    <div style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
+                      <div style={{
+                        width: "28px", height: "28px", borderRadius: "50%", background: "#6f42c1",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        color: "#fff", fontSize: "12px", fontWeight: "700", flexShrink: 0,
+                      }}>AI</div>
+                      <div style={{
+                        background: "#fff", border: "1px solid #e9ecef", borderRadius: "4px 12px 12px 12px",
+                        padding: "10px 14px", maxWidth: "85%", fontSize: "13px", lineHeight: "1.5",
+                      }}>
+                        <div style={{ marginBottom: "6px" }}>
+                          <span style={{
+                            padding: "2px 8px", borderRadius: "10px", fontSize: "10px", fontWeight: "600",
+                            background: (result.classification || "").includes("Test") ? "#fff3cd"
+                              : (result.classification || "").includes("Product") ? "#f8d7da"
+                              : (result.classification || "").includes("Infra") ? "#d1ecf1" : "#e2e3e5",
+                            color: (result.classification || "").includes("Test") ? "#856404"
+                              : (result.classification || "").includes("Product") ? "#721c24"
+                              : (result.classification || "").includes("Infra") ? "#0c5460" : "#383d41",
+                          }}>
+                            {result.classification || "Analysis Complete"}
+                          </span>
+                          {result.confidence && (
+                            <span style={{ marginLeft: "8px", fontSize: "10px", color: "#888" }}>Confidence: {result.confidence}</span>
+                          )}
+                        </div>
+                        <div style={{ marginBottom: "4px" }}><strong>Root Cause:</strong> {result.root_cause || "N/A"}</div>
+                        {result.suggested_fix && <div style={{ marginBottom: "4px" }}><strong>Suggested Fix:</strong> {result.suggested_fix}</div>}
+                        {result.failing_code && (
+                          <div style={{ marginTop: "6px" }}>
+                            <div style={{ fontSize: "11px", color: "#666" }}>
+                              {result.failing_code.file}{result.failing_code.line_range && ` (lines ${result.failing_code.line_range})`}
+                            </div>
+                            {result.failing_code.snippet && (
+                              <pre style={{ background: "#282c34", color: "#abb2bf", padding: "8px", borderRadius: "4px", fontSize: "10px", overflow: "auto", marginTop: "4px", marginBottom: 0 }}>
+                                {result.failing_code.snippet}
+                              </pre>
+                            )}
+                          </div>
+                        )}
+                        {result.related_components && result.related_components.length > 0 && (
+                          <div style={{ marginTop: "6px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                            {result.related_components.map((c, i) => (
+                              <span key={i} style={{ background: "#e9ecef", padding: "1px 6px", borderRadius: "8px", fontSize: "10px" }}>{c}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {result.error && (
+                    <div style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
+                      <div style={{
+                        width: "28px", height: "28px", borderRadius: "50%", background: "#dc3545",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        color: "#fff", fontSize: "10px", fontWeight: "700", flexShrink: 0,
+                      }}>!</div>
+                      <div style={{
+                        background: "#fce4ec", border: "1px solid #f5c6cb", borderRadius: "4px 12px 12px 12px",
+                        padding: "10px 14px", maxWidth: "85%", fontSize: "13px",
+                      }}>
+                        <strong>Error:</strong> {result.error}
+                        <div style={{ marginTop: "8px", fontSize: "11px", color: "#666" }}>
+                          Paste in Cursor chat: <code style={{ background: "#f8f9fa", padding: "2px 4px", borderRadius: "3px" }}>/triage-cdp-test-failure {tab.ticket}</code>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Follow-up conversation messages */}
+                  {history.map((msg, i) => (
+                    msg.role === "user" ? (
+                      <div key={i} style={{ display: "flex", gap: "8px", alignItems: "flex-start", justifyContent: "flex-end" }}>
+                        <div style={{
+                          background: "#e3f2fd", border: "1px solid #bbdefb", borderRadius: "12px 4px 12px 12px",
+                          padding: "10px 14px", maxWidth: "75%", fontSize: "13px",
+                        }}>
+                          {msg.text}
+                        </div>
+                        <div style={{
+                          width: "28px", height: "28px", borderRadius: "50%", background: "#1976d2",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          color: "#fff", fontSize: "11px", fontWeight: "700", flexShrink: 0,
+                        }}>U</div>
+                      </div>
+                    ) : msg.role === "assistant" ? (
+                      <div key={i} style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
+                        <div style={{
+                          width: "28px", height: "28px", borderRadius: "50%", background: "#6f42c1",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          color: "#fff", fontSize: "12px", fontWeight: "700", flexShrink: 0,
+                        }}>AI</div>
+                        <div style={{
+                          background: "#fff", border: "1px solid #e9ecef", borderRadius: "4px 12px 12px 12px",
+                          padding: "10px 14px", maxWidth: "85%", fontSize: "13px", lineHeight: "1.5",
+                        }}>
+                          {msg.data?.follow_up_answer || msg.data?.root_cause || (
+                            typeof msg.data === "object" ? (
+                              <pre style={{ margin: 0, fontSize: "11px", whiteSpace: "pre-wrap" }}>{JSON.stringify(msg.data, null, 2)}</pre>
+                            ) : String(msg.data)
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div key={i} style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
+                        <div style={{
+                          width: "28px", height: "28px", borderRadius: "50%", background: "#dc3545",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          color: "#fff", fontSize: "10px", fontWeight: "700", flexShrink: 0,
+                        }}>!</div>
+                        <div style={{
+                          background: "#fce4ec", border: "1px solid #f5c6cb", borderRadius: "4px 12px 12px 12px",
+                          padding: "10px 14px", maxWidth: "85%", fontSize: "13px", color: "#c62828",
+                        }}>
+                          {msg.text}
+                        </div>
+                      </div>
+                    )
+                  ))}
+
+                  {/* Typing indicator */}
+                  {followUpLoading && (
+                    <div style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
+                      <div style={{
+                        width: "28px", height: "28px", borderRadius: "50%", background: "#6f42c1",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        color: "#fff", fontSize: "12px", fontWeight: "700", flexShrink: 0,
+                      }}>AI</div>
+                      <div style={{
+                        background: "#fff", border: "1px solid #e9ecef", borderRadius: "4px 12px 12px 12px",
+                        padding: "10px 14px", fontSize: "13px", color: "#999",
+                      }}>
+                        <span style={{ animation: "pulse 1.5s infinite" }}>Thinking...</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Chat Input Bar */}
+                <div style={{
+                  padding: "12px 16px", borderTop: "1px solid #e9ecef", background: "#fff",
+                  borderRadius: "0 0 10px 10px", display: "flex", gap: "8px", alignItems: "center",
+                }}>
+                  <input
+                    type="text"
+                    placeholder="Ask a follow-up question about this analysis..."
+                    value={followUpText}
+                    onChange={e => setDeepAnalysisFollowUp(prev => ({ ...prev, [tab.ticket]: e.target.value }))}
+                    onKeyDown={e => { if (e.key === "Enter" && !followUpLoading && followUpText.trim()) handleDeepAnalysisFollowUp(tab.ticket); }}
+                    disabled={followUpLoading}
+                    style={{
+                      flex: 1, padding: "10px 14px", border: "1px solid #dee2e6", borderRadius: "20px",
+                      fontSize: "13px", outline: "none", background: "#f8f9fa",
+                      transition: "border-color 0.2s",
+                    }}
+                    onFocus={e => { e.target.style.borderColor = "#6f42c1"; e.target.style.background = "#fff"; }}
+                    onBlur={e => { e.target.style.borderColor = "#dee2e6"; e.target.style.background = "#f8f9fa"; }}
+                  />
+                  <button
+                    onClick={() => handleDeepAnalysisFollowUp(tab.ticket)}
+                    disabled={followUpLoading || !followUpText.trim()}
+                    style={{
+                      width: "36px", height: "36px", borderRadius: "50%",
+                      background: followUpLoading || !followUpText.trim() ? "#dee2e6" : "#6f42c1",
+                      color: "white", border: "none", cursor: followUpLoading || !followUpText.trim() ? "not-allowed" : "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "center", fontSize: "16px",
+                      transition: "background 0.2s",
+                    }}
+                    title="Send"
+                  >
+                    &#10148;
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Home Tab Content */}
+      {activeTab === "home" && <>
       <div style={{ 
         display: "flex", 
         justifyContent: "space-between", 
@@ -1623,6 +1996,7 @@ export default function RegressionHome() {
         </div>
       )}
 
+        <h3 style={{ marginBottom: "10px" }}>Regression Summary</h3>
         <table className="dashboard-table">
           <thead>
             <tr>
@@ -1630,19 +2004,15 @@ export default function RegressionHome() {
               <th>Branch</th>
               <th>Start Date</th>
               <th>Status</th>
-              <th>Actual Tasks</th>
-              <th>Manual Tasks</th>
-              <th>Merged Tasks</th>
+              <th>Jita Tasks</th>
               <th colSpan="2" style={{ textAlign: "center" }}>Tests Overview</th>
-              <th style={{ textAlign: "center" }}>Overall QI</th>
+              <th style={{ textAlign: "center" }}>TCMS QI - Current</th>
+              <th style={{ textAlign: "center" }}>TCMS QI - Overall</th>
             </tr>
           </thead>
 
           <tbody>
             {rows.map((row) => {
-              const branchManualTasks = manualTasks[row.branch] || [];
-              const mergedTaskIds = [...row.actualTasks, ...branchManualTasks];
-              
               return (
                 <tr key={row.branch}>
                 <td>
@@ -1672,85 +2042,6 @@ export default function RegressionHome() {
                   </td>
                   <td>
                     {renderTaskButton(row.actualTasks, "Regression_Run_Tasks")}
-                  </td>
-                  <td>
-                    {editingBranch === row.branch ? (
-                      <div style={{ display: "flex", gap: "5px", alignItems: "center" }}>
-                        <input
-                          type="text"
-                          value={newTaskId}
-                          onChange={(e) => setNewTaskId(e.target.value)}
-                          placeholder="Enter task ID"
-                          style={{ padding: "4px", fontSize: "12px", width: "120px" }}
-                          onKeyPress={(e) => {
-                            if (e.key === "Enter") {
-                              handleAddManualTask(row.branch);
-                            }
-                          }}
-                        />
-                        <button
-                          onClick={() => handleAddManualTask(row.branch)}
-                          style={{ padding: "4px 8px", fontSize: "12px" }}
-                        >
-                          Add
-                        </button>
-                        <button
-                          onClick={() => {
-                            setEditingBranch(null);
-                            setNewTaskId("");
-                          }}
-                          style={{ padding: "4px 8px", fontSize: "12px" }}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <div>
-                        <button
-                          onClick={() => setEditingBranch(row.branch)}
-                          style={{ padding: "4px 8px", fontSize: "12px", marginBottom: "5px" }}
-                        >
-                          + Add Task
-                        </button>
-                        {branchManualTasks.length > 0 && (
-                          <div style={{ marginTop: "5px" }}>
-                            {branchManualTasks.map((taskId) => (
-                              <div
-                                key={taskId}
-                                style={{
-                                  display: "inline-block",
-                                  margin: "2px",
-                                  padding: "2px 6px",
-                                  background: "#f0f0f0",
-                                  borderRadius: "3px",
-                                  fontSize: "11px"
-                                }}
-                              >
-                                {taskId}
-                                <button
-                                  onClick={() => handleRemoveManualTask(row.branch, taskId)}
-                                  style={{
-                                    marginLeft: "5px",
-                                    background: "red",
-                                    color: "white",
-                                    border: "none",
-                                    borderRadius: "2px",
-                                    cursor: "pointer",
-                                    fontSize: "10px",
-                                    padding: "1px 4px"
-                                  }}
-                                >
-                                  ×
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </td>
-                  <td>
-                    {renderTaskButton(mergedTaskIds, "Merged_Tasks")}
                   </td>
                   <td style={{ textAlign: "center", verticalAlign: "middle", fontSize: "12px" }}>
                     <div style={{ marginBottom: "10px" }}>
@@ -1782,69 +2073,162 @@ export default function RegressionHome() {
                       </div>
                     </div>
                   </td>
-                  <td style={{ textAlign: "center", verticalAlign: "middle", minWidth: "140px" }}>
+                  <td style={{ textAlign: "center", verticalAlign: "middle", minWidth: "150px" }}>
                     {(() => {
                       const qiData = branchQiData[row.branch];
-                      const overallLoading = branchQiLoading[`${row.branch}_all`];
                       const customDateStr = row.startDate ? row.startDate.split(" ")[0] : null;
-                      const customLoading = customDateStr && branchQiLoading[`${row.branch}_${row.startDate}`];
+                      const currentLoading = customDateStr && branchQiLoading[`${row.branch}_${row.startDate}`];
                       const qiColor = (val) =>
                         val === "error" ? "#dc3545"
                         : val >= 80 ? "#28a745"
                         : val >= 50 ? "#fd7e14"
                         : "#dc3545";
+                      const milestone = (() => {
+                        const b = row.branch?.toLowerCase();
+                        if (b === "master" || b === "main") return "master";
+                        const m = row.branch?.match(/(\d+\.\d+(?:\.\d+)?)/);
+                        return m ? m[1] : row.branch;
+                      })();
+                      const teamName = (() => {
+                        if (!teamConfig) return "CDP";
+                        const cfg = teamConfig[tag] || teamConfig["default"];
+                        return cfg ? cfg.team : "CDP";
+                      })();
+                      const tcmsSearch = JSON.stringify([
+                        {"field": "Team", "op": "$eq", "value": [`${milestone}/${teamName}`]},
+                        {"field": "Test Sets", "op": "$contains", "value": [`test_sets/milestones/${milestone}/${teamName}/`]}
+                      ]);
+                      const tcmsBaseUrl = `https://tcms.eng.nutanix.com/#/testcases/milestone/${milestone}?search=${encodeURIComponent(tcmsSearch)}&tab=package_type&pass=overall&type=Regression`;
+                      const tcmsDateUrl = customDateStr ? `${tcmsBaseUrl}&timeFilter=${customDateStr}` : null;
+
+                      if (!customDateStr) {
+                        return <span style={{ color: "#999", fontSize: "11px" }}>No start date</span>;
+                      }
+
                       return (
                         <div style={{ fontSize: "12px" }}>
-                          {/* Overall QI (time_filter=all) */}
-                          <div style={{ marginBottom: "8px" }}>
-                            {qiData?.overall != null && qiData.overall !== "error" ? (
-                              <div style={{ fontWeight: "bold", color: qiColor(qiData.overall) }}>
-                                {qiData.overall}%
-                                <div style={{ fontWeight: "normal", color: "#666", fontSize: "10px" }}>Overall QI</div>
+                          {qiData?.current != null && qiData.current !== "error" ? (
+                            <div>
+                              <div style={{ fontWeight: "bold", color: qiColor(qiData.current), fontSize: "16px" }}>
+                                {qiData.current}%
                               </div>
-                            ) : qiData?.overall === "error" ? (
-                              <div style={{ color: "#dc3545", fontSize: "11px" }}>Failed</div>
-                            ) : overallLoading ? (
-                              <span style={{ color: "#666", fontStyle: "italic" }}>Loading...</span>
-                            ) : (
+                              <div style={{ color: "#666", fontSize: "10px", marginBottom: "6px" }}>QI (from {customDateStr})</div>
+                              <div style={{ display: "flex", gap: "4px", justifyContent: "center", flexWrap: "wrap" }}>
+                                <button
+                                  onClick={() => setTcmsDetailModal({ data: qiData.currentDetail, title: `TCMS QI - Current (${customDateStr})`, branch: row.branch })}
+                                  style={{ padding: "2px 6px", fontSize: "10px", cursor: "pointer", background: "#17a2b8", color: "white", border: "none", borderRadius: "3px" }}
+                                >
+                                  Details
+                                </button>
+                                <a href={tcmsDateUrl} target="_blank" rel="noopener noreferrer"
+                                  style={{ padding: "2px 6px", fontSize: "10px", background: "#6c757d", color: "white", borderRadius: "3px", textDecoration: "none" }}
+                                >
+                                  TCMS
+                                </a>
+                              </div>
+                            </div>
+                          ) : qiData?.current === "error" ? (
+                            <div>
+                              <div style={{ color: "#dc3545", fontSize: "11px", marginBottom: "4px" }}>Failed</div>
+                              <a href={tcmsDateUrl} target="_blank" rel="noopener noreferrer"
+                                style={{ padding: "2px 6px", fontSize: "10px", background: "#6c757d", color: "white", borderRadius: "3px", textDecoration: "none" }}
+                              >
+                                TCMS
+                              </a>
+                            </div>
+                          ) : currentLoading ? (
+                            <span style={{ color: "#666", fontStyle: "italic" }}>Loading...</span>
+                          ) : (
+                            <div style={{ display: "flex", gap: "4px", justifyContent: "center", flexWrap: "wrap" }}>
+                              <button
+                                onClick={() => fetchBranchQi(row.branch, row.startDate)}
+                                style={{ padding: "3px 8px", fontSize: "11px", cursor: "pointer", background: "#17a2b8", color: "white", border: "none", borderRadius: "3px" }}
+                              >
+                                Load QI
+                              </button>
+                              <a href={tcmsDateUrl} target="_blank" rel="noopener noreferrer"
+                                style={{ padding: "3px 6px", fontSize: "10px", background: "#6c757d", color: "white", borderRadius: "3px", textDecoration: "none" }}
+                              >
+                                TCMS
+                              </a>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </td>
+                  <td style={{ textAlign: "center", verticalAlign: "middle", minWidth: "150px" }}>
+                    {(() => {
+                      const qiData = branchQiData[row.branch];
+                      const overallLoading = branchQiLoading[`${row.branch}_all`];
+                      const qiColor = (val) =>
+                        val === "error" ? "#dc3545"
+                        : val >= 80 ? "#28a745"
+                        : val >= 50 ? "#fd7e14"
+                        : "#dc3545";
+                      const milestone = (() => {
+                        const b = row.branch?.toLowerCase();
+                        if (b === "master" || b === "main") return "master";
+                        const m = row.branch?.match(/(\d+\.\d+(?:\.\d+)?)/);
+                        return m ? m[1] : row.branch;
+                      })();
+                      const teamName = (() => {
+                        if (!teamConfig) return "CDP";
+                        const cfg = teamConfig[tag] || teamConfig["default"];
+                        return cfg ? cfg.team : "CDP";
+                      })();
+                      const tcmsSearch = JSON.stringify([
+                        {"field": "Team", "op": "$eq", "value": [`${milestone}/${teamName}`]},
+                        {"field": "Test Sets", "op": "$contains", "value": [`test_sets/milestones/${milestone}/${teamName}/`]}
+                      ]);
+                      const tcmsBaseUrl = `https://tcms.eng.nutanix.com/#/testcases/milestone/${milestone}?search=${encodeURIComponent(tcmsSearch)}&tab=package_type&pass=overall&type=Regression`;
+
+                      return (
+                        <div style={{ fontSize: "12px" }}>
+                          {qiData?.overall != null && qiData.overall !== "error" ? (
+                            <div>
+                              <div style={{ fontWeight: "bold", color: qiColor(qiData.overall), fontSize: "16px" }}>
+                                {qiData.overall}%
+                              </div>
+                              <div style={{ color: "#666", fontSize: "10px", marginBottom: "6px" }}>QI (All Time)</div>
+                              <div style={{ display: "flex", gap: "4px", justifyContent: "center", flexWrap: "wrap" }}>
+                                <button
+                                  onClick={() => setTcmsDetailModal({ data: qiData.overallDetail, title: "TCMS QI - Overall", branch: row.branch })}
+                                  style={{ padding: "2px 6px", fontSize: "10px", cursor: "pointer", background: "#007bff", color: "white", border: "none", borderRadius: "3px" }}
+                                >
+                                  Details
+                                </button>
+                                <a href={tcmsBaseUrl} target="_blank" rel="noopener noreferrer"
+                                  style={{ padding: "2px 6px", fontSize: "10px", background: "#6c757d", color: "white", borderRadius: "3px", textDecoration: "none" }}
+                                >
+                                  TCMS
+                                </a>
+                              </div>
+                            </div>
+                          ) : qiData?.overall === "error" ? (
+                            <div>
+                              <div style={{ color: "#dc3545", fontSize: "11px", marginBottom: "4px" }}>Failed</div>
+                              <a href={tcmsBaseUrl} target="_blank" rel="noopener noreferrer"
+                                style={{ padding: "2px 6px", fontSize: "10px", background: "#6c757d", color: "white", borderRadius: "3px", textDecoration: "none" }}
+                              >
+                                TCMS
+                              </a>
+                            </div>
+                          ) : overallLoading ? (
+                            <span style={{ color: "#666", fontStyle: "italic" }}>Loading...</span>
+                          ) : (
+                            <div style={{ display: "flex", gap: "4px", justifyContent: "center", flexWrap: "wrap" }}>
                               <button
                                 onClick={() => fetchBranchQi(row.branch, "all")}
-                                style={{
-                                  padding: "3px 8px", fontSize: "11px", cursor: "pointer",
-                                  background: "#007bff", color: "white", border: "none",
-                                  borderRadius: "3px",
-                                }}
+                                style={{ padding: "3px 8px", fontSize: "11px", cursor: "pointer", background: "#007bff", color: "white", border: "none", borderRadius: "3px" }}
                               >
-                                Overall QI
+                                Load QI
                               </button>
-                            )}
-                          </div>
-                          {/* Custom Date QI (time_filter=startDate) */}
-                          {customDateStr && (
-                            <div>
-                              {qiData?.customDate != null && qiData.customDate !== "error" ? (
-                                <div style={{ fontWeight: "bold", color: qiColor(qiData.customDate) }}>
-                                  {qiData.customDate}%
-                                  <div style={{ fontWeight: "normal", color: "#666", fontSize: "10px" }}>
-                                    QI ({customDateStr})
-                                  </div>
-                                </div>
-                              ) : qiData?.customDate === "error" ? (
-                                <div style={{ color: "#dc3545", fontSize: "11px" }}>Failed</div>
-                              ) : customLoading ? (
-                                <span style={{ color: "#666", fontStyle: "italic" }}>Loading...</span>
-                              ) : (
-                                <button
-                                  onClick={() => fetchBranchQi(row.branch, row.startDate)}
-                                  style={{
-                                    padding: "3px 8px", fontSize: "11px", cursor: "pointer",
-                                    background: "#17a2b8", color: "white", border: "none",
-                                    borderRadius: "3px",
-                                  }}
-                                >
-                                  QI ({customDateStr})
-                                </button>
-                              )}
+                              <a href={tcmsBaseUrl} target="_blank" rel="noopener noreferrer"
+                                style={{ padding: "3px 6px", fontSize: "10px", background: "#6c757d", color: "white", borderRadius: "3px", textDecoration: "none" }}
+                              >
+                                TCMS
+                              </a>
                             </div>
                           )}
                         </div>
@@ -1882,7 +2266,6 @@ export default function RegressionHome() {
                             <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Total Failed</th>
                             <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Triaged</th>
                             <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>UnTriaged</th>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Bulk Issues</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1892,7 +2275,6 @@ export default function RegressionHome() {
                               <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{stats["Total Failed"]}</td>
                               <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center", color: "#28a745" }}>{stats["Triaged"]}</td>
                               <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center", color: "#dc3545" }}>{stats["UnTriaged"]}</td>
-                              <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center", color: "#ffc107" }}>{stats["Bulk Issues"]}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1932,12 +2314,13 @@ export default function RegressionHome() {
                             <tr style={{ backgroundColor: "#f8f9fa" }}>
                               <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "left" }}>Bulk Issue Jita Ticket</th>
                               <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Testcase Impacted</th>
-                              <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>QI Impact due to this bug</th>
+                              <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>QI Impact</th>
+                              <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Risk Level</th>
+                              <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Action</th>
                             </tr>
                           </thead>
                           <tbody>
                             {(() => {
-                              // Sort entries: if QI data is available, sort by QI impact, otherwise keep original order
                               const entries = Object.entries(triageCount.bulk_issues);
                               const hasQiData = triageCount.bulk_issues_with_qi && Object.keys(triageCount.bulk_issues_with_qi).length > 0;
                               
@@ -1945,14 +2328,23 @@ export default function RegressionHome() {
                                 ? entries.sort((a, b) => {
                                     const qiA = triageCount.bulk_issues_with_qi[a[0]]?.overall_qi_impact ?? 0;
                                     const qiB = triageCount.bulk_issues_with_qi[b[0]]?.overall_qi_impact ?? 0;
-                                    return qiA - qiB; // Sort by QI impact (most negative first)
+                                    return qiA - qiB;
                                   })
                                 : entries;
                               
+                              const getRiskLevel = (qiImpact) => {
+                                if (qiImpact === null || qiImpact === undefined) return null;
+                                if (qiImpact <= -5) return { label: "Critical", color: "#dc3545", bg: "#f8d7da" };
+                                if (qiImpact <= -2) return { label: "High", color: "#856404", bg: "#fff3cd" };
+                                if (qiImpact <= -1) return { label: "Medium", color: "#0c5460", bg: "#d1ecf1" };
+                                return { label: "Low", color: "#155724", bg: "#d4edda" };
+                              };
+
                               return sortedEntries.map(([ticket, tests]) => {
-                                // Check if QI data is available for this ticket
                                 const qiData = triageCount.bulk_issues_with_qi?.[ticket];
                                 const showLoading = loadingBulkQi && !qiData;
+                                const risk = qiData ? getRiskLevel(qiData.overall_qi_impact) : null;
+                                const firstTest = tests[0] || "";
                                 
                                 return (
                                   <tr key={ticket}>
@@ -1977,6 +2369,28 @@ export default function RegressionHome() {
                                       ) : (
                                         "-"
                                       )}
+                                    </td>
+                                    <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>
+                                      {risk ? (
+                                        <span style={{
+                                          padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "600",
+                                          color: risk.color, background: risk.bg,
+                                        }}>
+                                          {risk.label}
+                                        </span>
+                                      ) : "-"}
+                                    </td>
+                                    <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>
+                                      <button
+                                        onClick={() => openDeepAnalysisTab(ticket, firstTest, tests)}
+                                        style={{
+                                          padding: "3px 8px", fontSize: "10px", cursor: "pointer",
+                                          background: "#6f42c1", color: "white", border: "none", borderRadius: "3px",
+                                        }}
+                                        title="Open Cursor AI deep analysis in a new tab"
+                                      >
+                                        Deep Analysis
+                                      </button>
                                     </td>
                                   </tr>
                                 );
@@ -2059,6 +2473,13 @@ export default function RegressionHome() {
                   {triageCount.pending_tests !== undefined && (
                     <div style={{ marginBottom: "10px", color: "#17a2b8" }}>
                       <strong>Pending/Running Tests:</strong> {triageCount.pending_tests}
+                    </div>
+                  )}
+
+                  {/* Display Bulk Issues Count */}
+                  {triageCount.bulk_issues_count !== undefined && (
+                    <div style={{ marginBottom: "10px", color: "#ffc107" }}>
+                      <strong>Total Bulk Issues (tickets with &gt;5 testcases):</strong> {triageCount.bulk_issues_count}
                     </div>
                   )}
                   
@@ -2608,6 +3029,79 @@ export default function RegressionHome() {
               Click "Save" in Advanced Action to load QI Summary Report data.
             </div>
           )}
+        </div>
+      )}
+
+      {/* TCMS Detail Modal */}
+      </>}
+      {tcmsDetailModal && (
+        <div style={{
+          position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+          background: "rgba(0,0,0,0.5)", zIndex: 9999,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }} onClick={() => setTcmsDetailModal(null)}>
+          <div style={{
+            background: "white", borderRadius: "8px", padding: "24px",
+            maxWidth: "600px", width: "90%", maxHeight: "80vh", overflowY: "auto",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+          }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+              <h3 style={{ margin: 0 }}>{tcmsDetailModal.title} — {tcmsDetailModal.branch}</h3>
+              <button onClick={() => setTcmsDetailModal(null)}
+                style={{ background: "none", border: "none", fontSize: "20px", cursor: "pointer", color: "#666" }}>✕</button>
+            </div>
+            {tcmsDetailModal.data ? (
+              <div>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                  <tbody>
+                    {[
+                      ["QI (avg_total_op_success_%)", tcmsDetailModal.data.qi_value != null ? `${tcmsDetailModal.data.qi_value}%` : "-", "#007bff"],
+                      ["Total Tests", tcmsDetailModal.data.total_tests],
+                      ["Run", tcmsDetailModal.data.run],
+                      ["Passed", tcmsDetailModal.data.passed, "#28a745"],
+                      ["Failed", tcmsDetailModal.data.failed, "#dc3545"],
+                      ["Not Run", tcmsDetailModal.data.not_run, "#6c757d"],
+                      ["Run %", tcmsDetailModal.data.run_percentage != null ? `${tcmsDetailModal.data.run_percentage}%` : "-"],
+                      ["Total Triaged", tcmsDetailModal.data.total_triaged],
+                      ["Triage %", tcmsDetailModal.data.triage_percentage != null ? `${tcmsDetailModal.data.triage_percentage}%` : "-"],
+                      ["Product Issues", tcmsDetailModal.data.total_product_issues],
+                      ["Test Issues", tcmsDetailModal.data.total_test_issues],
+                      ["Other Issues", tcmsDetailModal.data.total_other_issues],
+                      ["Infra Issues", tcmsDetailModal.data.total_infra_issues],
+                      ["Framework Issues", tcmsDetailModal.data.total_framework_issues],
+                      ["Open Bugs", tcmsDetailModal.data.openBugs, "#dc3545"],
+                      ["Overall Effectiveness", tcmsDetailModal.data.overall_effectiveness != null ? `${tcmsDetailModal.data.overall_effectiveness}%` : "-"],
+                      ["Overall Stability", tcmsDetailModal.data.overall_stability != null ? `${tcmsDetailModal.data.overall_stability}%` : "-"],
+                    ].map(([label, value, color]) => (
+                      <tr key={label}>
+                        <td style={{ padding: "6px 8px", borderBottom: "1px solid #eee", fontWeight: "500" }}>{label}</td>
+                        <td style={{ padding: "6px 8px", borderBottom: "1px solid #eee", color: color || "inherit", fontWeight: color ? "bold" : "normal" }}>
+                          {value != null ? value : "-"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {tcmsDetailModal.data.unique_tickets && tcmsDetailModal.data.unique_tickets.length > 0 && (
+                  <div style={{ marginTop: "16px" }}>
+                    <strong>Unique Tickets ({tcmsDetailModal.data.unique_tickets.length}):</strong>
+                    <div style={{ marginTop: "8px" }}>
+                      <a
+                        href={`https://jira.nutanix.com/issues/?jql=issuekey%20in%20(${tcmsDetailModal.data.unique_tickets.join("%2C")})`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ padding: "4px 10px", fontSize: "12px", background: "#007bff", color: "white", borderRadius: "4px", textDecoration: "none" }}
+                      >
+                        View All in JIRA
+                      </a>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ color: "#666", fontStyle: "italic" }}>No detail data available.</div>
+            )}
+          </div>
         </div>
       )}
     </div>

@@ -3,9 +3,11 @@ import api from '../api';
 import { API_BASE_URL } from '../config';
 import { useTaskContext } from '../context/TaskContext';
 import AiMarkdown from '../components/AiMarkdown';
+import * as XLSX from 'xlsx';
 import './TestcaseManagement.css';
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE_OPTIONS = [50, 100, 200];
+const DEFAULT_PAGE_SIZE = 50;
 
 const TAG_CLASS_MAP = {
   critical: 'tag-critical',
@@ -60,6 +62,25 @@ const ALL_COLUMNS = [
 ];
 
 const DEFAULT_VISIBLE = new Set(ALL_COLUMNS.filter(c => c.defaultVisible).map(c => c.key));
+
+const CUSTOM_BRANCHES_STORAGE_KEY = 'tc-mgmt-custom-branches';
+
+function toShortBranch(name) {
+  if (name === 'master') return 'master';
+  const m = name.match(/^ganges-(\d+\.\d+(?:\.\d+)?)-stable$/);
+  return m ? m[1] : name;
+}
+
+function loadCustomBranches() {
+  try {
+    const raw = localStorage.getItem(CUSTOM_BRANCHES_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveCustomBranches(list) {
+  localStorage.setItem(CUSTOM_BRANCHES_STORAGE_KEY, JSON.stringify(list));
+}
 
 function renderCell(tc, colKey) {
   switch (colKey) {
@@ -151,9 +172,13 @@ function renderCell(tc, colKey) {
 export default function TestcaseManagement() {
   const { addTask, updateTask } = useTaskContext();
   const [branches, setBranches] = useState([]);
+  const [customBranches, setCustomBranches] = useState(loadCustomBranches);
   const [teams, setTeams] = useState([]);
   const [branch, setBranch] = useState('master');
   const [team, setTeam] = useState('CDP');
+  const [showBranchDropdown, setShowBranchDropdown] = useState(false);
+  const [newBranchInput, setNewBranchInput] = useState('');
+  const branchDropdownRef = useRef(null);
 
   const [testcases, setTestcases] = useState([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -171,6 +196,7 @@ export default function TestcaseManagement() {
   const [componentFilter, setComponentFilter] = useState('');
 
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [sortField, setSortField] = useState('name');
   const [sortDir, setSortDir] = useState('asc');
 
@@ -198,6 +224,13 @@ export default function TestcaseManagement() {
   const [aiAnalysis, setAiAnalysis] = useState(null);
   const [loadingAi, setLoadingAi] = useState(false);
   const [showAiPanel, setShowAiPanel] = useState(false);
+
+  const allBranches = React.useMemo(() => {
+    const shortApi = branches.map(toShortBranch);
+    const merged = [...shortApi];
+    customBranches.forEach(cb => { if (!merged.includes(cb)) merged.push(cb); });
+    return merged;
+  }, [branches, customBranches]);
 
   const showToast = useCallback((msg, type = 'info') => {
     setToast({ msg, type });
@@ -227,13 +260,49 @@ export default function TestcaseManagement() {
   }, [showActionsMenu]);
 
   useEffect(() => {
+    function handleClickOutside(e) {
+      if (branchDropdownRef.current && !branchDropdownRef.current.contains(e.target)) {
+        setShowBranchDropdown(false);
+      }
+    }
+    if (showBranchDropdown) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showBranchDropdown]);
+
+  const handleAddBranch = () => {
+    const val = newBranchInput.trim();
+    if (!val) return;
+    if (allBranches.includes(val)) {
+      setBranch(val);
+      setNewBranchInput('');
+      setShowBranchDropdown(false);
+      return;
+    }
+    const updated = [...customBranches, val];
+    setCustomBranches(updated);
+    saveCustomBranches(updated);
+    setBranch(val);
+    setNewBranchInput('');
+    setShowBranchDropdown(false);
+  };
+
+  const handleRemoveBranch = (branchToRemove) => {
+    const updated = customBranches.filter(b => b !== branchToRemove);
+    setCustomBranches(updated);
+    saveCustomBranches(updated);
+    if (branch === branchToRemove) {
+      setBranch(allBranches.find(b => b !== branchToRemove) || 'master');
+    }
+  };
+
+  useEffect(() => {
     api.get(`${API_BASE_URL}/mcp/regression/testcase-mgmt/branches`)
       .then(res => {
         setBranches(res.data.branches || []);
         setTeams(res.data.teams || []);
       })
       .catch(() => {
-        setBranches(['master', 'ganges-7.6-stable', 'ganges-7.5-stable']);
+        setBranches(['master', '7.6', '7.5']);
         setTeams(['CDP', 'AHV']);
       });
   }, []);
@@ -390,6 +459,28 @@ export default function TestcaseManagement() {
     }
   };
 
+  const handleDownloadPageExcel = () => {
+    setShowActionsMenu(false);
+    if (!paginated.length) { showToast('No data on current page', 'error'); return; }
+    const cols = activeColumns;
+    const rows = paginated.map(tc =>
+      Object.fromEntries(cols.map(col => {
+        const v = tc[col.key];
+        if (Array.isArray(v)) return [col.label, v.join(', ')];
+        if (col.key === 'published_ops')
+          return [col.label, (tc.published_success_ops != null && tc.published_total_ops != null)
+            ? `${tc.published_success_ops}/${tc.published_total_ops}` : ''];
+        if (typeof v === 'boolean') return [col.label, v ? 'Yes' : 'No'];
+        return [col.label, v != null ? v : ''];
+      }))
+    );
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Testcases');
+    XLSX.writeFile(wb, `testcases_${branch}_${team}_page${page}.xlsx`);
+    showToast(`Downloaded page ${page} (${paginated.length} rows)`, 'success');
+  };
+
   const openRunPlanModal = () => {
     setShowActionsMenu(false);
     setRpName('');
@@ -498,8 +589,8 @@ export default function TestcaseManagement() {
     return sortDir === 'asc' ? cmp : -cmp;
   });
 
-  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
-  const paginated = sorted.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const paginated = sorted.slice((page - 1) * pageSize, page * pageSize);
 
   const handleSort = (field) => {
     if (sortField === field) {
@@ -653,6 +744,9 @@ export default function TestcaseManagement() {
                 <button className="tc-actions-item" onClick={openRunPlanModal}>
                   Create Run Plan
                 </button>
+                <button className="tc-actions-item" onClick={handleDownloadPageExcel}>
+                  Download Current Page (Excel)
+                </button>
                 <button className="tc-actions-item" onClick={() => { setShowActionsMenu(false); handleDownloadResourceSpec(); }}>
                   Download Resource Spec
                 </button>
@@ -692,11 +786,57 @@ export default function TestcaseManagement() {
 
       {/* Controls bar */}
       <div className="tc-mgmt-controls">
-        <div className="tc-mgmt-filter-group">
+        <div className="tc-mgmt-filter-group tc-branch-picker-wrapper" ref={branchDropdownRef}>
           <label>Branch:</label>
-          <select value={branch} onChange={e => setBranch(e.target.value)}>
-            {branches.map(b => <option key={b} value={b}>{b}</option>)}
-          </select>
+          <button
+            className="tc-branch-toggle"
+            onClick={() => setShowBranchDropdown(v => !v)}
+          >
+            {branch} <span className="tc-branch-caret">▾</span>
+          </button>
+          {showBranchDropdown && (
+            <div className="tc-branch-dropdown">
+              {allBranches.map(b => {
+                const isCustom = customBranches.includes(b);
+                const isActive = branch === b;
+                return (
+                  <div key={b} className={`tc-branch-item${isActive ? ' active' : ''}`}>
+                    <span
+                      className="tc-branch-item-label"
+                      onClick={() => { setBranch(b); setShowBranchDropdown(false); }}
+                    >
+                      {b}
+                    </span>
+                    {isCustom && (
+                      <button
+                        className="tc-branch-remove-btn"
+                        onClick={e => { e.stopPropagation(); handleRemoveBranch(b); }}
+                        title={`Remove ${b}`}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              <div className="tc-branch-add-row">
+                <input
+                  type="text"
+                  placeholder="e.g. 7.7"
+                  value={newBranchInput}
+                  onChange={e => setNewBranchInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleAddBranch(); }}
+                />
+                <button
+                  className="tc-branch-add-btn"
+                  onClick={handleAddBranch}
+                  disabled={!newBranchInput.trim()}
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          )}
         </div>
         <div className="tc-mgmt-filter-group">
           <label>Team:</label>
@@ -889,8 +1029,19 @@ export default function TestcaseManagement() {
           {/* Pagination */}
           <div className="tc-mgmt-pagination">
             <span className="page-info">
-              Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, sorted.length)} of {sorted.length}
+              Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, sorted.length)} of {sorted.length}
             </span>
+            <div className="tc-page-size-picker">
+              <label>Rows:</label>
+              <select
+                value={pageSize}
+                onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}
+              >
+                {PAGE_SIZE_OPTIONS.map(n => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </div>
             <div className="page-controls">
               <button disabled={page <= 1} onClick={() => setPage(1)}>First</button>
               <button disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Prev</button>

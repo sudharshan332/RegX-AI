@@ -34,9 +34,19 @@ export default function RunPlan() {
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
   const [scheduleForm, setScheduleForm] = useState({ runPlanId: '', time: '09:00' });
 
+  // List view mode and filter
+  const [listMode, setListMode] = useState('table'); // 'table' or 'category'
+  const [branchFilter, setBranchFilter] = useState('');
+
+  // Bulk action state
+  const [bulkScheduleOpen, setBulkScheduleOpen] = useState(null);
+  const [bulkScheduleDate, setBulkScheduleDate] = useState('');
+  const [bulkBatchBranch, setBulkBatchBranch] = useState(null);
+
   // Create/Edit form state
   const [formData, setFormData] = useState({
     name: '',
+    branch: '',
     jobProfileSearchType: 'id', // 'id' or 'pattern'
     jobProfileIds: '',
     jobProfilePattern: '',
@@ -81,6 +91,11 @@ export default function RunPlan() {
   const [availableTags, setAvailableTags] = useState([]);
   const [showAdditionalTagsDropdown, setShowAdditionalTagsDropdown] = useState(false);
   const additionalTagsRef = useRef(null);
+
+  // Tester tags removal state
+  const [existingTesterTags, setExistingTesterTags] = useState([]);
+  const [tagsToRemove, setTagsToRemove] = useState([]);
+  const [loadingTesterTags, setLoadingTesterTags] = useState(false);
 
   // AI Risk Score state
   const [riskScores, setRiskScores] = useState({});
@@ -230,9 +245,78 @@ export default function RunPlan() {
     }
   };
 
+  // ── Bulk (category) actions ──
+  const handleBulkTrigger = async (branch) => {
+    const count = runPlans.filter(rp => rp.branch === branch).length;
+    if (!window.confirm(`Trigger all ${count} run plan(s) in branch "${branch}"?`)) return;
+    setLoading(true);
+    const taskId = addTask({ label: `Bulk Trigger: ${branch}`, page: 'Run Plan' });
+    try {
+      const response = await api.post(`${API_BASE}/bulk-trigger`, { branch });
+      const results = response.data.results || [];
+      const totalTasks = results.reduce((s, r) => s + (r.task_ids?.length || 0), 0);
+      const totalFailed = results.reduce((s, r) => s + (r.failed || 0), 0);
+      alert(`Bulk trigger for "${branch}":\n${results.length} run plan(s) triggered\n${totalTasks} task(s) created\n${totalFailed} failure(s)`);
+      updateTaskCtx(taskId, { status: totalFailed ? 'error' : 'success', detail: `${totalTasks} tasks, ${totalFailed} failures` });
+      fetchRunPlans();
+    } catch (error) {
+      const errData = error.response?.data;
+      if (errData?.code === 'CREDENTIALS_EXPIRED') {
+        alert('Session credentials expired. Please re-login.');
+      } else {
+        alert(`Bulk trigger failed: ${errData?.error || error.message}`);
+      }
+      updateTaskCtx(taskId, { status: 'error', detail: errData?.error || error.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBulkSchedule = async (branch) => {
+    if (!bulkScheduleDate) { alert('Please select a schedule date/time'); return; }
+    setLoading(true);
+    try {
+      await api.post(`${API_BASE}/bulk-schedule`, { branch, schedule_date: bulkScheduleDate });
+      alert(`All run plans in "${branch}" scheduled for ${bulkScheduleDate}`);
+      setBulkScheduleOpen(null);
+      setBulkScheduleDate('');
+      fetchRunPlans();
+    } catch (error) {
+      alert(`Bulk schedule failed: ${error.response?.data?.error || error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBulkBatchUpdate = (branch) => {
+    const branchPlans = runPlans.filter(rp => rp.branch === branch);
+    if (branchPlans.length === 0) return;
+    setBulkBatchBranch(branch);
+    setSelectedRunPlan(null);
+    setBatchUpdateData({
+      updateNosCluster: false,
+      updatePrismCentral: false,
+      nosCluster: { branch: '', updateType: '', buildType: '', tag: '', commitId: '', gbn: '' },
+      prismCentral: { branch: '', updateType: '', buildType: '', tag: '', commitId: '', gbn: '' },
+      nutestBranch: '',
+      patchUrl: '',
+      frameworkPatchUrl: '',
+      testerTagsAction: '',
+      testerTagValue: '',
+      updateAdditionalTags: false,
+      additionalTags: []
+    });
+    setShowAdditionalTagsDropdown(false);
+    setTagsToRemove([]);
+    setExistingTesterTags([]);
+    setView('batch-update');
+  };
+
   const handleCreate = () => {
     setFormData({
       name: '',
+      branch: '',
+      serviceAccount: '',
       jobProfileSearchType: 'id',
       jobProfileIds: '',
       jobProfilePattern: '',
@@ -247,6 +331,8 @@ export default function RunPlan() {
     setSelectedRunPlan(runPlan);
     setFormData({
       name: runPlan.name,
+      branch: runPlan.branch || '',
+      serviceAccount: runPlan.service_account || '',
       jobProfileSearchType: 'id',
       jobProfileIds: '',
       jobProfilePattern: '',
@@ -368,14 +454,16 @@ export default function RunPlan() {
     try {
       const payload = {
         name: formData.name,
+        branch: formData.branch || '',
+        service_account: formData.serviceAccount || '',
         job_profiles: formData.selectedJobProfiles.map(jp => extractId(jp._id)),
         schedule_date: formData.scheduleDate || null
       };
       
       if (view === 'create') {
-        const branch = formData.name.split('_').pop() || 'master';
+        const branchForTag = formData.name.split('_').pop() || 'master';
         const timestamp = Date.now();
-        payload.tag_name = `${branch}_${timestamp}`;
+        payload.tag_name = `${branchForTag}_${timestamp}`;
       }
 
       if (view === 'create') {
@@ -426,6 +514,7 @@ export default function RunPlan() {
   };
 
   const handleBatchUpdate = async (runPlan) => {
+    setBulkBatchBranch(null);
     setSelectedRunPlan(runPlan);
     setBatchUpdateData({
       updateNosCluster: false,
@@ -455,112 +544,103 @@ export default function RunPlan() {
       additionalTags: []
     });
     setShowAdditionalTagsDropdown(false);
+    setTagsToRemove([]);
+    setExistingTesterTags([]);
     setView('batch-update');
   };
 
-  const handleExecuteBatchUpdate = async () => {
-    if (!selectedRunPlan) return;
+  const buildBatchPayload = () => {
+    const payload = { components: [] };
 
-    if (!window.confirm(`Are you sure you want to batch update ${selectedRunPlan.job_profiles?.length || 0} job profile(s)?`)) {
-      return;
+    if (batchUpdateData.updateNosCluster) {
+      const d = {
+        component: 'NOS_CLUSTER',
+        branch: batchUpdateData.nosCluster.branch,
+        update_type: batchUpdateData.nosCluster.updateType,
+        build_type: batchUpdateData.nosCluster.buildType
+      };
+      if (batchUpdateData.nosCluster.updateType === 'tag' && batchUpdateData.nosCluster.tag) d.tag = batchUpdateData.nosCluster.tag;
+      else if (batchUpdateData.nosCluster.updateType === 'commit') {
+        if (batchUpdateData.nosCluster.commitId) d.commit_id = batchUpdateData.nosCluster.commitId;
+        if (batchUpdateData.nosCluster.gbn) d.gbn = batchUpdateData.nosCluster.gbn;
+      }
+      payload.components.push(d);
     }
 
-    setLoading(true);
-    try {
-      const payload = {
-        components: []
+    if (batchUpdateData.updatePrismCentral) {
+      const d = {
+        component: 'PRISM_CENTRAL',
+        branch: batchUpdateData.prismCentral.branch,
+        update_type: batchUpdateData.prismCentral.updateType,
+        build_type: batchUpdateData.prismCentral.buildType
       };
-      
-      // Add NOS_CLUSTER update if selected
-      if (batchUpdateData.updateNosCluster) {
-        const nosClusterData = {
-          component: 'NOS_CLUSTER',
-          branch: batchUpdateData.nosCluster.branch,
-          update_type: batchUpdateData.nosCluster.updateType,
-          build_type: batchUpdateData.nosCluster.buildType
-        };
-        
-        if (batchUpdateData.nosCluster.updateType === 'tag' && batchUpdateData.nosCluster.tag) {
-          nosClusterData.tag = batchUpdateData.nosCluster.tag;
-        } else if (batchUpdateData.nosCluster.updateType === 'commit') {
-          if (batchUpdateData.nosCluster.commitId) {
-            nosClusterData.commit_id = batchUpdateData.nosCluster.commitId;
-          }
-          if (batchUpdateData.nosCluster.gbn) {
-            nosClusterData.gbn = batchUpdateData.nosCluster.gbn;
-          }
-        }
-        
-        payload.components.push(nosClusterData);
+      if (batchUpdateData.prismCentral.updateType === 'tag' && batchUpdateData.prismCentral.tag) d.tag = batchUpdateData.prismCentral.tag;
+      else if (batchUpdateData.prismCentral.updateType === 'commit') {
+        if (batchUpdateData.prismCentral.commitId) d.commit_id = batchUpdateData.prismCentral.commitId;
+        if (batchUpdateData.prismCentral.gbn) d.gbn = batchUpdateData.prismCentral.gbn;
       }
-      
-      // Add PRISM_CENTRAL update if selected
-      if (batchUpdateData.updatePrismCentral) {
-        const prismCentralData = {
-          component: 'PRISM_CENTRAL',
-          branch: batchUpdateData.prismCentral.branch,
-          update_type: batchUpdateData.prismCentral.updateType,
-          build_type: batchUpdateData.prismCentral.buildType
-        };
-        
-        if (batchUpdateData.prismCentral.updateType === 'tag' && batchUpdateData.prismCentral.tag) {
-          prismCentralData.tag = batchUpdateData.prismCentral.tag;
-        } else if (batchUpdateData.prismCentral.updateType === 'commit') {
-          if (batchUpdateData.prismCentral.commitId) {
-            prismCentralData.commit_id = batchUpdateData.prismCentral.commitId;
-          }
-          if (batchUpdateData.prismCentral.gbn) {
-            prismCentralData.gbn = batchUpdateData.prismCentral.gbn;
-          }
-        }
-        
-        payload.components.push(prismCentralData);
+      payload.components.push(d);
+    }
+
+    if (batchUpdateData.nutestBranch) payload.nutest_branch = batchUpdateData.nutestBranch;
+    if (batchUpdateData.patchUrl) payload.patch_url = batchUpdateData.patchUrl;
+    if (batchUpdateData.frameworkPatchUrl) payload.framework_patch_url = batchUpdateData.frameworkPatchUrl;
+    if (batchUpdateData.testerTagsAction === 'add' && batchUpdateData.testerTagValue) {
+      payload.tester_tags_action = 'add';
+      payload.tester_tag_value = batchUpdateData.testerTagValue;
+    } else if (batchUpdateData.testerTagsAction === 'remove' && tagsToRemove.length > 0) {
+      payload.tester_tags_action = 'remove';
+      payload.tester_tags_to_remove = tagsToRemove;
+    }
+    if (batchUpdateData.updateAdditionalTags) payload.run_tests_with_additional_tags = batchUpdateData.additionalTags;
+
+    return payload;
+  };
+
+  const handleExecuteBatchUpdate = async () => {
+    const isBulk = !!bulkBatchBranch;
+    const targets = isBulk
+      ? runPlans.filter(rp => rp.branch === bulkBatchBranch)
+      : selectedRunPlan ? [selectedRunPlan] : [];
+
+    if (targets.length === 0) return;
+
+    const totalJPs = targets.reduce((s, rp) => s + (rp.job_profiles?.length || 0), 0);
+    const label = isBulk
+      ? `Batch update ${targets.length} run plan(s) (${totalJPs} job profile(s)) in branch "${bulkBatchBranch}"?`
+      : `Batch update ${totalJPs} job profile(s)?`;
+    if (!window.confirm(label)) return;
+
+    setLoading(true);
+    const payload = buildBatchPayload();
+    const taskLabel = isBulk ? `Update All: ${bulkBatchBranch}` : `Batch Update: ${targets[0].name}`;
+    const batchTaskId = addTask({ label: taskLabel, page: 'Run Plan' });
+
+    try {
+      let totalUpdated = 0;
+      let totalFailed = 0;
+
+      for (const rp of targets) {
+        const response = await api.post(`${API_BASE}/${rp.id}/batch-update`, payload);
+        totalUpdated += response.data.updated_count || 0;
+        totalFailed += response.data.failed_updates?.length || 0;
       }
 
-      // Add common fields if provided
-      if (batchUpdateData.nutestBranch) {
-        payload.nutest_branch = batchUpdateData.nutestBranch;
-      }
-      if (batchUpdateData.patchUrl) {
-        payload.patch_url = batchUpdateData.patchUrl;
-      }
-      if (batchUpdateData.frameworkPatchUrl) {
-        payload.framework_patch_url = batchUpdateData.frameworkPatchUrl;
-      }
-      
-      // Add tester_tags update if provided
-      if (batchUpdateData.testerTagsAction && batchUpdateData.testerTagValue) {
-        payload.tester_tags_action = batchUpdateData.testerTagsAction;
-        payload.tester_tag_value = batchUpdateData.testerTagValue;
-      }
-
-      // Add run_tests_with_additional_tags overwrite if enabled
-      if (batchUpdateData.updateAdditionalTags) {
-        payload.run_tests_with_additional_tags = batchUpdateData.additionalTags;
-      }
-
-      const batchTaskId = addTask({ label: `Batch Update: ${selectedRunPlan.name}`, page: 'Run Plan' });
-      const response = await api.post(
-        `${API_BASE}/${selectedRunPlan.id}/batch-update`,
-        payload
-      );
-      const updatedCount = response.data.updated_count || 0;
-      const failedCount = response.data.failed_updates?.length || 0;
-      
-      if (failedCount > 0) {
-        const failedIds = response.data.failed_updates.map(f => f.job_id).join(', ');
-        alert(`Batch update completed with errors:\n✅ Updated: ${updatedCount}\n❌ Failed: ${failedCount}\n\nFailed IDs: ${failedIds}`);
-        updateTaskCtx(batchTaskId, { status: 'error', detail: `${updatedCount} updated, ${failedCount} failed` });
+      if (totalFailed > 0) {
+        alert(`Batch update completed with errors:\nUpdated: ${totalUpdated}\nFailed: ${totalFailed}`);
+        updateTaskCtx(batchTaskId, { status: 'error', detail: `${totalUpdated} updated, ${totalFailed} failed` });
       } else {
-        alert(`✅ Batch update completed successfully! Updated ${updatedCount} job profile(s)`);
-        updateTaskCtx(batchTaskId, { status: 'success', detail: `Updated ${updatedCount} job profile(s)` });
+        alert(`Batch update completed successfully! Updated ${totalUpdated} job profile(s) across ${targets.length} run plan(s)`);
+        updateTaskCtx(batchTaskId, { status: 'success', detail: `Updated ${totalUpdated} job profile(s)` });
       }
-      
+
+      setBulkBatchBranch(null);
       setView('list');
       fetchRunPlans();
     } catch (error) {
       console.error('Error executing batch update:', error);
       alert('Failed to execute batch update');
+      updateTaskCtx(batchTaskId, { status: 'error', detail: error.message });
     } finally {
       setLoading(false);
     }
@@ -573,6 +653,34 @@ export default function RunPlan() {
         : [...prev.additionalTags, tag];
       return { ...prev, additionalTags: tags };
     });
+  };
+
+  const fetchExistingTesterTags = async (runPlan) => {
+    const jobProfileIds = (runPlan || selectedRunPlan)?.job_profiles?.filter(id => id && id.trim()) || [];
+    if (jobProfileIds.length === 0) {
+      setExistingTesterTags([]);
+      return;
+    }
+    setLoadingTesterTags(true);
+    try {
+      const response = await api.post(`${API_BASE}/search-job-profiles`, {
+        search_type: 'id',
+        search_value: jobProfileIds.join(',')
+      });
+      const profiles = response.data.job_profiles || [];
+      const tagSet = new Set();
+      profiles.forEach(jp => {
+        const tags = jp.tester_tags || [];
+        tags.forEach(t => tagSet.add(t));
+      });
+      const sortedTags = Array.from(tagSet).sort();
+      setExistingTesterTags(sortedTags);
+    } catch (error) {
+      console.error('Error fetching tester tags:', error);
+      setExistingTesterTags([]);
+    } finally {
+      setLoadingTesterTags(false);
+    }
   };
 
   const handleViewHistory = async (runPlanId) => {
@@ -757,26 +865,163 @@ export default function RunPlan() {
 
   // Render List View
   if (view === 'list') {
+    const uniqueBranches = [...new Set(runPlans.map(rp => rp.branch || '').filter(Boolean))].sort();
+    const filteredPlans = branchFilter
+      ? runPlans.filter(rp => rp.branch === branchFilter)
+      : runPlans;
+
+    // Category grouping
+    const grouped = {};
+    filteredPlans.forEach(rp => {
+      const br = rp.branch || 'Uncategorized';
+      if (!grouped[br]) grouped[br] = [];
+      grouped[br].push(rp);
+    });
+    const sortedBranches = Object.keys(grouped).sort((a, b) =>
+      a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b)
+    );
+
+    const isScheduleMissed = (plan) => {
+      if (!plan.schedule_date) return false;
+      if (plan.schedule_triggered) return false;
+      return new Date(plan.schedule_date) < new Date();
+    };
+
+    const renderScheduleCell = (plan) => {
+      if (!plan.schedule_date) return '-';
+      const missed = isScheduleMissed(plan);
+      const fmtDt = new Date(plan.schedule_date).toLocaleString();
+      return (
+        <span className={missed ? 'schedule-missed' : ''}>
+          {missed && <span className="schedule-warn-icon" title={`Scheduled for ${fmtDt} but was not triggered`}>&#9888;</span>}
+          {fmtDt}
+          {plan.schedule_triggered && <span className="schedule-ok-icon" title="Triggered on schedule">&#10003;</span>}
+        </span>
+      );
+    };
+
+    const renderPlanRow = (plan) => (
+      <tr key={plan.id}>
+        <td><span className="branch-tag">{plan.branch || '-'}</span></td>
+        <td>
+          {plan.name}
+          {plan.service_account && (
+            <span className="svc-badge" title={`Triggered via ${plan.service_account}`}>{plan.service_account}</span>
+          )}
+        </td>
+        <td>{plan.tag_name}</td>
+        <td>{plan.job_profiles?.length || 0}</td>
+        <td>{renderScheduleCell(plan)}</td>
+        <td>
+          {plan.last_triggered ? (
+            <a
+              href="#"
+              onClick={(e) => handleLastTriggeredClick(plan.id, e)}
+              style={{ color: '#3498db', textDecoration: 'none', cursor: 'pointer' }}
+              onMouseEnter={(e) => e.target.style.textDecoration = 'underline'}
+              onMouseLeave={(e) => e.target.style.textDecoration = 'none'}
+            >
+              {plan.last_triggered}
+            </a>
+          ) : (
+            '-'
+          )}
+        </td>
+        <td>
+          <div className="action-buttons">
+            <button onClick={() => handleEdit(plan)}>Edit</button>
+            <button onClick={() => handleTriggerNow(plan.id)}>Trigger Now</button>
+            <button onClick={() => handleBatchUpdate(plan)}>Batch Update</button>
+            <button onClick={() => handleViewHistory(plan.id)}>History</button>
+            <button
+              onClick={() => handleClone(plan.id)}
+              style={{ background: 'white', color: '#2c3e50', border: '1px solid #ddd' }}
+            >
+              Clone
+            </button>
+            <button
+              onClick={() => handleLoadRiskScore(plan)}
+              disabled={loadingRisk[plan.id]}
+              className="btn-risk-score"
+            >
+              {loadingRisk[plan.id] ? '...' : riskScores[plan.id] ? `Risk: ${riskScores[plan.id].risk_score}` : 'AI Risk'}
+            </button>
+          </div>
+          {riskScores[plan.id] && (
+            <div className="risk-score-badge-row">
+              <span
+                className={`risk-badge risk-${riskScores[plan.id].risk_level?.toLowerCase()}`}
+                onClick={() => setShowRiskPanel(showRiskPanel === plan.id ? null : plan.id)}
+                title="Click to see details"
+              >
+                {riskScores[plan.id].risk_level} ({riskScores[plan.id].risk_score}/100)
+              </span>
+            </div>
+          )}
+          {showRiskPanel === plan.id && riskScores[plan.id] && (
+            <div className="risk-detail-panel">
+              <div className="risk-detail-header">
+                <strong>AI Risk Analysis — {plan.name}</strong>
+                <button onClick={() => setShowRiskPanel(null)}>✕</button>
+              </div>
+              <div className="risk-detail-body">
+                <AiMarkdown content={riskScores[plan.id].analysis} />
+              </div>
+            </div>
+          )}
+        </td>
+      </tr>
+    );
+
     return (
       <div className="run-plan-container">
         <div className="run-plan-header">
           <h1>Run Plan - Regression Scheduling</h1>
           <div style={{ display: 'flex', gap: '10px' }}>
-            <button className="btn-calendar" onClick={handleOpenCalendar}>
-              Calendar View
+            <button className="btn-calendar" onClick={handleOpenCalendar}>Calendar View</button>
+            <button className="btn-primary" onClick={handleCreate}>+ Create Run Plan</button>
+          </div>
+        </div>
+
+        {/* Filter & View Toggle Bar */}
+        <div className="list-toolbar">
+          <div className="toolbar-left">
+            <select
+              value={branchFilter}
+              onChange={(e) => setBranchFilter(e.target.value)}
+              className="branch-filter-select"
+            >
+              <option value="">All Branches</option>
+              {uniqueBranches.map(b => (
+                <option key={b} value={b}>{b}</option>
+              ))}
+            </select>
+            <span className="plan-count">{filteredPlans.length} run plan(s)</span>
+          </div>
+          <div className="toolbar-right">
+            <button
+              className={`view-toggle-btn ${listMode === 'table' ? 'active' : ''}`}
+              onClick={() => setListMode('table')}
+            >
+              Table View
             </button>
-            <button className="btn-primary" onClick={handleCreate}>
-              + Create Run Plan
+            <button
+              className={`view-toggle-btn ${listMode === 'category' ? 'active' : ''}`}
+              onClick={() => setListMode('category')}
+            >
+              Category View
             </button>
           </div>
         </div>
 
         {loading ? (
           <div className="loading">Loading...</div>
-        ) : (
+        ) : listMode === 'table' ? (
+          /* ── Table View ── */
           <table className="run-plan-table">
             <thead>
               <tr>
+                <th>Branch</th>
                 <th>Name</th>
                 <th>Tag Name</th>
                 <th>Job Profiles</th>
@@ -786,82 +1031,108 @@ export default function RunPlan() {
               </tr>
             </thead>
             <tbody>
-              {runPlans.length === 0 ? (
+              {filteredPlans.length === 0 ? (
                 <tr>
-                  <td colSpan="6" className="empty-state">
+                  <td colSpan="7" className="empty-state">
                     No run plans found. Create one to get started.
                   </td>
                 </tr>
               ) : (
-                runPlans.map((plan) => (
-                  <tr key={plan.id}>
-                    <td>{plan.name}</td>
-                    <td>{plan.tag_name}</td>
-                    <td>{plan.job_profiles?.length || 0}</td>
-                    <td>{plan.schedule_date || '-'}</td>
-                    <td>
-                      {plan.last_triggered ? (
-                        <a
-                          href="#"
-                          onClick={(e) => handleLastTriggeredClick(plan.id, e)}
-                          style={{ color: '#3498db', textDecoration: 'none', cursor: 'pointer' }}
-                          onMouseEnter={(e) => e.target.style.textDecoration = 'underline'}
-                          onMouseLeave={(e) => e.target.style.textDecoration = 'none'}
-                        >
-                          {plan.last_triggered}
-                        </a>
-                      ) : (
-                        '-'
-                      )}
-                    </td>
-                    <td>
-                      <div className="action-buttons">
-                        <button onClick={() => handleEdit(plan)}>Edit</button>
-                        <button onClick={() => handleTriggerNow(plan.id)}>Trigger Now</button>
-                        <button onClick={() => handleBatchUpdate(plan)}>Batch Update</button>
-                        <button onClick={() => handleViewHistory(plan.id)}>History</button>
-                        <button 
-                          onClick={() => handleClone(plan.id)}
-                          style={{ background: 'white', color: '#2c3e50', border: '1px solid #ddd' }}
-                        >
-                          Clone
-                        </button>
-                        <button
-                          onClick={() => handleLoadRiskScore(plan)}
-                          disabled={loadingRisk[plan.id]}
-                          className="btn-risk-score"
-                        >
-                          {loadingRisk[plan.id] ? '...' : riskScores[plan.id] ? `Risk: ${riskScores[plan.id].risk_score}` : 'AI Risk'}
-                        </button>
-                      </div>
-                      {riskScores[plan.id] && (
-                        <div className="risk-score-badge-row">
-                          <span
-                            className={`risk-badge risk-${riskScores[plan.id].risk_level?.toLowerCase()}`}
-                            onClick={() => setShowRiskPanel(showRiskPanel === plan.id ? null : plan.id)}
-                            title="Click to see details"
-                          >
-                            {riskScores[plan.id].risk_level} ({riskScores[plan.id].risk_score}/100)
-                          </span>
-                        </div>
-                      )}
-                      {showRiskPanel === plan.id && riskScores[plan.id] && (
-                        <div className="risk-detail-panel">
-                          <div className="risk-detail-header">
-                            <strong>AI Risk Analysis — {plan.name}</strong>
-                            <button onClick={() => setShowRiskPanel(null)}>✕</button>
-                          </div>
-                          <div className="risk-detail-body">
-                            <AiMarkdown content={riskScores[plan.id].analysis} />
-                          </div>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                ))
+                filteredPlans.map(renderPlanRow)
               )}
             </tbody>
           </table>
+        ) : (
+          /* ── Category View ── */
+          <div className="category-view">
+            {sortedBranches.length === 0 ? (
+              <div className="empty-state" style={{ padding: 40 }}>No run plans found.</div>
+            ) : (
+              sortedBranches.map((br) => (
+                <div key={br} className="category-group">
+                  <div className="category-header">
+                    <div className="category-title">
+                      <span className="branch-tag large">{br}</span>
+                      <span className="category-count">{grouped[br].length} run plan(s)</span>
+                    </div>
+                    {br !== 'Uncategorized' && (
+                      <div className="category-actions">
+                        <button onClick={() => handleBulkTrigger(br)}>Trigger All</button>
+                        <button onClick={() => handleBulkBatchUpdate(br)}>Update All</button>
+                        <button onClick={() => { setBulkScheduleOpen(bulkScheduleOpen === br ? null : br); setBulkScheduleDate(''); }}>
+                          Schedule All
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {bulkScheduleOpen === br && (
+                    <div className="bulk-schedule-bar">
+                      <input
+                        type="datetime-local"
+                        value={bulkScheduleDate}
+                        onChange={(e) => setBulkScheduleDate(e.target.value)}
+                      />
+                      <button className="btn-primary" onClick={() => handleBulkSchedule(br)} disabled={loading || !bulkScheduleDate}>
+                        {loading ? 'Scheduling...' : 'Apply Schedule'}
+                      </button>
+                      <button onClick={() => setBulkScheduleOpen(null)}>Cancel</button>
+                    </div>
+                  )}
+
+                  <table className="run-plan-table category-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Tag Name</th>
+                        <th>Job Profiles</th>
+                        <th>Schedule Date</th>
+                        <th>Last Triggered</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {grouped[br].map((plan) => (
+                        <tr key={plan.id}>
+                          <td>
+                            {plan.name}
+                            {plan.service_account && (
+                              <span className="svc-badge" title={`Triggered via ${plan.service_account}`}>{plan.service_account}</span>
+                            )}
+                          </td>
+                          <td>{plan.tag_name}</td>
+                          <td>{plan.job_profiles?.length || 0}</td>
+                          <td>{renderScheduleCell(plan)}</td>
+                          <td>
+                            {plan.last_triggered ? (
+                              <a
+                                href="#"
+                                onClick={(e) => handleLastTriggeredClick(plan.id, e)}
+                                style={{ color: '#3498db', textDecoration: 'none', cursor: 'pointer' }}
+                                onMouseEnter={(e) => e.target.style.textDecoration = 'underline'}
+                                onMouseLeave={(e) => e.target.style.textDecoration = 'none'}
+                              >
+                                {plan.last_triggered}
+                              </a>
+                            ) : '-'}
+                          </td>
+                          <td>
+                            <div className="action-buttons">
+                              <button onClick={() => handleEdit(plan)}>Edit</button>
+                              <button onClick={() => handleTriggerNow(plan.id)}>Trigger Now</button>
+                              <button onClick={() => handleBatchUpdate(plan)}>Batch Update</button>
+                              <button onClick={() => handleViewHistory(plan.id)}>History</button>
+                              <button onClick={() => handleClone(plan.id)} style={{ background: 'white', color: '#2c3e50', border: '1px solid #ddd' }}>Clone</button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))
+            )}
+          </div>
         )}
       </div>
     );
@@ -889,6 +1160,33 @@ export default function RunPlan() {
               placeholder="e.g., CDP_Regression_Upgrade_master"
             />
             <small>Examples: CDP_Regression_Upgrade_master, CDP_Regression_FullReg_master</small>
+          </div>
+
+          {/* Branch Name (Category) */}
+          <div className="form-group">
+            <label>Branch Name (Category)</label>
+            <input
+              type="text"
+              value={formData.branch}
+              onChange={(e) => setFormData({ ...formData, branch: e.target.value })}
+              placeholder="e.g., master, ganges-7.5-stable"
+            />
+            <small>Groups run plans under a branch category for bulk actions</small>
+          </div>
+
+          {/* Trigger Service Account */}
+          <div className="form-group">
+            <label>Trigger Service Account</label>
+            <select
+              value={formData.serviceAccount}
+              onChange={(e) => setFormData({ ...formData, serviceAccount: e.target.value })}
+              className="svc-account-select"
+            >
+              <option value="">Use my LDAP credentials (default)</option>
+              <option value="svc.teamchandra">svc.teamchandra</option>
+              <option value="svc.cdp.regression">svc.cdp.regression</option>
+            </select>
+            <small>Select a service account to trigger this run plan, or leave default to use your own LDAP login</small>
           </div>
 
           {/* Job Profile Selection */}
@@ -1043,11 +1341,23 @@ export default function RunPlan() {
           {/* Schedule Date */}
           <div className="form-group">
             <label>Schedule Date (Optional)</label>
-            <input
-              type="datetime-local"
-              value={formData.scheduleDate}
-              onChange={(e) => setFormData({ ...formData, scheduleDate: e.target.value })}
-            />
+            <div className="schedule-date-row">
+              <input
+                type="datetime-local"
+                value={formData.scheduleDate}
+                onChange={(e) => setFormData({ ...formData, scheduleDate: e.target.value })}
+              />
+              {formData.scheduleDate && (
+                <button
+                  type="button"
+                  className="btn-clear-schedule"
+                  onClick={() => setFormData({ ...formData, scheduleDate: '' })}
+                  title="Clear schedule date"
+                >
+                  Clear Schedule
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="form-actions">
@@ -1066,9 +1376,15 @@ export default function RunPlan() {
     return (
       <div className="run-plan-container">
         <div className="run-plan-header">
-          <h1>Batch Update Job Profiles</h1>
-          <button onClick={() => setView('list')}>← Back to List</button>
+          <h1>{bulkBatchBranch ? `Update All — ${bulkBatchBranch}` : 'Batch Update Job Profiles'}</h1>
+          <button onClick={() => { setBulkBatchBranch(null); setView('list'); }}>← Back to List</button>
         </div>
+
+        {bulkBatchBranch && (
+          <div style={{ background: '#e8f4fd', border: '1px solid #b3d7f2', borderRadius: '6px', padding: '12px 16px', marginBottom: '16px', color: '#1a5276' }}>
+            Applying updates to <strong>{runPlans.filter(rp => rp.branch === bulkBatchBranch).length}</strong> run plan(s) in branch <strong>{bulkBatchBranch}</strong>
+          </div>
+        )}
 
         <div className="run-plan-form">
           {/* Component Selection Checkboxes */}
@@ -1361,7 +1677,19 @@ export default function RunPlan() {
               <label>Action</label>
               <select
                 value={batchUpdateData.testerTagsAction}
-                onChange={(e) => setBatchUpdateData({ ...batchUpdateData, testerTagsAction: e.target.value })}
+                onChange={(e) => {
+                  const action = e.target.value;
+                  setBatchUpdateData({ ...batchUpdateData, testerTagsAction: action, testerTagValue: '' });
+                  setTagsToRemove([]);
+                  if (action === 'remove') {
+                    if (bulkBatchBranch) {
+                      const branchPlans = runPlans.filter(rp => rp.branch === bulkBatchBranch);
+                      if (branchPlans.length > 0) fetchExistingTesterTags(branchPlans[0]);
+                    } else {
+                      fetchExistingTesterTags(selectedRunPlan);
+                    }
+                  }
+                }}
               >
                 <option value="">-- Select Action --</option>
                 <option value="add">Add Tag</option>
@@ -1369,7 +1697,7 @@ export default function RunPlan() {
               </select>
               <small>Select to add or remove a tag from tester_tags</small>
             </div>
-            {batchUpdateData.testerTagsAction && (
+            {batchUpdateData.testerTagsAction === 'add' && (
               <div className="form-group">
                 <label>Tag Value</label>
                 <input
@@ -1378,7 +1706,83 @@ export default function RunPlan() {
                   onChange={(e) => setBatchUpdateData({ ...batchUpdateData, testerTagValue: e.target.value })}
                   placeholder="e.g., minor, container__unlimited, v3.1"
                 />
-                <small>Enter the tag name to {batchUpdateData.testerTagsAction === 'add' ? 'add' : 'remove'}</small>
+                <small>Enter the tag name to add</small>
+              </div>
+            )}
+            {batchUpdateData.testerTagsAction === 'remove' && (
+              <div className="form-group">
+                <label>Select Tags to Remove</label>
+                {loadingTesterTags ? (
+                  <p style={{ color: '#666', fontStyle: 'italic' }}>Loading tags from job profiles...</p>
+                ) : existingTesterTags.length === 0 ? (
+                  <p style={{ color: '#999' }}>No tags found in job profiles</p>
+                ) : (
+                  <>
+                    <small style={{ display: 'block', marginBottom: '10px' }}>
+                      Click the ✕ icon on a tag to mark it for removal ({tagsToRemove.length} selected)
+                    </small>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', maxHeight: '200px', overflowY: 'auto', padding: '10px', border: '1px solid #e0e0e0', borderRadius: '6px', backgroundColor: '#fafafa' }}>
+                      {existingTesterTags.map(tag => {
+                        const isMarked = tagsToRemove.includes(tag);
+                        return (
+                          <span
+                            key={tag}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              padding: '4px 10px',
+                              borderRadius: '14px',
+                              fontSize: '12px',
+                              fontFamily: 'monospace',
+                              backgroundColor: isMarked ? '#ffebee' : '#e8f5e9',
+                              border: `1px solid ${isMarked ? '#ef5350' : '#a5d6a7'}`,
+                              color: isMarked ? '#c62828' : '#2e7d32',
+                              textDecoration: isMarked ? 'line-through' : 'none',
+                              transition: 'all 0.2s ease'
+                            }}
+                          >
+                            {tag}
+                            <span
+                              onClick={() => {
+                                if (isMarked) {
+                                  setTagsToRemove(prev => prev.filter(t => t !== tag));
+                                } else {
+                                  setTagsToRemove(prev => [...prev, tag]);
+                                }
+                              }}
+                              style={{
+                                cursor: 'pointer',
+                                fontWeight: 'bold',
+                                fontSize: '14px',
+                                lineHeight: '1',
+                                color: isMarked ? '#4caf50' : '#e53935',
+                                marginLeft: '2px'
+                              }}
+                              title={isMarked ? 'Undo removal' : 'Remove this tag'}
+                            >
+                              {isMarked ? '↩' : '✕'}
+                            </span>
+                          </span>
+                        );
+                      })}
+                    </div>
+                    {tagsToRemove.length > 0 && (
+                      <div style={{ marginTop: '8px', display: 'flex', gap: '10px', alignItems: 'center' }}>
+                        <small style={{ color: '#c62828', fontWeight: 'bold' }}>
+                          {tagsToRemove.length} tag(s) will be removed from all job profiles
+                        </small>
+                        <button
+                          type="button"
+                          onClick={() => setTagsToRemove([])}
+                          style={{ fontSize: '11px', padding: '2px 8px', background: '#fff', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer' }}
+                        >
+                          Clear Selection
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -1475,9 +1879,9 @@ export default function RunPlan() {
           </div>
 
           <div className="form-actions">
-            <button onClick={() => setView('list')}>Cancel</button>
+            <button onClick={() => { setBulkBatchBranch(null); setView('list'); }}>Cancel</button>
             <button className="btn-primary" onClick={handleExecuteBatchUpdate} disabled={loading}>
-              {loading ? 'Updating...' : 'Execute Batch Update'}
+              {loading ? 'Updating...' : bulkBatchBranch ? `Update All in ${bulkBatchBranch}` : 'Execute Batch Update'}
             </button>
           </div>
         </div>
