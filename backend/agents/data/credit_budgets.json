@@ -1,0 +1,32 @@
+[
+  {
+    "entity_id": "regx_team",
+    "entity_type": "team",
+    "daily_limit": 500,
+    "weekly_limit": 2000,
+    "monthly_limit": 8000,
+    "priority": 3,
+    "allow_overrun": true,
+    "overrun_limit": 100
+  },
+  {
+    "entity_id": "cdp_team",
+    "entity_type": "team",
+    "daily_limit": 300,
+    "weekly_limit": 1500,
+    "monthly_limit": 6000,
+    "priority": 3,
+    "allow_overrun": true,
+    "overrun_limit": 50
+  },
+  {
+    "entity_id": "system",
+    "entity_type": "user",
+    "daily_limit": 200,
+    "weekly_limit": 1000,
+    "monthly_limit": 4000,
+    "priority": 2,
+    "allow_overrun": false,
+    "overrun_limit": 0
+  }
+]

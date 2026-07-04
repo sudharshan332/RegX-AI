@@ -1,0 +1,72 @@
+{
+  "mcpServers": {
+    "regx-data": {
+      "url": "http://10.111.52.90:5003",
+      "description": "RegX regression data (failed testcases, details, push analysis results back)"
+    },
+    "atlassian": {
+      "url": "https://panacea-dev.eng.nutanix.com/mcp/atlassian",
+      "description": "gw -> atlassian (PII ON, Request+Response, fail-open)",
+      "headers": {
+        "X-Atlassian-Jira-Url": "https://jira.nutanix.com",
+        "X-Atlassian-Confluence-Url": "https://confluence.eng.nutanix.com:8443/"
+      }
+    },
+    "gw-sourcegraph": {
+      "url": "https://panacea-dev.eng.nutanix.com/mcp/sourcegraph",
+      "description": "gw -> sourcegraph (Code search and analysis across all Nutanix repos)"
+    },
+    "gw-jita": {
+      "url": "https://panacea-dev.eng.nutanix.com/mcp/jita",
+      "description": "gw -> jita (Direct file system access to JITA log bundles for local analysis)"
+    },
+    "gw-diamond": {
+      "url": "https://panacea-dev.eng.nutanix.com/mcp/diamond",
+      "description": "gw -> diamond (Remote SSH access to Diamond storage for log analysis)"
+    },
+    "gw-glean": {
+      "url": "https://panacea-dev.eng.nutanix.com/mcp/glean",
+      "description": "gw -> glean (Internal company knowledge search)"
+    },
+    "gw-supportgpt": {
+      "url": "https://panacea-dev.eng.nutanix.com/mcp/supportgpt",
+      "description": "gw -> supportgpt (RAG-based support knowledge base for runbooks and known errors)"
+    },
+    "gw-nurag": {
+      "url": "https://panacea-dev.eng.nutanix.com/mcp/nurag",
+      "description": "gw -> nurag (Advanced RAG with Knowledge Graph)"
+    },
+    "gw-slack": {
+      "url": "https://panacea-dev.eng.nutanix.com/mcp/slack",
+      "description": "gw -> slack (Slack workspace integration)"
+    },
+    "gw-panacea": {
+      "url": "https://panacea-dev.eng.nutanix.com/mcp/panacea",
+      "description": "gw -> panacea (Automated Root Cause Analysis and Agentic Triage)"
+    },
+    "gw-live-debug": {
+      "url": "https://panacea-dev.eng.nutanix.com/mcp/live-debug",
+      "description": "gw -> live-debug"
+    },
+    "auto-handoff": {
+      "url": "http://10.40.224.6:9001/sse?api_key=${AUTO_HANDOFF_API_KEY}"
+    },
+    "sourcegraph-remote": {
+      "url": "http://10.113.24.33:3002/mcp"
+    },
+    "jita-remote": {
+      "url": "http://10.113.24.33:3003/mcp"
+    },
+    "atlassian-remote": {
+      "url": "http://10.113.24.33:3008/mcp"
+    },
+    "sourcegraph": {
+      "url": "http://10.113.24.33:3002/mcp",
+      "description": "Sourcegraph MCP - Search product source code, read files at specific revisions, and cross-reference error signatures with code."
+    },
+    "jita": {
+      "url": "http://10.113.24.33:3003/mcp",
+      "description": "JITA MCP - Remote shell access to JITA log bundles via the Panacea host's pre-mounted filers (/home/nutanix/jita_mount/*). Fallback for log triage when the local NFS mount on this workstation is unavailable. Prefer local mount when available — MCP adds a network round-trip per command."
+    }
+  }
+}

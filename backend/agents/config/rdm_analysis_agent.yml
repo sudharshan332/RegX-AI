@@ -1,0 +1,49 @@
+name: rdm-deployment-failure-analysis
+type: deployment_agent
+skill_wrapper: triage-rdm-deployment-failure
+
+cost_optimization:
+  rdm_pattern_db: true
+  skip_ai_unless_requested: true
+  confidence_threshold: 0.8
+  ai_analysis_on_demand: true
+
+triggers:
+  - event: test_skipped
+    conditions:
+      - failure_analysis.category == "DEVPROD_SERVICE:RDM"
+  - event: deployment_failed
+    conditions:
+      - rdm_link exists
+  - event: test_failed
+    conditions:
+      - rdm_found == true
+
+pattern_matching:
+  rdm_categories: 
+    - PRODUCT
+    - INFRASTRUCTURE
+    - TEST_BUG
+  confidence_required: 0.95
+  deployment_types:
+    - nested_ahv
+    - external_storage
+    - multi_cluster
+    - bare_metal
+    - prism_central
+
+cross_skill_handoff:
+  from_cdp_triage: true
+  delegation_rules:
+    - condition: "skipped AND rdm_category"
+      action: "analyze_deployment"
+      priority: 5
+    - condition: "confidence < 0.6"
+      action: "handoff_to_cdp"
+      target_agent_type: analysis_agent
+      priority: 3
+
+mcp_dependencies:
+  - user-gw-jita
+  - user-gw-diamond
+  - user-atlassian

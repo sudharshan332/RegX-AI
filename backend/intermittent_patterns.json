@@ -1,7 +1,54 @@
 {
   "intermittent_patterns": [
-    "Timedout executing command source.*cluster start in .* secs with error:",
-    "Timedout executing command source.*cluster.*create in .* secs with error",
-    "Couldn't get handle to SVM VM object for ip"
+    {
+      "id": "timeout_cluster_start",
+      "regex": "Timedout executing command source.*cluster start in .* secs with error:",
+      "confidence": 0.95,
+      "category": "INTERMITTENT",
+      "auto_triage": true,
+      "description": "Cluster start timeout - known intermittent issue",
+      "action": "Retry deployment, timeout likely due to network latency or temporary resource contention",
+      "root_cause": "Network delays or temporary AHV/CVM resource contention during cluster start sequence"
+    },
+    {
+      "id": "timeout_cluster_create",
+      "regex": "Timedout executing command source.*cluster.*create in .* secs with error",
+      "confidence": 0.93,
+      "category": "INTERMITTENT",
+      "auto_triage": true,
+      "description": "Cluster creation timeout - known intermittent issue",
+      "action": "Retry deployment, timeout likely due to network latency or temporary resource contention",
+      "root_cause": "Network delays or temporary AHV/CVM resource contention during cluster creation"
+    },
+    {
+      "id": "svm_vm_handle_failure",
+      "regex": "Couldn't get handle to SVM VM object for ip",
+      "confidence": 0.88,
+      "category": "INTERMITTENT",
+      "auto_triage": true,
+      "description": "SVM VM object handle retrieval failure - intermittent networking issue",
+      "action": "Retry deployment, issue typically resolves on subsequent attempts",
+      "root_cause": "Temporary networking issue preventing SVM VM object handle retrieval"
+    },
+    {
+      "id": "ssh_connection_timeout",
+      "regex": "SSH connection.*timeout|Unable to establish SSH connection",
+      "confidence": 0.85,
+      "category": "INTERMITTENT",
+      "auto_triage": true,
+      "description": "SSH connection timeout - intermittent network connectivity issue",
+      "action": "Retry deployment, SSH timeouts are often transient network issues",
+      "root_cause": "Temporary network connectivity issues or target system load"
+    },
+    {
+      "id": "api_connection_timeout",
+      "regex": "Connection timeout.*API|API.*connection.*timeout",
+      "confidence": 0.82,
+      "category": "INTERMITTENT",
+      "auto_triage": true,
+      "description": "API connection timeout - intermittent service availability",
+      "action": "Retry deployment, API timeouts typically resolve automatically",
+      "root_cause": "Temporary API service overload or network connectivity issues"
+    }
   ]
 }

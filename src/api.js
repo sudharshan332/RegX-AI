@@ -28,4 +28,9 @@ api.interceptors.response.use(
   }
 );
 
+export const syncCursorAiSkills = (skillIds) =>
+  api.post('/mcp/regression/cursor-ai/sync-skills', {
+    skill_ids: skillIds,
+  });
+
 export default api;

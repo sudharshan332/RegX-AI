@@ -1,0 +1,72 @@
+name: intelligent-triage-agent
+type: intelligent_triage
+description: "Smart analysis with history-based logic and Nutanix knowledge integration"
+
+# Analysis Logic Configuration
+analysis_logic:
+  # For Failed Testcases
+  failed_tests:
+    check_history: true
+    intermittent_threshold: 0.7  # Pass rate below this = intermittent
+    first_level_ai_for_intermittent: true
+    pattern_match_for_recurring: true
+  
+  # For Skipped Testcases  
+  skipped_tests:
+    rdm_pattern_match_first: true
+    always_glean_search: true
+    first_level_ai_if_no_pattern: true
+
+# First Level AI Analysis Configuration
+first_level_ai:
+  jita_api:
+    base_url: "https://jita-phx1-webserver-2.eng.nutanix.com/api/v2"
+    analyze_step_logs: true
+    analyze_exception_summary: true
+    failure_stage_detection: true
+  
+  glean_search:
+    mode: "nutanix_knowledge" 
+    include_tickets: true
+    include_documentation: true
+    max_results: 5
+
+# Cost Tracking (Analytics Only - No Limits)
+cost_tracking:
+  track_for_analytics: true
+  no_credit_limits: true
+  cost_estimates:
+    pattern_match: 0
+    first_level_ai: 15
+    pattern_plus_glean: 5
+    full_analysis: 25
+
+# Triggers
+triggers:
+  - event: test_failed
+    conditions:
+      - status in ["failed", "failure"]
+  - event: test_skipped  
+    conditions:
+      - status == "skipped"
+
+# Pattern Learning
+pattern_learning:
+  enabled: true
+  learn_from_first_level_ai: true
+  confidence_threshold_for_learning: 0.8
+  update_pattern_cache: true
+
+# MCP Dependencies
+mcp_dependencies:
+  - user-gw-glean      # Primary for Nutanix knowledge search
+  - user-gw-jita       # For JITA API access
+  - user-atlassian     # For JIRA ticket suggestions
+  - user-gw-supportgpt # Additional knowledge source
+
+# History Integration
+history_integration:
+  enabled: true
+  lookback_days: 30
+  min_runs_for_analysis: 3
+  intermittent_detection: true

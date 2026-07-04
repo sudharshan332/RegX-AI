@@ -1,0 +1,51 @@
+name: mcp-bridge-enhanced
+type: mcp_bridge
+description: "Enhanced MCP server integration with cost tracking and caching"
+
+cost_optimization:
+  enable_caching: true
+  session_max_age: 3600
+  max_concurrent_calls: 10
+  cache_ttl_default: 300
+
+triggers:
+  - event: mcp_call_required
+    conditions:
+      - mcp_server_id exists
+
+mcp_servers:
+  regx-data:
+    url: "http://localhost:5003"
+    description: "RegX regression data"
+    cost_per_call: 1
+    cache_ttl: 600
+
+  atlassian:
+    url: "https://panacea-dev.eng.nutanix.com/mcp/atlassian"
+    description: "Jira & Confluence"
+    cost_per_call: 2
+    cache_ttl: 300
+
+  gw-sourcegraph:
+    url: "https://panacea-dev.eng.nutanix.com/mcp/sourcegraph"
+    description: "Code search"
+    cost_per_call: 2
+    cache_ttl: 900
+
+  gw-jita:
+    url: "https://panacea-dev.eng.nutanix.com/mcp/jita"
+    description: "JITA log access"
+    cost_per_call: 1
+    cache_ttl: 300
+
+  gw-glean:
+    url: "https://panacea-dev.eng.nutanix.com/mcp/glean"
+    description: "Internal knowledge search"
+    cost_per_call: 3
+    cache_ttl: 600
+
+  gw-supportgpt:
+    url: "https://panacea-dev.eng.nutanix.com/mcp/supportgpt"
+    description: "Support knowledge base"
+    cost_per_call: 3
+    cache_ttl: 600

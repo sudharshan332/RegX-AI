@@ -1,0 +1,45 @@
+name: cdp-test-failure-triage
+type: analysis_agent
+skill_wrapper: triage-cdp-test-failure
+
+cost_optimization:
+  pattern_first: true
+  confidence_threshold: 0.7
+  auto_jira_creation: false
+  telemetry_enabled: true
+  user_guided_promotion: true
+  ai_analysis_on_demand: true
+
+triggers:
+  - event: test_failed
+    conditions:
+      - failure_analysis.category != "DEVPROD_SERVICE:RDM"
+      - pattern_matched != true
+  - event: test_failed
+    conditions:
+      - test_name contains "cdp"
+  - event: test_failed
+    conditions:
+      - test_name contains "central"
+
+pattern_matching:
+  ttl_hours: 24
+  max_entries: 10000
+  confidence_thresholds:
+    simple_patterns: 0.8
+    rdm_patterns: 0.95
+    regex_patterns: 0.7
+
+mcp_dependencies:
+  - user-atlassian
+  - user-sourcegraph-remote
+  - user-gw-jita
+  - user-gw-glean
+  - user-gw-supportgpt
+
+cross_skill_handoff:
+  enabled: true
+  handoff_rules:
+    - target_agent_type: deployment_agent
+      condition: failure_analysis.category == "DEVPROD_SERVICE:RDM"
+      preserve_context: true

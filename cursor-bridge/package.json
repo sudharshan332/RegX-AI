@@ -1,0 +1,17 @@
+{
+  "name": "regx-cursor-bridge",
+  "version": "1.0.0",
+  "description": "Bridge service between RegX Flask backend and Cursor AI SDK for deep testcase analysis",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:mcp": "node mcp-server.js",
+    "dev": "node --watch server.js",
+    "dev:mcp": "node --watch mcp-server.js"
+  },
+  "dependencies": {
+    "@cursor/sdk": "^1.0.23",
+    "express": "^4.21.0"
+  }
+}

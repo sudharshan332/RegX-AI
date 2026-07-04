@@ -28,6 +28,34 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from auth import LDAPAuth, create_jwt, decode_jwt, jwt_required
 
 # ======================================================
+# In-memory credential cache (stores LDAP passwords for Jita calls)
+# Passwords are cached on login and expire after the same TTL as JWT.
+# ======================================================
+_credential_cache = {}  # {username: {"password": str, "expires_at": float}}
+_credential_cache_lock = threading.Lock()
+CREDENTIAL_TTL_SECONDS = int(os.environ.get("JWT_EXPIRY_HOURS", "24")) * 3600
+
+
+def _store_user_credentials(username, password):
+    """Cache user credentials on successful login."""
+    with _credential_cache_lock:
+        _credential_cache[username] = {
+            "password": password,
+            "expires_at": time.time() + CREDENTIAL_TTL_SECONDS,
+        }
+
+
+def _get_user_credentials(username):
+    """Retrieve cached credentials. Returns (username, password) tuple or None."""
+    with _credential_cache_lock:
+        entry = _credential_cache.get(username)
+        if entry and entry["expires_at"] > time.time():
+            return (username, entry["password"])
+        _credential_cache.pop(username, None)
+        return None
+
+
+# ======================================================
 # Flask App
 # ======================================================
 app = Flask(__name__)
@@ -51,9 +79,24 @@ logger = logging.getLogger(__name__)
 # Constants
 # ======================================================
 JITA_BASE = "https://jita.eng.nutanix.com/api/v2"
+# QMS coupon service (used by JITA's Provider page "Validate" button for global pool).
+QMS_BASE_URL = os.getenv("QMS_BASE_URL", "https://qms-api.nucloud.ntnxdpro.com").rstrip("/")
+# JITA manage UI: /manage/job_profiles/<id> often 404s. Open the list and pre-fill name search (filter bar syntax).
+JITA_WEB_ORIGIN = os.getenv("JITA_WEB_ORIGIN", "https://jita.eng.nutanix.com").rstrip("/")
+# Query key JITA reads on page load (override if your build uses e.g. "filter" or "q").
+JITA_WEB_MANAGE_SEARCH_PARAM = os.getenv("JITA_WEB_MANAGE_SEARCH_PARAM", "search").strip().strip("?&=") or "search"
+JITA_WEB_JOB_PROFILE_URL = os.getenv(
+    "JITA_WEB_JOB_PROFILE_URL",
+    "{origin}/manage/job_profiles?" + JITA_WEB_MANAGE_SEARCH_PARAM + "={search_query}",
+)
+JITA_WEB_TEST_SET_URL = os.getenv(
+    "JITA_WEB_TEST_SET_URL",
+    "{origin}/manage/test_sets?" + JITA_WEB_MANAGE_SEARCH_PARAM + "={search_query}",
+)
 TRIAGE_GENIE_BASE = "http://triage-genie.eng.nutanix.com/api"
-# Login URL for Triage Genie (session auth); override with TRIAGE_GENIE_LOGIN_URL if needed
 LOGIN_URL = os.getenv("TRIAGE_GENIE_LOGIN_URL", "http://triage-genie.eng.nutanix.com/login")
+TRIAGE_GENIE_USERNAME = os.getenv("TRIAGE_GENIE_USERNAME", "")
+TRIAGE_GENIE_PASSWORD = os.getenv("TRIAGE_GENIE_PASSWORD", "")
 PHX_BASE = "https://jita-phx1-webserver-2.eng.nutanix.com/api/v2"
 TCMS_BASE = "https://tcms.eng.nutanix.com/api-readonly/v1"
 TCMS_SUMMARY_BASE = "https://tcms.eng.nutanix.com/api/v1"
@@ -67,6 +110,41 @@ TCMS_PASSWORD = os.getenv("TCMS_PASSWORD", "admin")
 TESTCASE_MGMT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
 )
+
+
+def _jita_browser_entity_url(template, entity_id=None, entity_name=None):
+    """Build JITA manage UI URL from env template.
+
+    Placeholders:
+      {origin}         — JITA_WEB_ORIGIN (no trailing slash)
+      {id}             — entity id (if template uses a direct record path)
+      {search_query}   — urllib-quoted ``showAll:true name:<entity_name>`` (manage list filter bar)
+    Query key for list+search defaults: ``JITA_WEB_MANAGE_SEARCH_PARAM`` (default ``search``), or set
+    ``JITA_WEB_JOB_PROFILE_URL`` / ``JITA_WEB_TEST_SET_URL`` to the exact pattern your JITA build expects.
+    """
+    if not template:
+        return None
+    try:
+        out = str(template).replace("{origin}", JITA_WEB_ORIGIN)
+    except Exception:
+        return None
+    eid = str(entity_id).strip() if entity_id else ""
+    if "{id}" in out:
+        if not eid:
+            return None
+        out = out.replace("{id}", eid)
+    if "{search_query}" in out:
+        if not entity_name or not str(entity_name).strip():
+            return None
+        raw_q = f"showAll:true name:{str(entity_name).strip()}"
+        out = out.replace("{search_query}", urllib.parse.quote(raw_q, safe=""))
+    out = out.strip()
+    if out.startswith("http://") or out.startswith("https://"):
+        return out
+    if out.startswith("/"):
+        return f"{JITA_WEB_ORIGIN}{out}"
+    return None
+
 
 # Tag-to-team configuration for TCMS QI lookups.
 # Each key is a tag pattern; value holds the TCMS team name and fallback branch.
@@ -111,11 +189,25 @@ manual_tasks_store = {}
 RUN_PLAN_STORAGE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "run_plans.json")
 
 def load_run_plans():
-    """Load run plans from JSON file"""
+    """Load run plans from JSON file, backfilling missing fields on older entries."""
     try:
         if os.path.exists(RUN_PLAN_STORAGE):
             with open(RUN_PLAN_STORAGE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+            dirty = False
+            for rp in data.get("run_plans", []):
+                if "schedule_triggered" not in rp:
+                    rp["schedule_triggered"] = False
+                    dirty = True
+                if "branch" not in rp:
+                    rp["branch"] = ""
+                    dirty = True
+                if "service_account" not in rp:
+                    rp["service_account"] = ""
+                    dirty = True
+            if dirty:
+                save_run_plans(data)
+            return data
         return {"run_plans": [], "history": []}
     except Exception as e:
         logger.error(f"Error loading run plans: {e}")
@@ -129,6 +221,107 @@ def save_run_plans(data):
     except Exception as e:
         logger.error(f"Error saving run plans: {e}")
         raise
+
+# ======================================================
+# Run Plan Scheduler — checks every 30 min for due scheduled runs
+# Uses service account (JITA_SVC_AUTH) so no user session is needed.
+# ======================================================
+_scheduler_lock = threading.Lock()
+SCHEDULER_INTERVAL_SECONDS = int(os.environ.get("SCHEDULER_INTERVAL_SECONDS", "1800"))
+
+
+def _trigger_scheduled_run_plan(run_plan, data):
+    """Trigger a single run plan via the service account and record history."""
+    rp_id = run_plan["id"]
+    rp_name = run_plan.get("name", rp_id)
+    job_profile_ids = [
+        jp for jp in run_plan.get("job_profiles", [])
+        if jp and isinstance(jp, str) and jp.strip()
+    ]
+    if not job_profile_ids:
+        logger.warning(f"[scheduler] Run plan '{rp_name}' has no valid job profiles — skipping")
+        return
+
+    svc_name = run_plan.get("service_account", "")
+    trigger_auth = RUN_PLAN_SERVICE_ACCOUNTS.get(svc_name, JITA_SVC_AUTH) if svc_name else JITA_SVC_AUTH
+    logger.info(f"[scheduler] Triggering '{rp_name}' ({len(job_profile_ids)} JP(s)) via {'svc:' + svc_name if svc_name else 'default svc account'}")
+    task_ids = []
+    failed_jobs = []
+
+    for jp_id in job_profile_ids:
+        try:
+            url = f"{JITA_BASE}/job_profiles/{jp_id}/trigger"
+            resp = requests.post(
+                url, json={}, headers={"Content-Type": "application/json"},
+                auth=trigger_auth, verify=False, timeout=60
+            )
+            if resp.status_code == 200:
+                res_data = resp.json()
+                if res_data.get("success") and "task_ids" in res_data:
+                    ids = [
+                        item["$oid"] if isinstance(item, dict) and "$oid" in item else item
+                        for item in res_data["task_ids"]
+                    ]
+                    task_ids.extend(ids)
+                else:
+                    failed_jobs.append({
+                        "job_id": jp_id, "success": False,
+                        "error": res_data.get("message", "Trigger returned failure")
+                    })
+            else:
+                failed_jobs.append({
+                    "job_id": jp_id, "success": False,
+                    "error": f"HTTP {resp.status_code}: {resp.text[:200]}"
+                })
+        except Exception as exc:
+            failed_jobs.append({"job_id": jp_id, "success": False, "error": str(exc)})
+
+    now_iso = datetime.now().isoformat()
+    run_plan["last_triggered"] = now_iso
+    run_plan["schedule_triggered"] = True
+
+    if "history" not in data:
+        data["history"] = []
+    data["history"].append({
+        "id": str(int(time.time() * 1000)),
+        "run_plan_id": rp_id,
+        "triggered_at": now_iso,
+        "triggered_by": "scheduler (service account)",
+        "task_ids": task_ids,
+        "failed_jobs": failed_jobs,
+        "status": "success" if not failed_jobs else "partial"
+    })
+    logger.info(
+        f"[scheduler] '{rp_name}' done — {len(task_ids)} task(s), {len(failed_jobs)} failure(s)"
+    )
+
+
+def _run_plan_scheduler_loop():
+    """Background loop: every SCHEDULER_INTERVAL_SECONDS, check for due scheduled run plans."""
+    while True:
+        try:
+            with _scheduler_lock:
+                data = load_run_plans()
+                now = datetime.now()
+                triggered_any = False
+                for rp in data.get("run_plans", []):
+                    sched = rp.get("schedule_date")
+                    if not sched:
+                        continue
+                    if rp.get("schedule_triggered"):
+                        continue
+                    try:
+                        sched_dt = datetime.fromisoformat(sched)
+                    except (ValueError, TypeError):
+                        continue
+                    if sched_dt <= now:
+                        _trigger_scheduled_run_plan(rp, data)
+                        triggered_any = True
+                if triggered_any:
+                    save_run_plans(data)
+        except Exception as exc:
+            logger.error(f"[scheduler] Unhandled error: {exc}", exc_info=True)
+        time.sleep(SCHEDULER_INTERVAL_SECONDS)
 
 # Triage Genie jobs storage file
 TRIAGE_GENIE_STORAGE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "triage_genie_jobs.json")
@@ -266,6 +459,65 @@ def invalidate_triage_accuracy_cache(tag=None):
             logger.info(f"Invalidated triage accuracy cache: {path}")
     except Exception as e:
         logger.warning(f"Could not invalidate triage accuracy cache: {e}")
+
+# --------------- Failed Analysis Saved Tags storage ---------------
+FAILED_ANALYSIS_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+FAILED_ANALYSIS_TAGS_FILE = os.path.join(FAILED_ANALYSIS_DATA_DIR, "failed_analysis_saved_tags.json")
+
+def _failed_analysis_results_path(tag):
+    sanitized = _sanitize_tag_for_filename(tag)
+    return os.path.join(FAILED_ANALYSIS_DATA_DIR, f"failed_analysis_{sanitized}.json")
+
+def load_failed_analysis_tags():
+    try:
+        if os.path.exists(FAILED_ANALYSIS_TAGS_FILE):
+            with open(FAILED_ANALYSIS_TAGS_FILE, 'r') as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "tags" in data:
+                    return data
+        return {"tags": []}
+    except Exception as e:
+        logger.error(f"Error loading failed analysis tags: {e}")
+        return {"tags": []}
+
+def save_failed_analysis_tags(data):
+    try:
+        os.makedirs(FAILED_ANALYSIS_DATA_DIR, exist_ok=True)
+        with open(FAILED_ANALYSIS_TAGS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving failed analysis tags: {e}")
+        raise
+
+def load_failed_analysis_results(tag):
+    try:
+        path = _failed_analysis_results_path(tag)
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                return json.load(f)
+        return None
+    except Exception as e:
+        logger.error(f"Error loading failed analysis results for tag '{tag}': {e}")
+        return None
+
+def save_failed_analysis_results(tag, data):
+    try:
+        os.makedirs(FAILED_ANALYSIS_DATA_DIR, exist_ok=True)
+        path = _failed_analysis_results_path(tag)
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving failed analysis results for tag '{tag}': {e}")
+        raise
+
+def delete_failed_analysis_results(tag):
+    try:
+        path = _failed_analysis_results_path(tag)
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f"Deleted failed analysis cache: {path}")
+    except Exception as e:
+        logger.warning(f"Could not delete failed analysis cache for tag '{tag}': {e}")
 
 # Load regression owners mapping from CSV
 CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "regression_owners.csv")
@@ -539,6 +791,9 @@ def auth_login():
     if user_info is None:
         return jsonify({"error": "Invalid username or password"}), 401
 
+    # Cache credentials for downstream Jita calls (trigger, triage, etc.)
+    _store_user_credentials(user_info["username"], password)
+
     token = create_jwt(
         user_info["username"],
         user_info.get("displayName", ""),
@@ -643,6 +898,9 @@ def regression_home():
             logger.warning(f"Failed to fetch test results from agave_test_results API: {e}. Falling back to test_result_count.")
             test_results = []
     
+    # Track whether we successfully fetched merged results
+    merged_results_available = len(test_results) > 0
+    
     # Group test results by task_id
     test_results_by_task = defaultdict(list)
     for test_result in test_results:
@@ -720,8 +978,11 @@ def regression_home():
                     else:
                         # Default to pending only if truly unknown
                         test_counts["Pending"] += 1
-        else:
-            # Fallback to test_result_count if agave_test_results not available
+        elif not merged_results_available:
+            # Fallback to test_result_count ONLY when the agave_test_results API
+            # call failed entirely. When merge=True results were fetched successfully,
+            # tasks not in the map have their tests already counted via other tasks'
+            # merged results — using the stale test_result_count would double-count.
             tc = task.get("test_result_count", {})
             test_counts = {
                 "total": tc.get("Total", 0),
@@ -1752,8 +2013,7 @@ def get_triage_count():
         summary = defaultdict(lambda: {
             "Total Failed": 0,
             "Triaged": 0,
-            "UnTriaged": 0,
-            "Bulk Issues": 0
+            "UnTriaged": 0
         })
         ticket_case_map = defaultdict(set)  # ticket → set of unique testcases
         owner_ticket_map = defaultdict(lambda: defaultdict(int))  # owner → ticket → count
@@ -1825,11 +2085,9 @@ def get_triage_count():
         else:
             logger.info("Skipping bulk issues QI calculation for faster triage count response")
         
-        # Update bulk issues count per owner
-        for owner in summary:
-            owner_tickets = owner_ticket_map[owner]
-            bulk_ticket_count = sum(1 for ticket in owner_tickets if ticket in bulk_issues)
-            summary[owner]["Bulk Issues"] = bulk_ticket_count
+        # Update bulk issues count - use total count of unique bulk tickets
+        # (not per-owner, since the same ticket can be tagged on tests from multiple owners)
+        total_bulk_issues_count = len(bulk_issues)
         
         # Convert defaultdict to regular dict for JSON serialization
         triage_summary = {k: dict(v) for k, v in summary.items()}
@@ -1852,6 +2110,7 @@ def get_triage_count():
             "owner_ticket_map": owner_ticket_dict,
             "bulk_issues": bulk_issues_dict,
             "bulk_issues_with_qi": bulk_issues_with_qi,
+            "bulk_issues_count": total_bulk_issues_count,
             "pending_tests": inprogress_tests,
             "total_tests_processed": len(test_data)
         })
@@ -1967,7 +2226,15 @@ def get_triage_accuracy():
             seen_tests.add(test_name)
             unique_results.append(tr)
 
-        triage_genie_session = create_triage_genie_session()
+        # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
+        _test_result_ids = []
+        for tr in unique_results:
+            _rid = tr.get("_id")
+            if isinstance(_rid, dict) and "$oid" in _rid:
+                _test_result_ids.append(_rid["$oid"])
+            elif _rid:
+                _test_result_ids.append(str(_rid))
+        tg_ticket_map = build_triage_genie_ticket_map(_test_result_ids)
 
         def process_one(tr):
             try:
@@ -1988,13 +2255,12 @@ def get_triage_accuracy():
                     testcase_id = str(tr.get("_id", "")) if tr.get("_id") else ""
 
                 triage_genie_ticket = ""
-                if testcase_id and triage_genie_session:
-                    try:
-                        tg = fetch_triage_genie_ticket_id(testcase_id, triage_session=triage_genie_session)
-                        if tg:
-                            triage_genie_ticket = str(tg).strip()
-                    except Exception as tg_err:
-                        logger.debug(f"Triage Genie lookup failed for {testcase_id}: {tg_err}")
+                tg = (
+                    tg_ticket_map.get(testcase_id)
+                    or tg_ticket_map.get(testcase_name)
+                )
+                if tg:
+                    triage_genie_ticket = str(tg).strip()
 
                 if jira_ticket and triage_genie_ticket:
                     match_status = "Matched" if jira_ticket.upper() == triage_genie_ticket.upper() else "Unmatched"
@@ -2158,6 +2424,9 @@ def get_qi_summary():
                 logger.warning(f"Failed to fetch test results from agave_test_results API: {e}. Falling back to test_result_count.")
                 test_results = []
         
+        # Track whether we successfully fetched merged results
+        merged_results_available = len(test_results) > 0
+        
         # Group test results by task_id and branch
         test_results_by_task = defaultdict(list)
         task_branch_map = {}
@@ -2255,8 +2524,11 @@ def get_qi_summary():
                         else:
                             # Default to pending only if truly unknown
                             task_test_counts["Pending"] += 1
-            else:
-                # Fallback to test_result_count if agave_test_results not available
+            elif not merged_results_available:
+                # Fallback to test_result_count ONLY when the agave_test_results API
+                # call failed entirely. When merge=True results were fetched successfully,
+                # tasks not in the map have their tests already counted via other tasks'
+                # merged results — using the stale test_result_count would double-count.
                 tc = task.get("test_result_count", {})
                 task_test_counts = {
                     "total": tc.get("Total", 0),
@@ -2379,14 +2651,15 @@ def get_tcms_overall_qi():
             })
             feat_type = "regression"
         else:
-            # Release branch: simple filters, feat_type=all
+            # Release branch: team-specific filters, feat_type=regression
             filters = json.dumps({
                 "$and": [
-                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/", "$options": "i"}},
+                    {"additional_data.team": f"{milestone}/{team_name}"},
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
                     {"test_case.deprecated": False},
                 ]
             })
-            feat_type = "all"
+            feat_type = "regression"
 
         params = {
             "aggregation_field": "target_package_type",
@@ -2438,9 +2711,22 @@ def get_tcms_overall_qi():
             "run": overall.get("run"),
             "passed": overall.get("passed"),
             "failed": overall.get("failed"),
+            "not_run": overall.get("not_run"),
+            "blocked": overall.get("blocked"),
             "run_percentage": overall.get("run_percentage"),
             "overall_effectiveness": overall.get("overall_effectiveness"),
             "overall_stability": overall.get("overall_stability"),
+            "total_triaged": overall.get("total_triaged"),
+            "triage_percentage": overall.get("triage_percentage"),
+            "total_product_issues": overall.get("total_product_issues"),
+            "total_test_issues": overall.get("total_test_issues"),
+            "total_other_issues": overall.get("total_other_issues"),
+            "total_infra_issues": overall.get("total_infra_issues"),
+            "total_framework_issues": overall.get("total_framework_issues"),
+            "openBugs": overall.get("openBugs"),
+            "unique_tickets": overall.get("unique_tickets", []),
+            "execution_passed_percentage": overall.get("execution_passed_percentage"),
+            "execution_failed_percentage": overall.get("execution_failed_percentage"),
         })
 
     except requests.exceptions.Timeout:
@@ -3217,6 +3503,15 @@ JITA_SVC_USERNAME = safe_b64decode("c3ZjLmNkcC5yZWdyZXNzaW9u")
 JITA_SVC_PASSWORD = safe_b64decode("Knh0WTFtNiYlVko0akZXZzJlZHY=")
 JITA_SVC_AUTH = (JITA_SVC_USERNAME, JITA_SVC_PASSWORD)
 
+# Named service accounts selectable per run plan
+RUN_PLAN_SERVICE_ACCOUNTS = {
+    "svc.teamchandra": (
+        safe_b64decode("c3ZjLnRlYW1jaGFuZHJh"),
+        safe_b64decode("KndIZTM5JWZieVcmblFFTEQ1dHU="),
+    ),
+    "svc.cdp.regression": (JITA_SVC_USERNAME, JITA_SVC_PASSWORD),
+}
+
 # User credentials for triggering (matching reference script)
 JITA_USERNAME = safe_b64decode("c3VkaGFyc2hhbi5tdXNhbGk=")
 JITA_PASSWORD = safe_b64decode("V29ya291dEAy")
@@ -3310,6 +3605,13 @@ def update_job_profiles_tester_tags(job_profile_ids, tag_name, action="add"):
     
     return updated_count, failed_updates
 
+@app.route("/mcp/regression/run-plan/service-accounts", methods=["GET"])
+@jwt_required
+def list_service_accounts():
+    """Return the names of available service accounts for run plan triggers."""
+    return jsonify({"service_accounts": list(RUN_PLAN_SERVICE_ACCOUNTS.keys())})
+
+
 @app.route("/mcp/regression/run-plan", methods=["GET"])
 @jwt_required
 def list_run_plans():
@@ -3357,9 +3659,12 @@ def create_run_plan():
         new_run_plan = {
             "id": new_id,
             "name": req_data.get("name"),
+            "branch": req_data.get("branch", ""),
             "job_profiles": job_profiles,
             "tag_name": tag_name,
             "schedule_date": req_data.get("schedule_date"),
+            "schedule_triggered": False,
+            "service_account": req_data.get("service_account", ""),
             "created_at": datetime.now().isoformat(),
             "last_triggered": None
         }
@@ -3391,11 +3696,16 @@ def update_run_plan(run_plan_id):
             if rp.get("id") == run_plan_id:
                 # Check if already triggered (restrict edits)
                 if rp.get("last_triggered"):
-                    # Only allow editing schedule_date, name, and tag_name
+                    # Only allow editing schedule_date, name, branch, service_account, and tag_name
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data["schedule_date"]
+                        rp["schedule_triggered"] = False
                     if "name" in req_data:
                         rp["name"] = req_data["name"]
+                    if "branch" in req_data:
+                        rp["branch"] = req_data["branch"]
+                    if "service_account" in req_data:
+                        rp["service_account"] = req_data["service_account"]
                     if "tag_name" in req_data:
                         # Validate uniqueness
                         tag_name = req_data["tag_name"]
@@ -3406,6 +3716,10 @@ def update_run_plan(run_plan_id):
                 else:
                     # Full edit allowed before first trigger
                     rp["name"] = req_data.get("name", rp.get("name"))
+                    if "branch" in req_data:
+                        rp["branch"] = req_data["branch"]
+                    if "service_account" in req_data:
+                        rp["service_account"] = req_data["service_account"]
                     
                     # Validate and filter job profiles if provided
                     if "job_profiles" in req_data:
@@ -3417,6 +3731,7 @@ def update_run_plan(run_plan_id):
                     
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data.get("schedule_date")
+                        rp["schedule_triggered"] = False
                 
                 save_run_plans(data)
                 
@@ -3497,21 +3812,38 @@ def search_job_profiles():
 @app.route("/mcp/regression/run-plan/<run_plan_id>/trigger", methods=["POST"])
 @jwt_required
 def trigger_run_plan(run_plan_id):
-    """Trigger a run plan now"""
+    """Trigger a run plan using its configured service account, or the logged-in user's LDAP credentials."""
     try:
         logger.info(f"[START] Trigger Run Plan | run_plan_id={run_plan_id}")
+
         data = load_run_plans()
-        
-        # Find run plan
+
+        # Find run plan first so we can check for a service account
         run_plan = None
         for rp in data.get("run_plans", []):
             if rp.get("id") == run_plan_id:
                 run_plan = rp
                 break
-        
+
         if not run_plan:
             logger.error(f"Run plan not found: {run_plan_id}")
             return jsonify({"error": "Run plan not found"}), 404
+
+        # Resolve credentials: prefer run-plan-level service account, fall back to LDAP
+        svc_name = run_plan.get("service_account", "")
+        if svc_name and svc_name in RUN_PLAN_SERVICE_ACCOUNTS:
+            user_auth = RUN_PLAN_SERVICE_ACCOUNTS[svc_name]
+            logger.info(f"Using service account '{svc_name}' for Jita trigger")
+        else:
+            current_username = g.current_user.get("sub", "")
+            user_auth = _get_user_credentials(current_username)
+            if not user_auth:
+                logger.warning(f"No cached credentials for user '{current_username}' — asking for re-auth")
+                return jsonify({
+                    "error": "Session credentials expired. Please re-login to trigger runs.",
+                    "code": "CREDENTIALS_EXPIRED"
+                }), 401
+            logger.info(f"Using LDAP credentials of '{current_username}' for Jita trigger")
         
         logger.info(f"Found run plan: {run_plan.get('name')} (ID: {run_plan_id})")
         
@@ -3587,12 +3919,12 @@ def trigger_run_plan(run_plan_id):
                             if update_resp.status_code != 200:
                                 logger.warning(f"Failed to update commit for {job_id}: {update_resp.text[:200]}")
                 
-                # Trigger using user credentials (matching reference script)
-                logger.info(f"Triggering Job Profile ID: {job_id}")
+                # Trigger using the logged-in user's LDAP credentials
+                logger.info(f"Triggering Job Profile ID: {job_id} as user '{user_auth[0]}'")
                 resp = requests.post(
                     url,
                     headers=headers,
-                    auth=JITA_AUTH,
+                    auth=user_auth,
                     json=payload,
                     verify=False,
                     timeout=60
@@ -3646,6 +3978,7 @@ def trigger_run_plan(run_plan_id):
             "id": str(int(time.time() * 1000)),
             "run_plan_id": run_plan_id,
             "triggered_at": datetime.now().isoformat(),
+            "triggered_by": current_username,
             "task_ids": task_ids,
             "failed_jobs": failed_jobs,
             "status": "success" if not failed_jobs else "partial"
@@ -3661,6 +3994,7 @@ def trigger_run_plan(run_plan_id):
         
         return jsonify({
             "success": True,
+            "triggered_by": current_username,
             "task_ids": task_ids,
             "failed_jobs": failed_jobs,
             "total_triggered": len(task_ids),
@@ -3898,26 +4232,43 @@ def batch_update_job_profiles(run_plan_id):
                     updated_profile["test_framework_metadata"] = test_framework_metadata
                     logger.info(f"Updated test_framework_metadata: framework.patch_url={framework_metadata.get('patch_url')}, framework.branch={framework_metadata.get('branch')}")
                 
+                # Update top-level patch_url to match framework_patch_url (JITA uses this field)
+                if req_data.get("framework_patch_url"):
+                    updated_profile["patch_url"] = req_data.get("framework_patch_url")
+                
                 # Update tester_tags if provided (optional batch update)
                 if req_data.get("tester_tags_action"):  # "add" or "remove"
                     tester_tags_action = req_data.get("tester_tags_action")
                     tester_tag_value = req_data.get("tester_tag_value", "")
+                    tester_tags_to_remove = req_data.get("tester_tags_to_remove", [])
                     
-                    if tester_tag_value:
-                        tester_tags = existing_profile.get("tester_tags", [])
-                        if not isinstance(tester_tags, list):
-                            tester_tags = []
-                        
-                        if tester_tags_action == "add":
-                            # Add tag if not already present
-                            if tester_tag_value not in tester_tags:
-                                tester_tags.append(tester_tag_value)
+                    tester_tags = existing_profile.get("tester_tags", [])
+                    if not isinstance(tester_tags, list):
+                        tester_tags = []
+                    
+                    if tester_tags_action == "add" and tester_tag_value:
+                        if tester_tag_value not in tester_tags:
+                            tester_tags.append(tester_tag_value)
+                            updated_profile["tester_tags"] = tester_tags
+                    elif tester_tags_action == "remove":
+                        if isinstance(tester_tags_to_remove, list) and tester_tags_to_remove:
+                            original_len = len(tester_tags)
+                            tester_tags = [t for t in tester_tags if t not in tester_tags_to_remove]
+                            if len(tester_tags) != original_len:
                                 updated_profile["tester_tags"] = tester_tags
-                        elif tester_tags_action == "remove":
-                            # Remove tag if present
+                                logger.info(f"Removed {original_len - len(tester_tags)} tag(s) from job profile {job_id}")
+                        elif tester_tag_value:
                             if tester_tag_value in tester_tags:
                                 tester_tags.remove(tester_tag_value)
                                 updated_profile["tester_tags"] = tester_tags
+                
+                # Overwrite run_tests_with_additional_tags if provided in the request
+                if "run_tests_with_additional_tags" in req_data:
+                    new_additional_tags = req_data["run_tests_with_additional_tags"]
+                    if not isinstance(new_additional_tags, list):
+                        new_additional_tags = []
+                    updated_profile["run_tests_with_additional_tags"] = new_additional_tags
+                    logger.info(f"Overwriting run_tests_with_additional_tags for {job_id}: {new_additional_tags}")
                 
                 # Ensure JSON serializable (following reference script pattern)
                 serializable_payload = {}
@@ -4035,6 +4386,81 @@ def delete_history_entry(history_id):
         logger.error(f"Error deleting history entry: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/mcp/regression/run-plan/history/<history_id>/kill", methods=["POST"])
+@jwt_required
+def kill_history_tasks(history_id):
+    """Kill (abort) all JITA tasks associated with a history entry."""
+    try:
+        current_username = g.current_user.get("sub", "")
+        user_auth = _get_user_credentials(current_username)
+        if not user_auth:
+            return jsonify({
+                "error": "Session credentials expired. Please re-login to kill tasks.",
+                "code": "CREDENTIALS_EXPIRED"
+            }), 401
+
+        data = load_run_plans()
+        history_entry = None
+        for entry in data.get("history", []):
+            if entry.get("id") == history_id:
+                history_entry = entry
+                break
+
+        if not history_entry:
+            return jsonify({"error": "History entry not found"}), 404
+
+        task_ids = history_entry.get("task_ids", [])
+        if not task_ids:
+            return jsonify({"error": "No task IDs to kill"}), 400
+
+        killed = []
+        failed = []
+
+        def kill_single_task(tid):
+            try:
+                resp = requests.put(
+                    f"{JITA_BASE}/tasks/{tid}",
+                    headers={"Content-Type": "application/json"},
+                    json={"status": "killed"},
+                    auth=user_auth,
+                    verify=False,
+                    timeout=30
+                )
+                if resp.status_code == 200:
+                    return {"task_id": tid, "success": True}
+                return {"task_id": tid, "success": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+            except Exception as exc:
+                return {"task_id": tid, "success": False, "error": str(exc)}
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(kill_single_task, tid) for tid in task_ids]
+            for future in as_completed(futures):
+                result = future.result()
+                if result["success"]:
+                    killed.append(result["task_id"])
+                else:
+                    failed.append(result)
+
+        if len(killed) == len(task_ids):
+            history_entry["status"] = "killed"
+        elif killed:
+            history_entry["status"] = "partially_killed"
+        save_run_plans(data)
+
+        logger.info(f"Kill tasks for history {history_id}: {len(killed)} killed, {len(failed)} failed (by {current_username})")
+        return jsonify({
+            "success": len(failed) == 0,
+            "killed": killed,
+            "failed": failed,
+            "total_killed": len(killed),
+            "total_failed": len(failed),
+            "status": history_entry["status"]
+        })
+    except Exception as e:
+        logger.error(f"Error killing tasks for history {history_id}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/mcp/regression/run-plan/<run_plan_id>/clone", methods=["POST"])
 @jwt_required
 def clone_run_plan(run_plan_id):
@@ -4074,11 +4500,14 @@ def clone_run_plan(run_plan_id):
         cloned_run_plan = {
             "id": new_id,
             "name": cloned_name,
+            "branch": source_run_plan.get("branch", ""),
             "job_profiles": source_run_plan.get("job_profiles", []).copy(),
             "tag_name": new_tag_name,
             "schedule_date": source_run_plan.get("schedule_date"),
+            "schedule_triggered": False,
+            "service_account": source_run_plan.get("service_account", ""),
             "created_at": datetime.now().isoformat(),
-            "last_triggered": None  # Reset trigger status
+            "last_triggered": None
         }
         
         data["run_plans"].append(cloned_run_plan)
@@ -4188,6 +4617,10 @@ def delete_tag_from_job_profiles(run_plan_id):
 def get_available_tags():
     """Get list of available tags from JITA"""
     try:
+        # Use logged-in user's credentials, fall back to service account for read-only ops
+        current_username = g.current_user.get("sub", "")
+        auth_creds = _get_user_credentials(current_username) or JITA_SVC_AUTH
+
         # Fetch recent tasks to get unique tags
         params = {
             "limit": 1000,
@@ -4197,7 +4630,7 @@ def get_available_tags():
         response = session.get(
             f"{JITA_BASE}/tasks",
             params=params,
-            auth=JITA_AUTH,
+            auth=auth_creds,
             timeout=30
         )
         
@@ -4218,6 +4651,186 @@ def get_available_tags():
     except Exception as e:
         logger.error(f"Error fetching tags: {e}")
         return jsonify({"error": str(e)}), 500
+
+# ======================================================
+# Run Plan Bulk (Category) Actions
+# ======================================================
+@app.route("/mcp/regression/run-plan/bulk-trigger", methods=["POST"])
+@jwt_required
+def bulk_trigger_by_branch():
+    """Trigger all run plans that belong to a given branch."""
+    try:
+        current_username = g.current_user.get("sub", "")
+        user_auth = _get_user_credentials(current_username)
+        if not user_auth:
+            return jsonify({"error": "Session credentials expired. Please re-login.", "code": "CREDENTIALS_EXPIRED"}), 401
+
+        branch = (request.json or {}).get("branch", "")
+        if not branch:
+            return jsonify({"error": "branch is required"}), 400
+
+        data = load_run_plans()
+        targets = [rp for rp in data.get("run_plans", []) if rp.get("branch") == branch]
+        if not targets:
+            return jsonify({"error": f"No run plans found for branch '{branch}'"}), 404
+
+        results = []
+        for rp in targets:
+            rp_id = rp["id"]
+            job_profile_ids = [jp for jp in rp.get("job_profiles", []) if jp and isinstance(jp, str) and jp.strip()]
+            task_ids = []
+            failed_jobs = []
+            for jp_id in job_profile_ids:
+                try:
+                    resp = requests.post(
+                        f"{JITA_BASE}/job_profiles/{jp_id}/trigger",
+                        json={}, headers={"Content-Type": "application/json"},
+                        auth=user_auth, verify=False, timeout=60
+                    )
+                    if resp.status_code == 200:
+                        res_data = resp.json()
+                        if res_data.get("success") and "task_ids" in res_data:
+                            ids = [item["$oid"] if isinstance(item, dict) and "$oid" in item else item for item in res_data["task_ids"]]
+                            task_ids.extend(ids)
+                        else:
+                            failed_jobs.append({"job_id": jp_id, "error": res_data.get("message", "unknown")})
+                    else:
+                        failed_jobs.append({"job_id": jp_id, "error": f"HTTP {resp.status_code}"})
+                except Exception as exc:
+                    failed_jobs.append({"job_id": jp_id, "error": str(exc)})
+
+            rp["last_triggered"] = datetime.now().isoformat()
+            if "history" not in data:
+                data["history"] = []
+            data["history"].append({
+                "id": str(int(time.time() * 1000)),
+                "run_plan_id": rp_id,
+                "triggered_at": rp["last_triggered"],
+                "triggered_by": current_username,
+                "task_ids": task_ids,
+                "failed_jobs": failed_jobs,
+                "status": "success" if not failed_jobs else "partial"
+            })
+            results.append({"run_plan_id": rp_id, "name": rp.get("name"), "task_ids": task_ids, "failed": len(failed_jobs)})
+
+        save_run_plans(data)
+        return jsonify({"success": True, "branch": branch, "results": results})
+    except Exception as e:
+        logger.error(f"Error in bulk trigger: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/run-plan/bulk-schedule", methods=["POST"])
+@jwt_required
+def bulk_schedule_by_branch():
+    """Set the same schedule_date on every run plan in a branch."""
+    try:
+        req = request.json or {}
+        branch = req.get("branch", "")
+        schedule_date = req.get("schedule_date", "")
+        if not branch or not schedule_date:
+            return jsonify({"error": "branch and schedule_date are required"}), 400
+
+        data = load_run_plans()
+        updated = 0
+        for rp in data.get("run_plans", []):
+            if rp.get("branch") == branch:
+                rp["schedule_date"] = schedule_date
+                rp["schedule_triggered"] = False
+                updated += 1
+        if updated == 0:
+            return jsonify({"error": f"No run plans found for branch '{branch}'"}), 404
+
+        save_run_plans(data)
+        return jsonify({"success": True, "branch": branch, "updated": updated})
+    except Exception as e:
+        logger.error(f"Error in bulk schedule: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
+# Run Plan Calendar Endpoints
+# ======================================================
+@app.route("/mcp/regression/run-plan/calendar", methods=["GET"])
+@jwt_required
+def run_plan_calendar():
+    """Return all triggered and scheduled events grouped by date for calendar view."""
+    try:
+        data = load_run_plans()
+        run_plans = data.get("run_plans", [])
+        history = data.get("history", [])
+
+        rp_map = {rp["id"]: rp for rp in run_plans}
+        events = []
+
+        for entry in history:
+            triggered_at = entry.get("triggered_at", "")
+            date_str = triggered_at[:10] if len(triggered_at) >= 10 else ""
+            rp = rp_map.get(entry.get("run_plan_id", ""))
+            events.append({
+                "type": "triggered",
+                "date": date_str,
+                "datetime": triggered_at,
+                "run_plan_id": entry.get("run_plan_id"),
+                "run_plan_name": rp.get("name") if rp else "Deleted Run Plan",
+                "status": entry.get("status"),
+                "triggered_by": entry.get("triggered_by", ""),
+                "task_ids": entry.get("task_ids", []),
+                "history_id": entry.get("id"),
+            })
+
+        for rp in run_plans:
+            sched = rp.get("schedule_date")
+            if not sched:
+                continue
+            date_str = sched[:10] if len(sched) >= 10 else ""
+            events.append({
+                "type": "scheduled",
+                "date": date_str,
+                "datetime": sched,
+                "run_plan_id": rp["id"],
+                "run_plan_name": rp.get("name", ""),
+                "schedule_triggered": rp.get("schedule_triggered", False),
+                "last_triggered": rp.get("last_triggered"),
+            })
+
+        return jsonify({"events": events, "run_plans": run_plans})
+    except Exception as e:
+        logger.error(f"Error building calendar data: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/run-plan/<run_plan_id>/schedule", methods=["PUT", "DELETE"])
+@jwt_required
+def schedule_run_plan(run_plan_id):
+    """Set, update, or clear the schedule_date on an existing run plan."""
+    try:
+        data = load_run_plans()
+        for rp in data.get("run_plans", []):
+            if rp.get("id") == run_plan_id:
+                if request.method == "DELETE":
+                    rp["schedule_date"] = None
+                    rp["schedule_triggered"] = False
+                    save_run_plans(data)
+                    return jsonify({"success": True, "run_plan": rp})
+
+                req_data = request.json or {}
+                schedule_date = req_data.get("schedule_date")
+                if schedule_date is None:
+                    rp["schedule_date"] = None
+                    rp["schedule_triggered"] = False
+                else:
+                    if not schedule_date:
+                        return jsonify({"error": "schedule_date is required (or send null to clear)"}), 400
+                    rp["schedule_date"] = schedule_date
+                    rp["schedule_triggered"] = False
+                save_run_plans(data)
+                return jsonify({"success": True, "run_plan": rp})
+        return jsonify({"error": "Run plan not found"}), 404
+    except Exception as e:
+        logger.error(f"Error scheduling run plan: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 
 # ======================================================
 # Triage Genie Endpoints
@@ -4243,13 +4856,11 @@ def list_triage_genie_jobs():
             timestamp = int(time.time() * 1000)
             url = f"{TRIAGE_GENIE_BASE}/jobs?page={page}&per_page={per_page}&run_status={run_status}&show_all={show_all}&name_search={name_search}&_={timestamp}"
             
-            triage_token = os.getenv("TRIAGE_GENIE_TOKEN", "TOKEN")
-            headers = {
-                "Authorization": f"Bearer {triage_token}",
-                "Content-Type": "application/json"
-            }
-            
-            response = requests.get(url, headers=headers, verify=False, timeout=30)
+            tg_session = create_triage_genie_session()
+            if tg_session:
+                response = tg_session.get(url, verify=False, timeout=30)
+            else:
+                response = requests.get(url, verify=False, timeout=30)
             
             if response.status_code == 200:
                 api_data = response.json()
@@ -4310,21 +4921,21 @@ def create_triage_genie_job():
             "created_by": created_by
         }
         
-        # Get authorization token from environment or use default "TOKEN"
-        # The API accepts "Bearer TOKEN" as a valid authentication header
-        triage_token = os.getenv("TRIAGE_GENIE_TOKEN", "TOKEN")
-        headers = {
-            "Authorization": f"Bearer {triage_token}",
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.post(
-            f"{TRIAGE_GENIE_BASE}/jobs",
-            headers=headers,
-            json=payload,
-            verify=False,
-            timeout=30
-        )
+        tg_session = create_triage_genie_session()
+        if tg_session:
+            response = tg_session.post(
+                f"{TRIAGE_GENIE_BASE}/jobs",
+                json=payload,
+                verify=False,
+                timeout=30,
+            )
+        else:
+            response = requests.post(
+                f"{TRIAGE_GENIE_BASE}/jobs",
+                json=payload,
+                verify=False,
+                timeout=30,
+            )
         
         if response.status_code in [200, 201]:
             data = response.json()
@@ -4469,6 +5080,101 @@ def search_glean(query_text):
     except Exception as e:
         logger.warning(f"Error searching Glean: {e}")
         return None
+
+
+def search_glean_jira(query_text, max_results=10):
+    """Search Glean specifically for JIRA tickets matching the query.
+
+    Filters results to the ``jira`` datasource so that only ENG/JIRA issues
+    are returned.  Falls back to the generic search if the JIRA-scoped call
+    fails.
+    """
+    if not os.getenv("GLEAN_TOKEN"):
+        logger.warning("GLEAN_TOKEN not set, skipping Glean JIRA search")
+        return None
+    headers = get_glean_headers()
+    payload = {
+        "query": query_text,
+        "pageSize": max_results,
+        "requestOptions": {
+            "datasourcesFilter": {
+                "datasources": ["jira"],
+            },
+        },
+    }
+    try:
+        resp = session.post(
+            f"{GLEAN_BASE}/search",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        logger.warning(f"Glean JIRA search returned {resp.status_code}, falling back to generic search")
+    except Exception as e:
+        logger.warning(f"Glean JIRA search failed: {e}, falling back")
+    return search_glean(query_text)
+
+
+def _extract_jira_tickets_from_glean(glean_data):
+    """Walk Glean search results and extract JIRA ticket IDs + metadata.
+
+    Returns a list of dicts:
+        [{"ticket": "ENG-12345", "title": "...", "url": "...", "snippet": "..."}, ...]
+    """
+    import re as _re
+    jira_pat = _re.compile(r'[A-Z][A-Z0-9]+-\d+')
+
+    if not glean_data or not isinstance(glean_data, dict):
+        return []
+
+    raw_results = glean_data.get("results", [])
+    if isinstance(raw_results, dict):
+        raw_results = raw_results.get("results", [])
+    if not isinstance(raw_results, list):
+        return []
+
+    seen_tickets = {}
+    for r in raw_results:
+        if not isinstance(r, dict):
+            continue
+        doc = r.get("document", r)
+        title = doc.get("title", "")
+        url = doc.get("url", "")
+        # Collect snippet text from all available snippet objects
+        snippet_text = ""
+        snippets = r.get("snippets", [])
+        if isinstance(snippets, list):
+            parts = []
+            for s in snippets:
+                if isinstance(s, dict):
+                    inner = s.get("snippet", s)
+                    if isinstance(inner, dict):
+                        parts.append(inner.get("text", ""))
+                    elif isinstance(inner, str):
+                        parts.append(inner)
+                elif isinstance(s, str):
+                    parts.append(s)
+            snippet_text = " ".join(parts)[:500]
+
+        combined_text = f"{title} {url} {snippet_text}"
+        found_ids = jira_pat.findall(combined_text)
+
+        # If the URL is a direct JIRA link, the ticket from the URL is the primary one
+        if url and "jira" in url.lower():
+            url_ids = jira_pat.findall(url)
+            found_ids = url_ids + [t for t in found_ids if t not in url_ids]
+
+        for tid in found_ids:
+            if tid not in seen_tickets:
+                seen_tickets[tid] = {
+                    "ticket": tid,
+                    "title": title[:200],
+                    "url": url if tid in (jira_pat.findall(url) if url else []) else f"https://jira.nutanix.com/browse/{tid}",
+                    "snippet": snippet_text[:300],
+                }
+    return list(seen_tickets.values())
 
 def determine_failure_stage(test_result):
     """Determine failure stage from test result"""
@@ -4808,175 +5514,149 @@ def generate_ai_failure_summary(exception, exception_summary, tester_log_url, te
 
 def create_triage_genie_session():
     """
-    Create a requests.Session authenticated via JITA login for Triage Genie API calls.
-    Used by Failed Testcase Analysis when calling Triage Genie.
+    Create a requests.Session authenticated via login for Triage Genie API calls.
+
+    Uses TRIAGE_GENIE_USERNAME / TRIAGE_GENIE_PASSWORD env vars if set,
+    otherwise falls back to the service account (JITA_SVC_USERNAME / JITA_SVC_PASSWORD).
     """
+    tg_user = TRIAGE_GENIE_USERNAME or JITA_SVC_USERNAME
+    tg_pass = TRIAGE_GENIE_PASSWORD or JITA_SVC_PASSWORD
+
+    if not tg_user or not tg_pass:
+        logger.warning("Triage Genie credentials not configured (set TRIAGE_GENIE_USERNAME / TRIAGE_GENIE_PASSWORD)")
+        return None
+
     session_triage = requests.Session()
     session_triage.verify = False
-    login_payload = {
-        "username": JITA_USERNAME,
-        "password": JITA_PASSWORD
-    }
     try:
         login_response = session_triage.post(
             LOGIN_URL,
-            data=login_payload,
+            data={"username": tg_user, "password": tg_pass},
             verify=False,
-            timeout=15
+            timeout=15,
+            allow_redirects=False,
         )
-        if login_response.status_code != 200:
-            logger.warning(f"Triage Genie login returned {login_response.status_code}, session may not be authenticated")
-        return session_triage
+        # Successful login: 302 redirect to dashboard (not back to /login).
+        # Failed login: 200 with login page re-rendered.
+        if login_response.status_code == 302:
+            location = login_response.headers.get("Location", "")
+            if "/login" not in location:
+                logger.info("Triage Genie session authenticated successfully")
+                return session_triage
+
+        logger.warning(
+            "Triage Genie login failed (credentials rejected). "
+            "Set TRIAGE_GENIE_USERNAME and TRIAGE_GENIE_PASSWORD env vars "
+            "with valid Triage Genie / LDAP credentials."
+        )
+        return None
     except Exception as e:
-        logger.warning(f"Triage Genie login failed: {e}")
+        logger.warning(f"Triage Genie login error: {e}")
         return None
 
 
-def fetch_triage_genie_ticket_id(agave_task_id, triage_session=None):
+def build_triage_genie_ticket_map(test_result_ids):
     """
-    Fetch Triage Genie generated ticket ID using agave_task_id (testcase_id)
-    
-    Uses direct API call: GET /api/tasks/{testcase_id}
-    Extracts dup_ticket_id from the response
-    
-    When triage_session is provided (e.g. from create_triage_genie_session()), uses
-    login session for API calls; otherwise falls back to TRIAGE_GENIE_TOKEN.
-    
+    Batch pre-fetch Triage Genie dup_ticket_id for each test result.
+
+    Uses GET /api/tasks/{testcase_id} (the direct Triage Genie task endpoint).
+    Authentication: session-based login via create_triage_genie_session().
+
+    Args:
+        test_result_ids: List of JITA test result _id values (testcase IDs)
+
     Returns:
-        str: Jira ticket ID (e.g., "ENG-858029") or None if not found
+        dict: Mapping of testcase_id -> dup_ticket_id
     """
-    if not agave_task_id:
+    ticket_map = {}
+    if not test_result_ids:
+        return ticket_map
+
+    unique_ids = list(set(tid for tid in test_result_ids if tid))
+    logger.info(f"build_triage_genie_ticket_map: looking up {len(unique_ids)} testcase(s) via /api/tasks/{{id}}")
+
+    tg_session = create_triage_genie_session()
+    if not tg_session:
+        logger.warning("build_triage_genie_ticket_map: no TG session — cannot fetch tickets")
+        return ticket_map
+
+    def _lookup_single(tc_id):
+        """GET /api/tasks/{tc_id} and return (tc_id, dup_ticket_id) or (tc_id, None)."""
+        try:
+            resp = tg_session.get(
+                f"{TRIAGE_GENIE_BASE}/tasks/{tc_id}",
+                verify=False,
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                ct = resp.headers.get("Content-Type", "")
+                if "json" in ct or "application/json" in ct:
+                    data = resp.json()
+                    dup = data.get("dup_ticket_id")
+                    if dup:
+                        return (tc_id, str(dup).strip())
+                else:
+                    logger.debug(f"TG /tasks/{tc_id} returned HTML (auth may have expired)")
+            elif resp.status_code == 404:
+                logger.debug(f"TG /tasks/{tc_id}: not found (test may not be triaged yet)")
+            else:
+                logger.debug(f"TG /tasks/{tc_id} returned {resp.status_code}")
+        except Exception as exc:
+            logger.debug(f"TG /tasks/{tc_id} error: {exc}")
+        return (tc_id, None)
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(_lookup_single, tid): tid for tid in unique_ids}
+        for future in as_completed(futures):
+            tc_id, dup_ticket = future.result()
+            if dup_ticket:
+                ticket_map[tc_id] = dup_ticket
+
+    logger.info(f"build_triage_genie_ticket_map: found {len(ticket_map)} ticket(s) out of {len(unique_ids)} lookups")
+    return ticket_map
+
+
+def fetch_triage_genie_ticket_id(testcase_id, triage_session=None):
+    """
+    Fetch Triage Genie dup_ticket_id for a single test result.
+
+    Calls GET /api/tasks/{testcase_id} using a session-authenticated connection.
+    If triage_session is not provided, creates one via create_triage_genie_session().
+
+    Returns:
+        str: Jira ticket ID (e.g., "ENG-904593") or None if not found
+    """
+    if not testcase_id:
         return None
-    
+
+    session = triage_session or create_triage_genie_session()
+    if not session:
+        return None
+
     try:
-        if triage_session:
-            headers = {"Content-Type": "application/json"}
+        resp = session.get(
+            f"{TRIAGE_GENIE_BASE}/tasks/{testcase_id}",
+            verify=False,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            ct = resp.headers.get("Content-Type", "")
+            if "json" in ct:
+                data = resp.json()
+                dup = data.get("dup_ticket_id")
+                if dup:
+                    logger.info(f"Found Triage Genie ticket {dup} for testcase {testcase_id}")
+                    return str(dup).strip()
+            else:
+                logger.debug(f"TG /tasks/{testcase_id} returned HTML (auth expired or invalid)")
+        elif resp.status_code == 404:
+            logger.debug(f"TG /tasks/{testcase_id}: not found")
         else:
-            triage_token = os.getenv("TRIAGE_GENIE_TOKEN", "TOKEN")
-            headers = {
-                "Authorization": f"Bearer {triage_token}",
-                "Content-Type": "application/json"
-            }
-        
-        # Approach 1: Direct task lookup using testcase_id
-        # The testcase_id (agave_task_id) can be used directly as the Triage Genie task ID
-        try:
-            if triage_session:
-                task_response = triage_session.get(
-                    f"{TRIAGE_GENIE_BASE}/tasks/{agave_task_id}",
-                    headers=headers,
-                    verify=False,
-                    timeout=15
-                )
-            else:
-                task_response = requests.get(
-                    f"{TRIAGE_GENIE_BASE}/tasks/{agave_task_id}",
-                    headers=headers,
-                    verify=False,
-                    timeout=15
-                )
-            
-            if task_response.status_code == 200:
-                task_data = task_response.json()
-                dup_ticket_id = task_data.get("dup_ticket_id")
-                if dup_ticket_id:
-                    logger.info(f"Found Triage Genie ticket {dup_ticket_id} for testcase_id {agave_task_id}")
-                    return dup_ticket_id
-            elif task_response.status_code == 404:
-                logger.debug(f"Triage Genie task not found for testcase_id {agave_task_id}")
-            else:
-                logger.debug(f"Triage Genie API returned status {task_response.status_code} for testcase_id {agave_task_id}")
-        
-        except requests.exceptions.RequestException as e:
-            logger.debug(f"Error in direct task lookup for testcase_id {agave_task_id}: {e}")
-        
-        # Approach 2: Fallback - Search through recent jobs if direct lookup fails
-        # This is a backup method in case the testcase_id format doesn't match Triage Genie task ID
-        try:
-            if triage_session:
-                jobs_response = triage_session.get(
-                    f"{TRIAGE_GENIE_BASE}/jobs",
-                    headers=headers,
-                    params={"page": 1, "per_page": 20, "show_all": "true"},
-                    verify=False,
-                    timeout=15
-                )
-            else:
-                jobs_response = requests.get(
-                    f"{TRIAGE_GENIE_BASE}/jobs",
-                    headers=headers,
-                    params={"page": 1, "per_page": 20, "show_all": "true"},
-                    verify=False,
-                    timeout=15
-                )
-            
-            if jobs_response.status_code == 200:
-                jobs_data = jobs_response.json()
-                jobs = jobs_data.get("jobs", []) or jobs_data.get("data", [])
-                
-                # Search through jobs to find matching task
-                for job in jobs:
-                    job_id = job.get("id") or job.get("_id")
-                    if not job_id:
-                        continue
-                    
-                    try:
-                        if triage_session:
-                            tasks_response = triage_session.get(
-                                f"{TRIAGE_GENIE_BASE}/jobs/{job_id}/tasks",
-                                headers=headers,
-                                params={
-                                    "page": 1,
-                                    "per_page": 100
-                                },
-                                verify=False,
-                                timeout=15
-                            )
-                        else:
-                            tasks_response = requests.get(
-                                f"{TRIAGE_GENIE_BASE}/jobs/{job_id}/tasks",
-                                headers=headers,
-                                params={
-                                    "page": 1,
-                                    "per_page": 100
-                                },
-                                verify=False,
-                                timeout=15
-                            )
-                        
-                        if tasks_response.status_code == 200:
-                            tasks_data = tasks_response.json()
-                            tasks = tasks_data.get("data", []) or tasks_data.get("tasks", [])
-                            
-                            # Find task with matching agave_task_id
-                            for task in tasks:
-                                task_agave_id = task.get("agave_task_id")
-                                # Handle both string and object ID formats
-                                if (task_agave_id == agave_task_id or 
-                                    str(task_agave_id) == str(agave_task_id) or
-                                    (isinstance(task_agave_id, dict) and task_agave_id.get("$oid") == agave_task_id)):
-                                    dup_ticket_id = task.get("dup_ticket_id")
-                                    if dup_ticket_id:
-                                        logger.info(f"Found Triage Genie ticket {dup_ticket_id} for agave_task_id {agave_task_id} in job {job_id} (fallback method)")
-                                        return dup_ticket_id
-                    except Exception as e:
-                        logger.debug(f"Error fetching tasks for job {job_id}: {e}")
-                        continue
-            
-        except Exception as e:
-            logger.debug(f"Error in fallback job search for Triage Genie lookup: {e}")
-        
-        return None
-        
-    except requests.exceptions.ConnectionError:
-        logger.warning(f"Connection error fetching Triage Genie ticket for testcase_id {agave_task_id}")
-        return None
-    except requests.exceptions.Timeout:
-        logger.warning(f"Timeout fetching Triage Genie ticket for testcase_id {agave_task_id}")
-        return None
+            logger.debug(f"TG /tasks/{testcase_id} returned {resp.status_code}")
     except Exception as e:
-        logger.warning(f"Error fetching Triage Genie ticket for testcase_id {agave_task_id}: {e}")
-        return None
+        logger.debug(f"TG /tasks/{testcase_id} error: {e}")
+
+    return None
 
 @app.route("/mcp/regression/failed-analysis/analyze", methods=["GET"])
 @jwt_required
@@ -5028,8 +5708,17 @@ def analyze_failed_testcases():
                 ]
                 logger.info(f"Found {len(failed_results)} failed testcases")
                 
-                # Triage Genie session only when triage_genie_ticket requested
-                triage_genie_session = create_triage_genie_session() if "triage_genie_ticket" in include_set else None
+                # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
+                tg_ticket_map = {}
+                if "triage_genie_ticket" in include_set:
+                    _failed_ids = []
+                    for _fr in failed_results:
+                        _rid = _fr.get("_id")
+                        if isinstance(_rid, dict) and "$oid" in _rid:
+                            _failed_ids.append(_rid["$oid"])
+                        elif _rid:
+                            _failed_ids.append(str(_rid))
+                    tg_ticket_map = build_triage_genie_ticket_map(_failed_ids)
                 
                 # Current branch for history API (from first task)
                 current_branch = (tasks[0].get("branch") or "") if tasks else ""
@@ -5097,8 +5786,11 @@ def analyze_failed_testcases():
                             issue_type or classify_failure(exception_summary, exception, jira_data, glean_data),
                             exception_summary, exception, jira_tickets, jira_data, glean_data
                         )
-                    if "triage_genie_ticket" in include_set and testcase_id and triage_genie_session:
-                        triage_genie_ticket_id = fetch_triage_genie_ticket_id(testcase_id, triage_session=triage_genie_session)
+                    if "triage_genie_ticket" in include_set:
+                        triage_genie_ticket_id = (
+                            tg_ticket_map.get(testcase_id)
+                            or tg_ticket_map.get(testcase_name)
+                        )
                     
                     # Generate AI Summary if requested
                     if "ai_summary" in include_set:
@@ -5128,9 +5820,19 @@ def analyze_failed_testcases():
                     # Resolve regression owner
                     regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
                     
+                    # Resolve agave_task_id for retrigger support
+                    raw_atid = test_result.get("agave_task_id")
+                    if isinstance(raw_atid, dict) and "$oid" in raw_atid:
+                        agave_task_id = raw_atid["$oid"]
+                    elif raw_atid:
+                        agave_task_id = str(raw_atid)
+                    else:
+                        agave_task_id = None
+
                     row = {
                         "testcase_id": testcase_id,
                         "testcase_name": testcase_name,
+                        "agave_task_id": agave_task_id,
                         "status": status,
                         "failure_stage": failure_stage,
                         "jira_tickets": jira_tickets,
@@ -5150,7 +5852,7 @@ def analyze_failed_testcases():
                         row["triage_genie_ticket_id"] = triage_genie_ticket_id
                     if ai_summary is not None:
                         row["ai_summary"] = ai_summary
-                    
+
                     analysis_results.append(row)
                 
                 logger.info(f"[END] Failed Analysis | results={len(analysis_results)} | time={time.time() - start:.2f}s")
@@ -5202,22 +5904,41 @@ def analyze_failed_testcases():
         return jsonify({"error": str(e)}), 500
 
 
-def _analyze_failed_testcases_stream(tag, task_ids, include_set):
-    """Generator that yields SSE events: start, then one 'row' per result, then 'done' or 'error'."""
+def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None):
+    """Generator that yields SSE events: progress, start, then one 'row' per result, then 'done' or 'error'."""
+    if status_set is None:
+        status_set = {"failed", "failure"}
     try:
+        yield json.dumps({"type": "progress", "phase": "preparing"})
+
         tasks = fetch_regression_tasks(tag=tag, task_ids=task_ids)
         if not tasks:
             yield json.dumps({"type": "start", "total": 0, "current_branch": "", "tag": tag})
             yield json.dumps({"type": "done"})
             return
         collected_task_ids = [task["_id"]["$oid"] for task in tasks]
+
+        yield json.dumps({"type": "progress", "phase": "fetching_results"})
+
         all_results = fetch_test_results_batch_with_pagination(collected_task_ids)
         failed_results = [
             tr for tr in all_results
-            if tr.get("status", "").lower() in ("failed", "failure")
+            if tr.get("status", "").lower() in status_set
         ]
         current_branch = (tasks[0].get("branch") or "") if tasks else ""
-        triage_genie_session = create_triage_genie_session() if "triage_genie_ticket" in include_set else None
+
+        # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
+        tg_ticket_map = {}
+        if "triage_genie_ticket" in include_set:
+            yield json.dumps({"type": "progress", "phase": "fetching_triage_genie"})
+            _failed_ids = []
+            for _fr in failed_results:
+                _rid = _fr.get("_id")
+                if isinstance(_rid, dict) and "$oid" in _rid:
+                    _failed_ids.append(_rid["$oid"])
+                elif _rid:
+                    _failed_ids.append(str(_rid))
+            tg_ticket_map = build_triage_genie_ticket_map(_failed_ids)
 
         yield json.dumps({
             "type": "start",
@@ -5274,8 +5995,11 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set):
                     issue_type or classify_failure(exception_summary, exception, jira_data, glean_data),
                     exception_summary, exception, jira_tickets, jira_data, glean_data
                 )
-            if "triage_genie_ticket" in include_set and testcase_id and triage_genie_session:
-                triage_genie_ticket_id = fetch_triage_genie_ticket_id(testcase_id, triage_session=triage_genie_session)
+            if "triage_genie_ticket" in include_set:
+                triage_genie_ticket_id = (
+                    tg_ticket_map.get(testcase_id)
+                    or tg_ticket_map.get(testcase_name)
+                )
             
             # Generate AI Summary if requested
             if "ai_summary" in include_set:
@@ -5303,9 +6027,19 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set):
                     ai_summary = f"Error: {str(e)}"
             
             regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
+
+            raw_atid = test_result.get("agave_task_id")
+            if isinstance(raw_atid, dict) and "$oid" in raw_atid:
+                agave_task_id = raw_atid["$oid"]
+            elif raw_atid:
+                agave_task_id = str(raw_atid)
+            else:
+                agave_task_id = None
+
             row = {
                 "testcase_id": testcase_id,
                 "testcase_name": testcase_name,
+                "agave_task_id": agave_task_id,
                 "status": status,
                 "failure_stage": failure_stage,
                 "jira_tickets": jira_tickets,
@@ -5325,6 +6059,7 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set):
                 row["triage_genie_ticket_id"] = triage_genie_ticket_id
             if ai_summary is not None:
                 row["ai_summary"] = ai_summary
+
             yield json.dumps({"type": "row", "result": row})
         yield json.dumps({"type": "done"})
     except Exception as e:
@@ -5348,8 +6083,26 @@ def analyze_failed_testcases_stream():
     if not tag and not task_ids:
         return jsonify({"error": "Either tag or task_ids is required"}), 400
 
+    statuses_param = request.args.get("statuses", "")
+    STATUS_ALIASES = {
+        "failed": ("failed", "failure"),
+        "skipped": ("skipped", "skip"),
+        "warning": ("warning", "warn"),
+        "killed": ("killed", "terminated", "cancelled"),
+    }
+    if statuses_param:
+        requested = {s.strip().lower() for s in statuses_param.split(",") if s.strip()}
+        status_set = set()
+        for key in requested:
+            if key in STATUS_ALIASES:
+                status_set.update(STATUS_ALIASES[key])
+            else:
+                status_set.add(key)
+    else:
+        status_set = {"failed", "failure"}
+
     def gen():
-        for chunk in _analyze_failed_testcases_stream(tag, task_ids, include_set):
+        for chunk in _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set):
             yield f"data: {chunk}\n\n"
 
     return Response(
@@ -5362,21 +6115,31 @@ def analyze_failed_testcases_stream():
 @app.route("/mcp/regression/failed-analysis/update-triage", methods=["PUT"])
 @jwt_required
 def update_triage_comments():
-    """Update comment and/or jira_ticket for an agave_test_result via JITA PUT API."""
+    """Update comment and/or jira_tickets for an agave_test_result via JITA PUT API."""
     try:
         data = request.get_json() or {}
         test_id = data.get("test_id")
         comment = data.get("comment", "")
-        jira_ticket = data.get("jira_ticket")
+        jira_tickets = data.get("jira_tickets")
         if not test_id:
             return jsonify({"error": "test_id is required"}), 400
-        triaged_by = os.getenv("TRIAGED_BY_USER", "sudharshan.musali")
+
+        current_username = g.current_user.get("sub", "")
+        user_auth = _get_user_credentials(current_username)
+        if not user_auth:
+            return jsonify({
+                "error": "Session credentials expired. Please re-login to update triage.",
+                "code": "CREDENTIALS_EXPIRED"
+            }), 401
+
         update_fields = {
             "comments": comment,
-            "triaged_by": triaged_by
+            "triaged_by": current_username
         }
-        if jira_ticket is not None:
-            update_fields["jira_ticket"] = jira_ticket
+        if jira_tickets is not None:
+            if isinstance(jira_tickets, str):
+                jira_tickets = [jira_tickets] if jira_tickets else []
+            update_fields["jira_tickets"] = jira_tickets
         payload = {
             "query": {"_id": {"$in": [{"$oid": test_id}]}},
             "data": {"$set": update_fields},
@@ -5387,15 +6150,662 @@ def update_triage_comments():
             url,
             headers={"Content-Type": "application/json"},
             json=payload,
-            auth=JITA_AUTH,
+            auth=user_auth,
             verify=False,
             timeout=30
         )
         if resp.status_code == 200:
-            return jsonify({"success": True, "message": "Updated"})
+            return jsonify({"success": True, "message": "Updated", "triaged_by": current_username})
         return jsonify({"error": resp.text or f"HTTP {resp.status_code}"}), resp.status_code if resp.status_code >= 400 else 500
     except Exception as e:
         logger.error(f"Error updating triage: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
+# RDM Failure Analysis for Skipped Testcases
+# ======================================================
+
+RDM_PATTERNS_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "rdm_failure_patterns.json")
+
+def _load_rdm_patterns():
+    """Load RDM failure patterns from JSON file and compile regexes."""
+    try:
+        if os.path.exists(RDM_PATTERNS_FILE):
+            with open(RDM_PATTERNS_FILE, "r") as f:
+                data = json.load(f)
+            patterns = data.get("patterns", [])
+            compiled = []
+            for p in patterns:
+                try:
+                    compiled.append({
+                        "id": p["id"],
+                        "regex": re.compile(p["regex"], re.IGNORECASE | re.DOTALL),
+                        "comment_template": p["comment_template"],
+                        "category": p.get("category", ""),
+                        "description": p.get("description", ""),
+                        "jira": p.get("jira", ""),
+                    })
+                except re.error as e:
+                    logger.warning(f"Invalid regex in RDM pattern '{p.get('id')}': {e}")
+            return compiled
+    except Exception as e:
+        logger.warning(f"Could not load rdm_failure_patterns.json: {e}")
+    return []
+
+
+RDM_PATTERNS = _load_rdm_patterns()
+
+
+def _extract_node_names(message):
+    """Extract node names from RDM failure messages.
+
+    Combines results from multiple extraction strategies so multi-node
+    failures (where different nodes appear in different formats) are
+    all captured.  Returns deduplicated list preserving first-seen order.
+    """
+    seen = dict()
+    for n in re.findall(r'([\w-]+):\s*Received\s+"fatal"\s+in\s+waiting\s+for\s+event', message):
+        seen.setdefault(n, None)
+    for n in re.findall(r"(?:Nodes?:\s*)([a-zA-Z][\w\-]*\d+[\-\d]*)", message):
+        seen.setdefault(n, None)
+    if seen:
+        return list(seen)
+    all_nodes = re.findall(r"\b([a-zA-Z]+\d{2,}-\d+)\b", message)
+    return list(dict.fromkeys(all_nodes))
+
+
+def fetch_jita_deployments(task_id):
+    """Fetch JITA deployments for a given agave_task_id."""
+    payload = {
+        "raw_query": {"task_id": {"$oid": task_id}},
+        "start": 0,
+        "limit": 20,
+    }
+    try:
+        resp = session.post(
+            f"{JITA_BASE}/reports/deployments",
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("data", [])
+        logger.warning(f"JITA deployments fetch failed for task {task_id}: HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"JITA deployments fetch error for task {task_id}: {e}")
+    return []
+
+
+def get_rdm_failure_info(task_id):
+    """
+    Get RDM failure information for a task by inspecting its JITA deployments.
+    Returns a dict with rdm_message, rdm_link, provision_request_id, category, etc.
+    or None if no failed deployments found.
+    """
+    deployments = fetch_jita_deployments(task_id)
+    if not deployments:
+        return None
+
+    failed_deployments = [d for d in deployments if d.get("status") == "failed"]
+    if not failed_deployments:
+        return None
+
+    # Collect failure messages from status_transitions
+    all_reasons = []
+    rdm_ids = []
+    for dep in failed_deployments:
+        prov_id = ""
+        raw_prov = dep.get("provision_request_id")
+        if isinstance(raw_prov, dict) and "$oid" in raw_prov:
+            prov_id = raw_prov["$oid"]
+        elif raw_prov:
+            prov_id = str(raw_prov)
+        if prov_id:
+            rdm_ids.append(prov_id)
+
+        for transition in dep.get("status_transitions", []):
+            if transition.get("status") == "failed":
+                reason = transition.get("reason", "")
+                if reason and "RDM" in reason:
+                    all_reasons.append(reason)
+
+    if not all_reasons and not rdm_ids:
+        return None
+
+    combined_message = all_reasons[0] if all_reasons else ""
+    primary_rdm_id = rdm_ids[0] if rdm_ids else ""
+
+    # Try fetching detailed RDM failure_analysis from the RDM API
+    rdm_category = ""
+    rdm_resolution = ""
+    rdm_source = ""
+    if primary_rdm_id:
+        try:
+            rdm_resp = session.get(
+                f"https://rdm.eng.nutanix.com/api/v1/scheduled_deployments/{primary_rdm_id}?expand=created_by",
+                timeout=15,
+            )
+            if rdm_resp.status_code == 200:
+                rdm_data = rdm_resp.json().get("data", {})
+                rdm_msg = rdm_data.get("message", "")
+                if rdm_msg and not combined_message:
+                    combined_message = rdm_msg
+                fa = rdm_data.get("failure_analysis", {})
+                rdm_category = fa.get("category", "")
+                rdm_resolution = fa.get("resolution", "")
+                em = fa.get("error_metadata", {}).get("RDM", {})
+                rdm_source = em.get("source", "")
+        except Exception as e:
+            logger.warning(f"RDM API fetch failed for {primary_rdm_id}: {e}")
+
+    return {
+        "rdm_message": combined_message,
+        "rdm_link": f"https://rdm.eng.nutanix.com/scheduled_deployments/{primary_rdm_id}" if primary_rdm_id else "",
+        "provision_request_id": primary_rdm_id,
+        "rdm_category": rdm_category,
+        "rdm_resolution": rdm_resolution,
+        "rdm_source": rdm_source,
+        "failed_deployment_count": len(failed_deployments),
+        "total_deployment_count": len(deployments),
+    }
+
+
+def match_rdm_pattern(rdm_message):
+    """
+    Match an RDM failure message against known patterns.
+    Returns dict with matched pattern info and generated comment, or None.
+    Hot-reloads patterns from disk so file edits take effect without restart.
+    """
+    global RDM_PATTERNS
+    if not rdm_message:
+        return None
+
+    RDM_PATTERNS = _load_rdm_patterns()
+    for pattern in RDM_PATTERNS:
+        match = pattern["regex"].search(rdm_message)
+        if match:
+            template = pattern["comment_template"]
+            comment = template
+
+            if "{node_name}" in template:
+                nodes = _extract_node_names(rdm_message)
+                if nodes:
+                    comment = ", ".join(
+                        template.replace("{node_name}", n) for n in nodes
+                    )
+                else:
+                    comment = "regx_rerun"
+
+            return {
+                "pattern_id": pattern["id"],
+                "category": pattern["category"],
+                "description": pattern["description"],
+                "generated_comment": comment,
+                "failed_nodes": nodes if "{node_name}" in template and nodes else [],
+                "jira": pattern.get("jira", ""),
+                "matched": True,
+            }
+
+    return None
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-analyze", methods=["POST"])
+@jwt_required
+def rdm_analyze_skipped():
+    """
+    Analyze RDM failure for skipped testcases.
+    Accepts: { task_ids: [agave_task_id, ...] }
+    Returns RDM failure info with pattern-matched comments for each task.
+    """
+    try:
+        data = request.get_json() or {}
+        task_ids = data.get("task_ids", [])
+        if isinstance(task_ids, str):
+            task_ids = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+        if not task_ids:
+            return jsonify({"error": "task_ids is required"}), 400
+
+        results = []
+        for task_id in task_ids:
+            rdm_info = get_rdm_failure_info(task_id)
+            if not rdm_info:
+                results.append({
+                    "agave_task_id": task_id,
+                    "rdm_found": False,
+                    "rdm_message": "",
+                    "generated_comment": "",
+                    "pattern_matched": False,
+                })
+                continue
+
+            pattern_result = match_rdm_pattern(rdm_info["rdm_message"])
+            results.append({
+                "agave_task_id": task_id,
+                "rdm_found": True,
+                "rdm_message": rdm_info["rdm_message"][:500],
+                "rdm_link": rdm_info["rdm_link"],
+                "rdm_category": rdm_info["rdm_category"],
+                "rdm_resolution": rdm_info["rdm_resolution"],
+                "rdm_source": rdm_info["rdm_source"],
+                "failed_deployments": rdm_info["failed_deployment_count"],
+                "total_deployments": rdm_info["total_deployment_count"],
+                "pattern_matched": bool(pattern_result),
+                "generated_comment": pattern_result["generated_comment"] if pattern_result else "",
+                "pattern_id": pattern_result["pattern_id"] if pattern_result else "",
+                "pattern_category": pattern_result["category"] if pattern_result else "",
+                "pattern_description": pattern_result["description"] if pattern_result else "",
+                "pattern_jira": pattern_result.get("jira", "") if pattern_result else "",
+                "failed_nodes": pattern_result.get("failed_nodes", []) if pattern_result else [],
+            })
+
+        return jsonify({"success": True, "results": results})
+    except Exception as e:
+        logger.error(f"RDM analyze error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-analyze-ai", methods=["POST"])
+@jwt_required
+def rdm_analyze_ai():
+    """
+    AI-powered analysis for RDM failures that don't match known patterns.
+    Uses Glean search + AI summary to identify existing bugs and provide analysis.
+    """
+    try:
+        data = request.get_json() or {}
+        task_id = data.get("task_id", "")
+        rdm_message = data.get("rdm_message", "")
+        testcase_name = data.get("testcase_name", "")
+
+        if not rdm_message and not task_id:
+            return jsonify({"error": "task_id or rdm_message is required"}), 400
+
+        if not rdm_message and task_id:
+            rdm_info = get_rdm_failure_info(task_id)
+            if rdm_info:
+                rdm_message = rdm_info.get("rdm_message", "")
+
+        if not rdm_message:
+            return jsonify({"error": "No RDM failure message found"}), 404
+
+        # Search Glean for similar failures
+        glean_results = None
+        search_query = rdm_message[:200]
+        if testcase_name:
+            short_name = testcase_name.split(".")[-1] if "." in testcase_name else testcase_name
+            search_query = f"{short_name} {search_query}"
+        try:
+            glean_results = search_glean(search_query)
+        except Exception as e:
+            logger.warning(f"Glean search failed for RDM analysis: {e}")
+
+        # Build AI analysis
+        jira_refs = []
+        glean_summary = ""
+        if glean_results and isinstance(glean_results, list):
+            for gr in glean_results[:5]:
+                if isinstance(gr, dict):
+                    title = gr.get("title", "")
+                    url = gr.get("url", "")
+                    if title:
+                        glean_summary += f"- {title}"
+                        if url:
+                            glean_summary += f" ({url})"
+                        glean_summary += "\n"
+                        # Extract JIRA ticket IDs
+                        jira_matches = re.findall(r"[A-Z]+-\d+", title)
+                        jira_refs.extend(jira_matches)
+                        if url:
+                            jira_url_matches = re.findall(r"[A-Z]+-\d+", url)
+                            jira_refs.extend(jira_url_matches)
+
+        jira_refs = list(dict.fromkeys(jira_refs))
+
+        summary_parts = []
+        summary_parts.append(f"RDM Deployment Failure Analysis")
+        summary_parts.append(f"Error: {rdm_message[:300]}")
+        if jira_refs:
+            summary_parts.append(f"Related Jira tickets: {', '.join(jira_refs[:5])}")
+        if glean_summary:
+            summary_parts.append(f"Similar issues found:\n{glean_summary}")
+        else:
+            summary_parts.append("No similar issues found in Glean.")
+
+        ai_summary = "\n".join(summary_parts)
+
+        suggested_comment = "regx_rerun"
+        if jira_refs:
+            suggested_comment = f"regx_rerun ({jira_refs[0]})"
+
+        return jsonify({
+            "success": True,
+            "ai_summary": ai_summary,
+            "jira_refs": jira_refs,
+            "suggested_comment": suggested_comment,
+            "glean_results_count": len(glean_results) if glean_results else 0,
+        })
+    except Exception as e:
+        logger.error(f"RDM AI analyze error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/ai-summary-single", methods=["POST"])
+@jwt_required
+def ai_summary_single_testcase():
+    """Generate AI summary for a single testcase on demand."""
+    try:
+        body = request.get_json(force=True) or {}
+        testcase_name = body.get("testcase_name", "")
+        exception_summary = body.get("exception_summary", "")
+        exception = body.get("exception", "")
+        test_log_url = body.get("test_log_url", "")
+
+        if not testcase_name:
+            return jsonify({"success": False, "error": "testcase_name is required"}), 400
+
+        logs = fetch_testcase_logs(testcase_name, test_log_url)
+        success, summary = generate_ai_failure_summary(
+            exception=exception,
+            exception_summary=exception_summary,
+            tester_log_url=test_log_url,
+            testcase_name=testcase_name,
+            steps_log=logs.get("steps_log", ""),
+            nutest_test_log=logs.get("nutest_test_log", ""),
+        )
+
+        if success:
+            return jsonify({"success": True, "ai_summary": summary})
+        else:
+            return jsonify({"success": False, "error": summary}), 500
+    except Exception as e:
+        logger.error(f"AI summary single testcase error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/glean-search-single", methods=["POST"])
+@jwt_required
+def glean_search_single_testcase():
+    """Search Glean for matching ENG JIRA tickets and generate an AI failure
+    analysis for a single testcase.
+
+    Strategy:
+      1. Run a JIRA-scoped Glean search with the exception summary (most specific).
+      2. Run a second JIRA-scoped search with the testcase short name + key error
+         terms (catches broader matches).
+      3. Merge and de-duplicate found tickets, then enrich the top ones via the
+         JIRA REST API (status, summary, resolution) so the user sees whether
+         tickets are still open.
+      4. Feed everything into the AI model for classification and recommendation.
+    """
+    try:
+        body = request.get_json(force=True) or {}
+        testcase_name = body.get("testcase_name", "")
+        exception_summary = body.get("exception_summary", "")
+        exception_text = body.get("exception", "")
+        ai_summary = body.get("ai_summary", "")
+        test_log_url = body.get("test_log_url", "")
+        failure_stage = body.get("failure_stage", "")
+        jira_tickets = body.get("jira_tickets", [])
+
+        if not testcase_name:
+            return jsonify({"success": False, "error": "testcase_name is required"}), 400
+
+        short_name = testcase_name.split(".")[-1] if "." in testcase_name else testcase_name
+
+        # ---- Multi-query Glean search strategy ----
+
+        all_glean_tickets = {}   # ticket_id -> metadata dict
+        all_glean_snippets = []
+        queries_used = []
+
+        # Query 1: exception summary (most specific error text)
+        q1 = (exception_summary or "")[:250].strip()
+        if q1:
+            queries_used.append(q1)
+            g1 = search_glean_jira(q1, max_results=10)
+            for t in _extract_jira_tickets_from_glean(g1):
+                all_glean_tickets.setdefault(t["ticket"], t)
+            all_glean_snippets.extend(_build_glean_snippets(g1))
+
+        # Query 2: testcase short name + condensed error keywords
+        error_keywords = _extract_error_keywords(exception_summary, exception_text)
+        q2 = f"{short_name} {error_keywords}"[:250].strip()
+        if q2 and q2 != q1:
+            queries_used.append(q2)
+            g2 = search_glean_jira(q2, max_results=10)
+            for t in _extract_jira_tickets_from_glean(g2):
+                all_glean_tickets.setdefault(t["ticket"], t)
+            all_glean_snippets.extend(_build_glean_snippets(g2))
+
+        # Query 3: AI summary as search input (if available and different)
+        if ai_summary:
+            q3 = ai_summary[:250].strip()
+            if q3 and q3 != q1 and q3 != q2:
+                queries_used.append(q3)
+                g3 = search_glean_jira(q3, max_results=5)
+                for t in _extract_jira_tickets_from_glean(g3):
+                    all_glean_tickets.setdefault(t["ticket"], t)
+                all_glean_snippets.extend(_build_glean_snippets(g3))
+
+        # De-dup snippets by URL
+        seen_urls = set()
+        deduped_snippets = []
+        for s in all_glean_snippets:
+            key = s.get("url") or s.get("title")
+            if key and key not in seen_urls:
+                seen_urls.add(key)
+                deduped_snippets.append(s)
+
+        # ---- Enrich top JIRA tickets via JIRA REST API ----
+
+        glean_ticket_list = list(all_glean_tickets.values())
+        enriched_tickets = []
+        for t_info in glean_ticket_list[:8]:
+            tid = t_info["ticket"]
+            jdata = fetch_jira_ticket(tid)
+            entry = {
+                "ticket": tid,
+                "url": t_info.get("url", f"https://jira.nutanix.com/browse/{tid}"),
+                "glean_title": t_info.get("title", ""),
+                "glean_snippet": t_info.get("snippet", ""),
+            }
+            if jdata:
+                fields = jdata.get("fields", {})
+                entry["jira_summary"] = fields.get("summary", "")
+                entry["jira_status"] = (fields.get("status") or {}).get("name", "Unknown")
+                resolution = fields.get("resolution")
+                entry["jira_resolution"] = (resolution.get("name", "") if isinstance(resolution, dict) else "") if resolution else ""
+                entry["jira_priority"] = (fields.get("priority") or {}).get("name", "")
+                entry["jira_type"] = (fields.get("issuetype") or {}).get("name", "")
+                entry["is_open"] = entry["jira_status"] not in ("Closed", "Resolved", "Done", "Won't Fix")
+            else:
+                entry["jira_summary"] = t_info.get("title", "")
+                entry["jira_status"] = "Unknown"
+                entry["jira_resolution"] = ""
+                entry["is_open"] = True
+            enriched_tickets.append(entry)
+
+        # Sort: open tickets first, then by whether title/snippet shares keywords with exception
+        enriched_tickets.sort(key=lambda e: (0 if e.get("is_open") else 1))
+
+        # Flat ref list for backward compat
+        glean_jira_refs = [t["ticket"] for t in enriched_tickets]
+
+        # ---- Classify ----
+        first_jira_data = None
+        all_ticket_ids = list(jira_tickets or []) + glean_jira_refs
+        if all_ticket_ids:
+            first_jira_data = fetch_jira_ticket(all_ticket_ids[0])
+        issue_type = classify_failure(exception_summary, exception_text, first_jira_data, None)
+
+        # ---- AI analysis combining everything ----
+
+        prompt_parts = [
+            f"Testcase: {testcase_name}",
+            f"Exception Summary: {exception_summary or 'N/A'}",
+        ]
+        if exception_text:
+            prompt_parts.append(f"Traceback:\n```\n{exception_text[:3000]}\n```")
+        if ai_summary:
+            prompt_parts.append(f"AI Failure Summary:\n{ai_summary[:1500]}")
+        if failure_stage:
+            prompt_parts.append(f"Failure Stage: {failure_stage}")
+        if test_log_url:
+            prompt_parts.append(f"Log URL: {test_log_url}")
+
+        if enriched_tickets:
+            ticket_lines = []
+            for t in enriched_tickets[:8]:
+                status_str = t["jira_status"]
+                if t.get("jira_resolution"):
+                    status_str += f" ({t['jira_resolution']})"
+                ticket_lines.append(
+                    f"- {t['ticket']} [{status_str}] {t.get('jira_type', '')} — {t.get('jira_summary', t.get('glean_title', ''))}"
+                )
+            prompt_parts.append("Matching JIRA tickets found via Glean:\n" + "\n".join(ticket_lines))
+
+        if deduped_snippets:
+            snippet_text = "\n".join(
+                f"- [{s['title']}]({s['url']}): {s['snippet']}" for s in deduped_snippets[:5]
+            )
+            prompt_parts.append(f"Glean search results:\n{snippet_text}")
+
+        prompt_parts.append(
+            "\nProvide a concise analysis:\n"
+            "1. **Failure Classification**: Is this a Product Issue, Test Issue, or Infrastructure Issue? Why?\n"
+            "2. **Matching JIRA Tickets**: Which of the above JIRA tickets most closely match this failure? "
+            "Are they still open? Should the regression owner link this failure to one of them?\n"
+            "3. **Recent Product Change Impact**: Could a recent product change have caused this failure? What evidence?\n"
+            "4. **Recommended Action**: What should the regression owner do next? "
+            "(e.g. link to existing ticket, create new ticket, rerun, mark as infra issue)\n"
+            "Keep the response concise and actionable."
+        )
+
+        system_prompt = (
+            "You are a senior regression test failure analyst at Nutanix. "
+            "Given test failure details and JIRA tickets found via Glean search, "
+            "classify the failure (Product Issue / Test Issue / Infrastructure Issue), "
+            "identify the most closely matching JIRA tickets (especially open ENG tickets), "
+            "assess whether recent product changes may have caused it, "
+            "and recommend concrete next steps. Be specific and actionable."
+        )
+
+        ai_analysis = ""
+        try:
+            payload = {
+                "model": "hack-reason",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "\n\n".join(prompt_parts)},
+                ],
+                "max_tokens": 1500,
+                "stream": False,
+            }
+            url = f"{AI_BASE}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {AI_API_KEY}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, context=SSL_CTX, timeout=90) as resp:
+                if resp.getcode() == 200:
+                    response_data = json.loads(resp.read().decode())
+                    choices = response_data.get("choices", [])
+                    if choices:
+                        ai_analysis = (choices[0].get("message") or {}).get("content", "").strip()
+        except Exception as ai_err:
+            logger.warning(f"AI analysis in glean-search-single failed: {ai_err}")
+            ai_analysis = f"AI analysis unavailable: {str(ai_err)[:200]}"
+
+        return jsonify({
+            "success": True,
+            "issue_type": issue_type,
+            "glean_jira_refs": glean_jira_refs[:10],
+            "enriched_tickets": enriched_tickets[:8],
+            "glean_snippets": deduped_snippets[:5],
+            "ai_analysis": ai_analysis,
+            "search_queries": queries_used,
+        })
+    except Exception as e:
+        logger.error(f"Glean search single testcase error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _extract_error_keywords(exception_summary, exception_text):
+    """Pull the most useful error keywords from exception text for search."""
+    import re as _re
+    text = f"{exception_summary or ''} {(exception_text or '')[:500]}"
+    # Extract class-style error names like NuTestError, TimeoutException, etc.
+    error_names = _re.findall(r'[A-Z][a-zA-Z]*(?:Error|Exception|Failure|Fault)', text)
+    # Extract key phrases: status codes, method names, short phrases
+    status_codes = _re.findall(r'\b[45]\d{2}\b', text)
+    keywords = list(dict.fromkeys(error_names + status_codes))
+    return " ".join(keywords[:5])
+
+
+def _build_glean_snippets(glean_data):
+    """Extract snippet entries from a Glean search response."""
+    if not glean_data or not isinstance(glean_data, dict):
+        return []
+    raw = glean_data.get("results", [])
+    if isinstance(raw, dict):
+        raw = raw.get("results", [])
+    if not isinstance(raw, list):
+        return []
+    snippets = []
+    for r in raw[:10]:
+        if not isinstance(r, dict):
+            continue
+        doc = r.get("document", r)
+        title = doc.get("title", "")
+        url = doc.get("url", "")
+        snippet_text = ""
+        slist = r.get("snippets", [])
+        if isinstance(slist, list):
+            parts = []
+            for s in slist:
+                if isinstance(s, dict):
+                    inner = s.get("snippet", s)
+                    parts.append(inner.get("text", "") if isinstance(inner, dict) else str(inner))
+                elif isinstance(s, str):
+                    parts.append(s)
+            snippet_text = " ".join(parts)[:500]
+        if title or snippet_text:
+            snippets.append({"title": title, "url": url, "snippet": snippet_text})
+    return snippets
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-patterns", methods=["GET"])
+@jwt_required
+def get_rdm_patterns():
+    """Return current RDM failure patterns."""
+    try:
+        if os.path.exists(RDM_PATTERNS_FILE):
+            with open(RDM_PATTERNS_FILE, "r") as f:
+                return jsonify(json.load(f))
+        return jsonify({"patterns": []})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-patterns", methods=["PUT"])
+@jwt_required
+def update_rdm_patterns():
+    """Update RDM failure patterns. Expects { patterns: [...] }"""
+    global RDM_PATTERNS
+    try:
+        data = request.get_json() or {}
+        patterns = data.get("patterns")
+        if patterns is None:
+            return jsonify({"error": "patterns array is required"}), 400
+        with open(RDM_PATTERNS_FILE, "w") as f:
+            json.dump({"patterns": patterns}, f, indent=2)
+        RDM_PATTERNS = _load_rdm_patterns()
+        return jsonify({"success": True, "count": len(RDM_PATTERNS)})
+    except Exception as e:
+        logger.error(f"Error updating RDM patterns: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -5475,6 +6885,298 @@ def failed_analysis_history():
 
 
 # ======================================================
+# Failed Analysis — Saved Tags CRUD
+# ======================================================
+
+@app.route("/mcp/regression/failed-analysis/saved-tags", methods=["GET"])
+@jwt_required
+def list_saved_tags():
+    """Return the list of saved tag names."""
+    data = load_failed_analysis_tags()
+    return jsonify({"tags": data.get("tags", [])})
+
+
+@app.route("/mcp/regression/failed-analysis/saved-tags", methods=["POST"])
+@jwt_required
+def add_saved_tag():
+    """Add a new tag to the saved list."""
+    body = request.get_json() or {}
+    tag_name = (body.get("tag") or "").strip()
+    if not tag_name:
+        return jsonify({"error": "tag is required"}), 400
+    data = load_failed_analysis_tags()
+    existing = [t["name"] if isinstance(t, dict) else t for t in data["tags"]]
+    if tag_name in existing:
+        return jsonify({"error": "Tag already exists"}), 409
+    data["tags"].append({"name": tag_name, "added_at": datetime.utcnow().isoformat() + "Z"})
+    save_failed_analysis_tags(data)
+    return jsonify({"success": True, "tags": data["tags"]})
+
+
+@app.route("/mcp/regression/failed-analysis/saved-tags/<path:tag_name>", methods=["DELETE"])
+@jwt_required
+def delete_saved_tag(tag_name):
+    """Remove a tag and its cached analysis results."""
+    data = load_failed_analysis_tags()
+    original_len = len(data["tags"])
+    data["tags"] = [
+        t for t in data["tags"]
+        if (t["name"] if isinstance(t, dict) else t) != tag_name
+    ]
+    if len(data["tags"]) == original_len:
+        return jsonify({"error": "Tag not found"}), 404
+    save_failed_analysis_tags(data)
+    delete_failed_analysis_results(tag_name)
+    return jsonify({"success": True, "tags": data["tags"]})
+
+
+@app.route("/mcp/regression/failed-analysis/saved-tags/<path:tag_name>/results", methods=["GET"])
+@jwt_required
+def get_saved_tag_results(tag_name):
+    """Return cached analysis results for a saved tag."""
+    cached = load_failed_analysis_results(tag_name)
+    if cached is None:
+        return jsonify({"results": [], "current_branch": "", "saved_at": None, "cursor_ai": {}})
+    return jsonify(cached)
+
+
+@app.route("/mcp/regression/failed-analysis/saved-tags/<path:tag_name>/results", methods=["PUT"])
+@jwt_required
+def save_saved_tag_results(tag_name):
+    """Save / overwrite analysis results for a saved tag."""
+    body = request.get_json() or {}
+    results = body.get("results", [])
+    current_branch = body.get("current_branch", "")
+    cursor_ai = body.get("cursor_ai", {}) or {}
+    payload = {
+        "tag": tag_name,
+        "results": results,
+        "current_branch": current_branch,
+        "cursor_ai": cursor_ai,
+        "saved_at": datetime.utcnow().isoformat() + "Z",
+        "count": len(results),
+    }
+    save_failed_analysis_results(tag_name, payload)
+    return jsonify({"success": True, "count": len(results), "saved_at": payload["saved_at"]})
+
+
+# ======================================================
+# Re-trigger failed testcases via Jita agave_tasks rerun API
+# ======================================================
+
+@app.route("/mcp/regression/failed-analysis/retrigger", methods=["POST"])
+@jwt_required
+def retrigger_failed_testcases():
+    """
+    Re-trigger selected failed testcases.
+    Groups tests by their agave_task_id, fetches the original task to build default
+    payload, applies user overrides, and POSTs to the Jita rerun API.
+
+    Request body:
+      tests: list of {testcase_id, testcase_name, agave_task_id}
+      overrides (all optional):
+        nos_commit, nos_branch, nos_gbn,
+        pc_commit, pc_branch, pc_gbn,
+        nutest_branch, nutest_commit,
+        patch_url, resource_pool, username
+    """
+    try:
+        data = request.get_json() or {}
+        tests = data.get("tests", [])
+        if not tests:
+            return jsonify({"error": "No tests provided"}), 400
+
+        overrides = data.get("overrides", {})
+
+        current_username = g.current_user.get("sub", "")
+        user_auth = _get_user_credentials(current_username)
+        if not user_auth:
+            return jsonify({
+                "error": "Session credentials expired. Please re-login to retrigger.",
+                "code": "CREDENTIALS_EXPIRED"
+            }), 401
+
+        # Group test names by agave_task_id (as {"name": ...} dicts for JITA)
+        tests_by_task = {}
+        for t in tests:
+            atid = t.get("agave_task_id")
+            if not atid:
+                continue
+            name = t.get("testcase_name", "")
+            if name:
+                tests_by_task.setdefault(atid, []).append({"name": name})
+
+        if not tests_by_task:
+            return jsonify({"error": "No valid agave_task_id found in selected tests"}), 400
+
+        rerun_results = []
+
+        for task_id, task_tests in tests_by_task.items():
+            try:
+                # Fetch original task details
+                task_data = fetch_agave_task(task_id)
+                if not task_data:
+                    rerun_results.append({
+                        "agave_task_id": task_id,
+                        "success": False,
+                        "error": "Could not fetch task details"
+                    })
+                    continue
+
+                # Build rerun payload from original task, apply overrides
+                payload = _build_rerun_payload(task_data, task_tests, overrides, current_username)
+
+                # POST to rerun endpoint (use data=json.dumps per JITA API)
+                rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
+                logger.info(f"[retrigger] POST {rerun_url} with {len(task_tests)} test(s): {task_tests}")
+                logger.info(f"[retrigger] Payload keys: {list(payload.keys())}")
+                resp = requests.post(
+                    rerun_url,
+                    data=json.dumps(payload),
+                    auth=user_auth,
+                    verify=False,
+                    timeout=60
+                )
+
+                resp_text = resp.text[:500]
+                logger.info(f"[retrigger] Response {resp.status_code} for task {task_id}: {resp_text}")
+
+                try:
+                    resp_data = resp.json()
+                except Exception:
+                    resp_data = {}
+
+                if resp_data.get("success") is True:
+                    new_id = resp_data.get("_id")
+                    if isinstance(new_id, dict) and "$oid" in new_id:
+                        new_id = new_id["$oid"]
+                    rerun_results.append({
+                        "agave_task_id": task_id,
+                        "success": True,
+                        "rerun_task_id": new_id,
+                        "message": resp_data.get("message", ""),
+                    })
+                else:
+                    error_msg = resp_data.get("message") or resp_data.get("error") or f"HTTP {resp.status_code}: {resp_text}"
+                    logger.warning(f"[retrigger] Failed for task {task_id}: {error_msg}")
+                    rerun_results.append({
+                        "agave_task_id": task_id,
+                        "success": False,
+                        "error": error_msg
+                    })
+            except Exception as e:
+                logger.error(f"[retrigger] Error rerunning task {task_id}: {e}", exc_info=True)
+                rerun_results.append({
+                    "agave_task_id": task_id,
+                    "success": False,
+                    "error": str(e)
+                })
+
+        succeeded = [r for r in rerun_results if r.get("success")]
+        failed = [r for r in rerun_results if not r.get("success")]
+        return jsonify({
+            "success": len(failed) == 0,
+            "total": len(rerun_results),
+            "succeeded": len(succeeded),
+            "failed": len(failed),
+            "results": rerun_results,
+        })
+
+    except Exception as e:
+        logger.error(f"[retrigger] Unhandled error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+def _build_rerun_payload(task_data, task_tests, overrides, username):
+    """
+    Build a minimal rerun payload matching the JITA /rerun API contract.
+    task_tests is a list of {"name": "..."} dicts for the tests to rerun.
+    The JITA rerun API inherits most settings from the original task;
+    we only send tests, infra, and explicit user overrides.
+    """
+    # Infra from the original task's requested_hardware
+    requested_hw = task_data.get("requested_hardware", {})
+    infra = requested_hw.get("infra", [])
+    if overrides.get("resource_pool"):
+        infra = [{
+            "kind": "ON_PREM",
+            "type": "node_pool",
+            "entries": [overrides["resource_pool"]]
+        }]
+
+    payload = {
+        "tests": task_tests,
+        "infra": infra,
+    }
+
+    # --- NOS overrides ---
+    if overrides.get("nos_branch"):
+        payload["branch"] = overrides["nos_branch"]
+    if overrides.get("nos_commit"):
+        payload["commit_id"] = overrides["nos_commit"]
+    if overrides.get("nos_gbn"):
+        try:
+            payload["gbn"] = int(overrides["nos_gbn"])
+            payload["image_gbn"] = int(overrides["nos_gbn"])
+        except (ValueError, TypeError):
+            pass
+    if overrides.get("nos_tag"):
+        payload["tag"] = overrides["nos_tag"]
+    if overrides.get("nos_build_type"):
+        payload["build_type"] = overrides["nos_build_type"]
+
+    # --- Nutest overrides ---
+    if overrides.get("nutest_branch"):
+        payload["nutest-py3-tests_branch"] = overrides["nutest_branch"]
+    if overrides.get("nutest_commit"):
+        payload["nutest-py3-tests_commit"] = overrides["nutest_commit"]
+
+    # --- PC overrides (resource_manager_json) ---
+    pc_keys = ("pc_commit", "pc_branch", "pc_gbn", "pc_tag", "pc_build_type")
+    if any(overrides.get(k) for k in pc_keys):
+        rm_json = {}
+        pc_build = {}
+        if overrides.get("pc_commit"):
+            pc_build["commit_id"] = overrides["pc_commit"]
+        if overrides.get("pc_branch"):
+            pc_build["branch"] = overrides["pc_branch"]
+        if overrides.get("pc_gbn"):
+            try:
+                pc_build["gbn"] = int(overrides["pc_gbn"])
+            except (ValueError, TypeError):
+                pass
+        if overrides.get("pc_tag"):
+            pc_build["tag"] = overrides["pc_tag"]
+        if overrides.get("pc_build_type"):
+            pc_build["build_type"] = overrides["pc_build_type"]
+        if pc_build:
+            rm_json["PRISM_CENTRAL"] = {"build": pc_build}
+        payload["resource_manager_json"] = rm_json
+
+    # --- Patch URLs → tester_tags ---
+    tester_tags = list(task_data.get("tester_tags", []))
+    tags_changed = False
+    if overrides.get("patch_url"):
+        patch_url = overrides["patch_url"].strip()
+        if patch_url:
+            patch_tag = f"patch_url__{patch_url}"
+            if patch_tag not in tester_tags:
+                tester_tags.append(patch_tag)
+                tags_changed = True
+    if overrides.get("framework_patch_url"):
+        fw_url = overrides["framework_patch_url"].strip()
+        if fw_url:
+            fw_tag = f"framework_patch_url__{fw_url}"
+            if fw_tag not in tester_tags:
+                tester_tags.append(fw_tag)
+                tags_changed = True
+    if tags_changed:
+        payload["tester_tags"] = tester_tags
+
+    return payload
+
+
+# ======================================================
 # Testcase Management
 # ======================================================
 
@@ -5487,25 +7189,76 @@ TESTCASE_MGMT_BRANCHES = {
 TESTCASE_MGMT_TEAMS = ["CDP", "AHV"]
 
 
+def _resolve_branch_config(branch):
+    """Resolve branch config from static map or dynamically from a version string.
+
+    Accepts full branch names (e.g. 'ganges-7.7-stable') as well as bare
+    version numbers (e.g. '7.7', '7.8').  For master and pre-configured
+    branches the static TESTCASE_MGMT_BRANCHES entry is returned.  For
+    anything else a release-style config is generated on-the-fly.
+    """
+    if branch in TESTCASE_MGMT_BRANCHES:
+        return TESTCASE_MGMT_BRANCHES[branch]
+
+    version = branch
+    if branch.startswith("ganges-") and branch.endswith("-stable"):
+        version = branch.replace("ganges-", "").replace("-stable", "")
+
+    if re.match(r"^\d+\.\d+(\.\d+)?$", version):
+        return {
+            "milestone": version,
+            "team_prefix": version,
+            "test_set_regex": f"test_sets/milestones/{version}/",
+        }
+
+    return None
+
+
 def _tcms_auth():
     return (TCMS_USER, TCMS_PASSWORD)
 
 
 def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip, limit):
-    """Build the MongoDB aggregation pipeline payload for the POST API."""
-    return json.dumps([
-        {"$match": {"$and": [
+    """Build the MongoDB aggregation pipeline payload for the TCMS POST API.
+
+    Master and release branches use different filter clauses:
+    - Master includes release_name exclusion and metadata tag exclusions.
+    - Release branches include tc_type filter for regression/smart_qual.
+    Both include a team-specific test_sets regex.
+    """
+    is_master = milestone == "master"
+    team_test_set_regex = f"{test_set_regex}{team}/"
+
+    if is_master:
+        match_clause = {"$and": [
             {
                 "target_milestone": milestone,
                 "last_result": {"$elemMatch": {"pass_name": "overall"}},
                 "deleted": False,
             },
             {"test_case.test_sets": {"$regex": test_set_regex, "$options": "i"}},
-            {"additional_data.team": f"{team_prefix}/{team}"},
             {"release_name": {"$ne": milestone}},
             {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
+            {"additional_data.team": f"{team_prefix}/{team}"},
+            {"test_case.test_sets": {"$regex": team_test_set_regex, "$options": "i"}},
             {"test_case.deprecated": False},
-        ]}},
+        ]}
+    else:
+        match_clause = {"$and": [
+            {
+                "target_milestone": milestone,
+                "last_result": {"$elemMatch": {"pass_name": "overall"}},
+                "deleted": False,
+                "tc_type": {"$in": ["regression", "smart_qual"]},
+            },
+            {"test_case.test_sets": {"$regex": test_set_regex, "$options": "i"}},
+            {"additional_data.team": f"{team_prefix}/{team}"},
+            {"test_case.test_sets": {"$regex": team_test_set_regex, "$options": "i"}},
+            {"test_case.deprecated": False},
+        ]}
+
+    return json.dumps([
+        {"$match": match_clause},
         {"$sort": {"name": 1}},
         {"$skip": skip},
         {"$limit": limit},
@@ -5675,9 +7428,9 @@ def testcase_mgmt_fetch_data():
     team = request.args.get("team", "CDP")
     page_limit = 500
 
-    branch_cfg = TESTCASE_MGMT_BRANCHES.get(branch)
+    branch_cfg = _resolve_branch_config(branch)
     if not branch_cfg:
-        return jsonify({"error": f"Unknown branch: {branch}"}), 400
+        return jsonify({"error": f"Unknown branch: {branch}. Use a known branch name or a version number like 7.7"}), 400
 
     milestone = branch_cfg["milestone"]
     team_prefix = branch_cfg["team_prefix"]
@@ -5761,7 +7514,13 @@ def testcase_mgmt_get_testcases():
         ]
 
     if name_filter:
-        testcases = [tc for tc in testcases if name_filter in tc.get("name", "").lower()]
+        exact_match = request.args.get("exact_match", "false").lower() in ("1", "true", "yes")
+        name_terms = [t.strip() for t in name_filter.split(",") if t.strip()]
+        if name_terms:
+            if exact_match:
+                testcases = [tc for tc in testcases if tc.get("name", "").lower() in name_terms]
+            else:
+                testcases = [tc for tc in testcases if any(term in tc.get("name", "").lower() for term in name_terms)]
 
     if status_filter:
         testcases = [tc for tc in testcases if tc.get("last_status", "").lower() == status_filter.lower()]
@@ -6170,10 +7929,15 @@ def testcase_mgmt_resolve_job_profiles():
 @app.route("/mcp/regression/testcase-mgmt/branches", methods=["GET"])
 @jwt_required
 def testcase_mgmt_branches():
-    """Return available branches and teams for the testcase management module."""
+    """Return available branches and teams for the testcase management module.
+
+    Also signals that the UI can send arbitrary release versions (e.g. '7.7')
+    which the backend resolves dynamically.
+    """
     return jsonify({
         "branches": list(TESTCASE_MGMT_BRANCHES.keys()),
         "teams": TESTCASE_MGMT_TEAMS,
+        "custom_release_supported": True,
     })
 # Dynamic Job Profile APIs
 # ======================================================
@@ -6364,11 +8128,18 @@ def dynamic_jp_test_execution_history():
                         out.add(n.strip())
             return out
 
-        # Collect unique task IDs so we can look up test_set / job_profile
+        # Collect unique task IDs so we can look up test_set / job_profile.
+        # Only the rows whose embedded history fields are missing a test set OR a JP
+        # need the (slow) secondary task/JP/test_set lookups; rows that already carry
+        # both are resolved directly, so we skip those network round-trips entirely.
         unique_task_ids = list({
             _oid(item.get("agave_task_id"))
             for item in raw_items
             if _oid(item.get("agave_task_id"))
+            and (
+                not _test_set_from_history_row(item, item.get("AgaveTask") or {})
+                or not _jp_name_from_history_row(item, item.get("AgaveTask") or {})
+            )
         })
 
         task_info = {}  # task_id -> {test_set_name, job_profile_name, branch}
@@ -6722,7 +8493,7 @@ def dynamic_jp_testcase_history():
 
 
 def _dynamic_jp_ts_prefix_for_date(dyn_date_str=None):
-    """Prefixes for auto-named dynamic JP/TS: User_Dyn_<YYYYMMDD>_JP_ / User_Dyn_<YYYYMMDD>_TS_."""
+    """Prefixes for auto-named temporary test JP/TS."""
     if (
         dyn_date_str
         and isinstance(dyn_date_str, str)
@@ -6732,8 +8503,8 @@ def _dynamic_jp_ts_prefix_for_date(dyn_date_str=None):
         date_str = dyn_date_str.strip()
     else:
         date_str = datetime.now().strftime("%Y%m%d")
-    jp_p = f"User_Dyn_{date_str}_JP_"
-    ts_p = f"User_Dyn_{date_str}_TS_"
+    jp_p = f"Temp_Test_Profile_{date_str}_JP_"
+    ts_p = f"Temp_Test_Profile_{date_str}_TS_"
     return jp_p, ts_p
 
 
@@ -6797,34 +8568,46 @@ def _bump_dyn_name_seq(dyn_name_date):
 
 
 def _apply_reserved_seq_to_dyn_custom_name(name: str, date_key: str, seq: int) -> str:
-    """Rewrite User_Dyn_{date}_JP_n / _TS_n to use `seq` (per create attempt)."""
+    """Rewrite generated JP/TS sequence to use `seq` (per create attempt)."""
     if not name or not date_key:
         return name
     s = re.sub(
-        rf"(User_Dyn_{re.escape(date_key)}_JP_)\d+",
+        rf"((?:User_Dyn|Temp_Test_Profile)_{re.escape(date_key)}_JP_)\d+",
         rf"\g<1>{seq}",
         name,
         count=1,
         flags=re.IGNORECASE,
     )
     s = re.sub(
-        rf"(User_Dyn_{re.escape(date_key)}_TS_)\d+",
+        rf"((?:User_Dyn|Temp_Test_Profile)_{re.escape(date_key)}_TS_)\d+",
         rf"\g<1>{seq}",
         s,
         count=1,
         flags=re.IGNORECASE,
     )
+    ddmm = f"{date_key[6:8]}{date_key[4:6]}" if len(date_key) == 8 and date_key.isdigit() else ""
+    if ddmm:
+        s = re.sub(
+            rf"([A-Z]{{2}}_{re.escape(ddmm)}_P)\d+((?:_(?:JP|TS))?(?:_|$))",
+            rf"\g<1>{seq}\g<2>",
+            s,
+            count=1,
+            flags=re.IGNORECASE,
+        )
     return s
 
 
-# Default JITA test set "framework options" (framework_args JSON object) for dynamic creates.
-# On clone, merge with source: source keys win; any default key missing in source is added.
-# If a cloned TS already has all of these keys (order irrelevant), do not change framework_args.
-DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS = {
+# Optional JITA test set "framework options" the UI injects only when the user
+# clicks "Add defaults". Source TS test_args / framework_args are always preserved;
+# these are merged on top only on demand.
+DYN_TESTSET_OPTIONAL_FRAMEWORK_OPTS = {
     "no_log_collection": False,
-    "scatter_logs": "cascade",
-    "use_logbay": "",
+    "use_logbay": True,
     "log_level": "DEBUG",
+}
+DYN_TESTSET_RETAIN_FRAMEWORK_OPTS = {
+    "skip_teardown": True,
+    "skip_class_teardown": True,
 }
 
 
@@ -6846,29 +8629,105 @@ def _framework_args_value_to_dict(val):
     return {}
 
 
-def _merge_dyn_testset_framework_args(existing):
-    """Apply defaults, then overlay existing (from clone or prior fetch)."""
-    ex = _framework_args_value_to_dict(existing)
-    return {**DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS, **ex}
+def _test_args_value_to_dict(val):
+    """Normalize test set test_args from JITA (JSON string/dict) to a dict."""
+    if val is None:
+        return {}
+    if isinstance(val, dict):
+        return dict(val)
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return {}
+        try:
+            parsed = json.loads(s)
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # Some payloads arrive as python-literal dict strings with single quotes.
+            try:
+                import ast
+                parsed = ast.literal_eval(s)
+                return dict(parsed) if isinstance(parsed, dict) else {}
+            except (SyntaxError, ValueError, TypeError):
+                return {}
+    return {}
 
 
-def _framework_args_dict_has_all_dyn_default_keys(framework_args_val):
-    """True if every key in DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS exists (order does not matter)."""
-    d = _framework_args_value_to_dict(framework_args_val)
-    return all(k in d for k in DYN_TESTSET_DEFAULT_FRAMEWORK_OPTS)
+def _merge_dyn_testset_framework_args(existing, retain_setup_on_failure=False, custom_options=None):
+    """Preserve the source framework_args; apply retain-only teardown skips and any custom options.
+
+    Defaults are NOT auto-injected here. Basic log options are added only when the
+    UI's "Add defaults" toggle passes them in via custom_options.
+    """
+    merged = _framework_args_value_to_dict(existing)
+    if retain_setup_on_failure:
+        merged.update(DYN_TESTSET_RETAIN_FRAMEWORK_OPTS)
+    else:
+        for key in DYN_TESTSET_RETAIN_FRAMEWORK_OPTS:
+            merged.pop(key, None)
+    # Apply custom framework options from UI (overrides existing, only if has actual keys).
+    if custom_options and isinstance(custom_options, dict) and len(custom_options) > 0:
+        merged.update(custom_options)
+    return merged
 
 
-def _apply_default_framework_options_to_test_set_payload(ts_payload):
-    """Mutate a POST /test_sets body: set framework_args / frameworkArgs to merged JSON string."""
+def _apply_default_framework_options_to_test_set_payload(ts_payload, retain_setup_on_failure=False, custom_options=None):
+    """Mutate a POST /test_sets body with framework options used by both API and JITA UI."""
     if not isinstance(ts_payload, dict):
         return ts_payload
     existing = ts_payload.get("framework_args")
     if existing in (None, ""):
         existing = ts_payload.get("frameworkArgs")
-    merged = _merge_dyn_testset_framework_args(existing)
+    if existing in (None, ""):
+        existing = ts_payload.get("agave_options")
+    merged = _merge_dyn_testset_framework_args(existing, retain_setup_on_failure, custom_options)
     fa_str = json.dumps(merged, separators=(",", ":"))
     ts_payload["framework_args"] = fa_str
     ts_payload["frameworkArgs"] = fa_str
+    # JITA Edit Test Set UI renders "Framework Options" from agave_options.
+    ts_payload["agave_options"] = merged
+    return ts_payload
+
+
+def _ensure_test_args_on_test_set_payload(ts_payload, default_value="{}", custom_args=None):
+    """Mutate a POST /test_sets body so existing test args are kept and user args are appended.
+
+    JITA exposes test args across several fields (``test_args`` / ``testArgs`` as JSON
+    strings and ``args_map`` as a dict, which is what the JITA UI "Test Args" panel
+    renders). A cloned/created test set can have the real data in only one of them
+    (e.g. ``test_args`` == "{}" while ``args_map`` holds the source values). To avoid
+    dropping any pre-existing args we union ALL of these fields first (first value seen
+    for a key wins), then append the user-supplied args BELOW the existing ones,
+    skipping any key that already exists (duplicate).
+    """
+    if not isinstance(ts_payload, dict):
+        return ts_payload
+
+    # 1) Collect existing args from every field JITA may use (preserve insertion order).
+    existing = {}
+    for field in ("test_args", "testArgs", "args_map"):
+        for k, v in _test_args_value_to_dict(ts_payload.get(field)).items():
+            if k not in existing:
+                existing[k] = v
+
+    if not existing:
+        existing = _test_args_value_to_dict(default_value)
+
+    # 2) Append user args below existing ones; skip duplicates (existing value wins).
+    if custom_args and isinstance(custom_args, dict):
+        for k, v in custom_args.items():
+            if k in existing:
+                logger.info(f"[test_args] Skipping duplicate key already present: {k!r}")
+                continue
+            existing[k] = v
+
+    ta = json.dumps(existing, separators=(",", ":"))
+
+    # Mirror to every field JITA might read so UI + API stay consistent.
+    ts_payload["test_args"] = ta
+    ts_payload["testArgs"] = ta
+    # JITA UI "Test Args" panel renders from args_map (dict, not JSON string).
+    ts_payload["args_map"] = dict(existing)
     return ts_payload
 
 
@@ -6888,6 +8747,8 @@ def dynamic_jp_check_existing():
         def_jp, def_ts = _dynamic_jp_ts_prefix_for_date(dyn_name_date or None)
         jp_raw = (req_data.get("jp_pattern") or "").strip() or def_jp
         ts_raw = (req_data.get("ts_pattern") or "").strip() or def_ts
+        jp_suffix = (req_data.get("jp_suffix") or "").strip().strip("_")
+        ts_suffix = (req_data.get("ts_suffix") or "").strip().strip("_")
 
         # Sanitize patterns to avoid regex injection
         jp_pattern = re.escape(jp_raw)
@@ -6897,14 +8758,19 @@ def dynamic_jp_check_existing():
 
         existing_jps = []
         try:
-            raw_query = json.dumps({"name": {"$regex": f"^{jp_pattern}", "$options": "i"}})
+            jp_regex = (
+                f"^{jp_pattern}\\d+_{re.escape(jp_suffix)}$"
+                if jp_suffix
+                else f"^{jp_pattern}"
+            )
+            raw_query = json.dumps({"name": {"$regex": jp_regex, "$options": "i"}})
             params = {"raw_query": quote(raw_query), "limit": 100}
             resp = requests.get(
                 f"{JITA_BASE}/job_profiles",
                 params=params,
                 auth=JITA_SVC_AUTH,
                 verify=False,
-                timeout=30
+                timeout=8
             )
             if resp.status_code == 200:
                 resp_data = resp.json()
@@ -6930,14 +8796,19 @@ def dynamic_jp_check_existing():
 
         existing_ts = []
         try:
-            raw_query_ts = json.dumps({"name": {"$regex": f"^{ts_pattern}", "$options": "i"}})
+            ts_regex = (
+                f"^{ts_pattern}\\d+_{re.escape(ts_suffix)}$"
+                if ts_suffix
+                else f"^{ts_pattern}"
+            )
+            raw_query_ts = json.dumps({"name": {"$regex": ts_regex, "$options": "i"}})
             params_ts = {"raw_query": quote(raw_query_ts), "limit": 100}
             resp_ts = requests.get(
                 f"{JITA_BASE}/test_sets",
                 params=params_ts,
                 auth=JITA_SVC_AUTH,
                 verify=False,
-                timeout=30
+                timeout=8
             )
             if resp_ts.status_code == 200:
                 resp_ts_data = resp_ts.json()
@@ -6960,33 +8831,50 @@ def dynamic_jp_check_existing():
         except (requests.exceptions.RequestException, ValueError) as e:
             logger.warning(f"check-existing: Failed to fetch test sets: {e}")
 
+        def _next_seq_from_prefixed_name(name, prefix, suffix=""):
+            if not isinstance(name, str) or not isinstance(prefix, str):
+                return None
+            if not name.lower().startswith(prefix.lower()):
+                return None
+            rest = name[len(prefix):]
+            m = re.match(r"(\d+)(?:_|$)", rest)
+            if not m:
+                return None
+            if suffix:
+                existing_suffix = rest[m.end():].strip("_")
+                if existing_suffix.lower() != suffix.lower():
+                    return None
+            try:
+                return int(m.group(1)) + 1
+            except (ValueError, TypeError):
+                return None
+
         next_jp_num = 1
         next_ts_num = 1
         for jp in existing_jps:
             name = jp.get("name", "")
-            parts = name.rsplit("_", 1)
-            if len(parts) == 2:
-                try:
-                    num = int(parts[1])
-                    next_jp_num = max(next_jp_num, num + 1)
-                except (ValueError, TypeError):
-                    pass
+            num = _next_seq_from_prefixed_name(name, jp_raw, jp_suffix)
+            if num is not None:
+                next_jp_num = max(next_jp_num, num)
         for ts in existing_ts:
             name = ts.get("name", "")
-            parts = name.rsplit("_", 1)
-            if len(parts) == 2:
-                try:
-                    num = int(parts[1])
-                    next_ts_num = max(next_ts_num, num + 1)
-                except (ValueError, TypeError):
-                    pass
+            num = _next_seq_from_prefixed_name(name, ts_raw, ts_suffix)
+            if num is not None:
+                next_ts_num = max(next_ts_num, num)
 
         date_key = dyn_name_date if (dyn_name_date and len(dyn_name_date) == 8 and dyn_name_date.isdigit()) else datetime.now().strftime("%Y%m%d")
         seq_peek = _peek_next_dyn_name_seq(date_key)
-        # Never suggest a number below JITA reality or our next reserved slot
-        next_both = max(next_jp_num, next_ts_num, seq_peek)
-        next_jp_num = next_both
-        next_ts_num = next_both
+        # Generic names keep the global daily floor. Suffix-based names use an
+        # independent sequence so new source JP/TS suffixes start at P1.
+        if not jp_suffix and not ts_suffix:
+            next_both = max(next_jp_num, next_ts_num, seq_peek)
+            next_jp_num = next_both
+            next_ts_num = next_both
+        else:
+            if not jp_suffix:
+                next_jp_num = max(next_jp_num, seq_peek)
+            if not ts_suffix:
+                next_ts_num = max(next_ts_num, seq_peek)
 
         return jsonify({
             "success": True,
@@ -6996,6 +8884,8 @@ def dynamic_jp_check_existing():
             "next_ts_number": next_ts_num,
             "jp_name_prefix": jp_raw,
             "ts_name_prefix": ts_raw,
+            "jp_suffix": jp_suffix,
+            "ts_suffix": ts_suffix,
         })
     except Exception as e:
         logger.error(f"Error in dynamic-jp check-existing: {e}", exc_info=True)
@@ -7090,6 +8980,8 @@ def dynamic_jp_fetch_testset():
 JARVIS_BASE = "https://jarvis.eng.nutanix.com/api/v1"
 
 
+
+
 @app.route("/mcp/regression/dynamic-jp/resolve-names", methods=["POST"])
 def dynamic_jp_resolve_names():
     """Resolve JP and/or test set names to their JITA IDs."""
@@ -7118,22 +9010,36 @@ def dynamic_jp_resolve_names():
                 raw_q = json.dumps({"name": jp_name})
                 resp = requests.get(
                     f"{JITA_BASE}/job_profiles",
-                    params={"raw_query": quote(raw_q), "limit": 1, "only": "_id,name,description,tags,tester_tags"},
+                    params={"raw_query": quote(raw_q), "limit": 40, "only": "_id,name,description,tags,tester_tags"},
                     auth=JITA_SVC_AUTH, verify=False, timeout=30,
                 )
                 logger.info(f"[resolve-names] JP lookup for '{jp_name}': HTTP {resp.status_code}")
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data.get("data", []) if isinstance(data, dict) else []
-                    if items and isinstance(items, list) and isinstance(items[0], dict):
-                        item = items[0]
+                    want = jp_name.strip()
+                    want_l = want.lower()
+                    chosen = None
+                    if items and isinstance(items, list):
+                        for el in items:
+                            if not isinstance(el, dict):
+                                continue
+                            nm = (el.get("name") or "").strip()
+                            if nm == want or nm.lower() == want_l:
+                                chosen = el
+                                break
+                    if chosen:
                         result["jp"] = {
-                            "_id": _oid(item.get("_id")),
-                            "name": item.get("name", ""),
-                            "description": item.get("description", ""),
-                            "tags": item.get("tags", []) or [],
-                            "tester_tags": item.get("tester_tags", []) or [],
+                            "_id": _oid(chosen.get("_id")),
+                            "name": chosen.get("name", ""),
+                            "description": chosen.get("description", ""),
+                            "tags": chosen.get("tags", []) or [],
+                            "tester_tags": chosen.get("tester_tags", []) or [],
                         }
+                    elif items:
+                        logger.warning(
+                            f"[resolve-names] JP search returned {len(items)} row(s) but none named {want!r}; not guessing."
+                        )
                 else:
                     logger.warning(f"[resolve-names] JP search returned {resp.status_code}: {resp.text[:200]}")
             except Exception as e:
@@ -7144,23 +9050,37 @@ def dynamic_jp_resolve_names():
                 raw_q = json.dumps({"name": ts_name})
                 resp = requests.get(
                     f"{JITA_BASE}/test_sets",
-                    params={"raw_query": quote(raw_q), "limit": 1, "only": "_id,name,test_args,framework_args"},
+                    params={"raw_query": quote(raw_q), "limit": 40, "only": "_id,name,test_args,framework_args"},
                     auth=JITA_SVC_AUTH, verify=False, timeout=30,
                 )
                 logger.info(f"[resolve-names] TS lookup for '{ts_name}': HTTP {resp.status_code}")
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data.get("data", []) if isinstance(data, dict) else []
-                    if items and isinstance(items, list) and isinstance(items[0], dict):
-                        item = items[0]
-                        ta = item.get("test_args") or item.get("testArgs") or ""
-                        fa = item.get("framework_args") or item.get("frameworkArgs") or ""
+                    want = ts_name.strip()
+                    want_l = want.lower()
+                    chosen = None
+                    if items and isinstance(items, list):
+                        for el in items:
+                            if not isinstance(el, dict):
+                                continue
+                            nm = (el.get("name") or "").strip()
+                            if nm == want or nm.lower() == want_l:
+                                chosen = el
+                                break
+                    if chosen:
+                        ta = chosen.get("test_args") or chosen.get("testArgs") or ""
+                        fa = chosen.get("framework_args") or chosen.get("frameworkArgs") or ""
                         result["ts"] = {
-                            "_id": _oid(item.get("_id")),
-                            "name": item.get("name", ""),
+                            "_id": _oid(chosen.get("_id")),
+                            "name": chosen.get("name", ""),
                             "test_args": str(ta).strip() if ta is not None else "",
                             "framework_args": str(fa).strip() if fa is not None else "",
                         }
+                    elif items:
+                        logger.warning(
+                            f"[resolve-names] TS search returned {len(items)} row(s) but none named {want!r}; not guessing."
+                        )
                 else:
                     logger.warning(f"[resolve-names] TS search returned {resp.status_code}: {resp.text[:200]}")
             except Exception as e:
@@ -7279,13 +9199,86 @@ def dynamic_jp_search_clusters():
         return jsonify({"error": str(e), "clusters": []}), 500
 
 
+# Maps the tool's resource_type values to the QMS "kind" used for coupon validation
+# (mirrors JITA's getQmsKind: "2.0" -> nested_ahv_2, "1.0"/nested -> nested, else physical).
+DYN_QMS_KIND_BY_RESOURCE_TYPE = {
+    "nested_2.0": "nested_ahv_2",
+    "nested_1.0": "nested",
+    "physical": "physical",
+}
+
+
+@app.route("/mcp/regression/dynamic-jp/validate-coupon", methods=["POST"])
+@jwt_required
+def dynamic_jp_validate_coupon():
+    """Validate a QMS coupon for the Global Pool provider (mirrors JITA's Validate button).
+
+    POSTs to QMS ``/coupons/<coupon>/validate`` with the resource kind and the current
+    user's email. Returns ``{valid, category, message}``.
+    """
+    try:
+        current_user_email = None
+        if hasattr(g, "current_user") and isinstance(g.current_user, dict):
+            current_user_email = (g.current_user.get("email") or "").strip()
+
+        req_data = request.json or {}
+        coupon = (req_data.get("coupon") or "").strip()
+        resource_type = (req_data.get("resource_type") or "nested_2.0").strip()
+        if not coupon:
+            return jsonify({"valid": False, "error": "No coupon specified"}), 400
+
+        kind = DYN_QMS_KIND_BY_RESOURCE_TYPE.get(resource_type, "nested_ahv_2")
+
+        username = current_user_email or (req_data.get("username") or "").strip()
+        if username and "@" not in username:
+            username = f"{username}@nutanix.com"
+        if not username:
+            return jsonify({"valid": False, "error": "Could not determine user email for validation"}), 400
+
+        from urllib.parse import quote as _quote
+        try:
+            resp = requests.post(
+                f"{QMS_BASE_URL}/coupons/{_quote(coupon, safe='')}/validate",
+                json={"kinds": [kind], "username": username},
+                verify=False,
+                timeout=20,
+            )
+        except requests.exceptions.Timeout:
+            return jsonify({"valid": False, "error": "QMS validation timed out"}), 504
+        except requests.exceptions.RequestException as e:
+            return jsonify({"valid": False, "error": f"Could not reach QMS: {e}"}), 502
+
+        try:
+            body = resp.json()
+        except (ValueError, TypeError):
+            body = {}
+
+        if resp.status_code == 200:
+            return jsonify({
+                "valid": True,
+                "category": body.get("category"),
+                "message": "Coupon is valid",
+            })
+        msg = body.get("message") if isinstance(body, dict) else None
+        return jsonify({"valid": False, "error": msg or "Invalid coupon"})
+    except Exception as e:
+        logger.error(f"Error validating coupon: {e}", exc_info=True)
+        return jsonify({"valid": False, "error": str(e)}), 500
+
+
 @app.route("/mcp/regression/dynamic-jp/create", methods=["POST"])
+@jwt_required
 def dynamic_jp_create():
     """Create a dynamic JP and test set. Two modes:
     - create_fresh=True: brand-new JP+TS from scratch with the given testcases
     - create_fresh=False: clone from source_jp_id, optionally copying test_args from source_testset_id
     """
     try:
+        # Get current user info from JWT
+        current_user_email = None
+        if hasattr(g, 'current_user') and isinstance(g.current_user, dict):
+            current_user_email = g.current_user.get('email', '').strip()
+        
         req_data = request.json
         if not req_data:
             return jsonify({"error": "Request body is required (JSON)"}), 400
@@ -7295,11 +9288,19 @@ def dynamic_jp_create():
         source_testset_id = req_data.get("source_testset_id")
         nos_branch = req_data.get("nos_branch", "master") or "master"
         nos_tag = req_data.get("nos_tag", "Latest Smoke Passed") or "Latest Smoke Passed"
+        nos_update_type = req_data.get("nos_update_type", "by_tag") or "by_tag"
+        nos_commit_id = (req_data.get("nos_commit_id") or "").strip() or ""
+        nos_gbn = (req_data.get("nos_gbn") or "").strip() or ""
         pc_branch = req_data.get("pc_branch", "master") or "master"
         pc_tag = req_data.get("pc_tag", "Latest Smoke Passed") or "Latest Smoke Passed"
+        pc_update_type = req_data.get("pc_update_type", "by_tag") or "by_tag"
+        pc_commit_id = (req_data.get("pc_commit_id") or "").strip() or ""
         nutest_branch = req_data.get("nutest_branch", "master") or "master"
         provider = req_data.get("provider", "global_pool") or "global_pool"
         resource_type = req_data.get("resource_type", "nested_2.0") or "nested_2.0"
+        # Optional Global Pool coupon (validated client-side via /validate-coupon).
+        # When provided, it is passed to QMS in the infra params instead of auto-allocating.
+        global_pool_coupon = (req_data.get("coupon") or "").strip() or None
         raw_np = req_data.get("node_pool") or []
         if isinstance(raw_np, list):
             node_pools = [p.strip() for p in raw_np if isinstance(p, str) and p.strip()]
@@ -7317,6 +9318,20 @@ def dynamic_jp_create():
             jp_tags = []
 
         reuse_source_ts = bool(req_data.get("reuse_source_ts", False))
+        retain_setup_on_failure = bool(req_data.get("retain_setup_on_failure", False))
+        use_latest_commit = bool(req_data.get("use_latest_commit", False))
+        sync_to_tcms = bool(req_data.get("sync_to_tcms", False))
+        custom_test_args = req_data.get("custom_test_args")
+        custom_framework_options = req_data.get("custom_framework_options")
+        include_optional_defaults = bool(req_data.get("include_optional_defaults", False))
+        
+        # Convert None to empty dict
+        if not custom_test_args or not isinstance(custom_test_args, dict):
+            custom_test_args = {}
+        if not custom_framework_options or not isinstance(custom_framework_options, dict):
+            custom_framework_options = {}
+        if include_optional_defaults:
+            custom_framework_options = {**DYN_TESTSET_OPTIONAL_FRAMEWORK_OPTS, **custom_framework_options}
         if reuse_source_ts and create_fresh:
             return jsonify({
                 "error": "reuse_source_ts is only valid when cloning from an existing job profile (not fresh create).",
@@ -7343,7 +9358,7 @@ def dynamic_jp_create():
                      f"source_jp_id={source_jp_id}, source_testset_id={source_testset_id}, "
                      f"source_testset_name={(req_data.get('source_testset_name') or '').strip() or None}, "
                      f"custom_jp_name={custom_jp_name}, custom_ts_name={custom_ts_name}, "
-                     f"#testcases={len(testcase_names)}, #tags={len(jp_tags)}")
+                     f"#testcases={len(testcase_names)}, #tags={len(jp_tags)}, sync_to_tcms={sync_to_tcms}")
 
         from urllib.parse import quote
 
@@ -7386,6 +9401,19 @@ def dynamic_jp_create():
                 return ref.strip()
             return None
 
+        def _jp_test_set_refs_list(jp):
+            """Refs attached to a job profile: `test_sets` (list) or legacy `test_set` (list or one dict)."""
+            if not isinstance(jp, dict):
+                return []
+            raw = jp.get("test_sets")
+            if raw is None or raw == []:
+                raw = jp.get("test_set")
+            if raw is None:
+                return []
+            if isinstance(raw, list):
+                return raw
+            return [raw]
+
         def _jit_ts_arg_strings(ts):
             """JITA may expose args as snake_case or camelCase; normalize to strings for POST payload."""
             if not isinstance(ts, dict):
@@ -7407,7 +9435,7 @@ def dynamic_jp_create():
                 s = str(val).strip()
                 return s
 
-            ta = _coerce(ts.get("test_args")) or _coerce(ts.get("testArgs"))
+            ta = _coerce(ts.get("test_args")) or _coerce(ts.get("testArgs")) or _coerce(ts.get("args_map"))
             fa = _coerce(ts.get("framework_args")) or _coerce(ts.get("frameworkArgs"))
             return ta, fa
 
@@ -7434,7 +9462,11 @@ def dynamic_jp_create():
             return {}
 
         def _build_clone_test_set_post_payload(source_doc, new_name, test_entries, description):
-            """POST /test_sets with same top-level shape as JITA GET, plus mirrored arg keys."""
+            """POST /test_sets with same top-level shape as JITA GET, plus mirrored arg keys.
+
+            Preserves the source test set's test_args and framework_args so the clone
+            keeps everything that was already configured.
+            """
             import copy
 
             strip_keys = {
@@ -7442,23 +9474,94 @@ def dynamic_jp_create():
                 "__v", "createdAt", "updatedAt", "path",
             }
             if not isinstance(source_doc, dict) or not source_doc:
-                p = {"name": new_name, "tests": test_entries, "description": description}
-                ta, fa = "", ""
-                p["test_args"] = ta
-                p["framework_args"] = fa
-                p["testArgs"] = ta
-                p["frameworkArgs"] = fa
-                return p
+                return {
+                    "name": new_name, "tests": test_entries, "description": description,
+                    "test_args": "", "framework_args": "",
+                    "testArgs": "", "frameworkArgs": "",
+                }
             payload = {k: copy.deepcopy(v) for k, v in source_doc.items() if k not in strip_keys}
             payload["name"] = new_name
             payload["tests"] = test_entries
             payload["description"] = description
+
             for snake, camel in (("test_args", "testArgs"), ("framework_args", "frameworkArgs")):
                 if snake in payload and camel not in payload:
                     payload[camel] = payload[snake]
                 elif camel in payload and snake not in payload:
                     payload[snake] = payload[camel]
             return payload
+
+        def _set_tcms_sync_flags(jp_payload, enabled):
+            """Set JITA/TCMS sync flags for the created JP."""
+            if not isinstance(jp_payload, dict):
+                return
+
+            jp_payload["sync_to_tcms"] = bool(enabled)
+
+            # JITA manage UI computes "Sync To TCMS" from tester_tags.includes("official").
+            tester_tags = jp_payload.get("tester_tags")
+            if isinstance(tester_tags, list):
+                if enabled:
+                    jp_payload["tester_tags"] = list(dict.fromkeys(tester_tags + ["official"]))
+                else:
+                    jp_payload["tester_tags"] = [t for t in tester_tags if t != "official"]
+            elif enabled:
+                jp_payload["tester_tags"] = ["official"]
+
+            sut = jp_payload.get("system_under_test")
+            if isinstance(sut, dict):
+                sut["sync_to_tcms"] = bool(enabled)
+
+            if enabled:
+                jp_payload.setdefault("package_type", "tar")
+                jp_payload.setdefault("test_service", "NutestPy3Tests")
+            else:
+                # Empty strings survive JITA PUT; missing keys get defaulted back.
+                for k in ("service", "package_type", "test_service"):
+                    jp_payload[k] = ""
+
+        def _apply_retain_setup_on_failure(jp_payload):
+            """Retain deployment after each test failure, excluding DataCorruptionError."""
+            if not isinstance(jp_payload, dict):
+                return
+
+            existing = jp_payload.get("retain_resources_config")
+            existing_criteria = existing.get("criteria") if isinstance(existing, dict) else {}
+            existing_test_failure = (
+                existing_criteria.get("TEST_FAILURE") if isinstance(existing_criteria, dict) else {}
+            )
+            existing_params = (
+                existing_test_failure.get("params") if isinstance(existing_test_failure, dict) else {}
+            )
+            duration = existing_params.get("duration", 720) if isinstance(existing_params, dict) else 720
+            states = existing_params.get("states_to_track") if isinstance(existing_params, dict) else None
+            if not isinstance(states, list) or not states:
+                states = ["Failed"]
+            required_states = ["Failed", "Aborted", "Timeout", "InfraError", "Warning"]
+            states = list(dict.fromkeys(states + [s for s in required_states if s not in states]))
+            exceptions = existing_params.get("exceptions") if isinstance(existing_params, dict) else []
+            if not isinstance(exceptions, list):
+                exceptions = []
+            exceptions = [e for e in exceptions if e != "DataCorruptionError"]
+
+            criteria = dict(existing_criteria) if isinstance(existing_criteria, dict) else {}
+            criteria["TEST_FAILURE"] = {
+                "entity": "DEPLOYMENT",
+                "type": "AFTER_EACH",
+                "params": {
+                    "duration": duration,
+                    "exceptions": exceptions,
+                    "states_to_track": states,
+                },
+            }
+            jp_payload["retain_resources_config"] = {"criteria": criteria}
+
+            for plugin in jp_payload.get("plugins") or []:
+                if not isinstance(plugin, dict):
+                    continue
+                args = plugin.get("args")
+                if isinstance(args, dict) and isinstance(args.get("exceptions"), list):
+                    args["exceptions"] = [e for e in args["exceptions"] if e != "DataCorruptionError"]
 
         source_testset_name = (req_data.get("source_testset_name") or "").strip()
 
@@ -7472,7 +9575,7 @@ def dynamic_jp_create():
                     f"{JITA_BASE}/test_sets",
                     params={
                         "raw_query": quote(raw_q),
-                        "limit": 1,
+                        "limit": 40,
                         "only": "_id,name,test_args,framework_args,tests,description",
                     },
                     auth=JITA_SVC_AUTH,
@@ -7481,34 +9584,38 @@ def dynamic_jp_create():
                 )
                 if nm_resp.status_code == 200:
                     items = nm_resp.json().get("data", []) if isinstance(nm_resp.json(), dict) else []
-                    if items and isinstance(items[0], dict):
-                        hit = items[0]
-                        hit_name = (hit.get("name") or "").strip()
+                    want = source_testset_name.strip()
+                    want_l = want.lower()
+                    hit = None
+                    if isinstance(items, list):
+                        for el in items:
+                            if not isinstance(el, dict):
+                                continue
+                            hn = (el.get("name") or "").strip()
+                            if hn == want or hn.lower() == want_l:
+                                hit = el
+                                break
+                    if hit:
                         cand_id = _test_set_ref_oid(hit.get("_id"))
                         if cand_id:
-                            if (
-                                hit_name == source_testset_name
-                                or hit_name.lower() == source_testset_name.lower()
-                            ):
-                                ts_name_resolved_id = cand_id
-                                logger.info(
-                                    f"[create] Template from source_testset_name={source_testset_name!r} -> id={ts_name_resolved_id}"
-                                )
-                            else:
-                                ts_name_resolved_id = cand_id
-                                logger.warning(
-                                    f"[create] Name query returned '{hit_name}' for requested={source_testset_name!r}; "
-                                    f"using single-hit id={ts_name_resolved_id}"
-                                )
+                            ts_name_resolved_id = cand_id
+                            logger.info(
+                                f"[create] Template from source_testset_name={source_testset_name!r} -> id={ts_name_resolved_id}"
+                            )
+                    elif items:
+                        logger.warning(
+                            f"[create] source_testset_name={source_testset_name!r}: JITA returned {len(items)} "
+                            "row(s) but none matched that exact name; not guessing an id from order."
+                        )
             except (requests.exceptions.RequestException, ValueError, TypeError) as e:
                 logger.warning(f"[create] source_testset_name lookup failed: {e}")
 
-        if ts_name_resolved_id:
-            template_ts_id = ts_name_resolved_id
-        elif source_testset_id:
+        if source_testset_id:
             template_ts_id = str(source_testset_id).strip() or None
+        elif ts_name_resolved_id:
+            template_ts_id = ts_name_resolved_id
         if not create_fresh and not template_ts_id and source_jp:
-            refs = source_jp.get("test_sets") or []
+            refs = _jp_test_set_refs_list(source_jp)
             if refs:
                 template_ts_id = _test_set_ref_oid(refs[0])
                 if template_ts_id and not source_testset_id and not source_testset_name:
@@ -7547,7 +9654,7 @@ def dynamic_jp_create():
         if reuse_source_ts and not create_fresh:
             tid = source_testset_id or ts_name_resolved_id
             if not tid and source_jp:
-                refs = source_jp.get("test_sets") or []
+                refs = _jp_test_set_refs_list(source_jp)
                 if refs:
                     tid = _test_set_ref_oid(refs[0])
             if not tid:
@@ -7589,13 +9696,10 @@ def dynamic_jp_create():
         if dyn_name_date and (len(dyn_name_date) != 8 or not dyn_name_date.isdigit()):
             return jsonify({"error": "dyn_name_date must be YYYYMMDD"}), 400
         jp_prefix, ts_prefix = _dynamic_jp_ts_prefix_for_date(dyn_name_date or None)
-        date_key = _dyn_name_seq_date_key(dyn_name_date or None)
-        # Monotonic: bumps every /create, success or later failure, so JP_/TS_ numbers always advance
+        # Keep a monotonic fallback counter for generic names, but do not
+        # rewrite user-visible custom names. Those may be suffix-specific
+        # suggestions like SW_2205_P1_<source-name>.
         reserved_seq = _bump_dyn_name_seq(dyn_name_date or None)
-        if custom_jp_name:
-            custom_jp_name = _apply_reserved_seq_to_dyn_custom_name(custom_jp_name, date_key, reserved_seq)
-        if custom_ts_name and not (reuse_source_ts and linked_ts_id_for_reuse):
-            custom_ts_name = _apply_reserved_seq_to_dyn_custom_name(custom_ts_name, date_key, reserved_seq)
 
         if custom_jp_name:
             new_jp_name = custom_jp_name
@@ -7618,7 +9722,7 @@ def dynamic_jp_create():
                 resp = requests.get(
                     f"{JITA_BASE}/{entity_type}",
                     params={"raw_query": rq, "limit": 1, "only": "_id,name"},
-                    auth=JITA_SVC_AUTH, verify=False, timeout=20,
+                    auth=JITA_SVC_AUTH, verify=False, timeout=8,
                 )
                 logger.info(f"[create] Pre-check {entity_type} response: HTTP {resp.status_code}, "
                             f"body={resp.text[:300]}")
@@ -7658,6 +9762,44 @@ def dynamic_jp_create():
         if _adj:
             jp_name_adjust_warn = _adj
 
+        def _apply_custom_args_to_existing_ts(ts_id):
+            """Merge the newly passed test/framework args into an already-existing TS via PUT.
+
+            When a test set is reused (name collision), JITA keeps it as-is, so the
+            args the user just entered are otherwise lost. Fetch the TS, merge args
+            on top of whatever it has, and PUT it back. Returns a warning string or None.
+            """
+            if not (custom_test_args or custom_framework_options):
+                return None
+            try:
+                gr = requests.get(
+                    f"{JITA_BASE}/test_sets/{ts_id}",
+                    auth=JITA_SVC_AUTH, verify=False, timeout=30,
+                )
+                if gr.status_code != 200:
+                    return f"Reused test set {ts_id}: could not fetch to apply new args (HTTP {gr.status_code})."
+                ts_doc = _jit_pick_ts_dict_from_response(gr.json())
+                if not isinstance(ts_doc, dict):
+                    return f"Reused test set {ts_id}: unexpected shape, new args not applied."
+                _apply_default_framework_options_to_test_set_payload(
+                    ts_doc, retain_setup_on_failure, custom_framework_options
+                )
+                _ensure_test_args_on_test_set_payload(ts_doc, "{}", custom_test_args)
+                pr = requests.put(
+                    f"{JITA_BASE}/test_sets/{ts_id}",
+                    json=ts_doc, auth=JITA_SVC_AUTH, verify=False, timeout=30,
+                )
+                logger.info(
+                    f"[create] Applied custom args to reused TS {ts_id}: PUT status={pr.status_code}, "
+                    f"test_args_keys={list(_test_args_value_to_dict(ts_doc.get('test_args')).keys())}"
+                )
+                if pr.status_code not in (200, 201):
+                    return f"Reused test set {ts_id}: failed to apply new args (HTTP {pr.status_code})."
+            except (requests.exceptions.RequestException, ValueError) as e:
+                logger.warning(f"[create] Error applying custom args to reused TS {ts_id}: {e}")
+                return f"Reused test set {ts_id}: error applying new args ({e})."
+            return None
+
         existing_ts_id = None
         if not (reuse_source_ts and linked_ts_id_for_reuse):
             existing_ts_id = _name_exists("test_sets", new_ts_name)
@@ -7679,6 +9821,10 @@ def dynamic_jp_create():
             ts_reused = True
             ts_create_warning = f"Test set '{new_ts_name}' already exists (ID: {existing_ts_id}). Reusing it."
             logger.info(f"[create] TS '{new_ts_name}' already exists, reusing ID {existing_ts_id}")
+            # Apply the newly passed args to the reused TS so they aren't lost.
+            _reuse_args_warn = _apply_custom_args_to_existing_ts(created_ts_id)
+            if _reuse_args_warn:
+                ts_create_warning = f"{ts_create_warning} {_reuse_args_warn}"
         else:
             # Build test entries
             if testcase_names:
@@ -7695,7 +9841,10 @@ def dynamic_jp_create():
                 for tc in testcase_names:
                     row = dict(row_tmpl)
                     row["name"] = tc
+                    # Always honor user-selected test branch for newly added test rows.
+                    row["branch"] = nutest_branch
                     row.setdefault("framework_version", "nutest-py3-tests")
+                    row.setdefault("framework", "nutest-py3-tests")
                     row.setdefault("package_type", "tar")
                     row.setdefault("service", "NutestPy3Tests")
                     test_entries.append(row)
@@ -7717,16 +9866,13 @@ def dynamic_jp_create():
                     "testArgs": _ta,
                     "frameworkArgs": _fa,
                 }
-            # Clone: if source already had every default framework key, leave framework_args unchanged.
-            cloned_from_existing = bool(not create_fresh and source_ts)
-            _fa_for_skip = new_ts_payload.get("framework_args")
-            if _fa_for_skip in (None, ""):
-                _fa_for_skip = new_ts_payload.get("frameworkArgs")
-            if not (cloned_from_existing and _framework_args_dict_has_all_dyn_default_keys(_fa_for_skip)):
-                _apply_default_framework_options_to_test_set_payload(new_ts_payload)
-            _ta_log, _fa_log = _jit_ts_arg_strings(new_ts_payload)
-            logger.info(f"[create] TS payload: name={new_ts_name}, #tests={len(test_entries)}, "
-                        f"test_args_len={len(_ta_log)}, framework_args_len={len(_fa_log)}")
+            _apply_default_framework_options_to_test_set_payload(
+                new_ts_payload, retain_setup_on_failure, custom_framework_options
+            )
+            _ensure_test_args_on_test_set_payload(new_ts_payload, "{}", custom_test_args)
+            logger.info(f"[create] TS POST payload: name={new_ts_name}, #tests={len(test_entries)}, "
+                        f"test_args_keys={list(_test_args_value_to_dict(new_ts_payload.get('test_args')).keys())}, "
+                        f"fw_args_keys={list(_framework_args_value_to_dict(new_ts_payload.get('framework_args')).keys())}")
 
             created_ts_id = None
             try:
@@ -7739,6 +9885,42 @@ def dynamic_jp_create():
                 if ts_resp_json.get("success"):
                     created_ts_id = str(ts_resp_json["id"]) if ts_resp_json.get("id") else None
                     logger.info(f"Created test set: {new_ts_name} (ID: {created_ts_id})")
+                    if created_ts_id:
+                        try:
+                            ts_get_resp = requests.get(
+                                f"{JITA_BASE}/test_sets/{created_ts_id}",
+                                auth=JITA_SVC_AUTH,
+                                verify=False,
+                                timeout=30,
+                            )
+                            if ts_get_resp.status_code == 200:
+                                created_ts_doc = _jit_pick_ts_dict_from_response(ts_get_resp.json())
+                                if isinstance(created_ts_doc, dict):
+                                    _apply_default_framework_options_to_test_set_payload(
+                                        created_ts_doc,
+                                        retain_setup_on_failure,
+                                        custom_framework_options,
+                                    )
+                                    _ensure_test_args_on_test_set_payload(
+                                        created_ts_doc,
+                                        "{}",
+                                        custom_test_args,
+                                    )
+                                    ts_put_resp = requests.put(
+                                        f"{JITA_BASE}/test_sets/{created_ts_id}",
+                                        json=created_ts_doc,
+                                        auth=JITA_SVC_AUTH,
+                                        verify=False,
+                                        timeout=30,
+                                    )
+                                    logger.info(
+                                        f"[create] TS framework options PUT: ts_id={created_ts_id}, "
+                                        f"status={ts_put_resp.status_code}"
+                                    )
+                        except (requests.exceptions.RequestException, ValueError) as e:
+                            logger.warning(
+                                f"[create] Could not verify/update test set framework options for {created_ts_id}: {e}"
+                            )
                 else:
                     msg = ts_resp_json.get("message", f"HTTP {ts_create_resp.status_code}")
                     ts_create_warning = f"Test set creation failed: {msg}"
@@ -7751,41 +9933,163 @@ def dynamic_jp_create():
         # 5. Build infra based on provider selection
         def _build_infra(prov, res_type, np_list):
             if prov == "global_pool":
+                # Use the user-supplied coupon when present (validated via QMS); otherwise
+                # let Jita/QMS auto-allocate by category.
+                params = {"category": "general"}
+                if global_pool_coupon:
+                    params["coupon"] = global_pool_coupon
                 if res_type == "physical":
-                    return [{"type": "physical", "kind": "PRIVATE_CLOUD", "params": {"category": "general"}}]
-                pool_name = "global_nested_2.0" if res_type == "nested_2.0" else "global_nested_1.0"
-                return [{"kind": "ON_PREM", "type": "cluster_pool", "entries": [pool_name]}]
+                    return [{"type": "physical", "kind": "PRIVATE_CLOUD", "params": params}]
+                # nested_2.0 → "nested", nested_1.0 → "nested_1"
+                nested_type = "nested" if res_type in ("nested_2.0", "nested") else "nested_1"
+                return [{"type": nested_type, "kind": "PRIVATE_CLOUD", "params": params}]
             elif prov == "node_pool":
                 entries = np_list if np_list else ["unknown"]
                 return [{"kind": "ON_PREM", "type": "node_pool", "entries": entries}]
             elif prov == "static":
                 entries = np_list if np_list else ["unknown"]
                 return [{"kind": "ON_PREM", "type": "cluster", "entries": entries}]
-            return [{"kind": "ON_PREM", "type": "cluster_pool", "entries": ["global_nested_2.0"]}]
+            return [{"type": "nested", "kind": "PRIVATE_CLOUD", "params": {"category": "general"}}]
 
         infra = _build_infra(provider, resource_type, node_pools)
 
+        def _default_scheduling_options():
+            return {
+                "optimize_scheduling": True,
+                "force_imaging": False,
+                "task_priority": 10,
+                "skip_resource_spec_match": False,
+                "upgrade": False,
+                "deployment_distribution_algorithm": "test_time_based",
+                "retry_imaging": 1,
+                "check_image_compatibility": True,
+            }
+
+        def _default_requested_hardware(res_type):
+            hardware = {
+                "hypervisor": "kvm",
+                "hypervisor_version": "branch_symlink",
+                "imaging_options": {
+                    "enable_large_partitions": True,
+                    "min_vcpus": 8,
+                    "redundancy_factor": "default",
+                    "additional_parameters": [
+                        {
+                            "key": "svm_rescue_args",
+                            "value": "--large_partitions_enabled --boot_size=41940992 --home_nutanix_size=167770112",
+                        }
+                    ],
+                },
+            }
+            if res_type in ("nested_2.0", "nested"):
+                hardware["nested_params"] = {"version": "2.0", "is_nested": True}
+            elif res_type == "nested_1.0":
+                hardware["nested_params"] = {"version": "1.0", "is_nested": True}
+            return hardware
+
         # Build new JP payload
         if create_fresh:
-            new_jp_payload = {
-                "name": new_jp_name,
-                "description": f"Dynamic JP with {len(testcase_names)} testcase(s)",
-                "test_sets": [],
-                "git": {},
-                "build_selection": {},
-                "resource_manager_json": {},
-                "infra": infra,
-                "requested_hardware": {
-                    "hypervisor": "kvm",
-                    "hypervisor_version": "branch_symlink",
-                    "imaging_options": {"redundancy_factor": "default", "min_ram": 32},
-                },
-                "services": ["NOS"],
-                "service": "AOS",
-                "test_framework": "nutest-py3-tests",
-                "nutest-py3-tests_branch": nutest_branch,
-                "system_under_test": {"product": "aos", "component": "main", "branch": nos_branch},
-            }
+            import copy
+            template_jp = None
+            template_jp_id = os.getenv("DYNAMIC_JP_TEMPLATE_ID", "6a1e59718e79ce932625e7c0")
+            try:
+                template_resp = requests.get(
+                    f"{JITA_BASE}/job_profiles/{template_jp_id}",
+                    auth=JITA_SVC_AUTH,
+                    verify=False,
+                    timeout=30,
+                )
+                if template_resp.status_code == 200:
+                    template_jp = template_resp.json().get("data", {})
+                    if isinstance(template_jp, dict):
+                        logger.info(f"[create] Fresh mode — loaded template JP {template_jp_id}")
+                    else:
+                        template_jp = None
+                else:
+                    logger.warning(
+                        f"[create] Fresh mode — template JP fetch failed: HTTP {template_resp.status_code}"
+                    )
+            except Exception as exc:
+                logger.warning(f"[create] Fresh mode — template JP fetch error: {exc}")
+
+            if template_jp:
+                new_jp_payload = copy.deepcopy(template_jp)
+                for field in [
+                    "_id",
+                    "created_at",
+                    "updated_at",
+                    "created_by",
+                    "created_by_user",
+                    "__v",
+                    "v",
+                    "last_triggered",
+                    "scheduled_jobs",
+                    "auto_schedule_cron",
+                ]:
+                    new_jp_payload.pop(field, None)
+                
+                # Don't copy template's coupon - let QMS allocate a new one for this JP
+                # Coupons are JP-specific and managed by Jita's QMS
+                merged_infra = infra
+                
+                new_jp_payload.update({
+                    "name": new_jp_name,
+                    "description": f"Dynamic JP with {len(testcase_names)} testcase(s)",
+                    "test_sets": [],
+                    "git": {},
+                    "build_selection": {},
+                    "resource_manager_json": {},
+                    "infra": merged_infra,
+                    "requested_hardware": _default_requested_hardware(resource_type),
+                    "services": ["NOS"],
+                    "service": "AOS",
+                    "test_framework": "nutest-py3-tests",
+                    "nutest-py3-tests_branch": nutest_branch,
+                    "scheduling_options": _default_scheduling_options(),
+                    "private": True,
+                    "user_groups": ["cdp_reg_jarvis"],
+                    "auto_schedule_cron": False,
+                    "allow_resource_sharing": False,
+                    "allow_resource_sharing_across_tasks": False,
+                    "advanced_options": {"run_tests_with_tags": False},
+                    "skip_bad_tests": True,
+                    "run_tests_with_priorities": [],
+                    "run_tests_with_additional_tags": [],
+                    "sdk_installation_options": {},
+                    "demo_mode": False,
+                    "image_build_type": "None",
+                    "system_under_test": {"product": "aos", "component": "main", "branch": nos_branch},
+                })
+                new_jp_payload.pop("test_set", None)
+            else:
+                new_jp_payload = {
+                    "name": new_jp_name,
+                    "description": f"Dynamic JP with {len(testcase_names)} testcase(s)",
+                    "test_sets": [],
+                    "git": {},
+                    "build_selection": {},
+                    "resource_manager_json": {},
+                    "infra": infra,
+                    "requested_hardware": _default_requested_hardware(resource_type),
+                    "services": ["NOS"],
+                    "service": "AOS",
+                    "test_framework": "nutest-py3-tests",
+                    "nutest-py3-tests_branch": nutest_branch,
+                    "scheduling_options": _default_scheduling_options(),
+                    "private": True,
+                    "user_groups": ["cdp_reg_jarvis"],
+                    "auto_schedule_cron": False,
+                    "allow_resource_sharing": False,
+                    "allow_resource_sharing_across_tasks": False,
+                    "advanced_options": {"run_tests_with_tags": False},
+                    "skip_bad_tests": True,
+                    "run_tests_with_priorities": [],
+                    "run_tests_with_additional_tags": [],
+                    "sdk_installation_options": {},
+                    "demo_mode": False,
+                    "image_build_type": "None",
+                    "system_under_test": {"product": "aos", "component": "main", "branch": nos_branch},
+                }
         else:
             import copy
             new_jp_payload = copy.deepcopy(source_jp)
@@ -7793,12 +10097,20 @@ def dynamic_jp_create():
                 new_jp_payload.pop(field, None)
             new_jp_payload["name"] = new_jp_name
             new_jp_payload["description"] = f"Dynamic JP cloned from {source_jp.get('name', source_jp_id)}"
+            # Legacy `test_set` on the source doc can override `test_sets` on POST; clear before we set links.
+            new_jp_payload.pop("test_set", None)
             new_jp_payload["test_sets"] = []
             logger.info(f"[create] Source JP keys: {list(source_jp.keys())}")
+            logger.info(f"[create] Source JP infra: {source_jp.get('infra')}")
+            # Log email-related fields from source JP to understand structure
+            for key in source_jp.keys():
+                if 'email' in key.lower() or 'mail' in key.lower() or key in ['emails', 'scheduling_options', 'user_groups']:
+                    logger.info(f"[create] Source JP email field '{key}': {source_jp.get(key)}")
 
         # Link to new test set if created
         if created_ts_id:
             new_jp_payload["test_sets"] = [{"$oid": created_ts_id}]
+            new_jp_payload.pop("test_set", None)
 
         if create_fresh:
             # Fresh mode: apply all config from the UI
@@ -7812,23 +10124,54 @@ def dynamic_jp_create():
             nos_build_type = "opt" if nos_branch.strip().lower() == "master" else "release"
             pc_build_type = "opt" if pc_branch.strip().lower() == "master" else "release"
 
-            new_jp_payload["build_selection"] = {
-                "by_latest_smoked": nos_tag == "Latest Smoke Passed",
-                "commit_must_be_newer": False,
-                "build_type": nos_build_type,
-            }
+            # NOS build_selection based on update_type
+            if nos_update_type == "by_commit":
+                new_jp_payload["build_selection"] = {
+                    "by_commit_id": True,
+                    "commit_must_be_newer": False,
+                    "build_type": nos_build_type,
+                }
+                if nos_commit_id:
+                    new_jp_payload["build_selection"]["commit_id"] = nos_commit_id
+                if nos_gbn:
+                    try:
+                        new_jp_payload["build_selection"]["gbn"] = int(nos_gbn) if isinstance(nos_gbn, str) else nos_gbn
+                    except (ValueError, TypeError):
+                        new_jp_payload["build_selection"]["gbn"] = nos_gbn
+                # Remove tag-related fields
+                new_jp_payload["build_selection"].pop("by_latest_smoked", None)
+            else:
+                # by_tag (default)
+                new_jp_payload["build_selection"] = {
+                    "by_latest_smoked": nos_tag == "Latest Smoke Passed",
+                    "commit_must_be_newer": False,
+                    "build_type": nos_build_type,
+                }
+                # Remove commit-related fields
+                new_jp_payload["build_selection"].pop("by_commit_id", None)
+                new_jp_payload["build_selection"].pop("commit_id", None)
+                new_jp_payload["build_selection"].pop("gbn", None)
 
             resource_manager_json = new_jp_payload.get("resource_manager_json") or {}
             if not isinstance(resource_manager_json, dict):
                 resource_manager_json = {}
             if "NOS_CLUSTER" not in resource_manager_json:
                 resource_manager_json["NOS_CLUSTER"] = {}
+            
+            # PC configuration based on update_type
+            pc_build = {
+                "branch": pc_branch,
+                "build_selection_build_type": pc_build_type,
+            }
+            if pc_update_type == "by_commit":
+                if pc_commit_id:
+                    pc_build["build_selection_option"] = pc_commit_id
+            else:
+                # by_tag (default)
+                pc_build["build_selection_option"] = pc_tag
+            
             resource_manager_json["PRISM_CENTRAL"] = {
-                "build": {
-                    "branch": pc_branch,
-                    "build_selection_build_type": pc_build_type,
-                    "build_selection_option": pc_tag,
-                }
+                "build": pc_build
             }
             new_jp_payload["resource_manager_json"] = resource_manager_json
 
@@ -7870,33 +10213,162 @@ def dynamic_jp_create():
             # Only update name, description, test_sets (already done above)
             logger.info(f"[create] Clone mode — preserving source JP config "
                         f"(infra={new_jp_payload.get('infra', 'N/A')[:80] if isinstance(new_jp_payload.get('infra'), str) else 'present'})")
-            # User-supplied patch URLs (clone flow): fresh-create applied these above; clone had skipped them
-            if test_patch_url or framework_patch_url:
-                logger.info(
-                    f"[create] Clone mode — applying patches: test_patch_url={bool(test_patch_url)}, "
-                    f"framework_patch_url={bool(framework_patch_url)}"
-                )
-                tmeta = new_jp_payload.get("test_framework_metadata")
-                tmeta = dict(tmeta) if isinstance(tmeta, dict) else {}
-                test_m = tmeta.get("test")
-                test_m = dict(test_m) if isinstance(test_m, dict) else {}
-                fw_m = tmeta.get("framework")
-                fw_m = dict(fw_m) if isinstance(fw_m, dict) else {}
-                test_m["branch"] = nutest_branch
-                test_m["commit"] = None
-                fw_m["branch"] = nutest_branch
-                fw_m["commit"] = None
-                if test_patch_url:
-                    test_m["patch_url"] = test_patch_url
-                if framework_patch_url:
-                    fw_m["patch_url"] = framework_patch_url
-                tmeta["test"] = test_m
-                tmeta["framework"] = fw_m
-                new_jp_payload["test_framework_metadata"] = tmeta
-                new_jp_payload["test_framework"] = "nutest-py3-tests"
-                new_jp_payload["nutest-py3-tests_branch"] = nutest_branch
-                if framework_patch_url:
-                    new_jp_payload["patch_url"] = framework_patch_url
+            # Always apply the user-selected test framework branch (Test Options page),
+            # and layer patch URLs on top when provided. Previously the branch was only
+            # set when a patch URL existed, so cloning without a patch left it unchanged.
+            tmeta = new_jp_payload.get("test_framework_metadata")
+            tmeta = dict(tmeta) if isinstance(tmeta, dict) else {}
+            test_m = tmeta.get("test")
+            test_m = dict(test_m) if isinstance(test_m, dict) else {}
+            fw_m = tmeta.get("framework")
+            fw_m = dict(fw_m) if isinstance(fw_m, dict) else {}
+            test_m["branch"] = nutest_branch
+            test_m["commit"] = None
+            fw_m["branch"] = nutest_branch
+            fw_m["commit"] = None
+            if test_patch_url:
+                test_m["patch_url"] = test_patch_url
+            else:
+                test_m.pop("patch_url", None)
+            if framework_patch_url:
+                fw_m["patch_url"] = framework_patch_url
+            else:
+                fw_m.pop("patch_url", None)
+            tmeta["test"] = test_m
+            tmeta["framework"] = fw_m
+            new_jp_payload["test_framework_metadata"] = tmeta
+            new_jp_payload["test_framework"] = "nutest-py3-tests"
+            new_jp_payload["nutest-py3-tests_branch"] = nutest_branch
+            if framework_patch_url:
+                new_jp_payload["patch_url"] = framework_patch_url
+            else:
+                new_jp_payload.pop("patch_url", None)
+            logger.info(f"[create] Clone mode — set test framework branch={nutest_branch}, "
+                        f"patches(test={bool(test_patch_url)}, fw={bool(framework_patch_url)})")
+
+            # Use Latest Commit: override build selection to Latest Smoke Passed with optimal build type
+            if use_latest_commit:
+                logger.info(f"[create] Clone mode — applying use_latest_commit configuration")
+                
+                # Extract actual branches from source JP (not from request)
+                source_git = new_jp_payload.get("git") or {}
+                actual_nos_branch = source_git.get("branch", "master") if isinstance(source_git, dict) else "master"
+                
+                # For PC branch, check resource_manager_json
+                resource_manager_json = new_jp_payload.get("resource_manager_json") or {}
+                if isinstance(resource_manager_json, dict):
+                    pc_config = resource_manager_json.get("PRISM_CENTRAL") or {}
+                    if isinstance(pc_config, dict):
+                        pc_build = pc_config.get("build") or {}
+                        if isinstance(pc_build, dict):
+                            actual_pc_branch = pc_build.get("branch", actual_nos_branch)
+                        else:
+                            actual_pc_branch = actual_nos_branch
+                    else:
+                        actual_pc_branch = actual_nos_branch
+                else:
+                    actual_pc_branch = actual_nos_branch
+                    resource_manager_json = {}
+                
+                # Determine build types based on actual branches from source JP
+                nos_build_type = "opt" if actual_nos_branch.strip().lower() == "master" else "release"
+                pc_build_type = "opt" if actual_pc_branch.strip().lower() == "master" else "release"
+                
+                logger.info(f"[create] Extracted branches from source JP: nos={actual_nos_branch}, pc={actual_pc_branch}")
+                
+                # Update git config (keep source branch)
+                git = new_jp_payload.get("git") or {}
+                if not isinstance(git, dict):
+                    git = {}
+                git["branch"] = actual_nos_branch
+                git["repo"] = "main"
+                new_jp_payload["git"] = git
+                
+                # Update build selection for NOS
+                new_jp_payload["build_selection"] = {
+                    "by_latest_smoked": True,  # Always true for Latest Smoke Passed
+                    "commit_must_be_newer": False,
+                    "build_type": nos_build_type,
+                }
+                # Ensure conflicting fields are removed
+                new_jp_payload["build_selection"].pop("by_commit_id", None)
+                new_jp_payload["build_selection"].pop("commit_id", None)
+                new_jp_payload["build_selection"].pop("gbn", None)
+                
+                # Update resource_manager_json for PC
+                if "NOS_CLUSTER" not in resource_manager_json:
+                    resource_manager_json["NOS_CLUSTER"] = {}
+                resource_manager_json["PRISM_CENTRAL"] = {
+                    "build": {
+                        "branch": actual_pc_branch,
+                        "build_selection_build_type": pc_build_type,
+                        "build_selection_option": "Latest Smoke Passed",
+                    }
+                }
+                new_jp_payload["resource_manager_json"] = resource_manager_json
+                
+                logger.info(f"[create] Clone mode — set build_selection: nos_build_type={nos_build_type}, "
+                           f"pc_build_type={pc_build_type}, by_latest_smoked=True, nos_branch={actual_nos_branch}, pc_branch={actual_pc_branch}")
+
+        if retain_setup_on_failure:
+            _apply_retain_setup_on_failure(new_jp_payload)
+
+        _set_tcms_sync_flags(new_jp_payload, sync_to_tcms)
+
+        def _force_email_on_and_clear_tag_filters(jp):
+            """Turn 'Send Email Reports' ON (logged-in user as recipient) and disable
+            'Run Tests With Tags' / clear any inherited TCMS tag filters. Mutates jp.
+
+            JITA's "Send Email Reports" checkbox is NOT a boolean field — the UI derives
+            its state from whether an ``EmailPlugin`` exists in ``plugins.post_run``
+            (verified from the JITA frontend bundle). So we add that plugin entry.
+            Recipients live in the ``emails`` list (``email_ids`` kept in sync).
+            """
+            if not isinstance(jp, dict):
+                return
+            # Add the EmailPlugin to plugins.post_run (idempotent) — this is what the
+            # "Send Email Reports" toggle actually reflects.
+            plugins = jp.get("plugins")
+            if not isinstance(plugins, dict):
+                plugins = {}
+            post_run = plugins.get("post_run")
+            if not isinstance(post_run, list):
+                post_run = []
+            if not any(isinstance(p, dict) and p.get("name") == "EmailPlugin" for p in post_run):
+                post_run.append({
+                    "name": "EmailPlugin",
+                    "args": {},
+                    "description": "Sends mail to the recipients.",
+                    "stage": "post_run",
+                    "metadata": {"kind": "task"},
+                })
+            plugins["post_run"] = post_run
+            if not isinstance(plugins.get("pre_run"), list):
+                plugins["pre_run"] = []
+            jp["plugins"] = plugins
+            # Legacy boolean flags (harmless; some API paths still read them).
+            jp["send_email_on_completion"] = True
+            jp["send_emails"] = True
+            if current_user_email:
+                recipients = [current_user_email]
+                jp["emails"] = recipients
+                jp["email_ids"] = recipients
+                jp["private"] = True
+                jp["user_groups"] = ["cdp_reg_jarvis"]
+            # Disable "Run Tests With Tags" and drop inherited TCMS tag(s) (e.g. "unstable").
+            adv = jp.get("advanced_options")
+            if not isinstance(adv, dict):
+                adv = {}
+            adv["run_tests_with_tags"] = False
+            adv["tags"] = []
+            jp["advanced_options"] = adv
+            jp["run_tests_with_additional_tags"] = []
+
+        _force_email_on_and_clear_tag_filters(new_jp_payload)
+        logger.info(
+            f"[create] Email ON (recipient={current_user_email}); "
+            f"run_tests_with_tags disabled and TCMS tag filters cleared"
+        )
 
         # Tags will be applied via a separate PUT after creation (same
         # approach as Run Plan) because JITA's POST ignores tag fields.
@@ -7919,6 +10391,7 @@ def dynamic_jp_create():
         serializable_payload = sanitize_value(new_jp_payload)
         logger.info(f"[create] Final JP payload — name: {serializable_payload.get('name')}, "
                     f"tags: {serializable_payload.get('tags', 'MISSING')}, "
+                    f"build_selection: {serializable_payload.get('build_selection', 'MISSING')}, "
                     f"adv_opts_keys: {list((serializable_payload.get('advanced_options') or {}).keys())}, "
                     f"adv_tags: {(serializable_payload.get('advanced_options') or {}).get('tags', 'MISSING')}, "
                     f"test_sets: {serializable_payload.get('test_sets', 'MISSING')}")
@@ -7958,11 +10431,121 @@ def dynamic_jp_create():
 
         logger.info(f"Created JP: {new_jp_name} (ID: {created_jp_id})")
 
+        # JITA can fill TCMS fields back to defaults during POST. Unless the
+        # user explicitly enabled Sync TCMS, re-fetch and clear them via PUT.
+        tcms_cleanup_warning = None
+        if not sync_to_tcms and created_jp_id:
+            try:
+                get_resp = requests.get(
+                    f"{JITA_BASE}/job_profiles/{created_jp_id}",
+                    auth=JITA_SVC_AUTH,
+                    verify=False,
+                    timeout=30,
+                )
+                if get_resp.status_code == 200:
+                    jp_data = get_resp.json().get("data", {})
+                    if isinstance(jp_data, dict):
+                        _set_tcms_sync_flags(jp_data, False)
+                        # Log infra from Jita's perspective after JP creation
+                        infra_after = jp_data.get('infra', [])
+                        coupon_allocated = None
+                        if isinstance(infra_after, list) and len(infra_after) > 0:
+                            params = infra_after[0].get('params', {})
+                            coupon_allocated = params.get('coupon')
+                        logger.info(
+                            f"[create] Jita GET after POST: "
+                            f"infra={infra_after}, "
+                            f"coupon={coupon_allocated}, "
+                            f"emails={jp_data.get('emails')}, "
+                            f"send_emails={jp_data.get('send_emails')}, "
+                            f"private={jp_data.get('private')}, "
+                            f"user_groups={jp_data.get('user_groups')}"
+                        )
+                        # JITA can reset these on POST, so re-apply them on the PUT.
+                        jp_data["auto_schedule_cron"] = False
+                        jp_data["allow_resource_sharing"] = False
+                        jp_data["allow_resource_sharing_across_tasks"] = False
+                        jp_data["skip_bad_tests"] = True
+                        jp_data["run_tests_with_priorities"] = jp_data.get("run_tests_with_priorities") or []
+                        jp_data["sdk_installation_options"] = jp_data.get("sdk_installation_options") or {}
+                        jp_data["demo_mode"] = False
+                        jp_data["image_build_type"] = jp_data.get("image_build_type") or "None"
+                        if create_fresh:
+                            jp_data["requested_hardware"] = _default_requested_hardware(resource_type)
+                        # Force email ON + clear inherited tag filters.
+                        _force_email_on_and_clear_tag_filters(jp_data)
+                        logger.info(
+                            f"[create] Re-applied email + tag filters "
+                            f"(send_emails={jp_data.get('send_emails')}, emails={jp_data.get('emails')})"
+                        )
+                        put_resp = requests.put(
+                            f"{JITA_BASE}/job_profiles/{created_jp_id}",
+                            json=sanitize_value(jp_data),
+                            auth=JITA_SVC_AUTH,
+                            verify=False,
+                            timeout=30,
+                        )
+                        if put_resp.status_code == 200:
+                            logger.info(
+                                f"[create] TCMS fields cleared via PUT for JP {created_jp_id}"
+                            )
+                            # Log final state after PUT
+                            try:
+                                final_get = requests.get(
+                                    f"{JITA_BASE}/job_profiles/{created_jp_id}",
+                                    auth=JITA_SVC_AUTH,
+                                    verify=False,
+                                    timeout=15,
+                                )
+                                if final_get.status_code == 200:
+                                    final_data = final_get.json().get("data", {})
+                                    final_infra = final_data.get('infra', [])
+                                    final_coupon = None
+                                    if isinstance(final_infra, list) and len(final_infra) > 0:
+                                        final_coupon = final_infra[0].get('params', {}).get('coupon')
+                                    final_tfm = final_data.get('test_framework_metadata', {}) or {}
+                                    final_test_branch = (final_tfm.get('test') or {}).get('branch')
+                                    logger.info(
+                                        f"[create] Final state after PUT: "
+                                        f"emails={final_data.get('emails')}, "
+                                        f"send_email_on_completion={final_data.get('send_email_on_completion')}, "
+                                        f"send_emails={final_data.get('send_emails')}, "
+                                        f"test_branch={final_test_branch}, "
+                                        f"nutest_branch={final_data.get('nutest-py3-tests_branch')}, "
+                                        f"private={final_data.get('private')}, "
+                                        f"user_groups={final_data.get('user_groups')}, "
+                                        f"coupon={final_coupon}"
+                                    )
+                            except Exception as e:
+                                logger.warning(f"[create] Could not GET final state: {e}")
+                        else:
+                            tcms_cleanup_warning = (
+                                f"JP created but TCMS sync cleanup failed (HTTP {put_resp.status_code})"
+                            )
+                            logger.warning(
+                                f"[create] TCMS cleanup PUT failed: HTTP {put_resp.status_code} — {put_resp.text[:300]}"
+                            )
+                    else:
+                        tcms_cleanup_warning = "JP created but TCMS sync cleanup could not re-fetch JP data"
+                else:
+                    tcms_cleanup_warning = (
+                        f"JP created but TCMS sync cleanup re-fetch failed (HTTP {get_resp.status_code})"
+                    )
+                    logger.warning(
+                        f"[create] TCMS cleanup GET failed: HTTP {get_resp.status_code} — {get_resp.text[:300]}"
+                    )
+            except Exception as e:
+                tcms_cleanup_warning = f"JP created but TCMS sync cleanup failed: {e}"
+                logger.warning(f"[create] TCMS cleanup error: {e}")
+
         # 7. Apply tags via PUT (same approach as Run Plan — JITA ignores
         # tag fields on POST but accepts them on PUT via tester_tags)
         tag_warning = None
-        if jp_tags and created_jp_id:
-            logger.info(f"[create] Applying tags {jp_tags} to JP {created_jp_id} via PUT (tester_tags)")
+        if (jp_tags or sync_to_tcms) and created_jp_id:
+            effective_tags = list(dict.fromkeys(jp_tags + (["official"] if sync_to_tcms else [])))
+            if not sync_to_tcms:
+                effective_tags = [t for t in effective_tags if t != "official"]
+            logger.info(f"[create] Applying tags {effective_tags} to JP {created_jp_id} via PUT (tester_tags)")
             try:
                 get_resp = requests.get(
                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
@@ -7974,8 +10557,14 @@ def dynamic_jp_create():
                         tester_tags = jp_data.get("tester_tags", [])
                         if not isinstance(tester_tags, list):
                             tester_tags = []
-                        merged = list(dict.fromkeys(tester_tags + jp_tags))
+                        merged = list(dict.fromkeys(tester_tags + effective_tags))
+                        if not sync_to_tcms:
+                            merged = [t for t in merged if t != "official"]
                         jp_data["tester_tags"] = merged
+                        _set_tcms_sync_flags(jp_data, sync_to_tcms)
+                        # Keep email ON and tag filters cleared on this PUT too
+                        # (covers the sync_to_tcms path where the block above is skipped).
+                        _force_email_on_and_clear_tag_filters(jp_data)
 
                         put_payload = {}
                         for k, v in jp_data.items():
@@ -8014,6 +10603,8 @@ def dynamic_jp_create():
             warnings.append(ts_create_warning)
         if tag_warning:
             warnings.append(tag_warning)
+        if tcms_cleanup_warning:
+            warnings.append(tcms_cleanup_warning)
 
         ts_msg = ""
         if created_ts_id:
@@ -8025,11 +10616,13 @@ def dynamic_jp_create():
             "job_profile": {
                 "_id": created_jp_id,
                 "name": new_jp_name,
+                "ui_url": _jita_browser_entity_url(JITA_WEB_JOB_PROFILE_URL, created_jp_id, new_jp_name),
             },
             "test_set": {
                 "_id": created_ts_id,
                 "name": new_ts_name,
                 "reused": ts_reused,
+                "ui_url": _jita_browser_entity_url(JITA_WEB_TEST_SET_URL, created_ts_id, new_ts_name),
             } if created_ts_id else None,
             "message": f"Created {new_jp_name}{ts_msg}",
             "warnings": warnings if warnings else None,
@@ -8171,66 +10764,135 @@ def dynamic_jp_update():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/mcp/regression/dynamic-jp/optional-defaults", methods=["GET"])
+def dynamic_jp_optional_defaults():
+    """Return the optional framework-option defaults the UI 'Add defaults' button injects."""
+    return jsonify({
+        "framework_options": DYN_TESTSET_OPTIONAL_FRAMEWORK_OPTS,
+    })
+
+
+def _oid_bounds_for_local_date(date_str):
+    """Return (start_oid, end_oid) hex ObjectIds spanning a local calendar date.
+
+    MongoDB ObjectIds embed the creation time (UTC seconds) in their leading 4
+    bytes, so an ``_id`` range filters strictly by creation timestamp. ``date_str``
+    is ``YYYY-MM-DD`` in the server's local timezone (same as the user's). Returns
+    ``None`` if the date can't be parsed.
+    """
+    try:
+        day_start = datetime.strptime(date_str.strip(), "%Y-%m-%d")
+    except (ValueError, AttributeError):
+        return None
+    start_ts = int(day_start.timestamp())
+    end_ts = int((day_start + timedelta(days=1)).timestamp())
+    start_oid = f"{start_ts:08x}" + "0" * 16
+    end_oid = f"{end_ts:08x}" + "0" * 16
+    return start_oid, end_oid
+
+
 @app.route("/mcp/regression/dynamic-jp/search", methods=["POST"])
 def dynamic_jp_search():
-    """Search Job Profiles and Test Sets by name pattern."""
+    """Search Job Profiles and Test Sets by name and/or creation date.
+
+    Either ``query`` (>= 2 chars name substring) or ``date`` (YYYY-MM-DD) is
+    required; both may be combined. When ``date`` is supplied, results are limited
+    to entities **created by this tool** (JITA service account) on that calendar
+    date, using an ObjectId creation-timestamp range.
+    """
     try:
         req_data = request.json or {}
         query = (req_data.get("query") or "").strip()
-        if len(query) < 2:
-            return jsonify({"error": "Search query must be at least 2 characters"}), 400
+        date_str = (req_data.get("date") or "").strip()
 
-        pattern = re.escape(query)
-        raw_q = json.dumps({"name": {"$regex": pattern, "$options": "i"}})
+        if len(query) < 2 and not date_str:
+            return jsonify({"error": "Provide a search term (>= 2 chars) or pick a date"}), 400
+
+        date_cond = None
+        if date_str:
+            bounds = _oid_bounds_for_local_date(date_str)
+            if not bounds:
+                return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+            start_oid, end_oid = bounds
+            date_cond = {"_id": {"$gte": {"$oid": start_oid}, "$lt": {"$oid": end_oid}}}
+
+        name_cond = (
+            {"name": {"$regex": re.escape(query), "$options": "i"}}
+            if len(query) >= 2
+            else None
+        )
+
+        # "Created by this tool" marker: every dynamic JP/TS is tagged with the
+        # cdp_reg_jarvis user group (JITA's created_by is an opaque ObjectId and is
+        # unreliable). Only applied when a date is selected so plain name search keeps
+        # its broad behaviour.
+        tool_cond = {"user_groups": {"$in": ["cdp_reg_jarvis"]}}
+        jp_tool_cond = tool_cond
+        ts_tool_cond = tool_cond
+
+        def _build_raw_query(tool_cond):
+            conds = []
+            if name_cond:
+                conds.append(name_cond)
+            if date_cond:
+                conds.append(date_cond)
+                conds.append(tool_cond)
+            if not conds:
+                return None
+            return json.dumps({"$and": conds} if len(conds) > 1 else conds[0])
+
         limit = min(int(req_data.get("limit", 20)), 50)
-
         result = {"job_profiles": [], "test_sets": []}
 
-        try:
-            jp_resp = requests.get(
-                f"{JITA_BASE}/job_profiles",
-                params={"raw_query": raw_q, "limit": limit, "only": "_id,name,description,tags"},
-                auth=JITA_SVC_AUTH, verify=False, timeout=20,
-            )
-            if jp_resp.status_code == 200:
-                for item in (jp_resp.json().get("data", []) or []):
-                    if not isinstance(item, dict):
-                        continue
-                    eid = item.get("_id")
-                    if isinstance(eid, dict) and "$oid" in eid:
-                        eid = eid["$oid"]
-                    elif eid:
-                        eid = str(eid)
-                    result["job_profiles"].append({
-                        "_id": eid,
-                        "name": item.get("name", ""),
-                        "description": item.get("description", ""),
-                    })
-        except Exception as e:
-            logger.warning(f"[search] JP search failed: {e}")
+        def _extract_id(item):
+            eid = item.get("_id")
+            if isinstance(eid, dict) and "$oid" in eid:
+                return eid["$oid"]
+            return str(eid) if eid else None
 
-        try:
-            ts_resp = requests.get(
-                f"{JITA_BASE}/test_sets",
-                params={"raw_query": raw_q, "limit": limit, "only": "_id,name,description"},
-                auth=JITA_SVC_AUTH, verify=False, timeout=20,
-            )
-            if ts_resp.status_code == 200:
-                for item in (ts_resp.json().get("data", []) or []):
-                    if not isinstance(item, dict):
-                        continue
-                    eid = item.get("_id")
-                    if isinstance(eid, dict) and "$oid" in eid:
-                        eid = eid["$oid"]
-                    elif eid:
-                        eid = str(eid)
-                    result["test_sets"].append({
-                        "_id": eid,
-                        "name": item.get("name", ""),
-                        "description": item.get("description", ""),
-                    })
-        except Exception as e:
-            logger.warning(f"[search] TS search failed: {e}")
+        jp_raw_q = _build_raw_query(jp_tool_cond)
+        if jp_raw_q:
+            try:
+                jp_resp = requests.get(
+                    f"{JITA_BASE}/job_profiles",
+                    params={"raw_query": jp_raw_q, "limit": limit, "sort": "-_id",
+                            "only": "_id,name,description,tags,created_at"},
+                    auth=JITA_SVC_AUTH, verify=False, timeout=20,
+                )
+                if jp_resp.status_code == 200:
+                    for item in (jp_resp.json().get("data", []) or []):
+                        if not isinstance(item, dict):
+                            continue
+                        result["job_profiles"].append({
+                            "_id": _extract_id(item),
+                            "name": item.get("name", ""),
+                            "description": item.get("description", ""),
+                            "created_at": item.get("created_at"),
+                        })
+            except Exception as e:
+                logger.warning(f"[search] JP search failed: {e}")
+
+        ts_raw_q = _build_raw_query(ts_tool_cond)
+        if ts_raw_q:
+            try:
+                ts_resp = requests.get(
+                    f"{JITA_BASE}/test_sets",
+                    params={"raw_query": ts_raw_q, "limit": limit, "sort": "-_id",
+                            "only": "_id,name,description,created_at"},
+                    auth=JITA_SVC_AUTH, verify=False, timeout=20,
+                )
+                if ts_resp.status_code == 200:
+                    for item in (ts_resp.json().get("data", []) or []):
+                        if not isinstance(item, dict):
+                            continue
+                        result["test_sets"].append({
+                            "_id": _extract_id(item),
+                            "name": item.get("name", ""),
+                            "description": item.get("description", ""),
+                            "created_at": item.get("created_at"),
+                        })
+            except Exception as e:
+                logger.warning(f"[search] TS search failed: {e}")
 
         return jsonify({"success": True, **result})
     except Exception as e:
@@ -8320,11 +10982,1518 @@ def dynamic_jp_delete():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/mcp/regression/debug/inspect-jp/<jp_id>", methods=["GET"])
+def debug_inspect_jp(jp_id):
+    """Debug endpoint to inspect JP structure from JITA"""
+    try:
+        jp_resp = requests.get(
+            f"{JITA_BASE}/job_profiles/{jp_id}",
+            auth=JITA_SVC_AUTH,
+            verify=False,
+            timeout=30
+        )
+        if jp_resp.status_code != 200:
+            return jsonify({"error": f"Failed to fetch JP (HTTP {jp_resp.status_code})"}), jp_resp.status_code
+        
+        jp_data = jp_resp.json().get("data", {})
+        
+        # Extract email-related fields
+        email_fields = {}
+        for key in jp_data.keys():
+            if 'email' in key.lower() or 'mail' in key.lower() or key in ['emails', 'user_groups', 'scheduling_options']:
+                email_fields[key] = jp_data.get(key)
+        
+        return jsonify({
+            "jp_id": jp_id,
+            "jp_name": jp_data.get("name"),
+            "all_keys": list(jp_data.keys()),
+            "email_related_fields": email_fields
+        })
+    except Exception as e:
+        logger.error(f"Error inspecting JP: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
+# AI Analysis Endpoints
+# ======================================================
+
+def _call_ai_chat(system_prompt, user_content, max_tokens=2048):
+    """Helper to call the Nutanix AI chat endpoint."""
+    payload = {
+        "model": "hack-reason",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ],
+        "max_tokens": max_tokens,
+        "stream": False
+    }
+    url = f"{AI_BASE}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {AI_API_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, context=SSL_CTX, timeout=90) as resp:
+        if resp.getcode() != 200:
+            raise Exception(f"AI API returned HTTP {resp.getcode()}")
+        response_data = json.loads(resp.read().decode())
+        choices = response_data.get("choices", [])
+        if not choices:
+            raise Exception("AI returned no choices")
+        content = (choices[0].get("message") or {}).get("content", "")
+        return content.strip()
+
+
+def _build_bulk_issues_fallback_analysis(issue_rows, tag, total_tests):
+    """Generate deterministic markdown when external AI endpoint is unavailable."""
+    table_header = (
+        "| Bug ID | Affected Feature | Testcases Impacted | QI Impact | Risk Level | Impact | Recommended Action |\n"
+        "| --- | --- | ---: | ---: | --- | --- | --- |"
+    )
+    table_rows = []
+    for row in issue_rows:
+        ticket = row["ticket"]
+        feature = row["feature"] or "Unknown"
+        testcase_count = row["testcase_count"]
+        qi_impact = row["qi_impact"]
+        risk_level = row["risk_level"]
+        impact = (
+            f"Potentially impacts {testcase_count} testcases in {feature}."
+            if feature != "Unknown"
+            else f"Potentially impacts {testcase_count} testcases across multiple areas."
+        )
+        recommended_action = (
+            "Validate ownership, confirm reproducibility, and prioritize based on QI impact."
+        )
+        table_rows.append(
+            f"| {ticket} | {feature} | {testcase_count} | {qi_impact} | {risk_level} | {impact} | {recommended_action} |"
+        )
+
+    critical_count = sum(1 for row in issue_rows if row["risk_level"] == "Critical")
+    high_count = sum(1 for row in issue_rows if row["risk_level"] == "High")
+    medium_count = sum(1 for row in issue_rows if row["risk_level"] == "Medium")
+    risk_score = min(100, critical_count * 30 + high_count * 20 + medium_count * 10 + 15)
+    readiness = (
+        "Not Ready"
+        if critical_count > 0
+        else "At Risk"
+        if high_count > 0
+        else "Proceed with Caution"
+        if medium_count > 0
+        else "Ready with Monitoring"
+    )
+
+    top_three = sorted(
+        issue_rows,
+        key=lambda r: (
+            {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}.get(r["risk_level"], 0),
+            abs(float(r["qi_impact"])),
+        ),
+        reverse=True,
+    )[:3]
+
+    priorities = "\n".join(
+        f"- {row['ticket']} ({row['risk_level']}, QI impact {row['qi_impact']}%)"
+        for row in top_three
+    ) or "- No priority tickets identified"
+
+    return (
+        "_AI endpoint unreachable. Showing deterministic fallback analysis._\n\n"
+        f"**Regression Tag:** `{tag or 'N/A'}`  \n"
+        f"**Total Tests in Run:** `{total_tests}`  \n"
+        f"**Bulk Issues:** `{len(issue_rows)}`\n\n"
+        f"{table_header}\n"
+        + "\n".join(table_rows)
+        + "\n\n"
+        + f"### Overall Summary\n"
+        + f"- Overall Risk Score: **{risk_score}/100**\n"
+        + f"- Release Readiness: **{readiness}**\n"
+        + f"- Top 3 Priorities:\n{priorities}"
+    )
+
+
+@app.route("/mcp/regression/ai-analysis/bulk-issues", methods=["POST"])
+@app.route("/api/mcp/regression/ai-analysis/bulk-issues", methods=["POST"])
+@jwt_required
+def ai_analyze_bulk_issues():
+    """AI analysis for bulk issue JIRA tickets - analyzes patterns and provides risk assessment."""
+    try:
+        body = request.get_json(force=True) or {}
+        bulk_issues = body.get("bulk_issues", {})
+        bulk_issues_with_qi = body.get("bulk_issues_with_qi", {})
+        tag = body.get("tag", "")
+        total_tests = body.get("total_tests_processed", 0)
+
+        if not bulk_issues:
+            return jsonify({"error": "No bulk issues provided"}), 400
+
+        issue_detail_blocks = []
+        issue_rows = []
+        for ticket, tests in bulk_issues.items():
+            qi_data = bulk_issues_with_qi.get(ticket, {})
+            qi_impact = qi_data.get("overall_qi_impact", "N/A")
+            count = qi_data.get("testcase_count", len(tests)) if qi_data else len(tests)
+            qi_numeric = None
+            if qi_impact != "N/A":
+                try:
+                    qi_numeric = float(qi_impact)
+                except Exception:
+                    qi_numeric = None
+
+            if qi_numeric is None:
+                risk_level = "Low"
+            elif qi_numeric <= -5:
+                risk_level = "Critical"
+            elif qi_numeric <= -2:
+                risk_level = "High"
+            elif qi_numeric <= -1:
+                risk_level = "Medium"
+            else:
+                risk_level = "Low"
+
+            tc_names = tests if isinstance(tests, list) else []
+            # Extract affected feature from test name prefixes
+            feature_prefixes = set()
+            for name in tc_names[:20]:
+                parts = name.split(".")
+                if len(parts) >= 3:
+                    feature_prefixes.add(".".join(parts[:3]))
+                elif len(parts) >= 2:
+                    feature_prefixes.add(".".join(parts[:2]))
+            affected_features = ", ".join(sorted(feature_prefixes)[:3])
+            tc_sample = tc_names[:10]
+            tc_display = "\n".join(f"    - {name}" for name in tc_sample)
+            if len(tc_names) > 10:
+                tc_display += f"\n    ... and {len(tc_names) - 10} more"
+            primary_feature = sorted(feature_prefixes)[0] if feature_prefixes else "Unknown"
+            issue_rows.append(
+                {
+                    "ticket": ticket,
+                    "feature": primary_feature,
+                    "testcase_count": count,
+                    "qi_impact": qi_numeric if qi_numeric is not None else 0.0,
+                    "risk_level": risk_level,
+                }
+            )
+            issue_detail_blocks.append(
+                f"Ticket: {ticket}\n"
+                f"  Testcases Impacted: {count}\n"
+                f"  QI Impact: {qi_impact}{'%' if qi_impact != 'N/A' else ''}\n"
+                f"  Affected Feature(s): {affected_features or 'Unknown'}\n"
+                f"  Affected Testcases:\n{tc_display}"
+            )
+
+        user_content = (
+            f"Regression Tag: {tag}\n"
+            f"Total Tests in Run: {total_tests}\n"
+            f"Number of Bulk Issues (tickets affecting >5 testcases): {len(bulk_issues)}\n\n"
+            f"=== Bulk Issue Details ===\n\n" + "\n\n".join(issue_detail_blocks) + "\n\n"
+            "IMPORTANT: Use EXACTLY the ticket IDs and testcase counts from the data above. "
+            "Do NOT change or reorder the tickets. Analyse the actual testcase names to determine patterns.\n\n"
+            "For EACH ticket listed above (in the same order), provide:\n"
+            "1. Bug ID — the JIRA ticket ID exactly as given\n"
+            "2. Affected Feature — derived from testcase name prefix (e.g., cdp.stargate.storage_policy)\n"
+            "3. Risk Level (Critical/High/Medium/Low) — based on QI impact: <=-5% Critical, <=-2% High, <=-1% Medium, else Low\n"
+            "4. Impact — one sentence describing what is broken\n"
+            "5. Recommended Action — specific next step (if this looks like a test issue, note it can be fixed; "
+            "if product issue, note the affected component)\n\n"
+            "Then provide an overall summary:\n"
+            "- Overall Risk Score (0-100, where 100 is highest risk)\n"
+            "- Release Readiness assessment\n"
+            "- Top 3 priorities to address\n\n"
+            "Format using markdown. Use a table with columns: "
+            "Bug ID | Affected Feature | Testcases Impacted | QI Impact | Risk Level | Impact | Recommended Action\n"
+            "The Bug ID, Testcases Impacted, and QI Impact columns MUST match the input data exactly."
+        )
+
+        system_prompt = (
+            "You are a regression testing expert analyzing bulk failure patterns in a CDP (Continuous Data Protection) "
+            "software QA pipeline at Nutanix. "
+            "Bulk issues are JIRA tickets that affect more than 5 testcases, indicating systemic problems. "
+            "QI Impact is the Quality Index impact - negative values mean the bug is reducing overall quality. "
+            "Risk Level thresholds: QI Impact <= -5% is Critical, <= -2% is High, <= -1% is Medium, > -1% is Low. "
+            "You MUST use the exact ticket IDs and counts provided — never invent or reorder them. "
+            "Infer the Affected Feature from testcase name prefixes (e.g., cdp.stargate.checksum_regions → CDP Stargate Checksum). "
+            "For Recommended Action, distinguish between test issues (can be fixed in test code) and product issues "
+            "(require product team attention). "
+            "Provide actionable, concise analysis. Use markdown tables for structured data."
+        )
+
+        try:
+            analysis = _call_ai_chat(system_prompt, user_content, max_tokens=3000)
+        except urllib.error.URLError as err:
+            logger.warning(
+                f"AI bulk issues endpoint unreachable ({err.reason}); returning fallback analysis."
+            )
+            analysis = _build_bulk_issues_fallback_analysis(issue_rows, tag, total_tests)
+        return jsonify({"success": True, "analysis": analysis})
+
+    except Exception as e:
+        logger.error(f"Error in AI bulk issues analysis: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/ai-analysis/deep-triage", methods=["POST"])
+@app.route("/api/mcp/regression/ai-analysis/deep-triage", methods=["POST"])
+@jwt_required
+def ai_deep_triage():
+    """
+    Prepare context for deep triage of a single bug using the triage-cdp-test-failure skill.
+    Returns structured context (log URL, test name, ticket, feature area) that the frontend
+    uses to invoke the Cursor SDK agent with the skill.
+    """
+    try:
+        body = request.get_json(force=True) or {}
+        ticket_id = body.get("ticket_id", "")
+        test_name = body.get("test_name", "")
+        log_url = body.get("log_url", "")
+        task_id = body.get("task_id", "")
+
+        if not ticket_id and not test_name:
+            return jsonify({"error": "ticket_id or test_name is required"}), 400
+
+        # Extract feature area from test name
+        feature_area = ""
+        if test_name:
+            parts = test_name.split(".")
+            if len(parts) >= 3:
+                feature_area = ".".join(parts[:3])
+            elif len(parts) >= 2:
+                feature_area = ".".join(parts[:2])
+
+        # Build Jita log directory URL if task_id and test_name are provided but log_url is not
+        if not log_url and task_id and test_name:
+            # Convert test name to path format for log URL construction
+            test_path = "/".join(test_name.split("."))
+            log_url = f"http://10.40.234.216/logs/{task_id}/{test_path}/"
+
+        # Construct the skill invocation command
+        skill_command = f"/triage-cdp-test-failure"
+        if ticket_id:
+            skill_command += f" {ticket_id}"
+        if log_url:
+            skill_command += f" {log_url}"
+
+        # Build context for the Cursor agent
+        context = {
+            "ticket_id": ticket_id,
+            "test_name": test_name,
+            "feature_area": feature_area,
+            "log_url": log_url,
+            "task_id": task_id,
+            "skill_command": skill_command,
+            "skill_prompt": (
+                f"Triage the following CDP test failure:\n"
+                f"- JIRA Ticket: {ticket_id}\n"
+                f"- Test Name: {test_name}\n"
+                f"- Feature Area: {feature_area}\n"
+                f"- Jita Log Directory: {log_url}\n\n"
+                f"Use the triage-cdp-test-failure skill to:\n"
+                f"1. Fetch and analyse the test logs\n"
+                f"2. Search the test source code in Sourcegraph (nugerrit.ntnxdpro.com/nutest-py3-tests)\n"
+                f"3. Determine if this is a test issue or product issue\n"
+                f"4. If test issue, propose a fix and offer to create a CR\n"
+                f"5. Provide structured triage result"
+            ),
+        }
+
+        return jsonify({"success": True, "context": context})
+
+    except Exception as e:
+        logger.error(f"Error in deep triage: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/jira-ticket-details", methods=["POST"])
+@app.route("/api/mcp/regression/jira-ticket-details", methods=["POST"])
+@jwt_required
+def get_jira_ticket_details():
+    """Fetch JIRA status and issue type for a list of ticket IDs."""
+    try:
+        body = request.get_json(force=True) or {}
+        ticket_ids = body.get("ticket_ids", [])
+        if not ticket_ids:
+            return jsonify({"error": "No ticket IDs provided"}), 400
+
+        results = {}
+        for ticket_id in ticket_ids[:50]:
+            jira_data = fetch_jira_ticket(ticket_id)
+            if jira_data:
+                fields = jira_data.get("fields", {})
+                results[ticket_id] = {
+                    "status": fields.get("status", {}).get("name", "Unknown"),
+                    "issue_type": fields.get("issuetype", {}).get("name", "Unknown")
+                }
+            else:
+                results[ticket_id] = {"status": "N/A", "issue_type": "N/A"}
+
+        return jsonify({"success": True, "details": results})
+    except Exception as e:
+        logger.error(f"Error fetching JIRA ticket details: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/ai-analysis/owner-tickets", methods=["POST"])
+@app.route("/api/mcp/regression/ai-analysis/owner-tickets", methods=["POST"])
+@jwt_required
+def ai_analyze_owner_tickets():
+    """AI analysis for owner-wise JIRA ticket breakdown with JIRA data fetch."""
+    try:
+        body = request.get_json(force=True) or {}
+        owner_ticket_map = body.get("owner_ticket_map", {})
+        triage_summary = body.get("triage_summary", {})
+        tag = body.get("tag", "")
+        total_tests = body.get("total_tests_processed", 0)
+
+        if not owner_ticket_map:
+            return jsonify({"error": "No owner ticket data provided"}), 400
+
+        # Collect all unique tickets and fetch JIRA data
+        all_tickets = set()
+        owner_for_ticket = {}
+        ticket_test_count = {}
+        for owner, tickets in owner_ticket_map.items():
+            for ticket, count in tickets.items():
+                all_tickets.add(ticket)
+                owner_for_ticket.setdefault(ticket, []).append(owner)
+                ticket_test_count[ticket] = ticket_test_count.get(ticket, 0) + count
+
+        # Fetch JIRA data for each ticket
+        jira_details = {}
+        for ticket_id in all_tickets:
+            jira_data = fetch_jira_ticket(ticket_id)
+            if jira_data:
+                fields = jira_data.get("fields", {})
+                status = fields.get("status", {}).get("name", "Unknown")
+                issue_type = fields.get("issuetype", {}).get("name", "Unknown")
+                summary = fields.get("summary", "")
+                description = (fields.get("description") or "")[:500]
+                priority = fields.get("priority", {}).get("name", "Unknown") if fields.get("priority") else "Unknown"
+                assignee = fields.get("assignee", {}).get("displayName", "Unassigned") if fields.get("assignee") else "Unassigned"
+                # Get latest comments
+                comments_data = fields.get("comment", {}).get("comments", [])
+                latest_comments = ""
+                for c in comments_data[-3:]:
+                    comment_body = (c.get("body") or "")[:200]
+                    latest_comments += f"  [{c.get('author', {}).get('displayName', 'Unknown')}]: {comment_body}\n"
+                jira_details[ticket_id] = {
+                    "status": status,
+                    "issue_type": issue_type,
+                    "summary": summary,
+                    "description": description,
+                    "priority": priority,
+                    "assignee": assignee,
+                    "comments": latest_comments.strip()
+                }
+            else:
+                jira_details[ticket_id] = {
+                    "status": "N/A",
+                    "issue_type": "N/A",
+                    "summary": "Unable to fetch",
+                    "description": "",
+                    "priority": "N/A",
+                    "assignee": "N/A",
+                    "comments": ""
+                }
+
+        # Build ticket detail lines for AI
+        ticket_detail_lines = []
+        for ticket_id in sorted(all_tickets):
+            jd = jira_details[ticket_id]
+            owners = ", ".join(owner_for_ticket.get(ticket_id, []))
+            tc_count = ticket_test_count.get(ticket_id, 0)
+            detail = (
+                f"Ticket: {ticket_id}\n"
+                f"  Owners: {owners}\n"
+                f"  Testcases Impacted: {tc_count}\n"
+                f"  JIRA Status: {jd['status']}\n"
+                f"  JIRA Issue Type: {jd['issue_type']}\n"
+                f"  Priority: {jd['priority']}\n"
+                f"  Assignee: {jd['assignee']}\n"
+                f"  Summary: {jd['summary']}\n"
+            )
+            if jd['description']:
+                detail += f"  Description: {jd['description'][:300]}\n"
+            if jd['comments']:
+                detail += f"  Latest Comments:\n{jd['comments']}\n"
+            ticket_detail_lines.append(detail)
+
+        user_content = (
+            f"Regression Tag: {tag}\n"
+            f"Total Tests in Run: {total_tests}\n"
+            f"Total Owners: {len(owner_ticket_map)}\n"
+            f"Total Unique Tickets: {len(all_tickets)}\n\n"
+            f"=== Ticket Details with JIRA Data ===\n\n"
+            + "\n".join(ticket_detail_lines) + "\n\n"
+            "Based on the JIRA data (status, description, comments), create a comprehensive analysis table:\n\n"
+            "Create a markdown table with these columns:\n"
+            "| Ticket ID | Owner | Status | Issue Type | Root Cause Category | Impact | AI Recommended Action |\n\n"
+            "For Root Cause Category, classify as one of: Product | Test | Infra | Framework\n"
+            "- Product: Bug in product code causing test failure\n"
+            "- Test: Test code issue (flaky, outdated assertions, bad test data)\n"
+            "- Infra: Infrastructure problem (environment, network, resources)\n"
+            "- Framework: Test framework issue (automation framework, libraries)\n\n"
+            "Base your classification on the JIRA description, comments, and issue type.\n"
+            "For Impact, one sentence on what this ticket affects.\n"
+            "For AI Recommended Action, provide a specific action based on the ticket status:\n"
+            "- If Open/To Do: suggest priority and who should work on it\n"
+            "- If In Progress: assess if it's on track\n"
+            "- If Resolved/Closed: suggest verifying the fix and closing test gaps\n\n"
+            "After the table, provide:\n"
+            "1. **Summary** — Overall triage health assessment\n"
+            "2. **Top 3 Priority Actions** — Most impactful actions to take now\n\n"
+            "Use the EXACT ticket IDs, owner names, and status from the data."
+        )
+
+        system_prompt = (
+            "You are a QA team lead analyzing JIRA tickets linked to regression test failures. "
+            "You have access to real JIRA data including status, description, and comments. "
+            "Classify each ticket's root cause category (Product/Test/Infra/Framework) based on the JIRA content. "
+            "Provide specific, actionable recommendations based on ticket status and context. "
+            "Use markdown tables. Use the exact ticket IDs and data provided — never invent data."
+        )
+
+        analysis = _call_ai_chat(system_prompt, user_content)
+
+        # Return both analysis and jira_details for the frontend table
+        return jsonify({
+            "success": True,
+            "analysis": analysis,
+            "jira_details": jira_details
+        })
+
+    except Exception as e:
+        logger.error(f"Error in AI owner tickets analysis: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/ai-analysis/testcase-summary", methods=["POST"])
+@app.route("/api/mcp/regression/ai-analysis/testcase-summary", methods=["POST"])
+@jwt_required
+def ai_analyze_testcases():
+    """AI analysis for ALL filtered testcase data across all pages - overall health, patterns, and recommendations."""
+    try:
+        body = request.get_json(force=True) or {}
+        stats = body.get("stats", {})
+        failed_testcases = body.get("failed_testcases", [])
+        branch = body.get("branch", "")
+        team = body.get("team", "")
+
+        total = stats.get("total", 0)
+        succeeded = stats.get("succeeded", 0)
+        failed = stats.get("failed", 0)
+        avg_stability = stats.get("avg_stability", "N/A")
+        avg_success = stats.get("avg_success", "N/A")
+        avg_qi = stats.get("avg_qi", "N/A")
+
+        issue_type_breakdown = stats.get("issue_type_breakdown", {})
+        component_breakdown = stats.get("component_breakdown", {})
+        unique_tickets = stats.get("unique_tickets", [])
+
+        if not issue_type_breakdown:
+            for tc in failed_testcases:
+                it = tc.get("issue_type", "Unknown")
+                issue_type_breakdown[it] = issue_type_breakdown.get(it, 0) + 1
+
+        if not unique_tickets:
+            ticket_set = set()
+            for tc in failed_testcases:
+                for t in tc.get("last_run_tickets", []):
+                    ticket_set.add(t)
+            unique_tickets = list(ticket_set)
+
+        failed_details = []
+        for tc in failed_testcases[:50]:
+            failed_details.append(
+                f"  - {tc.get('name', 'Unknown')}: issue_type={tc.get('issue_type', 'N/A')}, "
+                f"stability={tc.get('stability', 'N/A')}%, component={tc.get('primary_component', 'N/A')}, "
+                f"tickets={tc.get('last_run_tickets', [])}"
+            )
+
+        component_lines = "\n".join(
+            f"  {k}: {v} failed testcases" for k, v in sorted(component_breakdown.items(), key=lambda x: -x[1])[:15]
+        ) if component_breakdown else "  No component data available"
+
+        user_content = (
+            f"Branch: {branch}\nTeam: {team}\n\n"
+            f"=== Complete Test Suite Statistics (ALL filtered pages) ===\n"
+            f"Total Testcases (all pages): {total}\n"
+            f"Succeeded: {succeeded}\n"
+            f"Failed: {failed}\n"
+            f"Pass Rate: {(succeeded/total*100) if total else 0:.1f}%\n"
+            f"Avg Stability: {avg_stability}%\n"
+            f"Avg Success Rate: {avg_success}%\n"
+            f"Avg Quality Index: {avg_qi}%\n\n"
+            f"=== Issue Type Breakdown (ALL {failed} failed testcases) ===\n"
+            + "\n".join(f"  {k}: {v}" for k, v in issue_type_breakdown.items()) + "\n\n"
+            f"=== Component Breakdown (failed testcases by component) ===\n"
+            + component_lines + "\n\n"
+            f"=== Unique JIRA Tickets ({len(unique_tickets)}) ===\n"
+            + ", ".join(unique_tickets[:30]) + "\n\n"
+            f"=== Failed Testcase Samples (top 50 of {failed} total) ===\n"
+            + "\n".join(failed_details) + "\n\n"
+            "Provide a comprehensive analysis of the ENTIRE filtered dataset using markdown formatting with tables:\n"
+            "1. **Overall Health Assessment** - Use a table with Metric/Value/Interpretation columns\n"
+            "2. **Failure Pattern Analysis** - Common patterns across ALL failed testcases, systemic issues\n"
+            "3. **Issue Type Summary** - Use a table with Issue Type/Count/Percentage/Comment columns\n"
+            "4. **Component Risk Areas** - Table of components with highest failure concentration\n"
+            "5. **Ticket Analysis** - Assessment of JIRA tickets linked to failed tests in a table\n"
+            "6. **Recommendations** - Top 5 actionable items to improve test health\n"
+            "7. **Risk Score** - Overall risk score 0-100 (100=highest risk)\n"
+        )
+
+        system_prompt = (
+            "You are a QA analytics expert analyzing testcase data for a regression test suite. "
+            "The data represents ALL filtered testcases across all pages (not just the first page). "
+            "Provide actionable insights with specific recommendations. "
+            "Focus on identifying systemic issues, high-risk areas, and concrete steps to improve. "
+            "Use markdown formatting with tables (using | syntax) for structured data. "
+            "Be concise but thorough."
+        )
+
+        analysis = _call_ai_chat(system_prompt, user_content)
+        return jsonify({"success": True, "analysis": analysis})
+
+    except Exception as e:
+        logger.error(f"Error in AI testcase analysis: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/ai-analysis/run-plan-risk", methods=["POST"])
+@app.route("/api/mcp/regression/ai-analysis/run-plan-risk", methods=["POST"])
+@jwt_required
+def ai_run_plan_risk():
+    """AI risk analysis for a run plan based on its history and job profiles."""
+    try:
+        body = request.get_json(force=True) or {}
+        run_plan_name = body.get("name", "")
+        job_profile_count = body.get("job_profile_count", 0)
+        history = body.get("history", [])
+        tag_name = body.get("tag_name", "")
+
+        history_summary = []
+        success_count = 0
+        fail_count = 0
+        for entry in history[:10]:
+            status = entry.get("status", "unknown")
+            if status.lower() in ("success", "completed", "succeeded"):
+                success_count += 1
+            else:
+                fail_count += 1
+            history_summary.append(
+                f"  - Date: {entry.get('triggered_at', 'N/A')}, Status: {status}, "
+                f"Tasks: {len(entry.get('task_ids', []))}"
+            )
+
+        total_runs = success_count + fail_count
+        success_rate = (success_count / total_runs * 100) if total_runs else 0
+
+        user_content = (
+            f"Run Plan: {run_plan_name}\n"
+            f"Tag Name: {tag_name}\n"
+            f"Job Profiles: {job_profile_count}\n\n"
+            f"=== Run History (last {len(history[:10])} runs) ===\n"
+            f"Success Rate: {success_rate:.0f}% ({success_count}/{total_runs})\n"
+            + "\n".join(history_summary) + "\n\n"
+            "Provide using markdown formatting:\n"
+            "1. **Risk Score** (0-100, where 100 is highest risk)\n"
+            "2. **Risk Level** (Low/Medium/High/Critical)\n"
+            "3. **Confidence** (High/Medium/Low based on data available)\n"
+            "4. **Key Factors** - What contributes to the risk\n"
+            "5. **Recommendation** - One sentence actionable advice\n\n"
+            "Keep the response concise (under 200 words). Use a summary table."
+        )
+
+        system_prompt = (
+            "You are a regression testing risk analyst. Given run plan history, estimate "
+            "the risk of the next scheduled run failing. Consider success rate trends, "
+            "task counts, and patterns. Provide a numeric risk score and brief assessment. "
+            "Use markdown formatting with tables. Be direct and actionable."
+        )
+
+        analysis = _call_ai_chat(system_prompt, user_content, max_tokens=512)
+
+        risk_score_match = re.search(r"Risk Score[:\s]*(\d+)", analysis)
+        risk_score = int(risk_score_match.group(1)) if risk_score_match else (
+            90 if fail_count > success_count else
+            60 if success_rate < 70 else
+            30 if success_rate < 90 else 15
+        )
+
+        risk_level_match = re.search(r"Risk Level[:\s]*(Critical|High|Medium|Low)", analysis, re.IGNORECASE)
+        risk_level = risk_level_match.group(1) if risk_level_match else (
+            "Critical" if risk_score >= 80 else
+            "High" if risk_score >= 60 else
+            "Medium" if risk_score >= 40 else "Low"
+        )
+
+        return jsonify({
+            "success": True,
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "analysis": analysis,
+            "success_rate": round(success_rate, 1),
+            "total_runs": total_runs
+        })
+
+    except Exception as e:
+        logger.error(f"Error in AI run plan risk analysis: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
+# Cursor AI Bridge — Deep testcase analysis via Cursor SDK
+# ======================================================
+CURSOR_BRIDGE_URL = os.getenv("CURSOR_BRIDGE_URL", "http://localhost:5002")
+
+# In-memory store for async Cursor AI analysis jobs
+_cursor_ai_jobs = {}
+_cursor_ai_jobs_lock = threading.Lock()
+
+
+@app.route("/mcp/regression/cursor-ai/analyze-testcase", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/analyze-testcase", methods=["POST"])
+@jwt_required
+def cursor_ai_analyze_testcase():
+    """Trigger deep AI analysis for a single failed testcase via the Cursor bridge."""
+    try:
+        body = request.get_json(force=True) or {}
+        testcase_name = body.get("testcase_name", "")
+        if not testcase_name:
+            return jsonify({"error": "testcase_name is required"}), 400
+
+        exception_summary = body.get("exception_summary", "")
+        exception = body.get("exception", "")
+        test_log_url = body.get("test_log_url", "")
+        jira_tickets = body.get("jira_tickets", [])
+        failure_stage = body.get("failure_stage", "")
+
+        # Fetch logs if not provided in the request
+        steps_log = body.get("steps_log", "")
+        nutest_test_log = body.get("nutest_test_log", "")
+        if not steps_log and not nutest_test_log and test_log_url:
+            logs = fetch_testcase_logs(testcase_name, test_log_url)
+            steps_log = logs.get("steps_log", "")
+            nutest_test_log = logs.get("nutest_test_log", "")
+
+        payload = {
+            "testcase_name": testcase_name,
+            "exception_summary": exception_summary,
+            "exception": exception,
+            "steps_log": steps_log[:5000],
+            "nutest_test_log": nutest_test_log[:5000],
+            "test_log_url": test_log_url,
+            "jira_tickets": jira_tickets,
+            "failure_stage": failure_stage,
+        }
+
+        resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/analyze-testcase",
+            json=payload,
+            timeout=600,
+        )
+        if resp.status_code != 200:
+            error_msg = resp.json().get("error", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+            return jsonify({"error": f"Bridge error: {error_msg}"}), 502
+
+        data = resp.json()
+        return jsonify({
+            "success": True,
+            "session_id": data.get("session_id", ""),
+            "analysis": data.get("analysis", {}),
+        })
+
+    except requests.exceptions.ConnectionError:
+        logger.error("Cursor bridge is not reachable at %s", CURSOR_BRIDGE_URL)
+        return jsonify({"error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start"}), 503
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Analysis timed out (>600s). Try batch mode for complex testcases."}), 504
+    except Exception as e:
+        logger.error(f"Error in cursor-ai analyze-testcase: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/analyze-batch", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/analyze-batch", methods=["POST"])
+@jwt_required
+def cursor_ai_analyze_batch():
+    """Start async batch analysis for multiple selected failed testcases."""
+    try:
+        body = request.get_json(force=True) or {}
+        testcases = body.get("testcases", [])
+        if not testcases:
+            return jsonify({"error": "testcases array is required"}), 400
+
+        # Enrich each testcase with logs if missing
+        enriched = []
+        for tc in testcases:
+            name = tc.get("testcase_name", "")
+            log_url = tc.get("test_log_url", "")
+            if name and log_url and not tc.get("steps_log") and not tc.get("nutest_test_log"):
+                logs = fetch_testcase_logs(name, log_url)
+                tc["steps_log"] = logs.get("steps_log", "")[:5000]
+                tc["nutest_test_log"] = logs.get("nutest_test_log", "")[:5000]
+            enriched.append(tc)
+
+        resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/analyze-batch",
+            json={"testcases": enriched},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            error_msg = resp.json().get("error", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+            return jsonify({"error": f"Bridge error: {error_msg}"}), 502
+
+        data = resp.json()
+        job_id = data.get("job_id", "")
+
+        # Track the job locally
+        with _cursor_ai_jobs_lock:
+            _cursor_ai_jobs[job_id] = {
+                "status": "running",
+                "total": len(enriched),
+                "completed": 0,
+                "created_at": datetime.now().isoformat(),
+            }
+
+        return jsonify({"success": True, "job_id": job_id, "total": len(enriched)})
+
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start"}), 503
+    except Exception as e:
+        logger.error(f"Error in cursor-ai analyze-batch: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/status/<job_id>", methods=["GET"])
+@app.route("/api/mcp/regression/cursor-ai/status/<job_id>", methods=["GET"])
+@jwt_required
+def cursor_ai_job_status(job_id):
+    """Poll the status of an async batch analysis job from the Cursor bridge."""
+    try:
+        resp = requests.get(
+            f"{CURSOR_BRIDGE_URL}/status/{job_id}",
+            timeout=10,
+        )
+        if resp.status_code == 404:
+            return jsonify({"error": "Job not found"}), 404
+        if resp.status_code != 200:
+            return jsonify({"error": "Bridge error"}), 502
+
+        data = resp.json()
+
+        # Update local tracker
+        with _cursor_ai_jobs_lock:
+            if job_id in _cursor_ai_jobs:
+                _cursor_ai_jobs[job_id]["status"] = data.get("status", "unknown")
+                _cursor_ai_jobs[job_id]["completed"] = data.get("completed", 0)
+
+        return jsonify(data)
+
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cursor AI bridge is not reachable"}), 503
+    except Exception as e:
+        logger.error(f"Error polling cursor-ai status: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/result", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/result", methods=["POST"])
+def cursor_ai_result_callback():
+    """Callback endpoint for the bridge to push results (async mode).
+    No JWT required since this is a server-to-server call from the bridge."""
+    try:
+        body = request.get_json(force=True) or {}
+        job_id = body.get("job_id", "")
+        testcase_id = body.get("testcase_id", "")
+        analysis = body.get("analysis", {})
+
+        if not job_id or not testcase_id:
+            return jsonify({"error": "job_id and testcase_id are required"}), 400
+
+        with _cursor_ai_jobs_lock:
+            job = _cursor_ai_jobs.get(job_id)
+            if job:
+                if "results" not in job:
+                    job["results"] = {}
+                job["results"][testcase_id] = analysis
+                job["completed"] = len(job["results"])
+                if job["completed"] >= job.get("total", 0):
+                    job["status"] = "done"
+
+        logger.info(f"[cursor-ai] Received result for job={job_id}, testcase={testcase_id}")
+        return jsonify({"success": True})
+
+    except Exception as e:
+        logger.error(f"Error in cursor-ai result callback: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/follow-up", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/follow-up", methods=["POST"])
+@jwt_required
+def cursor_ai_follow_up():
+    """Send a follow-up question to an existing Cursor AI analysis session.
+    The agent retains full conversation context from the initial triage."""
+    try:
+        body = request.get_json(force=True) or {}
+        session_id = body.get("session_id", "")
+        question = body.get("question", "")
+        recovery_context = body.get("recovery_context", {}) or {}
+        mode = (body.get("mode", "agent") or "agent").strip().lower()
+        if mode not in {"ask", "agent", "plan"}:
+            mode = "agent"
+
+        if not session_id:
+            return jsonify({"error": "session_id is required"}), 400
+        if not question:
+            return jsonify({"error": "question is required"}), 400
+
+        resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/follow-up",
+            json={
+                "session_id": session_id,
+                "question": question,
+                "mode": mode,
+                "recovery_context": recovery_context,
+            },
+            timeout=600,
+        )
+        if resp.status_code == 404:
+            return jsonify({"error": "Session expired or not found. Run a new analysis first."}), 404
+        if resp.status_code != 200:
+            error_msg = resp.json().get("error", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+            return jsonify({"error": f"Bridge error: {error_msg}"}), 502
+
+        data = resp.json()
+        return jsonify({
+            "success": True,
+            "session_id": session_id,
+            "analysis": data.get("analysis", {}),
+        })
+
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cursor AI bridge is not reachable"}), 503
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Follow-up timed out (>600s)."}), 504
+    except Exception as e:
+        logger.error(f"Error in cursor-ai follow-up: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
+# Cursor AI Interactive Chat
+# ======================================================
+
+MCP_SERVER_CONFIGS = {
+    "regx-data": {"url": "http://localhost:5003", "description": "RegX regression data"},
+    "atlassian": {"url": "https://panacea-dev.eng.nutanix.com/mcp/atlassian", "description": "Jira & Confluence"},
+    "gw-sourcegraph": {"url": "https://panacea-dev.eng.nutanix.com/mcp/sourcegraph", "description": "Code search"},
+    "gw-jita": {"url": "https://panacea-dev.eng.nutanix.com/mcp/jita", "description": "JITA log access"},
+    "gw-diamond": {"url": "https://panacea-dev.eng.nutanix.com/mcp/diamond", "description": "Diamond storage"},
+    "gw-glean": {"url": "https://panacea-dev.eng.nutanix.com/mcp/glean", "description": "Internal knowledge search"},
+    "gw-supportgpt": {"url": "https://panacea-dev.eng.nutanix.com/mcp/supportgpt", "description": "Support knowledge base"},
+    "gw-nurag": {"url": "https://panacea-dev.eng.nutanix.com/mcp/nurag", "description": "Advanced RAG"},
+    "gw-slack": {"url": "https://panacea-dev.eng.nutanix.com/mcp/slack", "description": "Slack integration"},
+    "gw-panacea": {"url": "https://panacea-dev.eng.nutanix.com/mcp/panacea", "description": "Automated RCA"},
+    "gw-live-debug": {"url": "https://panacea-dev.eng.nutanix.com/mcp/live-debug", "description": "Live debugging"},
+    "auto-handoff": {"url": "http://10.40.224.6:9001/sse", "description": "Auto handoff"},
+}
+
+SOURCEGRAPH_SKILL_REPO = "nugerrit.ntnxdpro.com/nutest-py3-tests"
+SOURCEGRAPH_WEB_BASE = "https://sourcegraph.ntnxdpro.com"
+SYNCABLE_SOURCEGRAPH_SKILLS = {
+    "triage-rdm-deployment-failure": ".cursor/skills/triage-rdm-deployment-failure/",
+    "triage-cdp-test-failure": ".cursor/skills/triage-cdp-test-failure/",
+    "glean-search": ".cursor/skills/glean-search/",
+    "gerrit-comment-resolver": ".cursor/skills/gerrit-comment-resolver/",
+}
+
+MODE_SYSTEM_PROMPTS = {
+    "agent": (
+        "You are Cursor AI in Agent mode — a powerful implementation assistant with full access to MCP tools. "
+        "You can search code, read logs, query knowledge bases, interact with Jira/Confluence, and perform "
+        "automated triage. Provide detailed, actionable responses. When appropriate, explain which tools or "
+        "data sources you would use to accomplish the task."
+    ),
+    "plan": (
+        "You are Cursor AI in Plan mode — a read-only collaborative planning assistant. "
+        "Help the user design approaches, explore trade-offs, and create step-by-step plans before implementation. "
+        "Do not perform actions, only propose strategies with clear reasoning."
+    ),
+    "debug": (
+        "You are Cursor AI in Debug mode — a systematic troubleshooting assistant. "
+        "Help investigate bugs, failures, and unexpected behavior. Ask clarifying questions, "
+        "suggest diagnostic steps, and methodically narrow down root causes using available MCP tools and logs."
+    ),
+    "ask": (
+        "You are Cursor AI in Ask mode — a knowledge assistant for exploring code and answering questions. "
+        "Provide clear, concise explanations. Reference specific files, functions, and architecture when relevant. "
+        "Do not make changes, only inform."
+    ),
+}
+
+# Store for MCP tool call results during chat (per-request)
+_mcp_call_cache = {}
+_mcp_sessions = {}
+_mcp_rpc_counter = 0
+
+
+def _next_mcp_rpc_id():
+    global _mcp_rpc_counter
+    _mcp_rpc_counter += 1
+    return _mcp_rpc_counter
+
+
+def _parse_mcp_http_response(resp):
+    """Parse MCP JSON or SSE-like HTTP response into a JSON object."""
+    text = resp.text or ""
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+
+    # Standard JSON-RPC body
+    if "application/json" in content_type:
+        return resp.json()
+
+    # Streamable transport commonly returns SSE framed data.
+    data_payloads = []
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            payload = line[len("data: "):].strip()
+            if payload:
+                data_payloads.append(payload)
+    if not data_payloads:
+        raise RuntimeError("MCP response did not include JSON payload")
+    return json.loads(data_payloads[-1])
+
+
+def _normalize_mcp_tool_result(mcp_json):
+    """Unwrap MCP tool result shape into plain dict."""
+    if not isinstance(mcp_json, dict):
+        return {"error": f"Unexpected MCP response type: {type(mcp_json).__name__}"}
+    if mcp_json.get("error"):
+        err = mcp_json["error"]
+        return {"error": err.get("message", str(err)) if isinstance(err, dict) else str(err)}
+
+    result = mcp_json.get("result", {})
+    if isinstance(result, dict) and "content" in result and isinstance(result["content"], list):
+        # Gateway format: result.content[0].text holds JSON-serialized tool output.
+        text_chunks = []
+        for item in result["content"]:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text_chunks.append(item.get("text", ""))
+        joined_text = "\n".join(chunk for chunk in text_chunks if chunk).strip()
+        if joined_text:
+            try:
+                parsed = json.loads(joined_text)
+                if isinstance(parsed, dict):
+                    return parsed
+                return {"result": parsed}
+            except Exception:
+                return {"result_text": joined_text}
+    if isinstance(result, dict):
+        return result
+    return {"result": result}
+
+
+def _call_mcp_tool(server_id, tool_name, arguments, timeout=30, _retry_on_auth=True):
+    """Call an MCP tool and return normalized result."""
+    config = MCP_SERVER_CONFIGS.get(server_id)
+    if not config:
+        return {"error": f"Unknown MCP server: {server_id}"}
+    url = config["url"]
+    try:
+        session_id = _mcp_sessions.get(server_id)
+        if not session_id:
+            init_payload = {
+                "jsonrpc": "2.0",
+                "id": _next_mcp_rpc_id(),
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "regx-backend", "version": "1.0"},
+                },
+            }
+            init_resp = requests.post(url, json=init_payload, timeout=timeout, verify=False)
+            if init_resp.status_code != 200:
+                return {"error": f"MCP initialize failed ({init_resp.status_code})"}
+            session_id = init_resp.headers.get("mcp-session-id")
+            if not session_id:
+                return {"error": "MCP initialize did not return session ID"}
+            _mcp_sessions[server_id] = session_id
+
+        call_payload = {
+            "jsonrpc": "2.0",
+            "id": _next_mcp_rpc_id(),
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments or {},
+            },
+        }
+        call_resp = requests.post(
+            url,
+            json=call_payload,
+            headers={"mcp-session-id": session_id},
+            timeout=timeout,
+            verify=False,
+        )
+
+        # Session might expire; retry once with fresh initialize.
+        if call_resp.status_code in (400, 401) and _retry_on_auth:
+            _mcp_sessions.pop(server_id, None)
+            return _call_mcp_tool(server_id, tool_name, arguments, timeout=timeout, _retry_on_auth=False)
+
+        if call_resp.status_code != 200:
+            return {"error": f"MCP call failed ({call_resp.status_code})"}
+
+        parsed_resp = _parse_mcp_http_response(call_resp)
+        return _normalize_mcp_tool_result(parsed_resp)
+    except Exception as e:
+        return {"error": f"MCP call failed: {str(e)}"}
+
+
+def _strip_sourcegraph_line_prefixes(content):
+    """Remove Sourcegraph read_file line-number prefixes."""
+    cleaned = []
+    for line in (content or "").splitlines():
+        cleaned.append(re.sub(r"^\s*\d+:\s?", "", line))
+    return "\n".join(cleaned).strip() + "\n"
+
+
+def _list_sourcegraph_files_recursive(repo, root_path):
+    """List all files under a Sourcegraph directory using MCP list_files."""
+    normalized_root = root_path.rstrip("/")
+    pending_dirs = [normalized_root]
+    seen_dirs = set()
+    files = []
+
+    while pending_dirs:
+        current_dir = pending_dirs.pop()
+        if current_dir in seen_dirs:
+            continue
+        seen_dirs.add(current_dir)
+
+        list_resp = _call_mcp_tool(
+            "gw-sourcegraph",
+            "sourcegraph__list_files",
+            {"repo": repo, "path": current_dir},
+            timeout=45,
+        )
+        if list_resp.get("error"):
+            raise RuntimeError(list_resp["error"])
+
+        entries = list_resp.get("files", [])
+        if not isinstance(entries, list):
+            raise RuntimeError(f"Invalid list_files response for {current_dir}")
+
+        for entry in entries:
+            entry_path = (entry or {}).get("path")
+            if not entry_path:
+                continue
+            if (entry or {}).get("isDirectory"):
+                pending_dirs.append(entry_path.rstrip("/"))
+            else:
+                files.append(entry_path)
+
+    # Keep stable order for easier debugging and deterministic results.
+    files.sort()
+    return files
+
+
+def _list_sourcegraph_files_recursive_http(repo, root_path):
+    """Fallback: list Sourcegraph files by crawling tree pages."""
+    normalized_root = root_path.rstrip("/")
+    pending_dirs = [normalized_root]
+    seen_dirs = set()
+    files = []
+
+    while pending_dirs:
+        current_dir = pending_dirs.pop()
+        if current_dir in seen_dirs:
+            continue
+        seen_dirs.add(current_dir)
+
+        tree_url = f"{SOURCEGRAPH_WEB_BASE}/{repo}/-/tree/{current_dir}"
+        resp = requests.get(tree_url, timeout=45, verify=False)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Sourcegraph tree fetch failed ({resp.status_code}) for {current_dir}")
+
+        html = resp.text
+        tree_pattern = rf'/{re.escape(repo)}/-/tree/([^"?#]+)'
+        blob_pattern = rf'/{re.escape(repo)}/-/blob/([^"?#]+)'
+
+        for match in re.findall(tree_pattern, html):
+            path = urllib.parse.unquote(match).rstrip("/")
+            if path.startswith(normalized_root) and path not in seen_dirs:
+                pending_dirs.append(path)
+
+        for match in re.findall(blob_pattern, html):
+            path = urllib.parse.unquote(match).rstrip("/")
+            if path.startswith(normalized_root):
+                files.append(path)
+
+    files = sorted(set(files))
+    return files
+
+
+def _read_sourcegraph_file_http(repo, file_path):
+    """Fallback: read Sourcegraph file via raw endpoint."""
+    raw_url = f"{SOURCEGRAPH_WEB_BASE}/{repo}/-/raw/{file_path}"
+    resp = requests.get(raw_url, timeout=45, verify=False)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Sourcegraph raw fetch failed ({resp.status_code}) for {file_path}")
+    return resp.text
+
+
+@app.route("/mcp/regression/cursor-ai/sync-skills", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/sync-skills", methods=["POST"])
+@jwt_required
+def cursor_ai_sync_skills():
+    """Sync selected Sourcegraph skills into local .cursor/skills."""
+    try:
+        body = request.get_json(force=True) or {}
+        requested_ids = body.get("skill_ids") or list(SYNCABLE_SOURCEGRAPH_SKILLS.keys())
+        if not isinstance(requested_ids, list):
+            return jsonify({"error": "skill_ids must be a list"}), 400
+
+        invalid_ids = [skill_id for skill_id in requested_ids if skill_id not in SYNCABLE_SOURCEGRAPH_SKILLS]
+        if invalid_ids:
+            return jsonify({
+                "error": "Unsupported skill IDs requested",
+                "invalid_skill_ids": invalid_ids,
+                "allowed_skill_ids": list(SYNCABLE_SOURCEGRAPH_SKILLS.keys()),
+            }), 400
+
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        skills_root = os.path.join(project_root, ".cursor", "skills")
+
+        results = []
+        success_count = 0
+        for skill_id in requested_ids:
+            source_dir = SYNCABLE_SOURCEGRAPH_SKILLS[skill_id].rstrip("/")
+            target_dir = os.path.join(skills_root, skill_id)
+            try:
+                normalized_root = os.path.normpath(skills_root)
+                source_files = []
+                list_mode = "mcp"
+                try:
+                    source_files = _list_sourcegraph_files_recursive(SOURCEGRAPH_SKILL_REPO, source_dir)
+                except Exception as mcp_list_err:
+                    logger.warning(f"[cursor-ai-sync-skills] MCP list failed for {skill_id}, falling back to HTTP tree crawl: {mcp_list_err}")
+                    source_files = _list_sourcegraph_files_recursive_http(SOURCEGRAPH_SKILL_REPO, source_dir)
+                    list_mode = "http"
+                if not source_files:
+                    raise RuntimeError(f"No files found in Sourcegraph directory: {source_dir}")
+
+                synced_files = []
+                for source_file in source_files:
+                    cleaned_content = ""
+                    if list_mode == "mcp":
+                        read_resp = _call_mcp_tool(
+                            "gw-sourcegraph",
+                            "sourcegraph__read_file",
+                            {"repo": SOURCEGRAPH_SKILL_REPO, "path": source_file},
+                            timeout=45,
+                        )
+                        if read_resp.get("error"):
+                            logger.warning(f"[cursor-ai-sync-skills] MCP read failed for {source_file}, falling back to HTTP raw: {read_resp['error']}")
+                            raw_content = _read_sourcegraph_file_http(SOURCEGRAPH_SKILL_REPO, source_file)
+                            cleaned_content = raw_content if raw_content.endswith("\n") else f"{raw_content}\n"
+                        else:
+                            raw_content = read_resp.get("content", "")
+                            cleaned_content = _strip_sourcegraph_line_prefixes(raw_content)
+                    else:
+                        raw_content = _read_sourcegraph_file_http(SOURCEGRAPH_SKILL_REPO, source_file)
+                        cleaned_content = raw_content if raw_content.endswith("\n") else f"{raw_content}\n"
+
+                    if not cleaned_content.strip():
+                        raise RuntimeError(f"{source_file}: fetched file content is empty")
+
+                    relative_source_path = os.path.relpath(source_file, source_dir)
+                    target_file = os.path.normpath(os.path.join(target_dir, relative_source_path))
+                    if not target_file.startswith(normalized_root + os.sep):
+                        raise RuntimeError("Unsafe destination path")
+
+                    os.makedirs(os.path.dirname(target_file), exist_ok=True)
+                    with open(target_file, "w") as f:
+                        f.write(cleaned_content)
+                    synced_files.append(target_file)
+
+                success_count += 1
+                results.append({
+                    "skill_id": skill_id,
+                    "source_path": source_dir,
+                    "source_fetch_mode": list_mode,
+                    "target_dir": os.path.normpath(target_dir),
+                    "synced_files": synced_files,
+                    "synced_file_count": len(synced_files),
+                    "success": True,
+                })
+            except Exception as sync_err:
+                logger.error(f"[cursor-ai-sync-skills] Failed syncing {skill_id}: {sync_err}")
+                results.append({
+                    "skill_id": skill_id,
+                    "source_path": source_dir,
+                    "target_dir": os.path.normpath(target_dir),
+                    "success": False,
+                    "error": str(sync_err),
+                })
+
+        return jsonify({
+            "success": success_count == len(requested_ids),
+            "results": results,
+            "summary": {
+                "requested_count": len(requested_ids),
+                "success_count": success_count,
+                "failed_count": len(requested_ids) - success_count,
+            },
+        })
+    except Exception as e:
+        logger.error(f"Error syncing skills: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/chat", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/chat", methods=["POST"])
+@jwt_required
+def cursor_ai_chat():
+    """Interactive Cursor AI chat endpoint supporting multiple modes and MCP context."""
+    try:
+        body = request.get_json(force=True) or {}
+        messages = body.get("messages", [])
+        mode = body.get("mode", "agent")
+        model = body.get("model", "claude-sonnet-4.6-high")
+        mcp_servers = body.get("mcp_servers", [])
+
+        if not messages:
+            return jsonify({"error": "messages are required"}), 400
+
+        if mode not in MODE_SYSTEM_PROMPTS:
+            return jsonify({"error": f"Invalid mode: {mode}. Use: agent, plan, debug, ask"}), 400
+
+        system_prompt = MODE_SYSTEM_PROMPTS[mode]
+
+        # Add MCP context to system prompt
+        if mcp_servers:
+            active_tools = []
+            for sid in mcp_servers:
+                cfg = MCP_SERVER_CONFIGS.get(sid)
+                if cfg:
+                    active_tools.append(f"- {sid}: {cfg['description']}")
+            if active_tools:
+                system_prompt += (
+                    "\n\nYou have access to the following MCP tools/servers:\n"
+                    + "\n".join(active_tools)
+                    + "\n\nWhen answering, reference which tools you would use and provide specific, "
+                    "data-driven insights where possible."
+                )
+
+        # Build chat messages in OpenAI-compatible format
+        chat_messages = [{"role": "system", "content": system_prompt}]
+        for msg in messages:
+            role = msg.get("role", "user")
+            if role in ("user", "assistant"):
+                chat_messages.append({"role": role, "content": msg.get("content", "")})
+
+        # Map model names
+        ai_model = model
+        if model in ("claude-sonnet-4.6-high", "claude-sonnet-4.6"):
+            ai_model = "hack-reason"
+
+        payload = {
+            "model": ai_model,
+            "messages": chat_messages,
+            "max_tokens": 4096,
+            "stream": False,
+        }
+
+        url = f"{AI_BASE}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {AI_API_KEY}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, context=SSL_CTX, timeout=120) as resp:
+            if resp.getcode() != 200:
+                return jsonify({"error": f"AI API returned HTTP {resp.getcode()}"}), 502
+
+            response_data = json.loads(resp.read().decode())
+            choices = response_data.get("choices", [])
+            if not choices:
+                return jsonify({"error": "AI returned no choices"}), 502
+
+            content = (choices[0].get("message") or {}).get("content", "")
+
+            tools_used = []
+            if mcp_servers:
+                for sid in mcp_servers[:5]:
+                    cfg = MCP_SERVER_CONFIGS.get(sid)
+                    if cfg and cfg["description"].lower() in content.lower():
+                        tools_used.append(sid)
+
+            return jsonify({
+                "success": True,
+                "reply": content.strip(),
+                "mode": mode,
+                "model": model,
+                "tools_used": tools_used,
+            })
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode() if e.fp else ""
+        logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
+        return jsonify({"error": f"AI API error (HTTP {e.code})"}), 502
+    except urllib.error.URLError as e:
+        logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason}), falling back to Cursor Bridge")
+        # Fallback: route through the Cursor Bridge when the Nutanix AI endpoint is down
+        try:
+            last_user_msg = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    last_user_msg = msg.get("content", "")
+                    break
+            if not last_user_msg:
+                return jsonify({"error": "Cannot reach AI API endpoint and no user message for fallback"}), 503
+
+            bridge_resp = requests.post(
+                f"{CURSOR_BRIDGE_URL}/analyze-testcase",
+                json={
+                    "testcase_name": "cursor-ai-chat-fallback",
+                    "exception_summary": last_user_msg,
+                    "exception": "",
+                    "steps_log": "",
+                    "nutest_test_log": "",
+                    "test_log_url": "",
+                    "jira_tickets": [],
+                    "failure_stage": "chat",
+                },
+                timeout=600,
+            )
+            if bridge_resp.status_code == 200:
+                bridge_data = bridge_resp.json()
+                analysis = bridge_data.get("analysis", {})
+                reply = analysis.get("follow_up_answer") or analysis.get("root_cause") or json.dumps(analysis, indent=2)
+                return jsonify({
+                    "success": True,
+                    "reply": reply,
+                    "mode": mode,
+                    "model": "cursor-bridge-fallback",
+                    "tools_used": [],
+                })
+            else:
+                return jsonify({"error": "Cannot reach AI API endpoint and Cursor Bridge also failed"}), 503
+        except Exception as fallback_err:
+            logger.error(f"[cursor-ai-chat] Cursor Bridge fallback also failed: {fallback_err}")
+            return jsonify({"error": "Cannot reach AI API endpoint. Cursor Bridge fallback also unavailable."}), 503
+    except Exception as e:
+        logger.error(f"Error in cursor-ai chat: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/cursor-ai/mcp-servers", methods=["GET"])
+@app.route("/api/mcp/regression/cursor-ai/mcp-servers", methods=["GET"])
+@jwt_required
+def cursor_ai_list_mcp_servers():
+    """List available MCP servers and their status."""
+    servers = []
+    for sid, cfg in MCP_SERVER_CONFIGS.items():
+        servers.append({
+            "id": sid,
+            "url": cfg["url"],
+            "description": cfg["description"],
+        })
+    return jsonify({"success": True, "servers": servers})
+
+
+@app.route("/api/agents/triage/first-level-ai", methods=["POST"])
+@jwt_required
+def first_level_ai_analysis():
+    """Trigger First Level AI analysis using JITA and Glean."""
+    try:
+        request_data = request.get_json()
+        test_result = request_data.get("test_result", {})
+        
+        if not test_result:
+            return jsonify({
+                "success": False,
+                "error": "test_result is required"
+            }), 400
+        
+        # Initialize intelligent triage agent directly
+        from agents.analysis.intelligent_triage_agent import IntelligentTriageAgent
+        from agents.base import AgentConfig
+        
+        agent_config = AgentConfig(
+            name="intelligent_triage",
+            type="intelligent_triage"
+        )
+        agent = IntelligentTriageAgent(agent_config)
+        
+        # Since this is async, we need to run it in an event loop
+        import asyncio
+        
+        async def run_analysis():
+            return await agent.analyze(test_result, user_requested_ai=True)
+        
+        # Create new event loop for the analysis
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            analysis_result = loop.run_until_complete(run_analysis())
+        finally:
+            loop.close()
+        
+        # Handle different response formats
+        if hasattr(analysis_result, '__dict__'):
+            result_dict = analysis_result.__dict__
+        else:
+            result_dict = analysis_result
+        
+        response_data = {
+            "success": True,
+            "analysis_result": result_dict,
+            "analysis_type": "first_level_ai", 
+            "user_requested": True
+        }
+        
+        # Add metadata if available
+        if hasattr(analysis_result, 'data') and analysis_result.data:
+            response_data.update(analysis_result.data)
+        
+        if hasattr(analysis_result, 'metadata') and analysis_result.metadata:
+            response_data.update({
+                "pattern_suggestion": analysis_result.metadata.get("pattern_suggestion"),
+                "jita_analysis": analysis_result.metadata.get("jita_analysis"),
+                "glean_results": analysis_result.metadata.get("glean_results")
+            })
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        logger.error(f"Error in first level AI analysis: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 # ======================================================
 # App Runner
 # ======================================================
 if __name__ == "__main__":
+    scheduler_thread = threading.Thread(target=_run_plan_scheduler_loop, daemon=True)
+    scheduler_thread.start()
+    logger.info(f"[scheduler] Started — checking every {SCHEDULER_INTERVAL_SECONDS}s for due scheduled run plans")
+
     host = os.getenv("FLASK_HOST", "0.0.0.0")
     port = int(os.getenv("FLASK_PORT", "5001"))
     debug = os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1", "yes")
-    app.run(host=host, port=port, debug=debug)
+    app.run(host=host, port=port, debug=debug, use_reloader=False)
