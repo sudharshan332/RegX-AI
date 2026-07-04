@@ -6936,7 +6936,7 @@ def get_saved_tag_results(tag_name):
     """Return cached analysis results for a saved tag."""
     cached = load_failed_analysis_results(tag_name)
     if cached is None:
-        return jsonify({"results": [], "current_branch": "", "saved_at": None})
+        return jsonify({"results": [], "current_branch": "", "saved_at": None, "cursor_ai": {}})
     return jsonify(cached)
 
 
@@ -6947,10 +6947,12 @@ def save_saved_tag_results(tag_name):
     body = request.get_json() or {}
     results = body.get("results", [])
     current_branch = body.get("current_branch", "")
+    cursor_ai = body.get("cursor_ai", {}) or {}
     payload = {
         "tag": tag_name,
         "results": results,
         "current_branch": current_branch,
+        "cursor_ai": cursor_ai,
         "saved_at": datetime.utcnow().isoformat() + "Z",
         "count": len(results),
     }
@@ -11044,6 +11046,74 @@ def _call_ai_chat(system_prompt, user_content, max_tokens=2048):
         return content.strip()
 
 
+def _build_bulk_issues_fallback_analysis(issue_rows, tag, total_tests):
+    """Generate deterministic markdown when external AI endpoint is unavailable."""
+    table_header = (
+        "| Bug ID | Affected Feature | Testcases Impacted | QI Impact | Risk Level | Impact | Recommended Action |\n"
+        "| --- | --- | ---: | ---: | --- | --- | --- |"
+    )
+    table_rows = []
+    for row in issue_rows:
+        ticket = row["ticket"]
+        feature = row["feature"] or "Unknown"
+        testcase_count = row["testcase_count"]
+        qi_impact = row["qi_impact"]
+        risk_level = row["risk_level"]
+        impact = (
+            f"Potentially impacts {testcase_count} testcases in {feature}."
+            if feature != "Unknown"
+            else f"Potentially impacts {testcase_count} testcases across multiple areas."
+        )
+        recommended_action = (
+            "Validate ownership, confirm reproducibility, and prioritize based on QI impact."
+        )
+        table_rows.append(
+            f"| {ticket} | {feature} | {testcase_count} | {qi_impact} | {risk_level} | {impact} | {recommended_action} |"
+        )
+
+    critical_count = sum(1 for row in issue_rows if row["risk_level"] == "Critical")
+    high_count = sum(1 for row in issue_rows if row["risk_level"] == "High")
+    medium_count = sum(1 for row in issue_rows if row["risk_level"] == "Medium")
+    risk_score = min(100, critical_count * 30 + high_count * 20 + medium_count * 10 + 15)
+    readiness = (
+        "Not Ready"
+        if critical_count > 0
+        else "At Risk"
+        if high_count > 0
+        else "Proceed with Caution"
+        if medium_count > 0
+        else "Ready with Monitoring"
+    )
+
+    top_three = sorted(
+        issue_rows,
+        key=lambda r: (
+            {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}.get(r["risk_level"], 0),
+            abs(float(r["qi_impact"])),
+        ),
+        reverse=True,
+    )[:3]
+
+    priorities = "\n".join(
+        f"- {row['ticket']} ({row['risk_level']}, QI impact {row['qi_impact']}%)"
+        for row in top_three
+    ) or "- No priority tickets identified"
+
+    return (
+        "_AI endpoint unreachable. Showing deterministic fallback analysis._\n\n"
+        f"**Regression Tag:** `{tag or 'N/A'}`  \n"
+        f"**Total Tests in Run:** `{total_tests}`  \n"
+        f"**Bulk Issues:** `{len(issue_rows)}`\n\n"
+        f"{table_header}\n"
+        + "\n".join(table_rows)
+        + "\n\n"
+        + f"### Overall Summary\n"
+        + f"- Overall Risk Score: **{risk_score}/100**\n"
+        + f"- Release Readiness: **{readiness}**\n"
+        + f"- Top 3 Priorities:\n{priorities}"
+    )
+
+
 @app.route("/mcp/regression/ai-analysis/bulk-issues", methods=["POST"])
 @app.route("/api/mcp/regression/ai-analysis/bulk-issues", methods=["POST"])
 @jwt_required
@@ -11060,10 +11130,29 @@ def ai_analyze_bulk_issues():
             return jsonify({"error": "No bulk issues provided"}), 400
 
         issue_detail_blocks = []
+        issue_rows = []
         for ticket, tests in bulk_issues.items():
             qi_data = bulk_issues_with_qi.get(ticket, {})
             qi_impact = qi_data.get("overall_qi_impact", "N/A")
             count = qi_data.get("testcase_count", len(tests)) if qi_data else len(tests)
+            qi_numeric = None
+            if qi_impact != "N/A":
+                try:
+                    qi_numeric = float(qi_impact)
+                except Exception:
+                    qi_numeric = None
+
+            if qi_numeric is None:
+                risk_level = "Low"
+            elif qi_numeric <= -5:
+                risk_level = "Critical"
+            elif qi_numeric <= -2:
+                risk_level = "High"
+            elif qi_numeric <= -1:
+                risk_level = "Medium"
+            else:
+                risk_level = "Low"
+
             tc_names = tests if isinstance(tests, list) else []
             # Extract affected feature from test name prefixes
             feature_prefixes = set()
@@ -11078,6 +11167,16 @@ def ai_analyze_bulk_issues():
             tc_display = "\n".join(f"    - {name}" for name in tc_sample)
             if len(tc_names) > 10:
                 tc_display += f"\n    ... and {len(tc_names) - 10} more"
+            primary_feature = sorted(feature_prefixes)[0] if feature_prefixes else "Unknown"
+            issue_rows.append(
+                {
+                    "ticket": ticket,
+                    "feature": primary_feature,
+                    "testcase_count": count,
+                    "qi_impact": qi_numeric if qi_numeric is not None else 0.0,
+                    "risk_level": risk_level,
+                }
+            )
             issue_detail_blocks.append(
                 f"Ticket: {ticket}\n"
                 f"  Testcases Impacted: {count}\n"
@@ -11122,7 +11221,13 @@ def ai_analyze_bulk_issues():
             "Provide actionable, concise analysis. Use markdown tables for structured data."
         )
 
-        analysis = _call_ai_chat(system_prompt, user_content, max_tokens=3000)
+        try:
+            analysis = _call_ai_chat(system_prompt, user_content, max_tokens=3000)
+        except urllib.error.URLError as err:
+            logger.warning(
+                f"AI bulk issues endpoint unreachable ({err.reason}); returning fallback analysis."
+            )
+            analysis = _build_bulk_issues_fallback_analysis(issue_rows, tag, total_tests)
         return jsonify({"success": True, "analysis": analysis})
 
     except Exception as e:
@@ -11736,6 +11841,10 @@ def cursor_ai_follow_up():
         body = request.get_json(force=True) or {}
         session_id = body.get("session_id", "")
         question = body.get("question", "")
+        recovery_context = body.get("recovery_context", {}) or {}
+        mode = (body.get("mode", "agent") or "agent").strip().lower()
+        if mode not in {"ask", "agent", "plan"}:
+            mode = "agent"
 
         if not session_id:
             return jsonify({"error": "session_id is required"}), 400
@@ -11744,7 +11853,12 @@ def cursor_ai_follow_up():
 
         resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/follow-up",
-            json={"session_id": session_id, "question": question},
+            json={
+                "session_id": session_id,
+                "question": question,
+                "mode": mode,
+                "recovery_context": recovery_context,
+            },
             timeout=600,
         )
         if resp.status_code == 404:

@@ -2496,6 +2496,24 @@ export default function RegressionHome() {
                           )}
                         </h4>
                         <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                          {(!triageCount.bulk_issues_with_qi || Object.keys(triageCount.bulk_issues_with_qi).length === 0) && (
+                            <button
+                              onClick={fetchBulkIssuesQi}
+                              disabled={loadingBulkQi}
+                              style={{
+                                padding: "7px 14px",
+                                background: loadingBulkQi ? "#6c757d" : "#007bff",
+                                color: "white",
+                                border: "none",
+                                borderRadius: "6px",
+                                cursor: loadingBulkQi ? "not-allowed" : "pointer",
+                                fontSize: "12px",
+                                fontWeight: "600"
+                              }}
+                            >
+                              {loadingBulkQi ? "Loading QI Impact..." : "Load QI Impact"}
+                            </button>
+                          )}
                           <button
                             onClick={fetchOwnerJiraDetails}
                             disabled={loadingJiraDetails}
@@ -2553,6 +2571,7 @@ export default function RegressionHome() {
                               <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "left" }}>Owner</th>
                               <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "left" }}>Jira Ticket</th>
                               <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>Testcase(s)</th>
+                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>QI Impact</th>
                               <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>Status</th>
                               <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>Issue Type</th>
                             </tr>
@@ -2562,6 +2581,8 @@ export default function RegressionHome() {
                               const ticketEntries = Object.entries(tickets);
                               return ticketEntries.map(([ticket, count], idx) => {
                                 const jiraInfo = ownerJiraDetails[ticket];
+                                const qiData = triageCount.bulk_issues_with_qi?.[ticket];
+                                const showQiLoading = loadingBulkQi && !qiData;
                                 return (
                                   <tr key={`${owner}-${ticket}`} style={{ borderBottom: idx === ticketEntries.length - 1 ? "2px solid #ccc" : undefined }}>
                                     {idx === 0 && (
@@ -2579,6 +2600,15 @@ export default function RegressionHome() {
                                     </td>
                                     <td style={{ padding: "6px 12px", border: "1px solid #ddd", textAlign: "center" }}>
                                       {count}
+                                    </td>
+                                    <td style={{ padding: "6px 12px", border: "1px solid #ddd", textAlign: "center" }}>
+                                      {showQiLoading ? (
+                                        <span style={{ color: "#666", fontStyle: "italic" }}>Loading...</span>
+                                      ) : qiData ? (
+                                        `${qiData.overall_qi_impact.toFixed(2)}%`
+                                      ) : (
+                                        "-"
+                                      )}
                                     </td>
                                     <td style={{ padding: "6px 12px", border: "1px solid #ddd", textAlign: "center" }}>
                                       {jiraInfo ? (

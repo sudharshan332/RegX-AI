@@ -111,9 +111,13 @@ export default function FailedTestcaseAnalysis() {
   const [cursorAiBatchJobId, setCursorAiBatchJobId] = useState(null);
   const [cursorAiBatchStatus, setCursorAiBatchStatus] = useState(null);
   const [cursorAiSessions, setCursorAiSessions] = useState({});
+  const [cursorAiOpenTabs, setCursorAiOpenTabs] = useState([]);
+  const [cursorAiMinimizedTabs, setCursorAiMinimizedTabs] = useState({});
   const [followUpInput, setFollowUpInput] = useState('');
   const [followUpLoading, setFollowUpLoading] = useState(false);
   const [followUpHistory, setFollowUpHistory] = useState([]);
+  const [followUpHistoryByTestcase, setFollowUpHistoryByTestcase] = useState({});
+  const [followUpMode, setFollowUpMode] = useState('agent');
 
   // Retrigger state
   const [retriggerModalOpen, setRetriggerModalOpen] = useState(false);
@@ -244,24 +248,42 @@ export default function FailedTestcaseAnalysis() {
       setResults(cached);
       setCurrentBranch(data.current_branch || '');
       setAnalysisTag(tagName);
+      const cursorAi = data.cursor_ai || {};
+      setCursorAiResults(cursorAi.results || {});
+      setCursorAiSessions(cursorAi.sessions || {});
+      setFollowUpHistoryByTestcase(cursorAi.follow_up_history_by_testcase || {});
     } catch (_) {
       setResults([]);
+      setCursorAiResults({});
+      setCursorAiSessions({});
+      setFollowUpHistoryByTestcase({});
     } finally {
       setLoading(false);
     }
   };
 
-  const saveResultsForTag = useCallback(async (tagName, rows, branch) => {
+  const saveResultsForTag = useCallback(async (tagName, rows, branch, cursorAiState = null) => {
     if (!tagName) return;
     setSavingResults(true);
     try {
       await api.put(`${API_BASE}/saved-tags/${encodeURIComponent(tagName)}/results`, {
         results: rows,
         current_branch: branch,
+        ...(cursorAiState ? { cursor_ai: cursorAiState } : {}),
       });
     } catch (_) {}
     setSavingResults(false);
   }, []);
+
+  useEffect(() => {
+    if (inputMode !== 'tag' || !analysisTag) return;
+    if (results.length === 0 && Object.keys(cursorAiResults).length === 0 && Object.keys(followUpHistoryByTestcase).length === 0) return;
+    saveResultsForTag(analysisTag, results, currentBranch, {
+      results: cursorAiResults,
+      sessions: cursorAiSessions,
+      follow_up_history_by_testcase: followUpHistoryByTestcase,
+    });
+  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, followUpHistoryByTestcase, saveResultsForTag]);
 
   const buildIncludeParam = useCallback((cols) => {
     const include = new Set(['basic', 'exception_summary', 'intermittent']);
@@ -668,6 +690,9 @@ export default function FailedTestcaseAnalysis() {
           Object.entries(data.results).forEach(([key, val]) => {
             if (val.success) {
               setCursorAiResults(prev => ({ ...prev, [key]: val.analysis }));
+              if (val.session_id) {
+                setCursorAiSessions(prev => ({ ...prev, [key]: val.session_id }));
+              }
               setCursorAiLoading(prev => ({ ...prev, [key]: false }));
             } else {
               setCursorAiResults(prev => ({ ...prev, [key]: { error: val.error || 'Failed' } }));
@@ -696,18 +721,47 @@ export default function FailedTestcaseAnalysis() {
     if (!sessionId) return;
 
     const question = followUpInput.trim();
+    const selectedMode = followUpMode;
     setFollowUpLoading(true);
-    setFollowUpHistory(prev => [...prev, { role: 'user', text: question }]);
+    const testcaseId = cursorAiDetailModal._testcase_id;
+    setFollowUpHistory(prev => {
+      const next = [...prev, { role: 'user', text: question, mode: selectedMode }];
+      if (testcaseId) {
+        setFollowUpHistoryByTestcase(hist => ({ ...hist, [testcaseId]: next }));
+      }
+      return next;
+    });
     setFollowUpInput('');
 
     try {
       const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/follow-up`, {
         session_id: sessionId,
         question,
+        mode: followUpMode,
+        recovery_context: {
+          testcase_name: cursorAiDetailModal.testcase_name || '',
+          latest_analysis: {
+            root_cause: cursorAiDetailModal.root_cause || '',
+            classification: cursorAiDetailModal.classification || '',
+            failing_code: cursorAiDetailModal.failing_code || null,
+            suggested_fix: cursorAiDetailModal.suggested_fix || '',
+            confidence: cursorAiDetailModal.confidence || '',
+            related_components: cursorAiDetailModal.related_components || [],
+            jira_duplicates: cursorAiDetailModal.jira_duplicates || [],
+            triage_report: cursorAiDetailModal.triage_report || '',
+          },
+          prior_history: followUpHistory.slice(-20),
+        },
       });
       if (resp.data?.success) {
         const analysis = resp.data.analysis;
-        setFollowUpHistory(prev => [...prev, { role: 'assistant', data: analysis }]);
+        setFollowUpHistory(prev => {
+          const next = [...prev, { role: 'assistant', data: analysis, mode: selectedMode }];
+          if (testcaseId) {
+            setFollowUpHistoryByTestcase(hist => ({ ...hist, [testcaseId]: next }));
+          }
+          return next;
+        });
         setCursorAiDetailModal(prev => ({
           ...prev,
           ...analysis,
@@ -748,6 +802,39 @@ export default function FailedTestcaseAnalysis() {
         {res.classification || 'Analyzed'}
       </span>
     );
+  };
+
+  const openCursorAiInTab = (result) => {
+    const testId = result?.testcase_id;
+    const analysis = testId ? cursorAiResults[testId] : null;
+    if (!testId || !analysis || analysis.error) return;
+
+    const tabId = String(testId);
+    const sessionId = cursorAiSessions[testId] || null;
+    setCursorAiOpenTabs(prev => {
+      const without = prev.filter(t => t.tabId !== tabId);
+      return [...without, {
+        tabId,
+        testcase_id: testId,
+        testcase_name: result.testcase_name,
+        analysis,
+        session_id: sessionId,
+      }];
+    });
+    setCursorAiMinimizedTabs(prev => ({ ...prev, [tabId]: false }));
+  };
+
+  const closeCursorAiTab = (tabId) => {
+    setCursorAiOpenTabs(prev => prev.filter(t => t.tabId !== tabId));
+    setCursorAiMinimizedTabs(prev => {
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+  };
+
+  const toggleCursorAiTabMinimized = (tabId) => {
+    setCursorAiMinimizedTabs(prev => ({ ...prev, [tabId]: !prev[tabId] }));
   };
 
   // --------------- Re-trigger handlers ---------------
@@ -1298,22 +1385,33 @@ export default function FailedTestcaseAnalysis() {
               aiRes.error ? (
                 <span className="cursor-ai-error-text" title={aiRes.error}>Failed</span>
               ) : (
-                <button
-                  type="button"
-                  className="btn-link cursor-ai-view-btn"
-                  onClick={() => {
-                    setCursorAiDetailModal({
-                      testcase_name: result.testcase_name,
-                      _testcase_id: result.testcase_id,
-                      _session_id: cursorAiSessions[result.testcase_id] || null,
-                      ...aiRes,
-                    });
-                    setFollowUpInput('');
-                    setFollowUpHistory([]);
-                  }}
-                >
-                  {getCursorAiStatusBadge(result.testcase_id)} View
-                </button>
+                <div className="cursor-ai-actions">
+                  <button
+                    type="button"
+                    className="btn-link cursor-ai-view-btn"
+                    onClick={() => {
+                      setCursorAiDetailModal({
+                        testcase_name: result.testcase_name,
+                        _testcase_id: result.testcase_id,
+                        _session_id: cursorAiSessions[result.testcase_id] || null,
+                        ...aiRes,
+                      });
+                      setFollowUpInput('');
+                      setFollowUpHistory(followUpHistoryByTestcase[result.testcase_id] || []);
+                      setFollowUpMode('agent');
+                    }}
+                  >
+                    {getCursorAiStatusBadge(result.testcase_id)} View
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-cursor-ai-open-tab"
+                    onClick={() => openCursorAiInTab(result)}
+                    title="Open analysis in tab on this page"
+                  >
+                    Open Tab
+                  </button>
+                </div>
               )
             ) : (
               <button
@@ -1519,6 +1617,70 @@ export default function FailedTestcaseAnalysis() {
               </div>
             )}
           </div>
+          {cursorAiOpenTabs.length > 0 && (
+            <div className="cursor-ai-tabs-panel">
+              <div className="cursor-ai-tabs-title">Cursor AI Open Tabs</div>
+              {cursorAiOpenTabs.map(tab => {
+                const isMinimized = !!cursorAiMinimizedTabs[tab.tabId];
+                const tabSessionId = cursorAiSessions[tab.testcase_id] || tab.session_id || null;
+                return (
+                  <div key={tab.tabId} className="cursor-ai-inline-tab">
+                    <div className="cursor-ai-inline-tab-header">
+                      <div className="cursor-ai-inline-tab-name" title={tab.testcase_name}>
+                        {tab.testcase_name}
+                      </div>
+                      <div className="cursor-ai-inline-tab-actions">
+                        <button
+                          type="button"
+                          className="btn-inline-tab-action"
+                          onClick={() => {
+                            setCursorAiDetailModal({
+                              testcase_name: tab.testcase_name,
+                              _testcase_id: tab.testcase_id,
+                              _session_id: tabSessionId,
+                              ...(cursorAiResults[tab.testcase_id] || tab.analysis),
+                            });
+                            setFollowUpInput('');
+                            setFollowUpHistory(followUpHistoryByTestcase[tab.testcase_id] || []);
+                            setFollowUpMode('agent');
+                          }}
+                        >
+                          Open Full
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-inline-tab-action"
+                          onClick={() => toggleCursorAiTabMinimized(tab.tabId)}
+                        >
+                          {isMinimized ? 'Expand' : 'Minimize'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-inline-tab-action btn-inline-tab-close"
+                          onClick={() => closeCursorAiTab(tab.tabId)}
+                        >
+                          Close
+                        </button>
+                      </div>
+                    </div>
+                    {!isMinimized && (
+                      <div className="cursor-ai-inline-tab-body">
+                        <div><strong>Classification:</strong> {(cursorAiResults[tab.testcase_id] || tab.analysis)?.classification || 'Unknown'}</div>
+                        <div><strong>Confidence:</strong> {(cursorAiResults[tab.testcase_id] || tab.analysis)?.confidence || 'N/A'}</div>
+                        <div><strong>Root Cause:</strong> {(cursorAiResults[tab.testcase_id] || tab.analysis)?.root_cause || 'N/A'}</div>
+                        <div><strong>Suggested Fix:</strong> {(cursorAiResults[tab.testcase_id] || tab.analysis)?.suggested_fix || 'N/A'}</div>
+                        {!tabSessionId && (
+                          <div className="cursor-ai-inline-tab-warning">
+                            Follow-up is unavailable for this tab (session not found).
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div className="filter-controls">
             <div className="filter-group filter-group-status-dropdown" ref={statusDropdownRef}>
               <label>Filter by Test Status:</label>
@@ -1792,11 +1954,18 @@ export default function FailedTestcaseAnalysis() {
                 {followUpHistory.map((msg, i) => (
                   <div key={i} className={`cursor-ai-followup-msg cursor-ai-followup-${msg.role}`}>
                     {msg.role === 'user' && (
-                      <div className="cursor-ai-followup-user"><strong>You:</strong> {msg.text}</div>
+                      <div className="cursor-ai-followup-user">
+                        <strong>You:</strong>
+                        {msg.mode && <span className="cursor-ai-followup-mode-badge">{msg.mode.toUpperCase()}</span>}
+                        {' '}
+                        {msg.text}
+                      </div>
                     )}
                     {msg.role === 'assistant' && (
                       <div className="cursor-ai-followup-assistant">
-                        <strong>AI:</strong>{' '}
+                        <strong>AI:</strong>
+                        {msg.mode && <span className="cursor-ai-followup-mode-badge">{msg.mode.toUpperCase()}</span>}
+                        {' '}
                         {msg.data?.follow_up_answer || msg.data?.root_cause || JSON.stringify(msg.data, null, 2)}
                       </div>
                     )}
@@ -1811,6 +1980,17 @@ export default function FailedTestcaseAnalysis() {
             <div className="modal-footer cursor-ai-modal-footer">
               {cursorAiDetailModal._session_id ? (
                 <div className="cursor-ai-followup-bar">
+                  <select
+                    className="cursor-ai-followup-mode"
+                    value={followUpMode}
+                    onChange={e => setFollowUpMode(e.target.value)}
+                    disabled={followUpLoading}
+                    title="Follow-up AI mode"
+                  >
+                    <option value="ask">Ask</option>
+                    <option value="agent">Agent</option>
+                    <option value="plan">Plan</option>
+                  </select>
                   <input
                     type="text"
                     className="cursor-ai-followup-input"

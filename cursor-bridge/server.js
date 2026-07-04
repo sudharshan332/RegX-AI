@@ -8,6 +8,10 @@ app.use(express.json({ limit: "2mb" }));
 const PORT = parseInt(process.env.CURSOR_BRIDGE_PORT || "5002", 10);
 const API_KEY = process.env.CURSOR_API_KEY;
 const MODEL_ID = process.env.CURSOR_MODEL_ID || "claude-sonnet-4-6";
+const BATCH_CONCURRENCY = Math.max(
+  3,
+  Math.min(5, parseInt(process.env.CURSOR_BATCH_CONCURRENCY || "4", 10) || 4),
+);
 
 const NUTEST_SOURCEGRAPH = "nugerrit.ntnxdpro.com/nutest-py3-tests";
 
@@ -69,6 +73,73 @@ setInterval(() => {
 
 function generateSessionId() {
   return `ses_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function sanitizeRecoveryHistory(history = []) {
+  if (!Array.isArray(history)) return [];
+  return history.slice(-20).map((m) => {
+    if (!m || typeof m !== "object") return null;
+    if (m.role === "user") {
+      return { role: "user", text: String(m.text || "").slice(0, 2000), mode: String(m.mode || "agent") };
+    }
+    if (m.role === "assistant") {
+      return {
+        role: "assistant",
+        mode: String(m.mode || "agent"),
+        follow_up_answer: String(m?.data?.follow_up_answer || ""),
+        root_cause: String(m?.data?.root_cause || ""),
+      };
+    }
+    return null;
+  }).filter(Boolean);
+}
+
+async function recoverSessionFromContext(sessionId, recoveryContext = {}) {
+  const testcaseName = String(recoveryContext.testcase_name || "");
+  const latestAnalysis = recoveryContext.latest_analysis || {};
+  const priorHistory = sanitizeRecoveryHistory(recoveryContext.prior_history || []);
+
+  if (!testcaseName && !latestAnalysis?.root_cause && priorHistory.length === 0) {
+    return null;
+  }
+
+  const agent = await Agent.create({
+    apiKey: API_KEY,
+    model: { id: MODEL_ID },
+    mcpServers: MCP_SERVERS,
+  });
+
+  const bootstrapPrompt = `You are continuing a previously completed failed-testcase analysis session.
+
+Preserve prior context and continue the same discussion style.
+Do NOT restart triage from scratch unless the user explicitly asks.
+
+Testcase: ${testcaseName || "unknown"}
+
+Latest known analysis JSON:
+\`\`\`json
+${JSON.stringify(latestAnalysis || {}, null, 2).slice(0, 12000)}
+\`\`\`
+
+Recent follow-up conversation (most recent entries):
+\`\`\`json
+${JSON.stringify(priorHistory, null, 2).slice(0, 12000)}
+\`\`\`
+
+Acknowledge internally that context is restored. Await the next user follow-up question.`;
+
+  const run = await agent.send(bootstrapPrompt);
+  await run.wait();
+
+  const restored = {
+    agent,
+    agentId: agent.agentId,
+    testcase_name: testcaseName || "recovered-session",
+    created_at: Date.now(),
+    last_used: Date.now(),
+  };
+  sessions.set(sessionId, restored);
+  return restored;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,25 +231,43 @@ app.post("/analyze-testcase", async (req, res) => {
 // The agent retains full conversation context from the initial triage.
 // ---------------------------------------------------------------------------
 app.post("/follow-up", async (req, res) => {
-  const { session_id, question } = req.body;
+  const { session_id, question, mode = "agent", recovery_context = {} } = req.body;
 
   if (!session_id || !question) {
     return res.status(400).json({ error: "session_id and question are required" });
   }
 
-  const session = sessions.get(session_id);
+  let session = sessions.get(session_id);
   if (!session) {
-    return res.status(404).json({
-      error: "Session not found or expired. Start a new analysis first.",
-    });
+    try {
+      session = await recoverSessionFromContext(session_id, recovery_context);
+    } catch (recoverErr) {
+      console.error("[follow-up] Session recovery failed:", recoverErr.message);
+    }
+    if (!session) {
+      return res.status(404).json({
+        error: "Session expired and could not be restored from cached context. Run a new analysis first.",
+      });
+    }
   }
 
   try {
     session.last_used = Date.now();
+    const selectedMode = ["ask", "agent", "plan"].includes(String(mode).toLowerCase())
+      ? String(mode).toLowerCase()
+      : "agent";
+    const modeInstruction = selectedMode === "ask"
+      ? "Operate in Ask mode: prioritize concise explanation and evidence gathering. Avoid making implementation changes unless explicitly asked."
+      : selectedMode === "plan"
+        ? "Operate in Plan mode: focus on approaches, trade-offs, and proposed plan before execution."
+        : "Operate in Agent mode: provide execution-ready, actionable guidance with concrete next steps.";
 
     const followUpPrompt = `Follow-up question on the same testcase analysis:
 
 ${question}
+
+Requested interaction mode: ${selectedMode}
+${modeInstruction}
 
 If this question requires deeper investigation, use the MCP tools (Sourcegraph,
 JITA, Jira, Glean, etc.) to gather more evidence. Then respond with updated JSON:
@@ -270,10 +359,10 @@ app.get("/status/:jobId", (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Batch processing — uses Agent.prompt() (one-shot, no sessions for batch)
+// Batch processing — creates durable sessions per testcase for follow-ups
 // ---------------------------------------------------------------------------
 async function processBatch(job, testcases) {
-  for (const tc of testcases) {
+  async function analyzeOne(tc) {
     const key = tc.testcase_id || tc.testcase_name;
     try {
       const promptOpts = {
@@ -294,19 +383,48 @@ async function processBatch(job, testcases) {
         ? buildSkippedAnalysisPrompt(promptOpts)
         : buildFailedAnalysisPrompt(promptOpts);
 
-      const result = await Agent.prompt(prompt, {
+      const agent = await Agent.create({
         apiKey: API_KEY,
         model: { id: MODEL_ID },
         mcpServers: MCP_SERVERS,
       });
+      const run = await agent.send(prompt);
+      const result = await run.wait();
+      const sessionId = generateSessionId();
 
-      job.results[key] = { success: true, analysis: parseAgentResult(result.result || "") };
+      sessions.set(sessionId, {
+        agent,
+        agentId: agent.agentId,
+        testcase_name: tc.testcase_name,
+        created_at: Date.now(),
+        last_used: Date.now(),
+      });
+
+      job.results[key] = {
+        success: true,
+        analysis: parseAgentResult(result.result || ""),
+        session_id: sessionId,
+      };
     } catch (err) {
       console.error(`[batch] Error for ${key}:`, err.message);
       job.results[key] = { success: false, error: err.message };
+    } finally {
+      job.completed += 1;
     }
-    job.completed += 1;
   }
+
+  let nextIndex = 0;
+  const workerCount = Math.min(BATCH_CONCURRENCY, testcases.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const idx = nextIndex;
+      nextIndex += 1;
+      if (idx >= testcases.length) return;
+      await analyzeOne(testcases[idx]);
+    }
+  });
+
+  await Promise.all(workers);
   job.status = "done";
   setTimeout(() => jobs.delete(job.id), 3600_000);
 }
@@ -336,4 +454,5 @@ app.listen(PORT, () => {
   console.log(`[cursor-bridge] nutest via Sourcegraph = ${NUTEST_SOURCEGRAPH}`);
   console.log(`[cursor-bridge] MCP servers = ${Object.keys(MCP_SERVERS).join(", ")}`);
   console.log(`[cursor-bridge] API key configured = ${!!API_KEY}`);
+  console.log(`[cursor-bridge] batch concurrency = ${BATCH_CONCURRENCY}`);
 });

@@ -10,7 +10,7 @@
 /* Sidebar Navigation */
 .sidebar {
   width: 276px;
-  background: #2f485f;
+  background: linear-gradient(180deg, #24374b 0%, #2c445b 55%, #36516b 100%);
   color: #eef3f8;
   display: flex;
   flex-direction: column;
@@ -75,50 +75,53 @@
 }
 
 .menu-item {
-  padding: 12px 20px;
+  padding: 12px 16px;
+  margin: 4px 10px;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 12px;
   transition: all 0.2s ease;
   border-left: 3px solid transparent;
-  color: #c8d1de;
+  border-radius: 10px;
+  color: #dbe5f2;
 }
 
 .menu-item:hover {
-  background: #36546f;
+  background: rgba(95, 135, 168, 0.25);
   color: #fff;
-  border-left-color: #5f7892;
+  border-left-color: #8ab1d1;
+  transform: translateX(2px);
 }
 
 .menu-item.active {
-  background: #365b78;
-  border-left-color: #5f87a8;
+  background: linear-gradient(90deg, rgba(112, 159, 195, 0.35), rgba(112, 159, 195, 0.14));
+  border-left-color: #9ac1df;
   font-weight: 600;
   color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(154, 193, 223, 0.38);
 }
 
 .menu-icon {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #aeb9c8;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.13);
+  color: #f8fbff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
+  font-size: 16px;
+  font-weight: 600;
   text-align: center;
-  opacity: 0.9;
+  opacity: 1;
 }
 
 .menu-item.active .menu-icon {
-  background: #4f7897;
+  background: #6c9abb;
   color: #fff;
-  border-color: #4f7897;
+  border-color: #8ab1d1;
 }
 
 .menu-content {
@@ -130,11 +133,13 @@
 .menu-label {
   font-size: 14px;
   font-weight: 600;
+  color: #ffffff;
 }
 
 .menu-description {
   font-size: 11px;
-  color: #aeb9c4;
+  color: #d6e1ec;
+  line-height: 1.25;
 }
 
 /* Sidebar User Info (pinned to bottom) */

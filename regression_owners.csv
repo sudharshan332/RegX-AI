@@ -161,7 +161,7 @@ cdp.stargate.volume_group.negative,Suryaprabha
 cdp.stargate.volume_group.odata,Suryaprabha
 cdp.stargate.volume_group.rbac,Suryaprabha
 cdp.stargate.volume_group.test_vg_v4_api,Suryaprabha
-cdp.stargate.volume_group.volume_groups_stats,Suryaprabha
+statscdp.stargate.volume_group.volume_groups_,Suryaprabha
 cdp.stargate.volume_group_load_balancing.test_vg_load_balancing,Suryaprabha
 cdp.zookeeper.zk_basic.test_zk_basic,Swapnil
 cdp.zookeeper.zk_leadership_blueprint.test_zk_leadership_blueprint,Swapnil
