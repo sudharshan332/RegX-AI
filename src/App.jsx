@@ -8,6 +8,7 @@ import RunReport from './pages/RunReport';
 import DynamicJobProfile from './pages/DynamicJobProfile';
 import ManageJobProfile from './pages/ManageJobProfile';
 import FailedTestcaseAnalysis from './pages/FailedTestcaseAnalysis';
+import CursorAI from './pages/CursorAI';
 import { TaskProvider } from './context/TaskContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import TaskStatusIcon from './components/TaskStatusIcon';
@@ -37,8 +38,9 @@ function Dashboard() {
     { id: 'triage-genie', label: 'Triage Genie', icon: '🤖', description: 'Automated Failure Triage' },
     { id: 'failed-analysis', label: 'Failed Testcase Analysis', icon: '🔍', description: 'AI-Powered Failure Analysis' },
     { id: 'run-report', label: 'Run Report', icon: '📊', description: 'QI Analysis' },
-    { id: 'job-profile', label: 'Dynamic Job Profile', icon: '⚙️', description: 'Job Profile Creation' },
+    { id: 'job-profile', label: 'Dynamic Job Profile', icon: '⚙️', description: 'Job Profile creation & manage JP/TS' },
     { id: 'manage-jp', label: 'Manage JP / TS', icon: '🗑️', description: 'Search & Delete JP/TS' },
+    { id: 'cursor-ai', label: 'Cursor AI', icon: '✨', description: 'Interactive AI Chat' },
   ];
 
   const renderPage = () => {
@@ -61,12 +63,20 @@ function Dashboard() {
         return <DynamicJobProfile />;
       case 'manage-jp':
         return <ManageJobProfile />;
+      case 'cursor-ai':
+        return <CursorAI />;
       default:
         return <RegressionHome />;
     }
   };
 
   const displayName = user?.name || user?.sub || 'User';
+  const openSidebarSettings = () => {
+    setActivePage('cursor-ai');
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('openCursorAiSettings'));
+    }, 0);
+  };
 
   return (
     <TaskProvider>
@@ -83,9 +93,19 @@ function Dashboard() {
             </button>
           </div>
           <div className="sidebar-user-info">
-            <span className="sidebar-user-name" title={user?.email || ''}>
-              {displayName}
-            </span>
+            <div className="sidebar-user-meta">
+              <span className="sidebar-user-name" title={user?.email || ''}>
+                {displayName}
+              </span>
+              <button
+                className="sidebar-settings-btn"
+                onClick={openSidebarSettings}
+                title="Open Cursor AI settings"
+                aria-label="Open Cursor AI settings"
+              >
+                ⚙
+              </button>
+            </div>
             <button className="sidebar-logout-btn" onClick={logout} title="Sign out">
               Logout
             </button>

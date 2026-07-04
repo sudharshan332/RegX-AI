@@ -1,7 +1,7 @@
 # Regression Dashboard — Project Documentation & Architecture
 
-**Version:** 1.0  
-**Last Updated:** February 2025  
+**Version:** 2.0  
+**Last Updated:** June 2026  
 **Status:** Living document — current implementation + improvement suggestions + AI roadmap
 
 ---
@@ -12,9 +12,10 @@
 2. [Technology Stack](#2-technology-stack)
 3. [Features & Modules](#3-features--modules)
 4. [Architecture Diagrams](#4-architecture-diagrams)
-5. [Improvement Suggestions](#5-improvement-suggestions)
-6. [AI Integration Roadmap](#6-ai-integration-roadmap)
-7. [Related Documents](#7-related-documents)
+5. [Authentication](#5-authentication)
+6. [Improvement Suggestions](#6-improvement-suggestions)
+7. [AI Integration Roadmap](#7-ai-integration-roadmap)
+8. [Related Documents](#8-related-documents)
 
 ---
 
@@ -22,47 +23,60 @@
 
 The **Regression Dashboard** is a web application for managing and analyzing regression test runs. It provides:
 
-- **Regression overview** by tag or task IDs (Home)
-- **Run planning** and scheduling with job profiles
-- **Handover** and testcase onboarding
-- **Testcase management**
-- **Triage Genie** — automated failure triage
-- **Failed Testcase Analysis** — rule-based failure analysis with Jira/Glean integration
-- **Run Report** — QI analysis, email reports
-- **Dynamic Job Profile** — job profile creation
+- **Regression overview** by tag or task IDs (Home) with triage counts, QI summary, triage accuracy, and TCMS overall QI
+- **Run planning** and scheduling with job profiles, calendar view, bulk triggers, and automated scheduling
+- **Handover** and testcase onboarding (placeholder — coming soon)
+- **Testcase management** — browse, tag, resolve job profiles, and download resource specs via TCMS
+- **Triage Genie** — automated failure triage jobs
+- **Failed Testcase Analysis** — rule-based and AI-powered failure analysis with RDM patterns, streaming results, saved tags, triage updates, retrigger, and Jira/Glean integration
+- **Run Report** — QI analysis, email preview and sending
+- **Dynamic Job Profile** — job profile and test set creation with execution history, testcase history, and cluster/node pool search
+- **Manage JP / TS** — search and bulk-delete job profiles and test sets
+- **Cursor AI** — interactive AI chat with multi-model support and MCP server integration (Atlassian, Sourcegraph, JITA, Diamond, Glean, SupportGPT, NuRAG, Slack, Panacea, Live Debug, Auto Handoff)
+- **AI Analysis** — bulk issue analysis, deep triage, owner ticket lookup, testcase summarization, and run plan risk scoring
 
-The system follows a **client–server** architecture: a **React** frontend (port 3000) and a **Flask** backend (port 5001), with integrations to JITA/Agave, Jira, Glean, and Triage Genie.
+The system follows a **client–server** architecture: a **React** frontend (port 3000) and a **Flask** backend (port 5001), with **LDAP + JWT authentication**, and integrations to JITA/Agave/PHX, TCMS, Jira, Glean, Triage Genie, and Cursor SDK MCP servers.
 
 ---
 
 ## 2. Technology Stack
 
-| Layer        | Technology                    | Purpose                          |
-|-------------|-------------------------------|----------------------------------|
-| Frontend    | React 19, React Scripts 5     | SPA, UI components               |
-| HTTP client | Axios                         | API calls to backend             |
-| Styling     | CSS (App.css, page-level CSS) | Layout and theming               |
-| Backend     | Flask 3.0, flask-cors         | REST API, CORS                   |
-| Data        | pandas, openpyxl              | CSV/Excel, data processing       |
-| HTTP        | requests, urllib3             | Outbound API calls               |
-| Storage     | JSON files, CSV               | Run plans, triage jobs, owners   |
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| Frontend | React 19, React Scripts 5 | SPA, UI components |
+| HTTP client | Axios (centralized `src/api.js` with JWT interceptor) | Authenticated API calls to backend |
+| Markdown | react-markdown, remark-gfm | Render AI/markdown responses |
+| Excel | xlsx (SheetJS) | Excel export in Testcase Management and Triage Accuracy |
+| Styling | CSS (App.css, page-level CSS) | Layout and theming |
+| State | React Context (AuthContext, TaskContext) | Authentication state, background task tracking |
+| Config | `src/config.js` (`REACT_APP_API_URL` env var) | Centralized API base URL |
+| Backend | Flask 3.0, flask-cors | REST API, CORS |
+| Auth | ldap3, PyJWT | LDAP authentication, JWT token management |
+| Data | pandas, openpyxl | CSV/Excel, data processing |
+| HTTP | requests, urllib3 | Outbound API calls |
+| Email | smtplib (stdlib) | Send run report emails |
+| Storage | JSON files, CSV | Run plans, triage jobs, config, analysis results, owners |
 
-**External services:** JITA API, Agave/PHX API, Jira API, Glean API, Triage Genie API.
+**External services:** JITA API, Agave/PHX API, TCMS API, Jira API, Glean API, Triage Genie API, Cursor SDK MCP servers.
 
 ---
 
 ## 3. Features & Modules
 
-| Module                    | Route/Page        | Backend APIs (prefix `/mcp/regression/`)     | Description                          |
-|---------------------------|-------------------|----------------------------------------------|--------------------------------------|
-| Home                      | `home`            | `home`, `manual-tasks`, `branches`, `triage-count`, `qi-summary` | Overview by tag/task IDs, manual tasks, triage/QI |
-| Run Plan                  | `run-plan`        | `run-plan`, `run-plan/<id>/trigger`, batch-update, history, clone, delete, tags, search-job-profiles | Scheduling, triggers, history        |
-| Handover                  | `handover`        | —                                            | New testcase onboarding (UI)         |
-| Testcase Management       | `testcase`        | —                                            | Testcase management (UI)             |
-| Triage Genie              | `triage-genie`    | `triage-genie/jobs`                          | Automated failure triage jobs        |
-| Failed Testcase Analysis  | `failed-analysis` | `failed-analysis/analyze`                    | Failure stage, classification, Jira/Glean, suggestions |
-| Run Report                | `run-report`      | `run-report/list-analysis-files`, `qi-analysis`, `preview-email`, `send-email` | QI analysis, email reports           |
-| Dynamic Job Profile       | `job-profile`     | (via run-plan search-job-profiles)           | Job profile creation                 |
+| Module | Route/Page | Backend APIs (prefix `/mcp/regression/`) | Description |
+|--------|-----------|------------------------------------------|-------------|
+| Home | `home` | `home`, `manual-tasks`, `branches`, `config`, `config/tags`, `triage-count`, `triage-accuracy`, `triage-accuracy/export-excel`, `qi-summary`, `tcms-overall-qi`, `team-config`, `tcms/tags`, `tcms/testcases` | Overview by tag/task IDs, manual tasks, triage/QI, triage accuracy analyzer, TCMS overall QI, team configuration |
+| Run Plan | `run-plan` | `run-plan`, `run-plan/<id>` (PUT/DELETE), `run-plan/<id>/trigger`, `run-plan/<id>/batch-update`, `run-plan/<id>/history`, `run-plan/<id>/clone`, `run-plan/<id>/schedule`, `run-plan/<id>/delete-tag`, `run-plan/search-job-profiles`, `run-plan/tags`, `run-plan/bulk-trigger`, `run-plan/bulk-schedule`, `run-plan/calendar`, `run-plan/history/<id>/retry`, `run-plan/history/<id>/delete`, `run-plan/history/<id>/kill`, `run-plan/service-accounts` | Scheduling, triggers, history with retry/kill, calendar view, bulk operations |
+| Handover | `handover` | — | New testcase onboarding (placeholder — coming soon) |
+| Testcase Management | `testcase` | `testcase-mgmt/fetch-data`, `testcase-mgmt/testcases`, `testcase-mgmt/tags/add`, `testcase-mgmt/tags/delete`, `testcase-mgmt/resource-spec/download`, `testcase-mgmt/resolve-job-profiles`, `testcase-mgmt/branches` | Browse testcases, tag management, resource spec download, job profile resolution via TCMS |
+| Triage Genie | `triage-genie` | `triage-genie/jobs` (GET/POST) | Automated failure triage jobs with prefill from Run Plan |
+| Failed Testcase Analysis | `failed-analysis` | `failed-analysis/analyze`, `analyze-stream`, `update-triage`, `rdm-analyze`, `rdm-analyze-ai`, `ai-summary-single`, `glean-search-single`, `rdm-patterns` (GET/PUT), `history`, `saved-tags` (GET/POST/DELETE), `saved-tags/<tag>/results` (GET/PUT), `retrigger` | Failure analysis (rule-based + AI), SSE streaming, RDM pattern management, saved tag history, triage updates, retrigger |
+| Run Report | `run-report` | `run-report/list-analysis-files`, `qi-analysis`, `preview-email`, `send-email` | QI analysis, email preview and sending |
+| Dynamic Job Profile | `job-profile` | `dynamic-jp/test-execution-history`, `testcase-history`, `check-existing`, `fetch-testset`, `resolve-names`, `search-node-pools`, `search-branches`, `search-clusters`, `create`, `update`, `search`, `delete` | Job profile and test set creation with execution/testcase history |
+| Manage JP / TS | `manage-jp` | `dynamic-jp/search`, `dynamic-jp/delete` | Search and bulk-delete job profiles and test sets |
+| Cursor AI | `cursor-ai` | `cursor-ai/analyze-testcase`, `analyze-batch`, `status/<job_id>`, `result`, `follow-up`, `chat`, `mcp-servers` | Interactive AI chat, testcase analysis, batch analysis, MCP server integration |
+| AI Analysis | (cross-cutting) | `ai-analysis/bulk-issues`, `deep-triage`, `owner-tickets`, `testcase-summary`, `run-plan-risk`, `jira-ticket-details` | Bulk issue analysis, deep triage, owner tickets, testcase summary, run plan risk score |
+| Authentication | (login gate) | `auth/login`, `auth/me`, `auth/logout` | LDAP login, JWT token validation, session management |
 
 ---
 
@@ -78,61 +92,103 @@ graph TB
 
     subgraph "Frontend - React (Port 3000)"
         APP[App.jsx]
-        HOME[RegressionHome]
-        RUNPLAN[RunPlan]
-        HANDOVER[Handover]
-        TESTCASE[TestcaseManagement]
-        TRIAGE[TriageGenie]
-        FAILED[FailedTestcaseAnalysis]
-        REPORT[RunReport]
-        JOBPROFILE[DynamicJobProfile]
-        APP --> HOME
-        APP --> RUNPLAN
-        APP --> HANDOVER
-        APP --> TESTCASE
-        APP --> TRIAGE
-        APP --> FAILED
-        APP --> REPORT
-        APP --> JOBPROFILE
+        AUTH_GATE[AppGate — Auth Guard]
+        LOGIN[LoginPage]
+        DASH[Dashboard]
+        AUTH_GATE --> LOGIN
+        AUTH_GATE --> DASH
+        APP --> AUTH_GATE
+        DASH --> HOME[RegressionHome]
+        DASH --> RUNPLAN[RunPlan]
+        DASH --> HANDOVER[Handover]
+        DASH --> TESTCASE[TestcaseManagement]
+        DASH --> TRIAGE[TriageGenie]
+        DASH --> FAILED[FailedTestcaseAnalysis]
+        DASH --> REPORT[RunReport]
+        DASH --> JOBPROFILE[DynamicJobProfile]
+        DASH --> MANAGEJP[ManageJobProfile]
+        DASH --> CURSORAI[CursorAI]
+    end
+
+    subgraph "Frontend Infrastructure"
+        CONFIG[config.js — API_BASE_URL]
+        API_CLIENT[api.js — Axios + JWT Interceptor]
+        AUTH_CTX[AuthContext — login/logout/user]
+        TASK_CTX[TaskContext — background tasks]
     end
 
     subgraph "Backend - Flask (Port 5001)"
-        API[test_flask.py]
-        API --> R1[/home]
-        API --> R2[/manual-tasks]
-        API --> R3[/run-plan]
-        API --> R4[/triage-genie/jobs]
-        API --> R5[/failed-analysis/analyze]
-        API --> R6[/run-report/*]
-        API --> R7[/branches, triage-count, qi-summary]
+        FLASK[test_flask.py]
+        AUTH_MOD[auth.py — LDAP + JWT]
+        FLASK --> AUTH_MOD
+        FLASK --> R_AUTH[/auth/*]
+        FLASK --> R_HOME[/home, /config, /branches]
+        FLASK --> R_MANUAL[/manual-tasks]
+        FLASK --> R_RUNPLAN[/run-plan/*]
+        FLASK --> R_TRIAGE_COUNT[/triage-count, /triage-accuracy]
+        FLASK --> R_QI[/qi-summary, /tcms-overall-qi]
+        FLASK --> R_TEAM[/team-config, /tcms/*]
+        FLASK --> R_TRIAGE_GENIE[/triage-genie/jobs]
+        FLASK --> R_FAILED[/failed-analysis/*]
+        FLASK --> R_REPORT[/run-report/*]
+        FLASK --> R_TESTCASE_MGMT[/testcase-mgmt/*]
+        FLASK --> R_DYNAMIC_JP[/dynamic-jp/*]
+        FLASK --> R_AI[/ai-analysis/*, /cursor-ai/*]
+        FLASK --> R_JIRA[/jira-ticket-details]
+        FLASK --> SCHEDULER[Run Plan Scheduler Thread]
     end
 
     subgraph "Local Storage"
         JSON1[run_plans.json]
         JSON2[triage_genie_jobs.json]
+        JSON3[regression_config.json]
+        JSON4[data/failed_analysis_*.json]
+        JSON5[data/triage_accuracy_data*.json]
+        JSON6[data/testcase_management_*.json]
+        JSON7[data/rdm_failure_patterns.json]
+        JSON8[data/failed_analysis_saved_tags.json]
         CSV1[regression_owners.csv]
+        SEQ[backend/.dyn_name_sequence.json]
     end
 
     subgraph "External Services"
-        JITA[JITA / Agave API]
+        JITA[JITA / Agave / PHX API]
+        TCMS[TCMS API]
         JIRA[Jira API]
         GLEAN[Glean API]
         TG[Triage Genie API]
+        LDAP[LDAP / Active Directory]
+        CURSOR_MCP[Cursor SDK MCP Servers]
     end
 
     U --> APP
-    HOME --> API
-    RUNPLAN --> API
-    TRIAGE --> API
-    FAILED --> API
-    REPORT --> API
-    API --> JSON1
-    API --> JSON2
-    API --> CSV1
-    API --> JITA
-    API --> JIRA
-    API --> GLEAN
-    API --> TG
+    HOME --> API_CLIENT
+    RUNPLAN --> API_CLIENT
+    TRIAGE --> API_CLIENT
+    FAILED --> API_CLIENT
+    REPORT --> API_CLIENT
+    TESTCASE --> API_CLIENT
+    JOBPROFILE --> API_CLIENT
+    MANAGEJP --> API_CLIENT
+    CURSORAI --> API_CLIENT
+    API_CLIENT --> FLASK
+    FLASK --> JSON1
+    FLASK --> JSON2
+    FLASK --> JSON3
+    FLASK --> JSON4
+    FLASK --> JSON5
+    FLASK --> JSON6
+    FLASK --> JSON7
+    FLASK --> JSON8
+    FLASK --> CSV1
+    FLASK --> SEQ
+    FLASK --> JITA
+    FLASK --> TCMS
+    FLASK --> JIRA
+    FLASK --> GLEAN
+    FLASK --> TG
+    AUTH_MOD --> LDAP
+    FLASK --> CURSOR_MCP
 ```
 
 ---
@@ -142,21 +198,35 @@ graph TB
 ```mermaid
 graph LR
     subgraph "App Container"
+        AUTH_PROVIDER[AuthProvider]
+        TASK_PROVIDER[TaskProvider]
         SIDEBAR[Sidebar Navigation]
         MAIN[Main Content]
+        TASK_ICON[TaskStatusIcon]
+    end
+
+    subgraph "Shared Infrastructure"
+        CONFIG[config.js]
+        API[api.js — JWT Interceptor]
+        AUTH_CTX[AuthContext]
+        TASK_CTX[TaskContext]
+        AI_MD[AiMarkdown]
     end
 
     subgraph "Pages"
         P1[Home]
         P2[Run Plan]
-        P3[Handover]
-        P4[Testcase Mgmt]
+        P3[Handover — placeholder]
+        P4[Testcase Management]
         P5[Triage Genie]
-        P6[Failed Analysis]
+        P6[Failed Testcase Analysis]
         P7[Run Report]
-        P8[Job Profile]
+        P8[Dynamic Job Profile]
+        P9[Manage JP / TS]
+        P10[Cursor AI]
     end
 
+    AUTH_PROVIDER --> TASK_PROVIDER
     SIDEBAR -->|activePage state| MAIN
     MAIN --> P1
     MAIN --> P2
@@ -166,6 +236,8 @@ graph LR
     MAIN --> P6
     MAIN --> P7
     MAIN --> P8
+    MAIN --> P9
+    MAIN --> P10
 ```
 
 ---
@@ -174,34 +246,112 @@ graph LR
 
 ```mermaid
 graph TD
-    subgraph "Regression Dashboard API - /mcp/regression/"
+    subgraph "Authentication — /mcp/regression/auth/"
+        AUTH_LOGIN[login POST]
+        AUTH_ME[me GET]
+        AUTH_LOGOUT[logout POST]
+    end
+
+    subgraph "Home & Config — /mcp/regression/"
         A[home GET]
         B[manual-tasks GET/POST/DELETE]
         C[branches GET]
+        CFG[config GET/POST]
+        CFG_TAGS[config/tags POST/DELETE]
         D[triage-count GET]
+        TA[triage-accuracy GET + export-excel GET]
         E[qi-summary GET]
-        F[run-plan GET/POST]
-        G[run-plan/&lt;id&gt; PUT/DELETE/trigger/batch-update/clone]
-        H[run-plan/history]
-        I[triage-genie/jobs GET/POST]
-        J[failed-analysis/analyze GET]
-        K[run-report/list-analysis-files POST]
-        L[run-report/qi-analysis POST]
-        M[run-report/preview-email POST]
-        N[run-report/send-email POST]
+        OQI[tcms-overall-qi GET]
+        TC[team-config GET]
+        TCMS_T[tcms/tags GET]
+        TCMS_TC[tcms/testcases POST]
     end
 
-    subgraph "Data / External"
-        A --> JITA
-        D --> JITA
-        E --> JITA
-        F --> JSON
-        I --> JSON
-        J --> JITA
-        J --> JIRA
-        J --> GLEAN
-        K --> JITA
-        L --> JITA
+    subgraph "Run Plan — /mcp/regression/run-plan/"
+        F[run-plan GET/POST]
+        G[run-plan/id PUT/DELETE]
+        G2[run-plan/id/trigger POST]
+        G3[run-plan/id/batch-update POST]
+        G4[run-plan/id/clone POST]
+        G5[run-plan/id/schedule PUT/DELETE]
+        G6[run-plan/id/delete-tag POST]
+        H[run-plan/history GET]
+        H2[run-plan/history/id/retry POST]
+        H3[run-plan/history/id/delete DELETE]
+        H4[run-plan/history/id/kill POST]
+        F2[run-plan/tags GET]
+        F3[run-plan/search-job-profiles POST]
+        F4[run-plan/bulk-trigger POST]
+        F5[run-plan/bulk-schedule POST]
+        F6[run-plan/calendar GET]
+        F7[run-plan/service-accounts GET]
+    end
+
+    subgraph "Testcase Management — /mcp/regression/testcase-mgmt/"
+        TM1[fetch-data GET]
+        TM2[testcases GET]
+        TM3[tags/add POST]
+        TM4[tags/delete POST]
+        TM5[resource-spec/download GET]
+        TM6[resolve-job-profiles POST]
+        TM7[branches GET]
+    end
+
+    subgraph "Triage Genie — /mcp/regression/triage-genie/"
+        I[jobs GET/POST]
+    end
+
+    subgraph "Failed Analysis — /mcp/regression/failed-analysis/"
+        J[analyze GET]
+        J2[analyze-stream GET — SSE]
+        J3[update-triage PUT]
+        J4[rdm-analyze POST]
+        J5[rdm-analyze-ai POST]
+        J6[ai-summary-single POST]
+        J7[glean-search-single POST]
+        J8[rdm-patterns GET/PUT]
+        J9[history GET]
+        J10[saved-tags GET/POST/DELETE]
+        J11[saved-tags/tag/results GET/PUT]
+        J12[retrigger POST]
+    end
+
+    subgraph "Run Report — /mcp/regression/run-report/"
+        K[list-analysis-files POST]
+        L[qi-analysis POST]
+        M[preview-email POST]
+        N[send-email POST]
+    end
+
+    subgraph "Dynamic JP — /mcp/regression/dynamic-jp/"
+        DJ1[test-execution-history POST]
+        DJ2[testcase-history POST]
+        DJ3[check-existing POST]
+        DJ4[fetch-testset POST]
+        DJ5[resolve-names POST]
+        DJ6[search-node-pools POST]
+        DJ7[search-branches POST]
+        DJ8[search-clusters POST]
+        DJ9[create POST]
+        DJ10[update POST]
+        DJ11[search POST]
+        DJ12[delete POST]
+    end
+
+    subgraph "AI & Cursor — /mcp/regression/"
+        AI1[ai-analysis/bulk-issues POST]
+        AI2[ai-analysis/deep-triage POST]
+        AI3[ai-analysis/owner-tickets POST]
+        AI4[ai-analysis/testcase-summary POST]
+        AI5[ai-analysis/run-plan-risk POST]
+        AI6[jira-ticket-details POST]
+        C1[cursor-ai/analyze-testcase POST]
+        C2[cursor-ai/analyze-batch POST]
+        C3[cursor-ai/status/job_id GET]
+        C4[cursor-ai/result POST]
+        C5[cursor-ai/follow-up POST]
+        C6[cursor-ai/chat POST]
+        C7[cursor-ai/mcp-servers GET]
     end
 ```
 
@@ -212,23 +362,67 @@ graph TD
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant R as React App
+    participant L as LoginPage
+    participant R as React App (api.js + JWT)
     participant F as Flask API
-    participant E as External (JITA/Jira/Glean/Triage Genie)
+    participant AD as LDAP / Active Directory
+    participant E as External (JITA/TCMS/Jira/Glean/Triage Genie/MCP)
     participant S as Storage (JSON/CSV)
 
-    U->>R: Use dashboard (tag / task IDs / run plan / triage / report)
-    R->>F: HTTP GET/POST (e.g. /home, /run-plan, /analyze)
-    F->>E: Fetch tasks, results, Jira, Glean
+    U->>L: Enter LDAP credentials
+    L->>F: POST /auth/login
+    F->>AD: LDAP bind + attribute lookup
+    AD-->>F: User info
+    F-->>L: JWT token + user
+    L->>R: Store token in localStorage
+
+    U->>R: Use dashboard (tag / task IDs / run plan / triage / report / AI chat)
+    R->>F: HTTP GET/POST with Authorization: Bearer <JWT>
+    F->>F: jwt_required decorator validates token
+    F->>E: Fetch tasks, results, Jira, Glean, TCMS, MCP
     E-->>F: Data
-    F->>S: Read/Write run_plans, triage jobs, owners CSV
-    F-->>R: JSON response
-    R-->>U: Render tables, forms, reports
+    F->>S: Read/Write run_plans, triage jobs, config, analysis results, owners
+    F-->>R: JSON response (or SSE stream for analyze-stream)
+    R-->>U: Render tables, forms, reports, AI responses
 ```
 
 ---
 
-### 4.5 Deployment / Runtime View
+### 4.5 Authentication Flow
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant AC as AuthContext
+    participant API as api.js (Axios)
+    participant F as Flask /auth/*
+    participant AD as LDAP Server
+    participant JWT as JWT Module (auth.py)
+
+    Note over B,JWT: Login Flow
+    B->>AC: login(username, password)
+    AC->>F: POST /auth/login {username, password}
+    F->>AD: LDAP bind (user credentials)
+    AD-->>F: Success + user attributes
+    F->>JWT: create_jwt(username, displayName, email)
+    JWT-->>F: JWT token (HS256, 24h expiry)
+    F->>F: Cache credentials for JITA passthrough
+    F-->>AC: {token, user}
+    AC->>B: Store token in localStorage, set user state
+
+    Note over B,JWT: Subsequent Requests
+    B->>API: Any API call
+    API->>API: Interceptor attaches Authorization: Bearer <token>
+    API->>F: Request with JWT header
+    F->>JWT: decode_jwt(token)
+    JWT-->>F: Payload (or 401 if expired/invalid)
+    F-->>API: Response
+    API->>API: On 401: clear token, reload → LoginPage
+```
+
+---
+
+### 4.6 Deployment / Runtime View
 
 ```mermaid
 graph TB
@@ -237,58 +431,101 @@ graph TB
         PY[python backend/test_flask.py]
         NPM --> REACT[React Dev Server :3000]
         PY --> FLASK[Flask Server :5001]
+        PY --> SCHEDULER[Scheduler Thread — auto-trigger due run plans]
     end
 
     subgraph "Browser"
         REACT --> BROWSER[localhost:3000]
-        BROWSER -->|API calls| FLASK
+        BROWSER -->|Proxy to :5001| FLASK
+    end
+
+    subgraph "Environment Variables"
+        ENV1[REACT_APP_API_URL — frontend API base]
+        ENV2[SECRET_KEY / REGX_SECRET_KEY — JWT signing]
+        ENV3[JWT_EXPIRY_HOURS — token TTL default 24]
+        ENV4[JITA_USERNAME / JITA_PASSWORD — service account]
+        ENV5[TRIAGE_GENIE_USERNAME / PASSWORD]
+        ENV6[TCMS_USER / TCMS_PASSWORD]
+        ENV7[FLASK_HOST, FLASK_PORT, FLASK_DEBUG]
     end
 
     subgraph "Filesystem"
         FLASK --> run_plans.json
         FLASK --> triage_genie_jobs.json
+        FLASK --> regression_config.json
         FLASK --> regression_owners.csv
+        FLASK --> data_dir["data/ — analysis results, triage accuracy, testcase mgmt, RDM patterns, saved tags"]
+        FLASK --> dyn_seq["backend/.dyn_name_sequence.json"]
     end
 ```
 
 ---
 
-## 5. Improvement Suggestions
+## 5. Authentication
 
-### 5.1 Code & Structure
+### 5.1 Overview
+
+The dashboard uses **LDAP (Active Directory) authentication** with **JWT tokens** for session management. All API routes (except `auth/login`) are protected by the `@jwt_required` decorator.
+
+### 5.2 Components
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| LDAP Auth | `backend/auth.py` → `LDAPAuth` class | Authenticates users against AD, fetches displayName/mail/title |
+| JWT helpers | `backend/auth.py` → `create_jwt`, `decode_jwt` | HS256 token creation and verification |
+| `@jwt_required` | `backend/auth.py` → decorator | Enforces valid JWT on protected routes, sets `g.current_user` |
+| Credential cache | `backend/test_flask.py` | In-memory cache of LDAP passwords for JITA API passthrough (TTL = JWT expiry) |
+| AuthContext | `src/context/AuthContext.jsx` | React context: login/logout, token persistence in localStorage, auto-validate on mount |
+| LoginPage | `src/components/LoginPage.jsx` | Login form UI |
+| api.js | `src/api.js` | Axios instance: attaches `Authorization: Bearer <token>`, clears token + reloads on 401 |
+
+### 5.3 Token Lifecycle
+
+1. User submits credentials → `POST /auth/login` → LDAP bind
+2. On success, backend issues JWT (HS256, configurable `JWT_EXPIRY_HOURS`, default 24h)
+3. Token stored in `localStorage` under key `regx_auth_token`
+4. Every request via `api.js` includes `Authorization: Bearer <token>`
+5. On 401 response, token is cleared and page reloads to show login
+
+---
+
+## 6. Improvement Suggestions
+
+### 6.1 Code & Structure
 
 | Area | Suggestion | Benefit |
 |------|------------|--------|
-| **Backend size** | Split `test_flask.py` into blueprints or modules (e.g. `routes/home.py`, `routes/run_plan.py`, `routes/failed_analysis.py`, `services/jira.py`, `services/glean.py`) | Easier maintenance, testing, and onboarding |
-| **Configuration** | Move all config to environment variables or a config module (base URLs, tokens, limits, ports); avoid hardcoded `HEADERS`, `JITA_BASE`, etc. | Security, different environments (dev/stage/prod) |
-| **API base URL** | Use a single base URL in frontend (e.g. `process.env.REACT_APP_API_URL` or `config.js`) instead of hardcoding `http://localhost:5001` in each component | Easier deployment and env switching |
-| **Duplication** | Remove duplicate `useEffect` in `App.jsx` (two identical `setActivePage` listeners) | Cleaner code, no confusion |
+| **Backend size** | Split `test_flask.py` (~11K lines) into blueprints or modules (e.g. `routes/home.py`, `routes/run_plan.py`, `routes/failed_analysis.py`, `routes/dynamic_jp.py`, `routes/cursor_ai.py`, `services/jira.py`, `services/glean.py`) | Easier maintenance, testing, and onboarding |
+| **Configuration** | Move all config to environment variables or a config module (base URLs, tokens, limits, ports); avoid hardcoded `JITA_BASE`, `TRIAGE_GENIE_BASE`, etc. | Security, different environments (dev/stage/prod) |
+| ~~API base URL~~ | ~~Use a single base URL in frontend~~ → **Done:** `src/config.js` with `REACT_APP_API_URL` | ✅ Implemented |
+| ~~Duplicate useEffect~~ | ~~Remove duplicate setActivePage listeners~~ → **Done:** single listener in `Dashboard` | ✅ Implemented |
+| ~~State management~~ | ~~Use React Context~~ → **Done:** `AuthContext` and `TaskContext` | ✅ Implemented |
+| ~~Authentication~~ | ~~Add auth for API~~ → **Done:** LDAP + JWT via `backend/auth.py` | ✅ Implemented |
 
-### 5.2 Security
+### 6.2 Security
 
 | Area | Suggestion | Benefit |
 |------|------------|--------|
-| **Secrets** | Never commit tokens; use `TRIAGE_GENIE_TOKEN`, `JIRA_TOKEN`, `GLEAN_TOKEN` (or similar) from env; document in README | No leaked credentials |
+| **Secrets** | Never commit tokens; use `TRIAGE_GENIE_USERNAME/PASSWORD`, `TCMS_USER/PASSWORD`, `SECRET_KEY` from env; document in README | No leaked credentials |
 | **CORS** | Restrict CORS in production to known frontend origins instead of open `CORS(app)` | Reduce cross-origin abuse |
-| **Auth** | Add authentication/authorization for API (e.g. API key, JWT, or SSO) so only authorized users can access regression data | Access control |
+| **Credential cache** | The in-memory credential cache stores LDAP passwords; consider encrypting at rest or using a secure vault | Defense in depth |
 
-### 5.3 Testing & Quality
+### 6.3 Testing & Quality
 
 | Area | Suggestion | Benefit |
 |------|------------|--------|
-| **Backend tests** | Add pytest (or similar) for critical endpoints: home, run-plan, failed-analysis, run-report | Regression safety, refactoring confidence |
+| **Backend tests** | Add pytest for critical endpoints: home, run-plan, failed-analysis, run-report, auth | Regression safety, refactoring confidence |
 | **Frontend tests** | Add unit tests for key components (e.g. RegressionHome, RunPlan, FailedTestcaseAnalysis) and integration tests for critical flows | Fewer UI regressions |
 | **Linting** | Use ESLint and Prettier in frontend; use flake8/black/ruff in backend | Consistent style and early bug detection |
 
-### 5.4 User Experience & Frontend
+### 6.4 User Experience & Frontend
 
 | Area | Suggestion | Benefit |
 |------|------------|--------|
-| **Loading & errors** | Consistent loading indicators and error messages (and retry) for all API calls | Clear feedback, fewer “blank” states |
+| **Loading & errors** | Consistent loading indicators and error messages (and retry) for all API calls | Clear feedback, fewer "blank" states |
 | **Routing** | Use React Router so each page has a URL (e.g. `/run-plan`, `/failed-analysis`); preserve state on refresh | Shareable links, better navigation |
-| **State** | Consider React Context or a small state library for shared data (e.g. selected tag, run plan id) instead of only local state and localStorage | Less prop drilling, clearer data flow |
 
-### 5.5 Performance & Scalability
+### 6.5 Performance & Scalability
 
 | Area | Suggestion | Benefit |
 |------|------------|--------|
@@ -296,14 +533,14 @@ graph TB
 | **Caching** | Cache Jira/Glean responses or analysis results (in-memory or Redis) with TTL for repeated tag/task queries | Lower latency, fewer external calls |
 | **Async** | For long-running operations (e.g. full analysis, report generation), use background jobs (Celery, RQ) and poll status or WebSockets | No timeouts, better UX |
 
-### 5.6 Data & Storage
+### 6.6 Data & Storage
 
 | Area | Suggestion | Benefit |
 |------|------------|--------|
 | **Persistence** | Replace or supplement JSON/CSV with a proper DB (e.g. SQLite for single instance, PostgreSQL for multi-instance) for run plans, triage jobs, and metadata | Durability, queries, backups |
 | **Schema** | Version run_plans and triage_genie_jobs schema; support migration if format changes | Safe evolution of stored data |
 
-### 5.7 Observability
+### 6.7 Observability
 
 | Area | Suggestion | Benefit |
 |------|------------|--------|
@@ -313,95 +550,139 @@ graph TB
 
 ---
 
-## 6. AI Integration Roadmap
+## 7. AI Integration Roadmap
 
-This section suggests a phased plan for integrating AI into the Regression Dashboard. It aligns with the existing “Phase-2 (Coming Soon): AI Regression Agent” idea in the sidebar.
+This section tracks the phased plan for integrating AI into the Regression Dashboard.
 
-### 6.1 Current State
+### 7.1 Current State
 
-- **Failed Testcase Analysis** uses a **rule-based** engine: keyword matching, scoring, and templates for failure stage, issue classification, Jira validation, and suggestions.
-- **No LLM or ML models** today; “AI” in the UI refers to automated, rule-based intelligence.
-- See `AI_Suggestion_Implementation_Guide.md` and `Architecture_and_Enhancement_Plan.md` for detailed current behavior and diagrams.
+- **Failed Testcase Analysis** uses both a **rule-based** engine (keyword matching, scoring, templates) and **AI-powered analysis** (`rdm-analyze-ai`, `ai-summary-single`, `glean-search-single`) for failure stage, issue classification, Jira validation, and suggestions.
+- **AI Analysis routes** provide bulk issue analysis, deep triage, owner ticket lookup, testcase summarization, and run plan risk scoring.
+- **Cursor AI** module provides an interactive chat interface backed by Cursor SDK with multi-model support (Claude Sonnet 4.6) and MCP server integrations.
+- **RDM patterns** provide configurable failure pattern matching with CRUD operations.
+- **Triage Accuracy Analyzer** evaluates triage quality across runs with Excel export.
 
-### 6.2 Phase 1 — LLM-Augmented Suggestions (Short-term, 1–3 months)
+### 7.2 Phase 1 — LLM-Augmented Suggestions ✅ Implemented
 
-| Goal | Actions | Outcome |
-|------|--------|--------|
-| **Hybrid suggestions** | Keep existing rules for simple cases; call an LLM (OpenAI/Claude/Ollama) for complex or ambiguous failures. Send context: exception summary, stack trace snippet, Jira summary, issue type. | Richer, context-aware suggestions without replacing current logic. |
-| **Prompt engineering** | Maintain a small set of prompts (e.g. “suggest fix for test failure”) and version them. Include few-shot examples from past triages. | Stable quality and easier iteration. |
-| **Safety** | Sanitize inputs to LLM (no PII/secrets); cap token usage; fallback to rule-based suggestion on LLM failure or timeout. | Safe and reliable UX. |
-| **Caching** | Cache LLM responses by a hash of (exception_summary + issue_type + jira_summary) with TTL to reduce cost and latency. | Cost control and faster repeat queries. |
+| Goal | Status | Implementation |
+|------|--------|---------------|
+| **Hybrid suggestions** | ✅ Done | Rule-based for simple cases; AI for complex failures via `rdm-analyze-ai`, `ai-summary-single` |
+| **Prompt engineering** | ✅ Done | Integrated via Cursor AI chat with model selection |
+| **Safety** | ✅ Done | JWT-protected endpoints, configurable models |
+| **Caching** | ✅ Done | Saved tags with cached analysis results (`failed_analysis_saved_tags.json`) |
 
-**Deliverables:** Optional LLM toggle in Failed Testcase Analysis; backend flag or env to enable/disable LLM path; logging of LLM usage.
+### 7.3 Phase 2 — Smarter Triage & Summarization ✅ Partially Implemented
 
-### 6.3 Phase 2 — Smarter Triage & Summarization (3–6 months)
+| Goal | Status | Implementation |
+|------|--------|---------------|
+| **Run-level summary** | ✅ Done | AI summary in Home (bulk issues, QI impact) |
+| **Triage Genie integration** | ✅ Done | Prefill from Run Plan, automated job creation |
+| **Triage accuracy** | ✅ Done | Triage Accuracy Analyzer with export |
+| **Flaky vs real** | 🔄 In progress | Deep triage via `ai-analysis/deep-triage` |
 
-| Goal | Actions | Outcome |
-|------|--------|--------|
-| **Run-level summary** | After collecting failed test analysis, call LLM to produce a short “run summary” (main themes, suggested owners, top 3 actions). | Quick human-readable overview for Run Report and Home. |
-| **Triage Genie integration** | Use LLM to suggest Jira ticket title/description or link to existing ticket from exception + test name. | Faster, more consistent triage. |
-| **Flaky vs real failure** | Use LLM or a small classifier (e.g. “flaky” vs “real” from history) to tag failures; surface in UI. | Better prioritization. |
-
-**Deliverables:** Run summary in Run Report and/or Home; optional AI-assisted triage in Triage Genie; flaky/real badge in Failed Testcase Analysis or Home.
-
-### 6.4 Phase 3 — Predictive & Proactive (6–12 months)
-
-| Goal | Actions | Outcome |
-|------|--------|--------|
-| **Failure prediction** | Train a lightweight model (or use LLM over historical data) to predict “likely to fail” tests per branch/tag based on code/config changes and past runs. | Proactive alerts or “risk score” on Run Plan. |
-| **Root cause clustering** | Group failures by root cause (e.g. embedding + clustering or LLM-based grouping) and suggest a single Jira or fix for a cluster. | Less duplicate triage. |
-| **Recommendations** | “Suggest run plan” or “suggest tests to run” based on changed files and past failures (LLM or retrieval). | Smarter Run Plan and resource use. |
-
-**Deliverables:** Risk or “likely to fail” indicator; root-cause groups in Failed Testcase Analysis; optional “suggest run plan” in Run Plan.
-
-### 6.5 Phase 4 — Full “AI Regression Agent” (12+ months)
+### 7.4 Phase 3 — Predictive & Proactive (In Progress)
 
 | Goal | Actions | Outcome |
 |------|--------|--------|
-| **Agent loop** | An agent that can: read run results → analyze failures → suggest/create Jira tickets → suggest code/test changes (with links to Glean/docs). | One place to “ask” the dashboard to triage and suggest next steps. |
-| **Chat / natural language** | Allow questions like “Why did test X fail on branch Y?” or “Summarize last week’s regressions”; answer using analysis + LLM. | Easier for new users and ad-hoc analysis. |
-| **CI integration** | Webhook or API for CI: post run results, get back summary + suggested actions; optional auto-create Jira or comments. | Regression intelligence inside pipeline. |
+| **Run plan risk** | `ai-analysis/run-plan-risk` endpoint scores risk for planned runs | Risk indicator on Run Plan |
+| **Root cause clustering** | Group failures by root cause via RDM patterns and AI analysis | Less duplicate triage |
+| **Recommendations** | Testcase summary via `ai-analysis/testcase-summary` | Smarter test selection |
 
-**Deliverables:** Agent API and optional UI (chat or “Ask Agent”); CI integration doc and reference implementation.
+### 7.5 Phase 4 — Full "AI Regression Agent" (In Progress)
 
-### 6.6 AI Roadmap — Visual Timeline
+| Goal | Status | Implementation |
+|------|--------|---------------|
+| **Agent loop** | ✅ Done | Cursor AI with multi-step analysis: analyze → follow-up → result |
+| **Chat / natural language** | ✅ Done | Cursor AI page with mode selection (Agent/Plan/Debug/Ask) |
+| **MCP server integration** | ✅ Done | 12 MCP servers: RegX Data, Atlassian, Sourcegraph, JITA, Diamond, Glean, SupportGPT, NuRAG, Slack, Panacea, Live Debug, Auto Handoff |
+| **CI integration** | Planned | Webhook or API for CI pipeline |
+
+### 7.6 AI Roadmap — Visual Timeline
 
 ```mermaid
 gantt
     title AI Integration Roadmap
     dateFormat YYYY-MM
-    section Phase 1
-    LLM-augmented suggestions     :a1, 2025-02, 3M
-    Caching & safety              :a2, 2025-03, 2M
-    section Phase 2
-    Run-level summary             :b1, 2025-05, 2M
-    Triage Genie AI               :b2, 2025-05, 2M
-    Flaky vs real                 :b3, 2025-06, 2M
-    section Phase 3
-    Failure prediction            :c1, 2025-08, 3M
-    Root cause clustering         :c2, 2025-09, 2M
-    Suggest run plan              :c3, 2025-10, 2M
-    section Phase 4
-    AI Regression Agent           :d1, 2026-01, 4M
-    Chat / NL interface           :d2, 2026-02, 2M
-    CI integration                :d3, 2026-03, 2M
+    section Phase 1 ✅
+    LLM-augmented suggestions     :done, a1, 2025-02, 3M
+    Caching & safety              :done, a2, 2025-03, 2M
+    section Phase 2 ✅
+    Run-level summary             :done, b1, 2025-05, 2M
+    Triage Genie AI               :done, b2, 2025-05, 2M
+    Triage accuracy               :done, b3, 2025-06, 2M
+    section Phase 3 🔄
+    Run plan risk scoring         :active, c1, 2025-08, 6M
+    Root cause clustering         :active, c2, 2025-09, 6M
+    Testcase summary              :active, c3, 2025-10, 5M
+    section Phase 4 🔄
+    Cursor AI Agent               :done, d1, 2026-01, 4M
+    Chat / NL interface           :done, d2, 2026-02, 3M
+    MCP server integration        :done, d3, 2026-03, 3M
+    CI integration                :d4, 2026-07, 3M
 ```
 
-### 6.7 Dependencies & Prerequisites
+### 7.7 Dependencies & Prerequisites
 
-- **API keys:** OpenAI/Anthropic or self-hosted LLM (e.g. Ollama) and secure storage (env/secrets manager).
-- **Infra:** Optional queue (Celery/Redis) for async LLM calls in Phase 2+; optional vector DB if you add semantic search.
+- **Cursor SDK:** Used for AI chat and analysis; requires Cursor bridge setup.
+- **MCP Servers:** 12 integrated servers for cross-tool intelligence (Atlassian, Sourcegraph, JITA, Diamond, Glean, SupportGPT, NuRAG, Slack, Panacea, Live Debug, Auto Handoff, RegX Data).
+- **API keys:** Managed via environment variables (see Section 4.6 for full list).
 - **Governance:** Review usage, cost, and PII; ensure prompts and model outputs align with security and compliance.
 
 ---
 
-## 7. Related Documents
+## 8. Related Documents
 
 | Document | Content |
 |----------|--------|
 | **README.md** | Setup, run instructions, npm scripts, environment variables. |
-| **Architecture_Diagrams.md** | Mermaid diagrams focused on **Failed Testcase Analysis** (data flow, analysis engine, external APIs, future phases, scalability). |
-| **Architecture_and_Enhancement_Plan.md** | Detailed current architecture, component tables, data flow, and enhancement plan for Failed Testcase Analysis. |
-| **AI_Suggestion_Implementation_Guide.md** | How the rule-based “AI” suggestion works, code structure, and how to enhance it with real LLM/AI. |
+| **AGENTS.md** | AI agent orientation: stack, ports, read-first docs, conventions. |
+| **.cursor/rules/regx-ai.mdc** | Cursor rule: stack, ports, API prefix, secrets policy, Gerrit conventions. |
+| **.cursor/skills/regx-ai/SKILL.md** | Cursor skill for the RegX-AI dashboard. |
+| **.cursor/skills/triage-cdp-test-failure/SKILL.md** | Cursor skill for triaging CDP test failures. |
 
-For **Failed Testcase Analysis** specifically, use the diagrams and tables in **Architecture_Diagrams.md** and **Architecture_and_Enhancement_Plan.md**. This document gives the **full project** view, **improvement suggestions**, and a **high-level AI integration roadmap** that can be refined with your team and priorities.
+### Frontend File Map
+
+| File / Directory | Purpose |
+|-----------------|---------|
+| `src/App.jsx` | Root component: AuthProvider → AppGate → Dashboard with sidebar navigation |
+| `src/config.js` | Centralized `API_BASE_URL` from `REACT_APP_API_URL` env var |
+| `src/api.js` | Axios instance with JWT interceptor (attach token, handle 401) |
+| `src/context/AuthContext.jsx` | Authentication context: login, logout, user state, token persistence |
+| `src/context/TaskContext.jsx` | Background task tracking context: add/update/clear tasks |
+| `src/RegressionHome.jsx` | Home page: regression overview, triage counts, QI, triage accuracy, TCMS QI |
+| `src/pages/RunPlan.jsx` | Run plan management: CRUD, trigger, schedule, calendar, bulk ops |
+| `src/pages/Handover.jsx` | Placeholder page (coming soon) |
+| `src/pages/TestcaseManagement.jsx` | Testcase browsing, tagging, resource spec download, job profile resolution |
+| `src/pages/TriageGenie.jsx` | Triage job creation and monitoring |
+| `src/pages/FailedTestcaseAnalysis.jsx` | Failure analysis (rule-based + AI), streaming, saved tags, retrigger |
+| `src/pages/RunReport.jsx` | QI analysis, email preview and sending |
+| `src/pages/DynamicJobProfile.jsx` | Job profile and test set creation with history |
+| `src/pages/ManageJobProfile.jsx` | Search and bulk-delete job profiles/test sets |
+| `src/pages/CursorAI.jsx` | Interactive AI chat with model/mode selection and MCP servers |
+| `src/components/LoginPage.jsx` | LDAP login form |
+| `src/components/AiMarkdown.jsx` | Markdown renderer for AI responses (react-markdown + remark-gfm) |
+| `src/components/TaskStatusIcon.jsx` | Floating icon showing background task status |
+
+### Backend File Map
+
+| File | Purpose |
+|------|---------|
+| `backend/test_flask.py` | Flask application (~11K lines): all API routes, scheduler thread, credential cache |
+| `backend/auth.py` | LDAP authentication (`LDAPAuth` class), JWT creation/verification, `@jwt_required` decorator |
+
+### Data File Map
+
+| File | Purpose |
+|------|---------|
+| `run_plans.json` | Run plan definitions and schedules |
+| `triage_genie_jobs.json` | Triage Genie job records |
+| `regression_config.json` | Dashboard configuration: input mode, default tag, added tags |
+| `regression_owners.csv` | Regression test owners mapping |
+| `backend/.dyn_name_sequence.json` | Auto-increment sequence for dynamic job profile naming |
+| `data/failed_analysis_*.json` | Cached failed testcase analysis results per tag |
+| `data/failed_analysis_saved_tags.json` | List of saved analysis tags |
+| `data/triage_accuracy_data*.json` | Triage accuracy analysis results per tag |
+| `data/testcase_management_*.json` | Testcase management data per branch/product |
+| `data/rdm_failure_patterns.json` | RDM failure pattern rules for automated classification |
+
+For **Failed Testcase Analysis** specifically, use the diagrams and tables in **Architecture_Diagrams.md** and **Architecture_and_Enhancement_Plan.md** (if present). This document gives the **full project** view, **improvement suggestions**, and the **AI integration roadmap** with current implementation status.
