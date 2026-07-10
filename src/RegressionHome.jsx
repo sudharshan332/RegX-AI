@@ -2259,6 +2259,51 @@ export default function RegressionHome() {
                   {triageCount.triage_summary && (
                     <div style={{ marginBottom: "20px" }}>
                       <h4 style={{ marginBottom: "10px" }}>Triage Summary:</h4>
+                      {(() => {
+                        const owners = Object.values(triageCount.triage_summary || {});
+                        const sum = (k) => owners.reduce((acc, s) => acc + (Number(s?.[k]) || 0), 0);
+                        const totalFailed = sum("Total Failed");
+                        const triaged = sum("Triaged");
+                        const untriaged = sum("UnTriaged");
+                        const bulk = sum("Bulk Issues");
+                        const pending = Number(triageCount.pending_tests) || 0;
+                        const triagedPct = totalFailed ? Math.round((triaged / totalFailed) * 100) : 0;
+                        const spark = (pts) => {
+                          const max = Math.max(...pts, 1);
+                          const min = Math.min(...pts, 0);
+                          const range = max - min || 1;
+                          const coords = pts.map((p, i) => {
+                            const x = (i / (pts.length - 1)) * 100;
+                            const y = 24 - ((p - min) / range) * 22 - 1;
+                            return `${x.toFixed(1)},${y.toFixed(1)}`;
+                          });
+                          return (
+                            <svg className="rh-stat-spark" viewBox="0 0 100 26" preserveAspectRatio="none">
+                              <polyline points={coords.join(" ")} fill="none" stroke="rgba(255,255,255,0.9)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          );
+                        };
+                        const cards = [
+                          { label: "Total Failed/Warning", value: totalFailed, icon: "\u26A0", bg: "linear-gradient(135deg, #3a6ea5 0%, #2b5278 100%)", pts: [3, 5, 4, 6, 5, 7, 6] },
+                          { label: "Triaged", value: triaged, sub: `${triagedPct}% of failures`, icon: "\u2713", bg: "linear-gradient(135deg, #27ae60 0%, #1e8449 100%)", pts: [2, 3, 5, 4, 6, 7, 8] },
+                          { label: "UnTriaged", value: untriaged, icon: "\u29D7", bg: "linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)", pts: [7, 6, 6, 4, 5, 3, 2] },
+                          { label: "Bulk Issues", value: bulk, icon: "\u2637", bg: "linear-gradient(135deg, #f5a623 0%, #e8890c 100%)", pts: [4, 5, 4, 5, 6, 5, 6] },
+                          { label: "Pending/Running", value: pending, icon: "\u27F3", bg: "linear-gradient(135deg, #4aa3df 0%, #2e86c1 100%)", pts: [5, 4, 5, 6, 4, 5, 4] },
+                        ];
+                        return (
+                          <div className="rh-stat-cards">
+                            {cards.map((c) => (
+                              <div key={c.label} className="rh-stat-card" style={{ background: c.bg }}>
+                                <div className="rh-stat-icon">{c.icon}</div>
+                                <div className="rh-stat-label">{c.label}</div>
+                                {spark(c.pts)}
+                                <div className="rh-stat-value">{c.value}</div>
+                                {c.sub && <div className="rh-stat-sub">{c.sub}</div>}
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })()}
                       <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "15px" }}>
                         <thead>
                           <tr style={{ background: "#e9ecef" }}>
@@ -2564,100 +2609,52 @@ export default function RegressionHome() {
                           )}
                         </div>
                       </div>
-                      <div style={{ overflowX: "auto" }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                          <thead>
-                            <tr style={{ background: "#e9ecef" }}>
-                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "left" }}>Owner</th>
-                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "left" }}>Jira Ticket</th>
-                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>Testcase(s)</th>
-                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>QI Impact</th>
-                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>Status</th>
-                              <th style={{ padding: "8px 12px", border: "1px solid #ddd", textAlign: "center" }}>Issue Type</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {Object.entries(triageCount.owner_ticket_map).map(([owner, tickets]) => {
-                              const ticketEntries = Object.entries(tickets);
-                              return ticketEntries.map(([ticket, count], idx) => {
-                                const jiraInfo = ownerJiraDetails[ticket];
-                                const qiData = triageCount.bulk_issues_with_qi?.[ticket];
-                                const showQiLoading = loadingBulkQi && !qiData;
-                                return (
-                                  <tr key={`${owner}-${ticket}`} style={{ borderBottom: idx === ticketEntries.length - 1 ? "2px solid #ccc" : undefined }}>
-                                    {idx === 0 && (
-                                      <td
-                                        rowSpan={ticketEntries.length}
-                                        style={{ padding: "8px 12px", border: "1px solid #ddd", fontWeight: "600", verticalAlign: "top", background: "#f8f9fa" }}
-                                      >
-                                        {owner}
-                                      </td>
-                                    )}
-                                    <td style={{ padding: "6px 12px", border: "1px solid #ddd" }}>
-                                      <a href={`${JIRA_URL}${ticket}`} target="_blank" rel="noreferrer" style={{ color: "#0066cc", textDecoration: "none" }}>
-                                        {ticket}
-                                      </a>
-                                    </td>
-                                    <td style={{ padding: "6px 12px", border: "1px solid #ddd", textAlign: "center" }}>
-                                      {count}
-                                    </td>
-                                    <td style={{ padding: "6px 12px", border: "1px solid #ddd", textAlign: "center" }}>
-                                      {showQiLoading ? (
-                                        <span style={{ color: "#666", fontStyle: "italic" }}>Loading...</span>
-                                      ) : qiData ? (
-                                        `${qiData.overall_qi_impact.toFixed(2)}%`
-                                      ) : (
-                                        "-"
-                                      )}
-                                    </td>
-                                    <td style={{ padding: "6px 12px", border: "1px solid #ddd", textAlign: "center" }}>
+                      <div className="rh-owner-grid">
+                        {Object.entries(triageCount.owner_ticket_map).map(([owner, tickets]) => {
+                          const ticketEntries = Object.entries(tickets);
+                          const statusStyle = (status) => ({
+                            background: status === "Closed" || status === "Resolved" ? "#d1fae5"
+                              : status === "In Progress" ? "#dbeafe"
+                              : status === "Open" || status === "To Do" ? "#fee2e2"
+                              : "#f3f4f6",
+                            color: status === "Closed" || status === "Resolved" ? "#065f46"
+                              : status === "In Progress" ? "#1e40af"
+                              : status === "Open" || status === "To Do" ? "#991b1b"
+                              : "#374151"
+                          });
+                          return (
+                            <div key={owner} className="rh-owner-card">
+                              <div className="rh-owner-head">
+                                <span>{owner}</span>
+                                <span className="rh-owner-count">{ticketEntries.length} ticket{ticketEntries.length !== 1 ? "s" : ""}</span>
+                              </div>
+                              <ul className="rh-owner-tickets">
+                                {ticketEntries.map(([ticket, count]) => {
+                                  const jiraInfo = ownerJiraDetails[ticket];
+                                  const qiData = triageCount.bulk_issues_with_qi?.[ticket];
+                                  return (
+                                    <li key={ticket}>
                                       {jiraInfo ? (
-                                        <span style={{
-                                          padding: "2px 8px",
-                                          borderRadius: "10px",
-                                          fontSize: "11px",
-                                          fontWeight: "600",
-                                          background: jiraInfo.status === "Closed" || jiraInfo.status === "Resolved" ? "#d1fae5"
-                                            : jiraInfo.status === "In Progress" ? "#dbeafe"
-                                            : jiraInfo.status === "Open" || jiraInfo.status === "To Do" ? "#fee2e2"
-                                            : "#f3f4f6",
-                                          color: jiraInfo.status === "Closed" || jiraInfo.status === "Resolved" ? "#065f46"
-                                            : jiraInfo.status === "In Progress" ? "#1e40af"
-                                            : jiraInfo.status === "Open" || jiraInfo.status === "To Do" ? "#991b1b"
-                                            : "#374151"
-                                        }}>
+                                        <span className="rh-ticket-status" style={statusStyle(jiraInfo.status)} title={jiraInfo.issue_type ? `Type: ${jiraInfo.issue_type}` : undefined}>
                                           {jiraInfo.status}
                                         </span>
                                       ) : (
-                                        <span style={{ color: "#9ca3af", fontSize: "11px" }}>—</span>
+                                        <span className="rh-ticket-status" style={{ background: "#f3f4f6", color: "#9ca3af" }}>—</span>
                                       )}
-                                    </td>
-                                    <td style={{ padding: "6px 12px", border: "1px solid #ddd", textAlign: "center" }}>
-                                      {jiraInfo ? (
-                                        <span style={{
-                                          padding: "2px 8px",
-                                          borderRadius: "10px",
-                                          fontSize: "11px",
-                                          fontWeight: "500",
-                                          background: jiraInfo.issue_type === "Bug" ? "#fef3c7"
-                                            : jiraInfo.issue_type === "Task" ? "#e0e7ff"
-                                            : "#f3f4f6",
-                                          color: jiraInfo.issue_type === "Bug" ? "#92400e"
-                                            : jiraInfo.issue_type === "Task" ? "#3730a3"
-                                            : "#374151"
-                                        }}>
-                                          {jiraInfo.issue_type}
-                                        </span>
-                                      ) : (
-                                        <span style={{ color: "#9ca3af", fontSize: "11px" }}>—</span>
+                                      <a className="rh-ticket-link" href={`${JIRA_URL}${ticket}`} target="_blank" rel="noreferrer">
+                                        {ticket}
+                                      </a>
+                                      {qiData && (
+                                        <span className="rh-ticket-count" title="QI Impact">{qiData.overall_qi_impact.toFixed(1)}% QI</span>
                                       )}
-                                    </td>
-                                  </tr>
-                                );
-                              });
-                            })}
-                          </tbody>
-                        </table>
+                                      <span className="rh-ticket-count">{count} tc</span>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            </div>
+                          );
+                        })}
                       </div>
 
                       {loadingOwnerAi && (

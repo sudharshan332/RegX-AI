@@ -55,3 +55,165 @@
 .jira-btn:hover {
   background: #c7dbff;
 }
+
+/* Summary stat cards (dashboard-style) */
+.rh-stat-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.rh-stat-card {
+  position: relative;
+  border-radius: 14px;
+  padding: 18px 18px 16px;
+  color: #fff;
+  overflow: hidden;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.rh-stat-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.18);
+}
+
+.rh-stat-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  line-height: 1;
+  margin-bottom: 12px;
+}
+
+.rh-stat-label {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  opacity: 0.95;
+  margin-bottom: 6px;
+}
+
+.rh-stat-spark {
+  display: block;
+  width: 100%;
+  height: 26px;
+  margin: 2px 0 8px;
+  opacity: 0.9;
+}
+
+.rh-stat-value {
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1.05;
+}
+
+.rh-stat-sub {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.9;
+  margin-top: 2px;
+}
+
+/* Owner-wise ticket breakdown cards (3-up grid) */
+.rh-owner-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+@media (max-width: 1100px) {
+  .rh-owner-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .rh-owner-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.rh-owner-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07);
+}
+
+.rh-owner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.rh-owner-count {
+  font-size: 10.5px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.22);
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.rh-owner-tickets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.rh-owner-tickets li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #f1f1f1;
+  font-size: 12px;
+}
+
+.rh-owner-tickets li:last-child {
+  border-bottom: none;
+}
+
+.rh-ticket-status {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+  min-width: 58px;
+  text-align: center;
+}
+
+.rh-ticket-link {
+  color: #0066cc;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.rh-ticket-link:hover {
+  text-decoration: underline;
+}
+
+.rh-ticket-count {
+  margin-left: auto;
+  color: #6b7280;
+  font-size: 11px;
+  white-space: nowrap;
+}
