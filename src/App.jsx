@@ -6,7 +6,6 @@ import TestcaseManagement from './pages/TestcaseManagement';
 import TriageGenie from './pages/TriageGenie';
 import RunReport from './pages/RunReport';
 import DynamicJobProfile from './pages/DynamicJobProfile';
-import ManageJobProfile from './pages/ManageJobProfile';
 import FailedTestcaseAnalysis from './pages/FailedTestcaseAnalysis';
 import CursorAI from './pages/CursorAI';
 import { TaskProvider } from './context/TaskContext';
@@ -39,7 +38,6 @@ function Dashboard() {
     { id: 'failed-analysis', label: 'Failed Testcase Analysis', icon: '🔍', description: 'AI-Powered Failure Analysis' },
     { id: 'run-report', label: 'Run Report', icon: '📊', description: 'QI Analysis' },
     { id: 'job-profile', label: 'Dynamic Job Profile', icon: '⚙️', description: 'Job Profile creation & manage JP/TS' },
-    { id: 'manage-jp', label: 'Manage JP / TS', icon: '🗑️', description: 'Search & Delete JP/TS' },
     { id: 'cursor-ai', label: 'Cursor AI', icon: '✨', description: 'Interactive AI Chat' },
   ];
 
@@ -61,8 +59,6 @@ function Dashboard() {
         return <RunReport />;
       case 'job-profile':
         return <DynamicJobProfile />;
-      case 'manage-jp':
-        return <ManageJobProfile />;
       case 'cursor-ai':
         return <CursorAI />;
       default:
