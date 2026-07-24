@@ -9033,6 +9033,8 @@ def dynamic_jp_fetch_testset():
 JARVIS_BASE = "https://jarvis.eng.nutanix.com/api/v1"
 
 
+
+
 @app.route("/mcp/regression/dynamic-jp/resolve-names", methods=["POST"])
 def dynamic_jp_resolve_names():
     """Resolve JP and/or test set names to their JITA IDs."""
@@ -14047,8 +14049,76 @@ def deprecation_search():
     })
 
 
-
-
+@app.route("/api/agents/triage/first-level-ai", methods=["POST"])
+@jwt_required
+def first_level_ai_analysis():
+    """Trigger First Level AI analysis using JITA and Glean."""
+    try:
+        request_data = request.get_json()
+        test_result = request_data.get("test_result", {})
+        
+        if not test_result:
+            return jsonify({
+                "success": False,
+                "error": "test_result is required"
+            }), 400
+        
+        # Initialize intelligent triage agent directly
+        from agents.analysis.intelligent_triage_agent import IntelligentTriageAgent
+        from agents.base import AgentConfig
+        
+        agent_config = AgentConfig(
+            name="intelligent_triage",
+            type="intelligent_triage"
+        )
+        agent = IntelligentTriageAgent(agent_config)
+        
+        # Since this is async, we need to run it in an event loop
+        import asyncio
+        
+        async def run_analysis():
+            return await agent.analyze(test_result, user_requested_ai=True)
+        
+        # Create new event loop for the analysis
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            analysis_result = loop.run_until_complete(run_analysis())
+        finally:
+            loop.close()
+        
+        # Handle different response formats
+        if hasattr(analysis_result, '__dict__'):
+            result_dict = analysis_result.__dict__
+        else:
+            result_dict = analysis_result
+        
+        response_data = {
+            "success": True,
+            "analysis_result": result_dict,
+            "analysis_type": "first_level_ai", 
+            "user_requested": True
+        }
+        
+        # Add metadata if available
+        if hasattr(analysis_result, 'data') and analysis_result.data:
+            response_data.update(analysis_result.data)
+        
+        if hasattr(analysis_result, 'metadata') and analysis_result.metadata:
+            response_data.update({
+                "pattern_suggestion": analysis_result.metadata.get("pattern_suggestion"),
+                "jita_analysis": analysis_result.metadata.get("jita_analysis"),
+                "glean_results": analysis_result.metadata.get("glean_results")
+            })
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        logger.error(f"Error in first level AI analysis: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 
 # ======================================================

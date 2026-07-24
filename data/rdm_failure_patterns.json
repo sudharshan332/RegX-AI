@@ -15,6 +15,7 @@
     {
       "id": "nutest_cluster_name_as_ip",
       "regex": "auto_cluster_nested_[\\w]+.*does not appear to be an IPv4 or IPv6 address",
+      "confidence": 0.98,
       "comment_template": "regx_known_issue AUTO-29021 - nutest cluster name parsed as IP address, check JIRA for fix status",
       "category": "INFRA_BUG",
       "description": "Nutest framework bug - nested cluster name (auto_cluster_nested_*) is incorrectly passed to ipaddress.ip_address() instead of a real IP, causing ValueError -> SSH timeout -> PC Deploy PluginInitialisationFailedException.",
@@ -25,6 +26,7 @@
     {
       "id": "installer_node_fatal_aos_install",
       "regex": "([\\w\\-]+):\\s*Received\\s+\"fatal\"\\s+in\\s+waiting\\s+for\\s+event\\s+\"[^\"]+\".*?AOS installation failed\\.\\s*Reason:\\s*None",
+      "confidence": 0.96,
       "comment_template": "regx_rerun_disable-{node_name}",
       "category": "INFRA_NODE",
       "description": "Foundation imaging fatal on specific node(s) - AOS installation failed with Reason: None during AHV install/reboot. Hardware-level failure where installer couldn't determine a reason (BMC/disk/boot issue). Disable all failed nodes and rerun. Report failed nodes with their IPMI IPs to IT for hardware inspection.",
@@ -36,6 +38,7 @@
     {
       "id": "installer_node_failure",
       "regex": "Installer errors[:\\s]*\\nNodes?:\\s*([\\w\\-]+).*?(?:failed|error|Fatal|Timeout)",
+      "confidence": 0.92,
       "comment_template": "regx_rerun_disable-{node_name}",
       "category": "INFRA_NODE",
       "description": "Foundation installer failure or timeout on specific node - disable node and rerun"
@@ -43,6 +46,7 @@
     {
       "id": "foundation_imaging_failure",
       "regex": "(?:foundation|imaging).*(?:failed|error|timeout)",
+      "confidence": 0.85,
       "comment_template": "regx_rerun",
       "category": "INFRA_INTERMITTENT",
       "description": "Foundation/imaging failure without specific node - intermittent rerun"
@@ -50,6 +54,7 @@
     {
       "id": "cluster_creation_failed",
       "regex": "(?:cluster.*creation|create.*cluster).*(?:failed|error|timeout)",
+      "confidence": 0.80,
       "comment_template": "regx_rerun",
       "category": "INFRA_INTERMITTENT",
       "description": "Cluster creation failure - intermittent rerun"
@@ -57,6 +62,7 @@
     {
       "id": "resource_allocation_failed",
       "regex": "(?:resource|allocation|provision).*(?:failed|unavailable|timeout)",
+      "confidence": 0.78,
       "comment_template": "regx_rerun",
       "category": "INFRA_INTERMITTENT",
       "description": "Resource allocation/provisioning failure - intermittent rerun"
@@ -64,6 +70,7 @@
     {
       "id": "network_connectivity",
       "regex": "(?:network|connectivity|unreachable|connection refused|ssh).*(?:failed|error|timeout)",
+      "confidence": 0.82,
       "comment_template": "regx_rerun",
       "category": "INFRA_INTERMITTENT",
       "description": "Network/connectivity failure - intermittent rerun"
@@ -71,6 +78,7 @@
     {
       "id": "cvm_boot_failure",
       "regex": "CVM.*(?:boot|booted).*(?:failed|error|timeout|unsuccessfully)",
+      "confidence": 0.87,
       "comment_template": "regx_rerun",
       "category": "INFRA_INTERMITTENT",
       "description": "CVM boot failure - intermittent rerun"
@@ -78,6 +86,7 @@
     {
       "id": "hypervisor_install_failure",
       "regex": "(?:hypervisor|esx|ahv).*(?:install|imaging).*(?:failed|error|timeout)",
+      "confidence": 0.84,
       "comment_template": "regx_rerun",
       "category": "INFRA_INTERMITTENT",
       "description": "Hypervisor installation failure - intermittent rerun"
@@ -85,6 +94,7 @@
     {
       "id": "rdm_internal_error",
       "regex": "(?:RDM|rdm).*(?:internal.*error|service.*unavailable)",
+      "confidence": 0.88,
       "comment_template": "regx_rerun",
       "category": "INFRA_INTERMITTENT",
       "description": "RDM internal error - intermittent rerun"
@@ -92,6 +102,7 @@
     {
       "id": "deployment_timeout",
       "regex": "(?:deployment|deploy).*(?:timeout|timed out)",
+      "confidence": 0.75,
       "comment_template": "regx_rerun",
       "category": "INFRA_INTERMITTENT",
       "description": "Deployment timeout - intermittent rerun"
@@ -99,6 +110,7 @@
     {
       "id": "nested_cluster_insufficient_resources",
       "regex": "No nested 2\\.0 base clusters available with enough total resources",
+      "confidence": 0.95,
       "comment_template": "regx_infra_issue check with ask-tool team and create JIRAticket",
       "category": "INFRA_RESOURCE",
       "description": "No nested 2.0 base clusters with sufficient resources (nodes, RAM, vCPUs) - no qualifying base cluster in the pool meets the hardware/configuration requirements",
