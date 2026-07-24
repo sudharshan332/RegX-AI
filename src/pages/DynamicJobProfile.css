@@ -101,10 +101,35 @@
 /* Embedded manage JP/TS inside Dynamic JP (no double page chrome) */
 .djp-manage-embedded {
   margin-top: 4px;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
 }
 
 .djp-manage-embedded .djp-section:first-of-type {
   margin-top: 0;
+}
+
+/* Delete view: JP + TS columns stretch full content width */
+.djp-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.djp-two-col > .djp-section {
+  margin-top: 0;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+@media (max-width: 900px) {
+  .djp-two-col {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── Buttons ── */
@@ -339,12 +364,14 @@
 
 /* ── Form ── */
 .djp-form {
-  max-width: 1000px;
+  max-width: none;
+  width: 100%;
   background: var(--djp-surface);
   padding: 22px;
   border: 1px solid var(--djp-border);
   border-radius: 10px;
   box-shadow: var(--djp-shadow);
+  box-sizing: border-box;
 }
 
 .djp-form-group {
@@ -1408,7 +1435,8 @@
 }
 
 .djp-single-name-field {
-  max-width: 520px;
+  max-width: none;
+  width: 100%;
 }
 
 .djp-action-hint {
@@ -1797,6 +1825,24 @@
   width: 100%;
   max-width: none;
   box-sizing: border-box;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.djp-container > .djp-section,
+.djp-manage-embedded > .djp-section,
+.rm-embedded > .djp-section {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}
+
+.djp-config-panel,
+.djp-unique-lists,
+.djp-name-editor-row,
+.djp-search-row {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .djp-section,
@@ -2029,8 +2075,11 @@
    fit more on screen.
    ============================================================ */
 .djp-container {
-  padding: 10px 8px;
+  padding: 10px 16px;
   font-size: 11px;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
 }
 
 .djp-header {

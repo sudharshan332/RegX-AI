@@ -28,6 +28,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from auth import LDAPAuth, create_jwt, decode_jwt, jwt_required
 
 # ======================================================
+# Load environment variables from a .env file (JIRA_TOKEN, GLEAN_TOKEN, etc.).
+# Looks in the project root and the backend/ directory. Existing real env vars
+# always win. No-op if python-dotenv isn't installed.
+# ======================================================
+try:
+    from dotenv import load_dotenv
+
+    _here = os.path.dirname(os.path.abspath(__file__))
+    load_dotenv(os.path.join(os.path.dirname(_here), ".env"))  # <repo>/.env
+    load_dotenv(os.path.join(_here, ".env"))                    # <repo>/backend/.env
+except ImportError:
+    pass
+
+# ======================================================
 # In-memory credential cache (stores LDAP passwords for Jita calls)
 # Passwords are cached on login and expire after the same TTL as JWT.
 # ======================================================
@@ -79,6 +93,38 @@ logger = logging.getLogger(__name__)
 # Constants
 # ======================================================
 JITA_BASE = "https://jita.eng.nutanix.com/api/v2"
+# JITA v1 exposes user records: GET /api/v1/users/<oid> resolves a created_by
+# ObjectId to {user_name, email, display_name, roles}. Used to enforce JP delete
+# ownership (only the real owner / created_by may delete a JP — same as JITA UI).
+JITA_V1_BASE = "https://jita.eng.nutanix.com/api/v1"
+# Optional allowlist of usernames permitted to delete ANY JP/TS (e.g. team admins),
+# in addition to the entity's real owner. Comma-separated sAMAccountNames.
+JP_DELETE_ADMIN_USERS = {
+    u.strip().lower() for u in os.getenv("JP_DELETE_ADMIN_USERS", "").split(",") if u.strip()
+}
+
+# The RegX tool stamps every entity it creates with this JITA user group, so the tag
+# marks an entity as "managed by RegX". JITA has no queryable per-user group
+# membership, so the group roster is configured here (comma-separated sAMAccountNames,
+# overridable via CDP_REG_JARVIS_MEMBERS). Any member may create or delete any
+# RegX-managed (tagged) entity regardless of individual ownership; entities that are
+# NOT tagged with the group (created outside RegX) still require true ownership.
+CDP_REG_JARVIS_GROUP = "cdp_reg_jarvis"
+# Default roster is the CDP regression team; override/extend via CDP_REG_JARVIS_MEMBERS
+# env (comma-separated sAMAccountNames). Env fully replaces the default when set.
+_CDP_REG_JARVIS_DEFAULT_MEMBERS = {
+    "swapnil.wankhede",
+    "shilpa.sattigeri",
+    "thanuja.c",
+    "sudharshan.musali",
+}
+_cdp_reg_jarvis_env = {
+    u.strip().lower() for u in os.getenv("CDP_REG_JARVIS_MEMBERS", "").split(",") if u.strip()
+}
+CDP_REG_JARVIS_MEMBERS = _cdp_reg_jarvis_env or _CDP_REG_JARVIS_DEFAULT_MEMBERS
+# Name-regex searches are unindexed on JITA and scale with the result limit, so the
+# search endpoint needs a longer read timeout than the default one-shot GETs.
+JITA_SEARCH_TIMEOUT = int(os.getenv("JITA_SEARCH_TIMEOUT", "30"))
 # QMS coupon service (used by JITA's Provider page "Validate" button for global pool).
 QMS_BASE_URL = os.getenv("QMS_BASE_URL", "https://qms-api.nucloud.ntnxdpro.com").rstrip("/")
 # JITA manage UI: /manage/job_profiles/<id> often 404s. Open the list and pre-fill name search (filter bar syntax).
@@ -2074,16 +2120,22 @@ def get_triage_count():
         # Identify bulk issues (tickets with >5 testcases)
         # Convert sets to lists for JSON serialization
         bulk_issues = {ticket: list(tests) for ticket, tests in ticket_case_map.items() if len(tests) > 5}
-        
-        # Calculate QI impact for bulk issues only if requested (to speed up triage count)
+        # Full ticket -> testcases map (every triaged ticket, not just bulk ones).
+        all_tickets_map = {ticket: list(tests) for ticket, tests in ticket_case_map.items()}
+
+        # Calculate QI impact only if requested (to speed up triage count).
+        # QI is computed for EVERY ticket (ticket_qi_map); bulk_issues_with_qi is the
+        # subset for tickets with >5 testcases, kept for the bulk-issue tables.
         include_bulk_qi = request.args.get("include_bulk_qi", "false").lower() == "true"
         bulk_issues_with_qi = {}
-        if include_bulk_qi and bulk_issues:
-            logger.info("Calculating QI impact for bulk issues (this may take longer)...")
-            qi_calculation_result = calculate_bulk_issues_qi_impact(bulk_issues, test_data, tag)
-            bulk_issues_with_qi = qi_calculation_result["bulk_issues_with_qi"]
+        ticket_qi_map = {}
+        if include_bulk_qi and all_tickets_map:
+            logger.info(f"Calculating QI impact for all {len(all_tickets_map)} triaged tickets (this may take longer)...")
+            qi_calculation_result = calculate_bulk_issues_qi_impact(all_tickets_map, test_data, tag)
+            ticket_qi_map = qi_calculation_result["bulk_issues_with_qi"]
+            bulk_issues_with_qi = {t: ticket_qi_map[t] for t in bulk_issues if t in ticket_qi_map}
         else:
-            logger.info("Skipping bulk issues QI calculation for faster triage count response")
+            logger.info("Skipping QI calculation for faster triage count response")
         
         # Update bulk issues count - use total count of unique bulk tickets
         # (not per-owner, since the same ticket can be tagged on tests from multiple owners)
@@ -2110,6 +2162,7 @@ def get_triage_count():
             "owner_ticket_map": owner_ticket_dict,
             "bulk_issues": bulk_issues_dict,
             "bulk_issues_with_qi": bulk_issues_with_qi,
+            "ticket_qi_map": ticket_qi_map,
             "bulk_issues_count": total_bulk_issues_count,
             "pending_tests": inprogress_tests,
             "total_tests_processed": len(test_data)
@@ -9322,6 +9375,28 @@ def dynamic_jp_create():
         custom_test_args = req_data.get("custom_test_args")
         custom_framework_options = req_data.get("custom_framework_options")
         include_optional_defaults = bool(req_data.get("include_optional_defaults", False))
+
+        # --- Release Migration options (all optional; default preserves prior behavior) ---
+        # Explicit description for the new JP (e.g. version-migrated source description).
+        # When omitted, the generic clone/fresh description is used as before.
+        custom_jp_description = (req_data.get("custom_jp_description") or "").strip() or None
+        # In clone mode, apply the requested nos_branch/pc_branch to the new JP instead of
+        # preserving the source JP's branches. Fresh mode already applies branches.
+        override_source_branches = bool(req_data.get("override_source_branches", False))
+        # Branch used for the JITA -> TCMS sync (written to system_under_test.branch, the
+        # field JITA derives the TCMS milestone from). Only applied when sync is enabled.
+        tcms_sync_branch = (req_data.get("tcms_sync_branch") or "").strip() or None
+        # Keep the source JP's email recipients, visibility and tag filters as-is instead of
+        # forcing email to the current user / cdp_reg_jarvis. Used by Release Migration so a
+        # migrated JP keeps behaving like its source (only branches/version change).
+        preserve_source_config = bool(req_data.get("preserve_source_config", False))
+        # Release Migration version rewrite. When `version_to` is set (clone mode), the
+        # new JP/TS names and description are derived from the source by replacing the old
+        # release version with the new one. `version_from` is optional: when blank, the old
+        # version is auto-detected from the source JP (its name's version token first, then
+        # its existing NOS/git branch). Explicit custom_* values still take precedence.
+        version_from = (req_data.get("version_from") or "").strip()
+        version_to = (req_data.get("version_to") or "").strip()
         
         # Convert None to empty dict
         if not custom_test_args or not isinstance(custom_test_args, dict):
@@ -9489,8 +9564,13 @@ def dynamic_jp_create():
                     payload[snake] = payload[camel]
             return payload
 
-        def _set_tcms_sync_flags(jp_payload, enabled):
-            """Set JITA/TCMS sync flags for the created JP."""
+        def _set_tcms_sync_flags(jp_payload, enabled, sync_branch=None):
+            """Set JITA/TCMS sync flags for the created JP.
+
+            ``sync_branch`` (optional): when sync is enabled, overwrite the TCMS sync
+            branch on ``system_under_test.branch`` — the field JITA uses to resolve the
+            TCMS milestone that results are published under.
+            """
             if not isinstance(jp_payload, dict):
                 return
 
@@ -9507,8 +9587,13 @@ def dynamic_jp_create():
                 jp_payload["tester_tags"] = ["official"]
 
             sut = jp_payload.get("system_under_test")
+            if not isinstance(sut, dict) and enabled and sync_branch:
+                sut = {}
             if isinstance(sut, dict):
                 sut["sync_to_tcms"] = bool(enabled)
+                if enabled and sync_branch:
+                    sut["branch"] = sync_branch
+                jp_payload["system_under_test"] = sut
 
             if enabled:
                 jp_payload.setdefault("package_type", "tar")
@@ -9688,6 +9773,41 @@ def dynamic_jp_create():
                 except (requests.exceptions.RequestException, ValueError):
                     reuse_ts_display_name = linked_ts_id_for_reuse
             logger.info(f"[create] reuse_source_ts=True, linked_ts_id={linked_ts_id_for_reuse}, name={reuse_ts_display_name}")
+
+        # Release Migration: derive migrated JP/TS names + description from the source by
+        # replacing the old release version with the new one. The old version is taken from
+        # `version_from` when provided, otherwise auto-detected from the source JP — its
+        # name's version token first (that is what actually appears in the name/description),
+        # then its existing NOS/git branch as a fallback.
+        if version_to and not create_fresh and isinstance(source_jp, dict):
+            def _extract_version_token(text):
+                # digits, with each later segment a number or single-letter wildcard (e.g. 7.6.X)
+                m = re.search(r"\d+(?:\.(?:\d+|[xX]))+", str(text or ""))
+                return m.group(0) if m else ""
+
+            old_ver = version_from
+            if not old_ver:
+                src_git = source_jp.get("git") if isinstance(source_jp.get("git"), dict) else {}
+                src_branch = src_git.get("branch") or ""
+                old_ver = _extract_version_token(source_jp.get("name")) or _extract_version_token(src_branch)
+
+            def _migrate_text(text):
+                s = "" if text is None else str(text)
+                if old_ver and old_ver != version_to and old_ver in s:
+                    return s.replace(old_ver, version_to)
+                return s
+
+            src_name = source_jp.get("name") or ""
+            if not custom_jp_name and src_name:
+                custom_jp_name = _migrate_text(src_name)
+            if not custom_jp_description:
+                custom_jp_description = _migrate_text(source_jp.get("description"))
+            if not custom_ts_name and isinstance(source_ts, dict) and source_ts.get("name"):
+                custom_ts_name = _migrate_text(source_ts.get("name"))
+            logger.info(
+                f"[create] Release Migration version rewrite: from={old_ver or '(none)'} "
+                f"to={version_to}, jp_name={custom_jp_name!r}, ts_name={custom_ts_name!r}"
+            )
 
         # 3. Sequential names: User_Dyn_<YYYYMMDD>_JP_N / User_Dyn_<YYYYMMDD>_TS_N
         dyn_name_date = (req_data.get("dyn_name_date") or "").strip()
@@ -10094,7 +10214,10 @@ def dynamic_jp_create():
             for field in ["_id", "created_at", "updated_at", "created_by", "__v"]:
                 new_jp_payload.pop(field, None)
             new_jp_payload["name"] = new_jp_name
-            new_jp_payload["description"] = f"Dynamic JP cloned from {source_jp.get('name', source_jp_id)}"
+            # Release Migration keeps the source description as-is (the deep copy already
+            # carries it); a transformed description is applied later via custom_jp_description.
+            if not preserve_source_config:
+                new_jp_payload["description"] = f"Dynamic JP cloned from {source_jp.get('name', source_jp_id)}"
             # Legacy `test_set` on the source doc can override `test_sets` on POST; clear before we set links.
             new_jp_payload.pop("test_set", None)
             new_jp_payload["test_sets"] = []
@@ -10308,10 +10431,67 @@ def dynamic_jp_create():
                 logger.info(f"[create] Clone mode — set build_selection: nos_build_type={nos_build_type}, "
                            f"pc_build_type={pc_build_type}, by_latest_smoked=True, nos_branch={actual_nos_branch}, pc_branch={actual_pc_branch}")
 
+        # Release Migration: overwrite the source JP's NOS (git) and Prism Central
+        # branches with the requested ones. Fresh mode already applies branches above;
+        # this covers clone mode, which otherwise preserves the source branches.
+        if override_source_branches and not create_fresh and not use_latest_commit:
+            git = new_jp_payload.get("git") or {}
+            if not isinstance(git, dict):
+                git = {}
+            git["branch"] = nos_branch
+            git.setdefault("repo", "main")
+            new_jp_payload["git"] = git
+
+            nos_build_type = "opt" if nos_branch.strip().lower() == "master" else "release"
+            pc_build_type = "opt" if pc_branch.strip().lower() == "master" else "release"
+
+            if nos_update_type == "by_commit":
+                bs = {
+                    "by_commit_id": True,
+                    "commit_must_be_newer": False,
+                    "build_type": nos_build_type,
+                }
+                if nos_commit_id:
+                    bs["commit_id"] = nos_commit_id
+                if nos_gbn:
+                    try:
+                        bs["gbn"] = int(nos_gbn) if isinstance(nos_gbn, str) else nos_gbn
+                    except (ValueError, TypeError):
+                        bs["gbn"] = nos_gbn
+                new_jp_payload["build_selection"] = bs
+            else:
+                new_jp_payload["build_selection"] = {
+                    "by_latest_smoked": nos_tag == "Latest Smoke Passed",
+                    "commit_must_be_newer": False,
+                    "build_type": nos_build_type,
+                }
+
+            rmj = new_jp_payload.get("resource_manager_json") or {}
+            if not isinstance(rmj, dict):
+                rmj = {}
+            rmj.setdefault("NOS_CLUSTER", {})
+            pc_build = {
+                "branch": pc_branch,
+                "build_selection_build_type": pc_build_type,
+            }
+            if pc_update_type == "by_commit":
+                if pc_commit_id:
+                    pc_build["build_selection_option"] = pc_commit_id
+            else:
+                pc_build["build_selection_option"] = pc_tag
+            rmj["PRISM_CENTRAL"] = {"build": pc_build}
+            new_jp_payload["resource_manager_json"] = rmj
+            logger.info(f"[create] Release Migration — overrode branches: nos={nos_branch}, pc={pc_branch}")
+
         if retain_setup_on_failure:
             _apply_retain_setup_on_failure(new_jp_payload)
 
-        _set_tcms_sync_flags(new_jp_payload, sync_to_tcms)
+        # Release Migration: use the explicitly transformed description when provided
+        # (e.g. old-version -> new-version replacement), overriding the generic default.
+        if custom_jp_description:
+            new_jp_payload["description"] = custom_jp_description
+
+        _set_tcms_sync_flags(new_jp_payload, sync_to_tcms, tcms_sync_branch)
 
         def _force_email_on_and_clear_tag_filters(jp):
             """Turn 'Send Email Reports' ON (logged-in user as recipient) and disable
@@ -10362,11 +10542,17 @@ def dynamic_jp_create():
             jp["advanced_options"] = adv
             jp["run_tests_with_additional_tags"] = []
 
-        _force_email_on_and_clear_tag_filters(new_jp_payload)
-        logger.info(
-            f"[create] Email ON (recipient={current_user_email}); "
-            f"run_tests_with_tags disabled and TCMS tag filters cleared"
-        )
+        if not preserve_source_config:
+            _force_email_on_and_clear_tag_filters(new_jp_payload)
+            logger.info(
+                f"[create] Email ON (recipient={current_user_email}); "
+                f"run_tests_with_tags disabled and TCMS tag filters cleared"
+            )
+        else:
+            logger.info(
+                "[create] preserve_source_config=True — kept source email/visibility/tag "
+                "config unchanged (Release Migration)"
+            )
 
         # Tags will be applied via a separate PUT after creation (same
         # approach as Run Plan) because JITA's POST ignores tag fields.
@@ -10802,9 +10988,34 @@ def dynamic_jp_search():
         req_data = request.json or {}
         query = (req_data.get("query") or "").strip()
         date_str = (req_data.get("date") or "").strip()
+        # When true, treat `query` as a raw regular expression (Release Migration uses
+        # this to target JP families like "CDP_Regression_FullReg_7\.6\.0\.6_.*").
+        # Otherwise the query is escaped and matched as a literal substring.
+        use_regex = bool(req_data.get("regex", False))
+        # Callers that only need one collection can skip the other. An unindexed
+        # name-regex scan on JITA is slow, so skipping the unused query (e.g. Release
+        # Migration only needs job profiles) avoids a second ~20s round-trip.
+        include_job_profiles = bool(req_data.get("include_job_profiles", True))
+        include_test_sets = bool(req_data.get("include_test_sets", True))
 
-        if len(query) < 2 and not date_str:
+        # Multi-term search: in literal mode a "|"-separated query like "CDP | 7.5.1"
+        # matches names that contain ALL of the terms (AND), mirroring the JITA UI where
+        # adding words narrows the result set. In regex mode we keep the whole query
+        # intact so "|" behaves as native regex alternation (Release Migration relies on it).
+        if use_regex:
+            search_terms = [query] if query else []
+        else:
+            search_terms = [t.strip() for t in query.split("|") if t.strip()]
+
+        if not any(len(t) >= 2 for t in search_terms) and not date_str:
             return jsonify({"error": "Provide a search term (>= 2 chars) or pick a date"}), 400
+
+        if use_regex:
+            for t in search_terms:
+                try:
+                    re.compile(t)
+                except re.error as rex:
+                    return jsonify({"error": f"Invalid regular expression '{t}': {rex}"}), 400
 
         date_cond = None
         if date_str:
@@ -10814,11 +11025,16 @@ def dynamic_jp_search():
             start_oid, end_oid = bounds
             date_cond = {"_id": {"$gte": {"$oid": start_oid}, "$lt": {"$oid": end_oid}}}
 
-        name_cond = (
-            {"name": {"$regex": re.escape(query), "$options": "i"}}
-            if len(query) >= 2
-            else None
-        )
+        def _name_regex(term):
+            return {"name": {"$regex": term if use_regex else re.escape(term), "$options": "i"}}
+
+        if not search_terms:
+            name_cond = None
+        elif len(search_terms) == 1:
+            name_cond = _name_regex(search_terms[0])
+        else:
+            # AND semantics: the name must contain every term (order-independent).
+            name_cond = {"$and": [_name_regex(t) for t in search_terms]}
 
         # "Created by this tool" marker: every dynamic JP/TS is tagged with the
         # cdp_reg_jarvis user group (JITA's created_by is an opaque ObjectId and is
@@ -10839,8 +11055,16 @@ def dynamic_jp_search():
                 return None
             return json.dumps({"$and": conds} if len(conds) > 1 else conds[0])
 
-        limit = min(int(req_data.get("limit", 20)), 50)
+        # JITA honors a large single `limit` and returns a top-level `total`, so we
+        # fetch everything that matches in one request (like the JITA UI, which shows
+        # "N of TOTAL") instead of an arbitrary 20. Capped high for safety.
+        SEARCH_MAX_LIMIT = int(os.getenv("JITA_SEARCH_MAX_LIMIT", "2000"))
+        limit = min(int(req_data.get("limit", SEARCH_MAX_LIMIT)), SEARCH_MAX_LIMIT)
         result = {"job_profiles": [], "test_sets": []}
+        totals = {"job_profiles": 0, "test_sets": 0}
+        # Timeouts/failures are surfaced here so the UI can tell "no matches" apart
+        # from "the JITA scan was too slow" (a silent empty result is misleading).
+        warnings = []
 
         def _extract_id(item):
             eid = item.get("_id")
@@ -10848,17 +11072,18 @@ def dynamic_jp_search():
                 return eid["$oid"]
             return str(eid) if eid else None
 
-        jp_raw_q = _build_raw_query(jp_tool_cond)
+        jp_raw_q = _build_raw_query(jp_tool_cond) if include_job_profiles else None
         if jp_raw_q:
             try:
                 jp_resp = requests.get(
                     f"{JITA_BASE}/job_profiles",
                     params={"raw_query": jp_raw_q, "limit": limit, "sort": "-_id",
                             "only": "_id,name,description,tags,created_at"},
-                    auth=JITA_SVC_AUTH, verify=False, timeout=20,
+                    auth=JITA_SVC_AUTH, verify=False, timeout=JITA_SEARCH_TIMEOUT,
                 )
                 if jp_resp.status_code == 200:
-                    for item in (jp_resp.json().get("data", []) or []):
+                    jp_body = jp_resp.json() or {}
+                    for item in (jp_body.get("data", []) or []):
                         if not isinstance(item, dict):
                             continue
                         result["job_profiles"].append({
@@ -10867,20 +11092,32 @@ def dynamic_jp_search():
                             "description": item.get("description", ""),
                             "created_at": item.get("created_at"),
                         })
+                    totals["job_profiles"] = jp_body.get("total", len(result["job_profiles"]))
+                else:
+                    warnings.append(f"Job profile search returned HTTP {jp_resp.status_code}.")
+                    logger.warning(f"[search] JP search HTTP {jp_resp.status_code}: {jp_resp.text[:200]}")
+            except requests.exceptions.Timeout:
+                warnings.append(
+                    "Job profile search timed out. Narrow the query (add more of the name) "
+                    "or lower the result limit, then retry."
+                )
+                logger.warning("[search] JP search timed out")
             except Exception as e:
+                warnings.append(f"Job profile search failed: {e}")
                 logger.warning(f"[search] JP search failed: {e}")
 
-        ts_raw_q = _build_raw_query(ts_tool_cond)
+        ts_raw_q = _build_raw_query(ts_tool_cond) if include_test_sets else None
         if ts_raw_q:
             try:
                 ts_resp = requests.get(
                     f"{JITA_BASE}/test_sets",
                     params={"raw_query": ts_raw_q, "limit": limit, "sort": "-_id",
                             "only": "_id,name,description,created_at"},
-                    auth=JITA_SVC_AUTH, verify=False, timeout=20,
+                    auth=JITA_SVC_AUTH, verify=False, timeout=JITA_SEARCH_TIMEOUT,
                 )
                 if ts_resp.status_code == 200:
-                    for item in (ts_resp.json().get("data", []) or []):
+                    ts_body = ts_resp.json() or {}
+                    for item in (ts_body.get("data", []) or []):
                         if not isinstance(item, dict):
                             continue
                         result["test_sets"].append({
@@ -10889,18 +11126,194 @@ def dynamic_jp_search():
                             "description": item.get("description", ""),
                             "created_at": item.get("created_at"),
                         })
+                    totals["test_sets"] = ts_body.get("total", len(result["test_sets"]))
+                else:
+                    warnings.append(f"Test set search returned HTTP {ts_resp.status_code}.")
+                    logger.warning(f"[search] TS search HTTP {ts_resp.status_code}: {ts_resp.text[:200]}")
+            except requests.exceptions.Timeout:
+                warnings.append(
+                    "Test set search timed out. Narrow the query or lower the result limit, then retry."
+                )
+                logger.warning("[search] TS search timed out")
             except Exception as e:
+                warnings.append(f"Test set search failed: {e}")
                 logger.warning(f"[search] TS search failed: {e}")
 
-        return jsonify({"success": True, **result})
+        # Note when JITA reports more matches than we returned (shouldn't happen with
+        # the high cap, but keeps the UI honest if a query exceeds SEARCH_MAX_LIMIT).
+        for kind, human in (("job_profiles", "job profiles"), ("test_sets", "test sets")):
+            if totals[kind] > len(result[kind]):
+                warnings.append(
+                    f"Showing {len(result[kind])} of {totals[kind]} matching {human}. "
+                    f"Refine the search to see the rest."
+                )
+
+        return jsonify({
+            "success": True,
+            "warnings": warnings,
+            "totals": totals,
+            **result,
+        })
     except Exception as e:
         logger.error(f"Error in dynamic-jp search: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
+def _current_user_identifiers():
+    """Identity aliases for the logged-in user, lowercased, for owner matching.
+
+    Includes the JWT email, the username (sAMAccountName), the username with the
+    default corp domain, and the local-part of the email. Matching any of these
+    against an entity's owner emails counts as ownership.
+    """
+    cu = getattr(g, "current_user", None)
+    username = (cu.get("sub") if isinstance(cu, dict) else "") or ""
+    email = (cu.get("email") if isinstance(cu, dict) else "") or ""
+    ids = set()
+    username = username.strip().lower()
+    email = email.strip().lower()
+    if username:
+        ids.add(username)
+        ids.add(f"{username}@nutanix.com")
+    if email:
+        ids.add(email)
+        ids.add(email.split("@")[0])  # local-part
+    return {i for i in ids if i}
+
+
+def _user_in_cdp_reg_jarvis(user_ids=None):
+    """True if the logged-in user is a member of the cdp_reg_jarvis group roster."""
+    if not CDP_REG_JARVIS_MEMBERS:
+        return False
+    ids = user_ids if user_ids is not None else _current_user_identifiers()
+    return bool(ids & CDP_REG_JARVIS_MEMBERS)
+
+
+_jita_user_cache = {}
+_jita_user_cache_lock = threading.Lock()
+
+
+def _resolve_jita_user(oid):
+    """Resolve a JITA user ObjectId to its user record via /api/v1/users/<oid>.
+
+    Cached process-wide so a bulk delete of many entities owned by the same
+    person only hits JITA once for that owner.
+    """
+    if not oid:
+        return {}
+    with _jita_user_cache_lock:
+        if oid in _jita_user_cache:
+            return _jita_user_cache[oid]
+    record = {}
+    try:
+        r = requests.get(f"{JITA_V1_BASE}/users/{oid}", auth=JITA_SVC_AUTH, verify=False, timeout=20)
+        if r.status_code == 200:
+            record = (r.json() or {}).get("data", {}) or {}
+        else:
+            logger.warning(f"[delete] user resolve {oid} -> HTTP {r.status_code}")
+    except Exception as e:
+        logger.warning(f"[delete] user resolve {oid} error: {e}")
+    if record:
+        with _jita_user_cache_lock:
+            _jita_user_cache[oid] = record
+    return record
+
+
+# Markers that identify a JITA *service/bot/tool* account (not a real human).
+# When a JP/TS is created by one of these (or created_by can't be resolved), the
+# real owner is taken from the entity's ``emails`` list instead — that's where the
+# RegX tool records the user who requested the clone/create.
+_SERVICE_ACCOUNT_MARKERS = (
+    "svc.", "svc_", "svc-", "_bot", "-bot", "bot_", "jarvis", "agave", "jenkins", "automation",
+)
+
+
+def _is_service_account(user_name, email=""):
+    blob = f"{user_name or ''} {email or ''}".lower()
+    return any(m in blob for m in _SERVICE_ACCOUNT_MARKERS)
+
+
+def _emails_as_ids(entity_data):
+    """Owner identifiers pulled from an entity's ``emails``/``user`` fields."""
+    ids = set()
+    emails = entity_data.get("emails") or []
+    if isinstance(emails, str):
+        emails = [emails]
+    for e in emails:
+        if isinstance(e, str) and e.strip():
+            e = e.strip().lower()
+            ids.add(e)
+            if "@" in e:
+                ids.add(e.split("@")[0])
+    u = entity_data.get("user")
+    if isinstance(u, str) and u.strip():
+        u = u.strip().lower()
+        ids.add(u)
+        if "@" in u:
+            ids.add(u.split("@")[0])
+    return ids, (emails[0] if emails else None)
+
+
+def _entity_owner_identity(entity_data):
+    """Resolve who is allowed to delete a JITA entity.
+
+    Returns ``(owner_ids, owner_display)`` — a lowercased set of the owner's
+    identifiers (user_name, email, email local-part) plus a human-readable name.
+
+    Rules (matching JITA's model + how the RegX tool records ownership):
+    - If ``created_by`` resolves to a **real human**, only that person owns it
+      (their team-mates listed in ``emails`` are just notification recipients and
+      must NOT be able to delete it).
+    - If ``created_by`` is a **service/bot/tool account** (e.g. svc.cdp.regression,
+      agave_bot) or can't be resolved, fall back to the ``emails``/``user`` list —
+      that's where the tool stores the user who requested the clone/create, so the
+      requester (and anyone explicitly listed) can delete it.
+    """
+    owner = {}
+    cbu = entity_data.get("created_by_user")
+    if isinstance(cbu, dict) and (cbu.get("user_name") or cbu.get("email")):
+        owner = cbu
+    else:
+        cb = entity_data.get("created_by")
+        oid = cb.get("$oid") if isinstance(cb, dict) else cb
+        if not oid and isinstance(cbu, dict):
+            oid = cbu.get("$oid")
+        owner = _resolve_jita_user(oid)
+
+    owner_user_name = (owner.get("user_name") or "").strip().lower()
+    owner_email = (owner.get("email") or "").strip().lower()
+    creator_is_human = bool(owner_user_name or owner_email) and not _is_service_account(owner_user_name, owner_email)
+
+    if creator_is_human:
+        owner_ids = set()
+        for v in (owner_user_name, owner_email):
+            if v:
+                owner_ids.add(v)
+                if "@" in v:
+                    owner_ids.add(v.split("@")[0])
+        owner_display = (
+            owner.get("user_name") or owner.get("email") or owner.get("display_name") or "another user"
+        )
+        return owner_ids, owner_display
+
+    # Service/bot/tool-created (or unresolved) — ownership comes from emails/user.
+    owner_ids, first_email = _emails_as_ids(entity_data)
+    owner_display = first_email or owner.get("user_name") or owner.get("display_name") or "the creator"
+    return owner_ids, owner_display
+
+
 @app.route("/mcp/regression/dynamic-jp/delete", methods=["POST"])
+@jwt_required
 def dynamic_jp_delete():
-    """Delete one or more Job Profiles and/or Test Sets by ID."""
+    """Delete one or more Job Profiles and/or Test Sets by ID.
+
+    JITA does **not** enforce per-entity ownership on delete (any authenticated
+    user can delete any entity), so authorization is enforced here (see
+    ``_entity_owner_identity``): a human-created entity may only be deleted by that
+    human; a tool/service-created entity may be deleted by the user(s) recorded in
+    its ``emails``. Non-owners — and entities whose ownership can't be verified —
+    are blocked with a clear message instead of being deleted.
+    """
     try:
         req_data = request.json or {}
         jp_ids = req_data.get("jp_ids", [])
@@ -10917,64 +11330,125 @@ def dynamic_jp_delete():
         jp_ids = [str(i).strip() for i in jp_ids if i]
         ts_ids = [str(i).strip() for i in ts_ids if i]
 
+        current_username = g.current_user.get("sub", "") if isinstance(getattr(g, "current_user", None), dict) else ""
+        user_ids = _current_user_identifiers()
+        if not user_ids:
+            return jsonify({
+                "error": "Could not determine your identity from the session. Please re-login.",
+                "code": "IDENTITY_UNKNOWN",
+            }), 401
+        is_admin = current_username.strip().lower() in JP_DELETE_ADMIN_USERS
+        is_group_member = _user_in_cdp_reg_jarvis(user_ids)
+
         results = {"job_profiles": [], "test_sets": []}
 
-        for jp_id in jp_ids:
+        def _delete_with_ownership(kind, path, entity_id):
+            label = "Job Profile" if kind == "job_profiles" else "Test Set"
+
+            # 1) Fetch the entity (with owner expanded) to verify ownership before deleting.
             try:
-                resp = requests.delete(
-                    f"{JITA_BASE}/job_profiles/{jp_id}",
+                get_resp = requests.get(
+                    f"{JITA_BASE}/{path}/{entity_id}",
+                    params={"expand": "created_by_user"},
                     auth=JITA_SVC_AUTH, verify=False, timeout=30,
                 )
-                success = resp.status_code in (200, 204)
-                msg = "Deleted" if success else f"JITA returned HTTP {resp.status_code}"
-                if not success:
-                    try:
-                        msg = resp.json().get("message", msg)
-                    except Exception:
-                        pass
-                results["job_profiles"].append({
-                    "_id": jp_id,
-                    "success": success,
-                    "message": msg,
-                })
-                logger.info(f"[delete] JP {jp_id}: {'OK' if success else 'FAILED'} ({msg})")
             except Exception as e:
-                results["job_profiles"].append({
-                    "_id": jp_id,
-                    "success": False,
-                    "message": str(e),
-                })
-                logger.warning(f"[delete] JP {jp_id} error: {e}")
+                logger.warning(f"[delete] {label} {entity_id} lookup error: {e}")
+                return {"_id": entity_id, "success": False, "message": f"Could not look up {label}: {e}"}
 
-        for ts_id in ts_ids:
+            if get_resp.status_code == 404:
+                return {"_id": entity_id, "success": False, "message": f"{label} not found (already deleted?)."}
+            if get_resp.status_code != 200:
+                return {"_id": entity_id, "success": False,
+                        "message": f"Could not verify ownership ({label} lookup HTTP {get_resp.status_code})."}
+
+            entity = (get_resp.json() or {}).get("data", {}) or {}
+            entity_name = entity.get("name", entity_id)
+            owner_ids, owner_display = _entity_owner_identity(entity)
+            entity_groups = entity.get("user_groups") or []
+            is_regx_managed = CDP_REG_JARVIS_GROUP in entity_groups
+
+            # 2) Authorization decision — mirror JITA: only the real owner (created_by)
+            #    may delete. Exceptions: the admin allowlist, and members of the
+            #    cdp_reg_jarvis group for any RegX-managed (tagged) entity.
+            if is_admin:
+                logger.info(f"[delete] admin '{current_username}' authorized to delete {label} '{entity_name}'")
+            elif is_group_member and is_regx_managed:
+                logger.info(
+                    f"[delete] cdp_reg_jarvis member '{current_username}' authorized to delete "
+                    f"RegX-managed {label} '{entity_name}'"
+                )
+            elif not owner_ids:
+                # Owner could not be resolved => cannot prove ownership. Block (safe default).
+                logger.warning(
+                    f"[delete] {label} '{entity_name}' ({entity_id}) owner unresolved; "
+                    f"blocking delete requested by '{current_username}'"
+                )
+                return {
+                    "_id": entity_id, "success": False, "unauthorized": True,
+                    "message": f"You are not authorized to delete this {label}: its owner could not be verified.",
+                }
+            elif user_ids.isdisjoint(owner_ids):
+                logger.warning(
+                    f"[delete] BLOCKED: '{current_username}' is not the owner of {label} "
+                    f"'{entity_name}' ({entity_id}); owner={owner_display}"
+                )
+                return {
+                    "_id": entity_id, "success": False, "unauthorized": True,
+                    "owner": owner_display,
+                    "message": f"You are not authorized to delete this {label}. Only the owner ({owner_display}) can delete it.",
+                }
+
+            # 3) Ownership confirmed — perform the delete (service account always has rights).
             try:
-                resp = requests.delete(
-                    f"{JITA_BASE}/test_sets/{ts_id}",
+                del_resp = requests.delete(
+                    f"{JITA_BASE}/{path}/{entity_id}",
                     auth=JITA_SVC_AUTH, verify=False, timeout=30,
                 )
-                success = resp.status_code in (200, 204)
-                msg = "Deleted" if success else f"JITA returned HTTP {resp.status_code}"
-                if not success:
-                    try:
-                        msg = resp.json().get("message", msg)
-                    except Exception:
-                        pass
-                results["test_sets"].append({
-                    "_id": ts_id,
-                    "success": success,
-                    "message": msg,
-                })
-                logger.info(f"[delete] TS {ts_id}: {'OK' if success else 'FAILED'} ({msg})")
             except Exception as e:
-                results["test_sets"].append({
-                    "_id": ts_id,
-                    "success": False,
-                    "message": str(e),
-                })
-                logger.warning(f"[delete] TS {ts_id} error: {e}")
+                logger.warning(f"[delete] {label} {entity_id} delete error: {e}")
+                return {"_id": entity_id, "success": False, "message": str(e)}
 
-        all_ok = all(r["success"] for r in results["job_profiles"] + results["test_sets"])
-        return jsonify({"success": all_ok, "results": results})
+            if del_resp.status_code in (200, 204):
+                logger.info(f"[delete] {label} '{entity_name}' ({entity_id}) deleted by owner '{current_username}'")
+                return {"_id": entity_id, "success": True, "message": "Deleted"}
+
+            msg = f"JITA returned HTTP {del_resp.status_code}"
+            try:
+                msg = del_resp.json().get("message", msg)
+            except Exception:
+                pass
+            return {"_id": entity_id, "success": False, "message": msg}
+
+        # Process every selected entity independently and in parallel so bulk
+        # deletes (100+ items with mixed ownership) stay fast. Each item is fetched,
+        # ownership-checked, and deleted (or blocked) on its own — one blocked item
+        # never affects the others. Order is preserved to match the request.
+        def _run(kind, path, ids):
+            if not ids:
+                return []
+            ordered = [None] * len(ids)
+            max_workers = min(10, len(ids)) or 1
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_to_idx = {
+                    pool.submit(_delete_with_ownership, kind, path, eid): i
+                    for i, eid in enumerate(ids)
+                }
+                for fut in as_completed(future_to_idx):
+                    i = future_to_idx[fut]
+                    try:
+                        ordered[i] = fut.result()
+                    except Exception as e:
+                        ordered[i] = {"_id": ids[i], "success": False, "message": str(e)}
+            return ordered
+
+        results["job_profiles"] = _run("job_profiles", "job_profiles", jp_ids)
+        results["test_sets"] = _run("test_sets", "test_sets", ts_ids)
+
+        all_items = results["job_profiles"] + results["test_sets"]
+        all_ok = bool(all_items) and all(r["success"] for r in all_items)
+        any_unauthorized = any(r.get("unauthorized") for r in all_items)
+        return jsonify({"success": all_ok, "unauthorized": any_unauthorized, "results": results})
     except Exception as e:
         logger.error(f"Error in dynamic-jp delete: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -11000,7 +11474,7 @@ def debug_inspect_jp(jp_id):
         for key in jp_data.keys():
             if 'email' in key.lower() or 'mail' in key.lower() or key in ['emails', 'user_groups', 'scheduling_options']:
                 email_fields[key] = jp_data.get(key)
-        
+
         return jsonify({
             "jp_id": jp_id,
             "jp_name": jp_data.get("name"),
@@ -11317,17 +11791,27 @@ def get_jira_ticket_details():
         if not ticket_ids:
             return jsonify({"error": "No ticket IDs provided"}), 400
 
-        results = {}
-        for ticket_id in ticket_ids[:50]:
+        # De-dupe and cap generously; fetch in parallel so large owner maps
+        # (100+ unique tickets) return well within the client timeout.
+        unique_ids = list(dict.fromkeys(ticket_ids))[:200]
+
+        def _one(ticket_id):
             jira_data = fetch_jira_ticket(ticket_id)
             if jira_data:
                 fields = jira_data.get("fields", {})
-                results[ticket_id] = {
+                issue_type = fields.get("issuetype", {}).get("name", "Unknown")
+                return ticket_id, {
                     "status": fields.get("status", {}).get("name", "Unknown"),
-                    "issue_type": fields.get("issuetype", {}).get("name", "Unknown")
+                    "issue_type": issue_type,
+                    "bug_type": _categorize_bug_type_from_issuetype(issue_type),
                 }
-            else:
-                results[ticket_id] = {"status": "N/A", "issue_type": "N/A"}
+            return ticket_id, {"status": "N/A", "issue_type": "N/A", "bug_type": None}
+
+        results = {}
+        max_workers = min(10, len(unique_ids)) or 1
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for ticket_id, detail in pool.map(_one, unique_ids):
+                results[ticket_id] = detail
 
         return jsonify({"success": True, "details": results})
     except Exception as e:
@@ -12446,15 +12930,15 @@ def _categorize_bug_type_from_issuetype(issuetype):
     if not issuetype:
         return None
     issuetype_lower = issuetype.lower()
-    if "test bug" in issuetype_lower or "testbed" in issuetype_lower:
-        return "Test Bug"
-    elif "environment" in issuetype_lower:
+    if "environment" in issuetype_lower:
         return "Environment"
     elif "flaky" in issuetype_lower:
         return "Flaky"
-    elif "product bug" in issuetype_lower or ("product" in issuetype_lower and "bug" in issuetype_lower):
-        return "Product Bug"
-    elif issuetype_lower == "bug" or "bug" in issuetype_lower:
+    elif "test" in issuetype_lower or "testbed" in issuetype_lower:
+        # Any test-type issue (e.g. "Test", "Test Bug") counts as a test issue.
+        return "Test Bug"
+    elif "bug" in issuetype_lower:
+        # Any remaining bug (e.g. "Bug", "Product Bug") counts as a product bug.
         return "Product Bug"
     return None
 

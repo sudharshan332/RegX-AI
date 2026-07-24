@@ -13,6 +13,112 @@ const DEFAULT_TAG = "cdp_master_full_reg";
 const JITA_RESULTS_URL = "https://jita.eng.nutanix.com/results?task_ids=";
 const JIRA_URL = "https://jira.nutanix.com/browse/";
 
+// Bug-type color code shared across the owner breakdown tiles and the donut graph.
+const BUG_TYPE_COLORS = {
+  "Product Bug": "#ef4444", // red
+  "Test Bug": "#f59e0b",    // orange
+  "Environment": "#3b82f6", // blue
+  "Flaky": "#a855f7",       // purple
+  "Other": "#9ca3af",       // grey
+};
+
+// Classify a Jira issue type string into a bug category.
+// Rule (per product): any "test" issue type -> Test Bug, any "bug" -> Product Bug.
+const categorizeBugType = (issueType) => {
+  if (!issueType) return null;
+  const s = String(issueType).toLowerCase();
+  if (s.includes("environment")) return "Environment";
+  if (s.includes("flaky")) return "Flaky";
+  if (s.includes("test") || s.includes("testbed")) return "Test Bug";
+  if (s.includes("bug")) return "Product Bug";
+  return null;
+};
+
+// Resolve the bug type for a ticket, preferring the backend-provided value.
+const bugTypeOf = (jiraInfo) => {
+  if (!jiraInfo) return null;
+  return jiraInfo.bug_type || categorizeBugType(jiraInfo.issue_type);
+};
+
+// Build a Jira search URL (JQL "issuekey in (...)") for a set of tickets.
+const jiraJqlUrl = (tickets) => {
+  const list = Array.from(new Set(tickets)).filter(Boolean);
+  if (list.length === 0) return null;
+  return `https://jira.nutanix.com/issues/?jql=${encodeURIComponent(`issuekey in (${list.join(",")}) ORDER BY status`)}`;
+};
+
+const openTickets = (tickets) => {
+  const url = jiraJqlUrl(tickets);
+  if (url) window.open(url, "_blank", "noopener,noreferrer");
+};
+
+// Derive a risk level from an overall QI impact value (mirrors backend thresholds).
+const riskFromQi = (qi) => {
+  const n = typeof qi === "number" ? qi : parseFloat(qi);
+  if (isNaN(n)) return null;
+  if (n <= -5) return "Critical";
+  if (n <= -2) return "High";
+  if (n <= -1) return "Medium";
+  return "Low";
+};
+
+const RISK_COLORS = {
+  Critical: { bg: "#fee2e2", color: "#991b1b" },
+  High: { bg: "#ffedd5", color: "#9a3412" },
+  Medium: { bg: "#fef9c3", color: "#854d0e" },
+  Low: { bg: "#dcfce7", color: "#166534" },
+};
+
+// Pie chart of bug-type totals. Hover a slice for its ticket count ("Label - N").
+// The pie is display-only; use the legend on the right to open Jira.
+function BugPie({ segments, total, size = 150 }) {
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = size / 2 - 2;
+  const active = segments.filter((s) => s.value > 0);
+  const pointOnCircle = (deg) => {
+    const rad = ((deg - 90) * Math.PI) / 180; // start from 12 o'clock
+    return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+  };
+  let angle = 0;
+  return (
+    <div className="rh-bug-pie" style={{ width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Bug type distribution">
+        {total === 0 && <circle cx={cx} cy={cy} r={r} fill="#eef2f7" />}
+        {active.length === 1 && (
+          <circle cx={cx} cy={cy} r={r} fill={active[0].color} className="rh-bug-pie-slice">
+            <title>{`${active[0].label} ${active[0].value} (100%)`}</title>
+          </circle>
+        )}
+        {active.length > 1 &&
+          active.map((s) => {
+            const pct = s.value / total;
+            const sweep = pct * 360;
+            const start = angle;
+            const end = angle + sweep;
+            angle = end;
+            const [x1, y1] = pointOnCircle(start);
+            const [x2, y2] = pointOnCircle(end);
+            const largeArc = sweep > 180 ? 1 : 0;
+            const d = `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`;
+            return (
+              <path
+                key={s.label}
+                d={d}
+                fill={s.color}
+                stroke="#fff"
+                strokeWidth="1"
+                className="rh-bug-pie-slice"
+              >
+                <title>{`${s.label} (${Math.round(pct * 100)}%)`}</title>
+              </path>
+            );
+          })}
+      </svg>
+    </div>
+  );
+}
+
 // Load tag from localStorage or use default
 const getStoredTag = () => {
   const stored = localStorage.getItem("regressionDashboardTag");
@@ -348,11 +454,18 @@ export default function RegressionHome() {
     }
   };
 
-  // Auto-fetch JIRA details when owner_ticket_map becomes available
+  // Auto-fetch JIRA details when owner_ticket_map becomes available.
+  // Refetch if nothing is cached yet, or if every cached entry is stale N/A
+  // (e.g. from an earlier run before JIRA_TOKEN was configured).
   useEffect(() => {
     if (!triageCount || !triageCount.owner_ticket_map) return;
-    if (Object.keys(ownerJiraDetails).length > 0) return;
-    fetchOwnerJiraDetails();
+    const entries = Object.values(ownerJiraDetails);
+    const allStale = entries.length > 0 && entries.every(
+      (d) => (d?.status === "N/A" || d?.status === "Unknown" || !d?.status) && !d?.bug_type
+    );
+    if (entries.length === 0 || allStale) {
+      fetchOwnerJiraDetails();
+    }
   }, [triageCount]);
 
   // Handle configuration save
@@ -776,11 +889,12 @@ export default function RegressionHome() {
         timeout: 300000 // 5 minutes timeout for QI calculation
       });
       
-      // Update triage count with bulk issues QI data
-      if (response.data.bulk_issues_with_qi) {
+      // Update triage count with per-ticket + bulk issues QI data
+      if (response.data.bulk_issues_with_qi || response.data.ticket_qi_map) {
         setTriageCount(prev => ({
           ...prev,
-          bulk_issues_with_qi: response.data.bulk_issues_with_qi
+          bulk_issues_with_qi: response.data.bulk_issues_with_qi || prev.bulk_issues_with_qi || {},
+          ticket_qi_map: response.data.ticket_qi_map || response.data.bulk_issues_with_qi || {}
         }));
       }
     } catch (err) {
@@ -2514,23 +2628,77 @@ export default function RegressionHome() {
                     </div>
                   )}
                   
-                  {/* Display Pending Tests */}
-                  {triageCount.pending_tests !== undefined && (
-                    <div style={{ marginBottom: "10px", color: "#17a2b8" }}>
-                      <strong>Pending/Running Tests:</strong> {triageCount.pending_tests}
-                    </div>
-                  )}
-
-                  {/* Display Bulk Issues Count */}
-                  {triageCount.bulk_issues_count !== undefined && (
-                    <div style={{ marginBottom: "10px", color: "#ffc107" }}>
-                      <strong>Total Bulk Issues (tickets with &gt;5 testcases):</strong> {triageCount.bulk_issues_count}
-                    </div>
-                  )}
                   
                   {/* Display Owner Ticket Map as Table */}
-                  {triageCount.owner_ticket_map && Object.keys(triageCount.owner_ticket_map).length > 0 && (
+                  {triageCount.owner_ticket_map && Object.keys(triageCount.owner_ticket_map).length > 0 && (() => {
+                    // Aggregate bug types across every unique ticket in the current run.
+                    const bugOrder = ["Product Bug", "Test Bug", "Environment", "Flaky", "Other"];
+                    const bugTotals = { "Product Bug": 0, "Test Bug": 0, "Environment": 0, "Flaky": 0, "Other": 0 };
+                    const bugTickets = { "Product Bug": [], "Test Bug": [], "Environment": [], "Flaky": [], "Other": [] };
+                    const otherIssueTypes = {}; // issue_type -> count, for "Other" tooltip
+                    const seenTickets = new Set();
+                    Object.values(triageCount.owner_ticket_map).forEach((tks) => {
+                      Object.keys(tks).forEach((t) => {
+                        if (seenTickets.has(t)) return;
+                        seenTickets.add(t);
+                        const info = ownerJiraDetails[t];
+                        const bt = bugTypeOf(info) || "Other";
+                        bugTotals[bt] = (bugTotals[bt] || 0) + 1;
+                        bugTickets[bt].push(t);
+                        if (bt === "Other") {
+                          const it = info?.issue_type && info.issue_type !== "N/A"
+                            ? info.issue_type
+                            : "Not loaded / Unknown";
+                          otherIssueTypes[it] = (otherIssueTypes[it] || 0) + 1;
+                        }
+                      });
+                    });
+                    const totalBugs = seenTickets.size;
+                    const otherTip = Object.keys(otherIssueTypes).length
+                      ? "Other = non-bug Jira issue types: " +
+                        Object.entries(otherIssueTypes).map(([k, v]) => `${k} (${v})`).join(", ")
+                      : "Other = Jira issue types that are neither a bug nor a test issue";
+                    const openBugType = (label) => openTickets(bugTickets[label] || []);
+                    const donutSegments = bugOrder
+                      .map((label) => ({ label, value: bugTotals[label] || 0, color: BUG_TYPE_COLORS[label] }))
+                      .filter((s) => s.value > 0);
+                    return (
                     <div style={{ marginTop: "20px" }}>
+                      {/* Bug-type summary: pie on the left, count-pill legend on the right.
+                          Click a slice or a legend row to open that bug type in Jira. */}
+                      <div className="rh-bug-summary">
+                        <BugPie segments={donutSegments} total={totalBugs} />
+                        <div className="rh-bug-summary-legend">
+                          <div className="rh-bug-summary-head">
+                            <span className="rh-bug-summary-title">Bugs Overview</span>
+                            <span className="rh-bug-summary-total-pill">{totalBugs}</span>
+                          </div>
+                          <ul className="rh-bug-summary-list">
+                            {bugOrder.map((label) => (
+                              bugTotals[label] > 0 ? (
+                                <li
+                                  key={label}
+                                  className="rh-bug-summary-item"
+                                  onClick={() => openBugType(label)}
+                                  title={label === "Other" ? otherTip : `Open ${bugTotals[label]} ${label} ticket(s) in Jira`}
+                                >
+                                  <span className="rh-bug-summary-name">
+                                    <span className="rh-bug-dot" style={{ background: BUG_TYPE_COLORS[label] }} />
+                                    {label}
+                                    {label === "Other" && <span className="rh-bug-summary-info">?</span>}
+                                  </span>
+                                  <span
+                                    className="rh-bug-summary-pill"
+                                    style={{ background: BUG_TYPE_COLORS[label] }}
+                                  >
+                                    {bugTotals[label]}
+                                  </span>
+                                </li>
+                              ) : null
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
                         <h4 style={{ margin: 0 }}>
                           Owner-wise Jira Ticket Breakdown:
@@ -2541,7 +2709,7 @@ export default function RegressionHome() {
                           )}
                         </h4>
                         <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                          {(!triageCount.bulk_issues_with_qi || Object.keys(triageCount.bulk_issues_with_qi).length === 0) && (
+                          {(!triageCount.ticket_qi_map || Object.keys(triageCount.ticket_qi_map).length === 0) && (
                             <button
                               onClick={fetchBulkIssuesQi}
                               disabled={loadingBulkQi}
@@ -2611,7 +2779,16 @@ export default function RegressionHome() {
                       </div>
                       <div className="rh-owner-grid">
                         {Object.entries(triageCount.owner_ticket_map).map(([owner, tickets]) => {
-                          const ticketEntries = Object.entries(tickets);
+                          // Highest testcase-impact ticket first.
+                          const ticketEntries = Object.entries(tickets).sort((a, b) => b[1] - a[1]);
+                          // Per-owner bug-type tallies for the tile header badges.
+                          let ownerProductBugs = 0;
+                          let ownerTestBugs = 0;
+                          ticketEntries.forEach(([t]) => {
+                            const bt = bugTypeOf(ownerJiraDetails[t]);
+                            if (bt === "Product Bug") ownerProductBugs += 1;
+                            else if (bt === "Test Bug") ownerTestBugs += 1;
+                          });
                           const statusStyle = (status) => ({
                             background: status === "Closed" || status === "Resolved" ? "#d1fae5"
                               : status === "In Progress" ? "#dbeafe"
@@ -2625,29 +2802,72 @@ export default function RegressionHome() {
                           return (
                             <div key={owner} className="rh-owner-card">
                               <div className="rh-owner-head">
-                                <span>{owner}</span>
-                                <span className="rh-owner-count">{ticketEntries.length} ticket{ticketEntries.length !== 1 ? "s" : ""}</span>
+                                <button
+                                  type="button"
+                                  className="rh-owner-name rh-owner-name-link"
+                                  onClick={() => openTickets(ticketEntries.map(([t]) => t))}
+                                  title={`Open ${owner}'s ${ticketEntries.length} ticket(s) in Jira`}
+                                >
+                                  {owner}
+                                </button>
+                                <div className="rh-owner-head-right">
+                                  <div className="rh-owner-bugcounts">
+                                    <span className="rh-owner-bugcount" title="Product Bugs">
+                                      <span className="rh-bug-dot" style={{ background: BUG_TYPE_COLORS["Product Bug"] }} />
+                                      {ownerProductBugs}
+                                    </span>
+                                    <span className="rh-owner-bugcount" title="Test Bugs">
+                                      <span className="rh-bug-dot" style={{ background: BUG_TYPE_COLORS["Test Bug"] }} />
+                                      {ownerTestBugs}
+                                    </span>
+                                  </div>
+                                  <span className="rh-owner-count">{ticketEntries.length} ticket{ticketEntries.length !== 1 ? "s" : ""}</span>
+                                </div>
                               </div>
                               <ul className="rh-owner-tickets">
                                 {ticketEntries.map(([ticket, count]) => {
                                   const jiraInfo = ownerJiraDetails[ticket];
-                                  const qiData = triageCount.bulk_issues_with_qi?.[ticket];
+                                  const qiData = triageCount.ticket_qi_map?.[ticket] || triageCount.bulk_issues_with_qi?.[ticket];
+                                  const bt = bugTypeOf(jiraInfo);
+                                  const risk = qiData ? riskFromQi(qiData.overall_qi_impact) : null;
+                                  const hasStatus = jiraInfo && jiraInfo.status && jiraInfo.status !== "N/A";
+                                  const dotColor = bt ? BUG_TYPE_COLORS[bt] : "#d1d5db";
+                                  const dotTip = bt
+                                    ? `${bt}${jiraInfo?.issue_type ? ` — Issue Type: ${jiraInfo.issue_type}` : ""}`
+                                    : (jiraInfo ? `Other — Issue Type: ${jiraInfo.issue_type || "N/A"}` : "Loading bug type…");
                                   return (
                                     <li key={ticket}>
-                                      {jiraInfo ? (
-                                        <span className="rh-ticket-status" style={statusStyle(jiraInfo.status)} title={jiraInfo.issue_type ? `Type: ${jiraInfo.issue_type}` : undefined}>
-                                          {jiraInfo.status}
-                                        </span>
-                                      ) : (
-                                        <span className="rh-ticket-status" style={{ background: "#f3f4f6", color: "#9ca3af" }}>—</span>
-                                      )}
+                                      {/* Color code (red = product bug, orange = test bug, grey = other/loading) */}
+                                      <span className="rh-bug-dot rh-bug-dot-lg rh-bug-dot-spaced" style={{ background: dotColor }} title={dotTip} />
                                       <a className="rh-ticket-link" href={`${JIRA_URL}${ticket}`} target="_blank" rel="noreferrer">
                                         {ticket}
                                       </a>
-                                      {qiData && (
-                                        <span className="rh-ticket-count" title="QI Impact">{qiData.overall_qi_impact.toFixed(1)}% QI</span>
-                                      )}
-                                      <span className="rh-ticket-count">{count} tc</span>
+                                      {/* State of the ticket — centered in the row */}
+                                      <span className="rh-ticket-state-wrap">
+                                        <span
+                                          className="rh-ticket-status"
+                                          style={hasStatus ? statusStyle(jiraInfo.status) : { background: "#f3f4f6", color: "#9ca3af" }}
+                                          title={jiraInfo?.issue_type ? `Type: ${jiraInfo.issue_type}` : undefined}
+                                        >
+                                          {hasStatus ? jiraInfo.status : (jiraInfo ? "N/A" : "…")}
+                                        </span>
+                                      </span>
+                                      <span className="rh-ticket-meta">
+                                        <span className="rh-qi-badge" title="QI Impact for this ticket">
+                                          {qiData ? `${qiData.overall_qi_impact.toFixed(1)}% QI` : "— QI"}
+                                        </span>
+                                        {risk && (
+                                          <span
+                                            className="rh-risk-badge"
+                                            style={{ background: RISK_COLORS[risk].bg, color: RISK_COLORS[risk].color }}
+                                            title="Risk Level"
+                                          >
+                                            {risk}
+                                          </span>
+                                        )}
+                                        {/* Count of testcases affected by this ticket */}
+                                        <span className="rh-ticket-count" title="Testcases affected">{count} tc</span>
+                                      </span>
                                     </li>
                                   );
                                 })}
@@ -2680,7 +2900,8 @@ export default function RegressionHome() {
                         </div>
                       )}
                     </div>
-                  )}
+                    );
+                  })()}
                 </div>
               )}
             </div>

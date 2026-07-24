@@ -208,3 +208,13 @@ __marimo__/
 
 # Local monotonic User_Dyn_* JP/TS sequence (RegX dynamic-jp)
 backend/.dyn_name_sequence.json
+
+# Node / build artifacts (never commit installed deps)
+node_modules/
+/build
+
+# Committed Python virtualenv (should not be tracked)
+regx_env/
+
+# macOS
+.DS_Store

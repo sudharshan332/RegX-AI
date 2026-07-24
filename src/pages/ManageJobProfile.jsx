@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import axios from 'axios';
+import api from '../api';
 import { API_BASE_URL } from '../config';
 import './DynamicJobProfile.css';
 
@@ -23,6 +24,7 @@ export default function ManageJobProfile({ embedded = false }) {
 
   const [jobProfiles, setJobProfiles] = useState([]);
   const [testSets, setTestSets] = useState([]);
+  const [totals, setTotals] = useState({ job_profiles: 0, test_sets: 0 });
   const [searched, setSearched] = useState(false);
 
   const [selectedJPs, setSelectedJPs] = useState(new Set());
@@ -46,20 +48,27 @@ export default function ManageJobProfile({ embedded = false }) {
     setSelectedJPs(new Set());
     setSelectedTSs(new Set());
     try {
+      // No small limit — return everything that matches (JITA honors a large
+      // limit and reports the true total), so the list mirrors the JITA UI.
       const resp = await axios.post(`${API_BASE}/search`, {
         query: q,
         date: selectedDate || null,
-        limit: 30,
       });
-      setJobProfiles(resp.data?.job_profiles || []);
-      setTestSets(resp.data?.test_sets || []);
+      const jps = resp.data?.job_profiles || [];
+      const tss = resp.data?.test_sets || [];
+      setJobProfiles(jps);
+      setTestSets(tss);
+      setTotals(resp.data?.totals || { job_profiles: jps.length, test_sets: tss.length });
       setSearched(true);
-      if (!resp.data?.job_profiles?.length && !resp.data?.test_sets?.length) {
+      const warnings = Array.isArray(resp.data?.warnings) ? resp.data.warnings : [];
+      if (!jps.length && !tss.length) {
         const where = [
           q.length >= 2 ? `matching "${q}"` : '',
           selectedDate ? `created on ${selectedDate}` : '',
         ].filter(Boolean).join(' and ');
         setErrorMsg(`No Job Profiles or Test Sets found ${where}`);
+      } else if (warnings.length) {
+        setErrorMsg(warnings.join(' '));
       }
     } catch (err) {
       setErrorMsg(`Search failed: ${getErrorMessage(err)}`);
@@ -105,21 +114,34 @@ export default function ManageJobProfile({ embedded = false }) {
     setSuccessMsg(null);
     setDeleteResults(null);
     try {
-      const resp = await axios.post(`${API_BASE}/delete`, {
+      // Use the shared `api` instance so the JWT is attached — the backend deletes
+      // with the user's own JITA credentials and enforces delete permissions.
+      const resp = await api.post(`/mcp/regression/dynamic-jp/delete`, {
         jp_ids: jpIds,
         ts_ids: tsIds,
       });
       setDeleteResults(resp.data?.results || {});
 
-      const jpOk = (resp.data?.results?.job_profiles || []).filter((r) => r.success).length;
-      const tsOk = (resp.data?.results?.test_sets || []).filter((r) => r.success).length;
-      const jpFail = jpIds.length - jpOk;
-      const tsFail = tsIds.length - tsOk;
+      const jpResults = resp.data?.results?.job_profiles || [];
+      const tsResults = resp.data?.results?.test_sets || [];
+      const allResults = [...jpResults, ...tsResults];
+      const okCount = allResults.filter((r) => r.success).length;
+      const unauthorizedCount = allResults.filter((r) => r.unauthorized).length;
+      const otherFailCount = allResults.filter((r) => !r.success && !r.unauthorized).length;
 
-      if (jpFail === 0 && tsFail === 0) {
-        setSuccessMsg(`Successfully deleted ${jpOk + tsOk} item(s)`);
+      if (okCount > 0) setSuccessMsg(`Successfully deleted ${okCount} item(s).`);
+      else setSuccessMsg(null);
+
+      if (unauthorizedCount > 0 || otherFailCount > 0) {
+        const parts = [];
+        if (unauthorizedCount > 0) parts.push(`${unauthorizedCount} blocked — you are not the owner`);
+        if (otherFailCount > 0) parts.push(`${otherFailCount} failed`);
+        setErrorMsg(
+          `${okCount} deleted, ${parts.join(', ')}. ` +
+          `The item(s) you don't own were not deleted. See details below.`
+        );
       } else {
-        setErrorMsg(`Deleted ${jpOk + tsOk} item(s), ${jpFail + tsFail} failed. See details below.`);
+        setErrorMsg(null);
       }
 
       // Remove successfully deleted items from lists
@@ -164,7 +186,7 @@ export default function ManageJobProfile({ embedded = false }) {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
-              placeholder="Enter JP or Test Set name (partial match)..."
+              placeholder="Name (partial match). Combine terms with | e.g. CDP | 7.5.1"
               disabled={loading}
             />
           </div>
@@ -204,7 +226,9 @@ export default function ManageJobProfile({ embedded = false }) {
         </div>
         <p style={{ margin: '8px 0 0', fontSize: 12, color: '#64748b' }}>
           Pick a date to list only items this tool created that day. The name search
-          is optional and can be combined with the date.
+          is optional and can be combined with the date. Separate multiple terms with
+          <code style={{ padding: '0 4px' }}>|</code> (e.g. <code>CDP | 7.5.1</code>) to
+          match names containing <strong>all</strong> of them (narrows results, like JITA).
         </p>
       </div>
 
@@ -222,7 +246,9 @@ export default function ManageJobProfile({ embedded = false }) {
           {/* Job Profiles column */}
           <div className="djp-section">
             <h3 style={{ margin: '0 0 12px', fontSize: 15, fontWeight: 700 }}>
-              Job Profiles ({jobProfiles.length})
+              Job Profiles ({totals.job_profiles > jobProfiles.length
+                ? `${jobProfiles.length} of ${totals.job_profiles}`
+                : jobProfiles.length})
             </h3>
             {jobProfiles.length === 0 ? (
               <p style={{ color: '#64748b', fontSize: 13 }}>No Job Profiles found</p>
@@ -259,7 +285,9 @@ export default function ManageJobProfile({ embedded = false }) {
           {/* Test Sets column */}
           <div className="djp-section">
             <h3 style={{ margin: '0 0 12px', fontSize: 15, fontWeight: 700 }}>
-              Test Sets ({testSets.length})
+              Test Sets ({totals.test_sets > testSets.length
+                ? `${testSets.length} of ${totals.test_sets}`
+                : testSets.length})
             </h3>
             {testSets.length === 0 ? (
               <p style={{ color: '#64748b', fontSize: 13 }}>No Test Sets found</p>

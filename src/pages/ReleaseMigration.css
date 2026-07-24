@@ -1,0 +1,286 @@
+/* Release Migration — builds on DynamicJobProfile.css (djp-* tokens & controls). */
+
+/* ── Numbered step headers ── */
+.rm-step-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.rm-step-num {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--djp-blue, #2563eb);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.rm-step-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--djp-text, #111827);
+  line-height: 1.3;
+}
+
+/* ── Grouped parameter subsections ── */
+.rm-subsection {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--djp-border);
+}
+
+.rm-subsection:first-of-type {
+  margin-top: 4px;
+  padding-top: 0;
+  border-top: none;
+}
+
+.rm-subsection-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--djp-subtle, #94a3b8);
+  margin-bottom: 10px;
+}
+
+.rm-optional {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--djp-subtle, #94a3b8);
+  background: var(--djp-chip-bg, #f1f5f9);
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* ── Results toolbar (Select all + count) ── */
+.rm-results-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0 8px;
+}
+
+.rm-results-count {
+  font-size: 11px;
+  color: var(--djp-muted);
+  font-weight: 600;
+}
+
+.rm-jp-list {
+  max-height: 320px;
+}
+
+.rm-jp-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.rm-jp-name {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--djp-text);
+  word-break: break-all;
+  line-height: 1.35;
+}
+
+.djp-name-item.selected .rm-jp-name {
+  color: var(--djp-green-dark);
+}
+
+.rm-jp-preview {
+  font-size: 11px;
+  color: var(--djp-green-dark);
+  word-break: break-all;
+  margin-top: 1px;
+}
+
+.rm-jp-preview .rm-arrow {
+  font-weight: 700;
+  margin-right: 2px;
+}
+
+/* Full-width embedded migration (inside Manage Job Profile) */
+.rm-embedded,
+.rm-container {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}
+
+.rm-embedded .djp-section,
+.rm-container .djp-section {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* ── Migration form grid ── */
+.rm-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 18px;
+  width: 100%;
+}
+
+.rm-form-grid .djp-form-group {
+  margin-bottom: 8px;
+  min-width: 0;
+}
+
+@media (min-width: 1100px) {
+  .rm-subsection:last-of-type .rm-form-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .rm-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Progress bar ── */
+.rm-progress-wrap {
+  margin-bottom: 14px;
+}
+
+.rm-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--djp-muted);
+  margin-bottom: 6px;
+}
+
+.rm-progress-summary {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.rm-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.rm-chip-success {
+  background: #f0fdf4;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+}
+
+.rm-chip-failed {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+.rm-progress-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: #eef1f5;
+  overflow: hidden;
+}
+
+.rm-progress-bar {
+  height: 100%;
+  background: var(--djp-green);
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+
+/* ── Per-JP results ── */
+.rm-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.rm-result-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--djp-border);
+  border-left-width: 3px;
+  border-radius: 4px;
+  background: var(--djp-surface);
+}
+
+.rm-result-pending { border-left-color: #cbd5e1; }
+.rm-result-running { border-left-color: var(--djp-blue); }
+.rm-result-success { border-left-color: #22c55e; background: #f6fdf9; }
+.rm-result-failed  { border-left-color: #dc2626; background: #fef6f6; }
+
+.rm-status-chip {
+  flex-shrink: 0;
+  min-width: 62px;
+  text-align: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.rm-status-pending { background: #f1f5f9; color: #475569; }
+.rm-status-running { background: #e8f0f6; color: var(--djp-blue); }
+.rm-status-success { background: #f0fdf4; color: #166534; }
+.rm-status-failed  { background: #fef2f2; color: #991b1b; }
+
+.rm-result-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.rm-result-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--djp-text);
+  word-break: break-all;
+}
+
+.rm-result-name a {
+  color: var(--djp-green-dark);
+  text-decoration: none;
+  border-bottom: 1px solid var(--djp-green);
+}
+
+.rm-result-name a:hover {
+  border-bottom-color: var(--djp-green-dark);
+}
+
+.rm-result-source {
+  font-weight: 400;
+  color: var(--djp-subtle);
+  font-size: 11px;
+}
+
+.rm-result-msg {
+  font-size: 11px;
+  margin-top: 3px;
+  word-break: break-word;
+}
+
+.rm-result-msg-error { color: #991b1b; }
+.rm-result-msg-warn { color: #92400e; }

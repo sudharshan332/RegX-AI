@@ -37,7 +37,7 @@ function Dashboard() {
     { id: 'triage-genie', label: 'Triage Genie', icon: '🤖', description: 'Automated Failure Triage' },
     { id: 'failed-analysis', label: 'Failed Testcase Analysis', icon: '🔍', description: 'AI-Powered Failure Analysis' },
     { id: 'run-report', label: 'Run Report', icon: '📊', description: 'QI Analysis' },
-    { id: 'job-profile', label: 'Dynamic Job Profile', icon: '⚙️', description: 'Job Profile creation & manage JP/TS' },
+    { id: 'job-profile', label: 'Manage Job Profile', icon: '⚙️', description: 'Create, clone, delete & release-migrate JPs' },
     { id: 'cursor-ai', label: 'Cursor AI', icon: '✨', description: 'Interactive AI Chat' },
   ];
 
