@@ -5262,7 +5262,16 @@ def _load_intermittent_patterns():
                 data = json.load(f)
             raw = data.get("intermittent_patterns", data) if isinstance(data, dict) else data
             if isinstance(raw, list) and raw:
-                return [re.compile(p, re.IGNORECASE) for p in raw]
+                # Supports both the legacy format (list of regex strings) and the
+                # structured format (list of {"regex"/"pattern": ..., ...} objects).
+                compiled = []
+                for p in raw:
+                    if isinstance(p, dict):
+                        p = p.get("regex") or p.get("pattern")
+                    if isinstance(p, str) and p:
+                        compiled.append(re.compile(p, re.IGNORECASE))
+                if compiled:
+                    return compiled
     except Exception as e:
         logger.warning(f"Could not load intermittent_patterns.json: {e}, using defaults")
     return [re.compile(p, re.IGNORECASE) for p in default_patterns]
