@@ -1,0 +1,2145 @@
+/* ── Base Container ── */
+.djp-container {
+  --djp-bg: #ffffff;
+  --djp-surface: #ffffff;
+  --djp-surface-muted: #f8f9fa;
+  --djp-border: #e6eaf0;
+  --djp-border-strong: #d7dde5;
+  --djp-text: #2c3e50;
+  --djp-muted: #5f6b76;
+  --djp-subtle: #7f8c8d;
+  --djp-green: #22a5a5;
+  --djp-green-dark: #1b8e8e;
+  --djp-green-soft: #e6f5f5;
+  --djp-blue: #365b78;
+  --djp-red: #e74c3c;
+  --djp-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+  padding: 14px 6px;
+  background: var(--djp-bg);
+  min-height: auto;
+  font-family: Inter, Arial, sans-serif;
+  font-size: 12px;
+  color: var(--djp-text);
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}
+
+/* ── Header ── */
+.djp-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--djp-border);
+}
+
+.djp-header h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--djp-text);
+  letter-spacing: 0;
+}
+
+.djp-header-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+/* Action dropdown (Create / Delete) */
+.djp-actions-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.djp-actions-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 200;
+  min-width: 200px;
+  background: var(--djp-surface);
+  border: 1px solid var(--djp-border);
+  border-radius: 10px;
+  box-shadow: var(--djp-shadow);
+  padding: 6px 0;
+  animation: djpFadeSlideDown 0.15s ease;
+}
+
+@keyframes djpFadeSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.djp-actions-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 18px;
+  border: none;
+  background: none;
+  font-size: 13px;
+  color: var(--djp-muted);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.djp-actions-item:hover {
+  background: var(--djp-surface-muted);
+  color: var(--djp-text);
+}
+
+/* Embedded manage JP/TS inside Dynamic JP (no double page chrome) */
+.djp-manage-embedded {
+  margin-top: 4px;
+}
+
+.djp-manage-embedded .djp-section:first-of-type {
+  margin-top: 0;
+}
+
+/* ── Buttons ── */
+.djp-btn {
+  padding: 6px 12px;
+  border: 1px solid var(--djp-border-strong);
+  background: var(--djp-surface);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.15s ease;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  color: var(--djp-text);
+}
+
+.djp-btn:hover {
+  background: var(--djp-surface-muted);
+  border-color: var(--djp-subtle);
+}
+
+.djp-btn:disabled {
+  background: #eef1f5;
+  color: var(--djp-subtle);
+  cursor: not-allowed;
+  border-color: #eef1f5;
+}
+
+.djp-btn-primary {
+  background: var(--djp-green);
+  color: #fff;
+  border-color: var(--djp-green);
+}
+
+.djp-btn-primary:hover {
+  background: var(--djp-green-dark);
+  border-color: var(--djp-green-dark);
+}
+
+.djp-btn-success {
+  background: var(--djp-green);
+  color: #fff;
+  border-color: var(--djp-green);
+}
+
+.djp-btn-success:hover {
+  background: var(--djp-green-dark);
+  border-color: var(--djp-green-dark);
+}
+
+.djp-btn-warning {
+  background: #f59e0b;
+  color: #fff;
+  border-color: #f59e0b;
+}
+
+.djp-btn-warning:hover {
+  background: #d97706;
+  border-color: #d97706;
+}
+
+.djp-btn-danger {
+  background: #dc2626;
+  color: #fff;
+  border-color: #dc2626;
+}
+
+.djp-btn-danger:hover {
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
+
+/* Green "Action" dropdown trigger — after .djp-btn so border/background win */
+.djp-btn.djp-btn-manage-actions {
+  background: #365b78;
+  color: #fff;
+  border-color: #365b78;
+}
+
+.djp-btn.djp-btn-manage-actions:hover:not(:disabled) {
+  background: #2f485f;
+  border-color: #2f485f;
+  box-shadow: 0 2px 6px rgba(47, 72, 95, 0.2);
+}
+
+.djp-btn-sm {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.djp-defaults-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.djp-defaults-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  border-radius: 6px;
+  border: 1px solid var(--djp-border-strong);
+  background: var(--djp-surface);
+  color: var(--djp-muted);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.djp-defaults-btn:hover {
+  border-color: var(--djp-green);
+  color: var(--djp-green-dark);
+  background: var(--djp-green-soft);
+}
+
+.djp-defaults-btn.is-on {
+  background: var(--djp-green);
+  border-color: var(--djp-green);
+  color: #fff;
+}
+
+.djp-defaults-btn-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.djp-defaults-btn.is-on .djp-defaults-btn-check {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* Info badge with hover tooltip (uses data-tip, no glyph fonts) */
+.djp-info-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--djp-border-strong);
+  background: var(--djp-surface-muted);
+  color: var(--djp-muted);
+  font-size: 11px;
+  font-weight: 700;
+  font-style: italic;
+  font-family: Georgia, "Times New Roman", serif;
+  cursor: help;
+  outline: none;
+}
+
+.djp-info-badge:hover,
+.djp-info-badge:focus {
+  border-color: var(--djp-green);
+  color: var(--djp-green-dark);
+}
+
+.djp-info-badge::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: pre-line;
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #1f2937;
+  color: #f8fafc;
+  font-size: 11px;
+  font-weight: 400;
+  font-style: normal;
+  font-family: inherit;
+  line-height: 1.5;
+  text-align: left;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.25);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.djp-info-badge::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #1f2937;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease;
+  z-index: 50;
+}
+
+.djp-info-badge:hover::after,
+.djp-info-badge:focus::after,
+.djp-info-badge:hover::before,
+.djp-info-badge:focus::before {
+  opacity: 1;
+  visibility: visible;
+}
+
+.djp-btn-lg {
+  padding: 10px 28px;
+  font-size: 14px;
+  border-radius: 10px;
+}
+
+/* ── Loading ── */
+.djp-loading {
+  text-align: center;
+  padding: 40px;
+  font-size: 13px;
+  color: #64748b;
+}
+
+/* ── Form ── */
+.djp-form {
+  max-width: 1000px;
+  background: var(--djp-surface);
+  padding: 22px;
+  border: 1px solid var(--djp-border);
+  border-radius: 10px;
+  box-shadow: var(--djp-shadow);
+}
+
+.djp-form-group {
+  margin-bottom: 18px;
+}
+
+.djp-form-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+  color: #3b4654;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.djp-form-group textarea,
+.djp-form-group input[type="text"],
+.djp-form-group select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--djp-border-strong);
+  border-radius: 4px;
+  font-size: 12px;
+  box-sizing: border-box;
+  font-family: inherit;
+  color: var(--djp-text);
+  background: var(--djp-surface);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.djp-branch-field {
+  flex: 1;
+  min-width: 260px;
+  position: relative;
+}
+
+.djp-branch-results {
+  position: absolute;
+  z-index: 10;
+  left: 0;
+  right: 0;
+  margin-top: 3px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+
+.djp-field-status {
+  color: #64748b;
+}
+
+.djp-form-group textarea::placeholder,
+.djp-form-group input[type="text"]::placeholder {
+  color: var(--djp-subtle);
+  font-style: normal;
+  font-weight: 400;
+}
+
+.djp-form-group textarea {
+  min-height: 90px;
+  resize: vertical;
+  overflow: hidden;
+  line-height: 1.55;
+}
+
+.djp-form-group textarea:focus,
+.djp-form-group input:focus,
+.djp-form-group select:focus {
+  outline: none;
+  border-color: var(--djp-green);
+  box-shadow: 0 0 0 3px rgba(24, 169, 87, 0.13);
+}
+
+.djp-form-group small {
+  display: block;
+  margin-top: 5px;
+  color: var(--djp-subtle);
+  font-size: 11px;
+  letter-spacing: 0.01em;
+}
+
+.djp-section-note {
+  display: block;
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.djp-form-row {
+  display: flex;
+  gap: 16px;
+}
+
+.djp-form-row > .djp-form-group {
+  flex: 1;
+}
+
+.djp-flex-field {
+  flex: 1;
+}
+
+.djp-search-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.djp-search-row .djp-form-group {
+  flex: 1;
+  margin-bottom: 0;
+  min-width: 130px;
+}
+
+.djp-search-row .djp-btn {
+  height: 38px;
+  white-space: nowrap;
+}
+
+.djp-search-action {
+  display: flex;
+  align-items: flex-end;
+}
+
+/* ── Toggle Switch ── */
+.djp-toggle-group {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding-bottom: 0;
+}
+
+.djp-toggle-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--djp-muted);
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.djp-toggle {
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  background: #c8d0da;
+  cursor: pointer;
+  position: relative;
+  transition: background 0.2s ease;
+  flex-shrink: 0;
+  border: none;
+}
+
+.djp-toggle:hover {
+  background: var(--djp-subtle);
+}
+
+.djp-toggle.active {
+  background: var(--djp-green);
+}
+
+.djp-toggle-knob {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  transition: left 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.djp-toggle.active .djp-toggle-knob {
+  left: 23px;
+}
+
+.djp-toggle-hint {
+  font-size: 10px;
+  color: #94a3b8;
+  white-space: nowrap;
+  text-align: center;
+  font-weight: 500;
+}
+
+/* ── Section ── */
+.djp-section {
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid var(--djp-border);
+  border-radius: 4px;
+  background: var(--djp-surface);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+}
+
+.djp-section-title {
+  margin: 0 0 14px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--djp-text);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--djp-border);
+  letter-spacing: 0.01em;
+}
+
+/* ── Step 1 wide layout — stretch to full container width ── */
+.djp-step1-section {
+  max-width: none !important;
+  width: 100% !important;
+  box-sizing: border-box;
+}
+
+.djp-step1-section .djp-form-group {
+  max-width: none;
+  width: 100%;
+}
+
+.djp-step1-section textarea {
+  width: 100% !important;
+  box-sizing: border-box;
+  min-height: 100px;
+}
+
+.djp-step1-section .djp-search-row {
+  width: 100%;
+}
+
+/* ── Section title row (title + Latest button) ── */
+.djp-section-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--djp-border);
+}
+
+.djp-section-title-row .djp-section-title {
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.djp-section-title-row--compact {
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+}
+
+.djp-btn-latest {
+  background: #365b78;
+  color: #fff;
+  border: 1px solid #365b78;
+  padding: 7px 18px;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 999px;
+  cursor: pointer;
+  letter-spacing: 0.3px;
+  transition: all 0.2s ease;
+  box-shadow: none;
+}
+
+.djp-btn-latest:hover {
+  background: #2f485f;
+  box-shadow: 0 2px 6px rgba(47, 72, 95, 0.2);
+  transform: translateY(-1px);
+}
+
+/* ── Info Banners ── */
+.djp-info-banner {
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+.djp-info-banner.info {
+  background: #f3f7fc;
+  color: #2d425c;
+  border: 1px solid #d7e0ea;
+}
+
+.djp-info-banner.success {
+  background: var(--djp-green-soft);
+  color: var(--djp-green-dark);
+  border: 1px solid #c8d5df;
+}
+
+.djp-info-banner.warning {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+.djp-info-banner.error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+/* ── Config Panel (Step 2 cards) ── */
+.djp-config-panel {
+  display: flex;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.djp-config-card {
+  flex: 1;
+  padding: 16px;
+  border: 1px solid var(--djp-border);
+  border-radius: 8px;
+  background: var(--djp-surface-muted);
+}
+
+.djp-config-card h4 {
+  margin: 0 0 12px 0;
+  color: var(--djp-text);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ── Patch toggle row ── */
+.djp-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.djp-toggle-row label {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--djp-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ── Node pool / cluster search results ── */
+.djp-pool-results {
+  max-height: 160px;
+  overflow-y: auto;
+  border: 1px solid var(--djp-border);
+  border-radius: 8px;
+  margin-top: 4px;
+  background: var(--djp-surface);
+  box-shadow: var(--djp-shadow);
+}
+
+.djp-pool-item {
+  padding: 8px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #eef1f5;
+  color: var(--djp-muted);
+  transition: background 0.12s ease;
+}
+
+.djp-pool-item:last-child {
+  border-bottom: none;
+}
+
+.djp-pool-item:hover {
+  background: var(--djp-surface-muted);
+}
+
+.djp-pool-item.selected {
+  background: var(--djp-green-soft);
+  color: var(--djp-green-dark);
+  font-weight: 600;
+}
+
+/* ── Tables ── */
+.djp-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--djp-surface);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  margin-top: 14px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.djp-table th {
+  background: #34495e;
+  color: #fff;
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.djp-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #eef1f5;
+  font-size: 12px;
+}
+
+.djp-table tr:hover {
+  background: var(--djp-surface-muted);
+}
+
+.djp-table .empty-row td {
+  text-align: center;
+  color: #94a3b8;
+  padding: 28px;
+}
+
+/* ── Selection table ── */
+.djp-select-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  border: 1px solid var(--djp-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.djp-select-table thead tr {
+  background: #f3f6f9;
+  border-bottom: 1px solid var(--djp-border);
+}
+
+.djp-select-table th {
+  padding: 8px 12px;
+  text-align: left;
+  font-weight: 700;
+  color: var(--djp-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.djp-select-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #eef1f5;
+  vertical-align: middle;
+}
+
+.djp-select-table tbody tr {
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.djp-select-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.djp-row-unselected {
+  background: var(--djp-surface);
+  color: var(--djp-muted);
+}
+
+.djp-row-unselected:hover {
+  background: var(--djp-surface-muted);
+  color: var(--djp-text);
+}
+
+.djp-row-selected {
+  background: var(--djp-green-soft);
+  color: var(--djp-green-dark);
+  font-weight: 500;
+}
+
+.djp-row-selected:hover {
+  background: #dce9f2;
+}
+
+.djp-row-selected td {
+  border-bottom-color: #c8d5df;
+}
+
+.djp-cell-name {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.djp-cell-id {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  color: inherit;
+  opacity: 0.6;
+}
+
+.djp-select-table input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--djp-green);
+}
+
+/* ── Status Badges ── */
+.djp-status {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.djp-status.passed { background: #f0fdf4; color: #166534; }
+.djp-status.failed { background: #fef2f2; color: #991b1b; }
+.djp-status.skipped { background: #fffbeb; color: #92400e; }
+.djp-status.unknown { background: #f1f5f9; color: #475569; }
+
+/* ── Release Type Badge ── */
+.djp-release-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.djp-release-badge.opt {
+  background: #f0fdf4;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+}
+
+.djp-release-badge.release {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+/* ── Misc ── */
+.djp-advanced-options[open] summary {
+  margin-bottom: 10px;
+}
+
+.djp-existing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.djp-existing-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border: 1px solid var(--djp-border);
+  border-radius: 8px;
+  background: var(--djp-surface);
+  transition: all 0.15s ease;
+}
+
+.djp-existing-item:hover {
+  border-color: var(--djp-green);
+  box-shadow: 0 6px 18px rgba(24, 169, 87, 0.1);
+}
+
+.djp-existing-item-info {
+  flex: 1;
+}
+
+.djp-existing-item-info .name {
+  font-weight: 600;
+  color: var(--djp-text);
+  font-size: 13px;
+}
+
+.djp-existing-item-info .desc {
+  color: var(--djp-subtle);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.djp-existing-item-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.djp-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--djp-border);
+}
+
+/* ── Result Box ── */
+.djp-result-box {
+  margin-top: 18px;
+  padding: 18px 20px;
+  border-radius: 10px;
+  border: 1px solid #c8d5df;
+  background: var(--djp-green-soft);
+}
+
+.djp-result-box h3 {
+  margin: 0 0 10px 0;
+  color: var(--djp-green-dark);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.djp-result-box p {
+  margin: 5px 0;
+  font-size: 12px;
+  color: var(--djp-muted);
+}
+
+.djp-result-box code {
+  background: #dce9f2;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--djp-green-dark);
+}
+
+.djp-result-box p.djp-result-entity-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.djp-result-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #c8d5df;
+  border-radius: 6px;
+  background: var(--djp-surface);
+  color: var(--djp-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.djp-result-copy-btn:hover {
+  color: var(--djp-green-dark);
+  background: #dce9f2;
+  border-color: #9fb4c5;
+}
+.djp-result-copy-btn:focus-visible {
+  outline: 2px solid var(--djp-green);
+  outline-offset: 1px;
+}
+
+.djp-result-copied {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--djp-green-dark);
+}
+
+.djp-copy-glyph {
+  display: block;
+}
+
+.djp-result-box a.djp-jita-entity-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  text-decoration: none;
+  border-bottom: 1px solid var(--djp-green);
+  padding-bottom: 1px;
+}
+.djp-result-box a.djp-jita-entity-link:hover {
+  border-bottom-color: var(--djp-green-dark);
+}
+
+.djp-jita-entity-prefix {
+  font-weight: 800;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--djp-green-dark);
+  font-family: system-ui, sans-serif;
+}
+.djp-jita-entity-prefix--static {
+  margin-right: 8px;
+}
+.djp-result-box a.djp-jita-entity-link .djp-jita-entity-prefix {
+  color: var(--djp-green-dark);
+}
+.djp-result-box a.djp-jita-entity-link:hover .djp-jita-entity-prefix {
+  color: #075b2d;
+}
+
+.djp-result-box a.djp-jita-entity-link code {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.djp-result-box a.djp-jita-entity-link:hover code {
+  background: #dce9f2;
+}
+
+/* ── Tabs ── */
+.djp-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--djp-border);
+  margin-bottom: 20px;
+}
+
+.djp-tab {
+  padding: 10px 20px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--djp-subtle);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: all 0.15s ease;
+}
+
+.djp-tab:hover {
+  color: var(--djp-text);
+}
+
+.djp-tab.active {
+  color: var(--djp-green-dark);
+  border-bottom-color: var(--djp-green);
+}
+
+/* ── Node pool chip tags ── */
+.djp-node-pool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #eff6ff !important;
+  border: 1px solid #bfdbfe !important;
+  border-radius: 16px !important;
+  padding: 3px 10px !important;
+  font-size: 12px !important;
+  color: #1e40af !important;
+  font-weight: 500;
+}
+
+.djp-node-pool-chip button {
+  color: #dc2626 !important;
+  font-weight: 700;
+  font-size: 13px !important;
+}
+
+/* ── Execution History Table ── */
+.djp-exec-table-wrapper {
+  overflow-x: auto;
+  border: 1px solid var(--djp-border);
+  border-radius: 8px;
+}
+
+.djp-exec-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.djp-exec-table thead {
+  background: #f3f6f9;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.djp-exec-table th {
+  padding: 10px 12px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--djp-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  border-bottom: 1px solid var(--djp-border);
+}
+
+.djp-exec-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #eef1f5;
+  color: var(--djp-muted);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.djp-exec-table tbody tr:hover {
+  background: var(--djp-surface-muted);
+}
+
+.djp-exec-table .djp-cell-exception {
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--djp-muted);
+  font-size: 12px;
+}
+
+.djp-exec-link {
+  color: var(--djp-blue);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.djp-exec-link:hover {
+  text-decoration: underline;
+}
+
+.djp-exec-status {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.djp-exec-status.status-pass {
+  background: #e8f0f6;
+  color: var(--djp-green-dark);
+}
+
+.djp-exec-status.status-fail {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.djp-exec-status.status-other {
+  background: #eef1f5;
+  color: var(--djp-muted);
+}
+
+.djp-exec-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--djp-muted);
+}
+
+.djp-btn-sm {
+  padding: 4px 14px !important;
+  font-size: 12px !important;
+  min-width: auto !important;
+}
+
+/* Unique TS / JP lists */
+.djp-clear-selection-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+.djp-unique-lists {
+  display: flex;
+  gap: 16px;
+}
+.djp-unique-list-col {
+  flex: 1;
+  min-width: 0;
+}
+.djp-list-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.djp-list-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--djp-text);
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+.djp-list-count {
+  font-weight: 400;
+  color: var(--djp-subtle);
+  font-size: 11px;
+  margin-left: 4px;
+}
+.djp-name-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.djp-name-list li {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--djp-muted);
+  border-bottom: 1px solid #eef1f5;
+  word-break: break-all;
+}
+.djp-name-list li:last-child {
+  border-bottom: none;
+}
+.djp-name-list li:hover {
+  background: var(--djp-surface-muted);
+}
+
+/* Selectable name list */
+.djp-name-list-selectable {
+  max-height: 172px;
+  overflow-y: auto;
+  border: 1px solid var(--djp-border);
+  border-radius: 4px;
+  background: var(--djp-surface);
+}
+
+.djp-name-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+  border-left: 2px solid transparent;
+}
+
+.djp-name-item:hover {
+  background: var(--djp-surface-muted);
+}
+
+.djp-name-item.selected {
+  background: var(--djp-green-soft);
+  border-left-color: var(--djp-green);
+  font-weight: 500;
+}
+
+.djp-radio-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid #cbd5e1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: border-color 0.15s ease;
+}
+
+.djp-name-item.selected .djp-radio-dot {
+  border-color: var(--djp-green);
+}
+
+.djp-radio-dot-inner {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--djp-green);
+}
+
+.djp-name-text {
+  flex: 1;
+  word-break: break-all;
+  line-height: 1.35;
+  font-size: 11px;
+  color: var(--djp-muted);
+}
+
+.djp-name-item.selected .djp-name-text {
+  color: var(--djp-green-dark);
+}
+
+.djp-resolved-badge {
+  font-size: 10px;
+  color: var(--djp-muted);
+  background: #eef1f5;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  flex-shrink: 0;
+}
+
+.djp-resolving-text {
+  font-size: 11px;
+  color: var(--djp-subtle);
+  font-style: italic;
+  flex-shrink: 0;
+}
+
+/* Name editor row */
+.djp-name-editor-row {
+  display: flex;
+  gap: 12px;
+}
+
+.djp-clone-config {
+  border-top: 1px solid var(--djp-border);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+
+.djp-name-panel {
+  margin-bottom: 16px;
+}
+
+.djp-name-panel .djp-list-heading {
+  margin-bottom: 12px;
+}
+
+.djp-ts-mode-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.djp-ts-mode-option {
+  flex: 0 1 auto;
+  min-width: auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--djp-text);
+  font-weight: 400;
+}
+
+.djp-ts-mode-option:hover {
+  color: var(--djp-green-dark);
+}
+
+.djp-ts-mode-option.selected {
+  color: var(--djp-text);
+}
+
+.djp-ts-mode-option input {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--djp-green);
+}
+
+.djp-ts-mode-option strong {
+  color: var(--djp-text);
+  font-weight: 600;
+}
+
+.djp-single-name-field {
+  max-width: 520px;
+}
+
+.djp-action-hint {
+  align-self: center;
+  margin-left: 2px;
+  font-size: 11px;
+}
+
+.djp-action-hint-error {
+  color: #c2410c;
+}
+
+.djp-tag-section {
+  margin-top: 12px;
+}
+
+.djp-tag-patch-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 9px 10px;
+  border: 1px solid var(--djp-border);
+  border-radius: 4px;
+  background: #fbfcfd;
+}
+
+.djp-toggle-row--inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 0;
+}
+
+.djp-toggle-row--inline label {
+  margin-bottom: 0;
+  min-width: 4.5rem;
+}
+
+.djp-tag-patch-expand {
+  margin-top: 12px;
+}
+
+.djp-tag-input-area {
+  margin-top: 8px;
+}
+
+.djp-tag-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.djp-tag-input-row input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--djp-border-strong);
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--djp-text);
+}
+
+.djp-tag-input-row input:focus {
+  outline: none;
+  border-color: var(--djp-green);
+  box-shadow: 0 0 0 3px rgba(24, 169, 87, 0.13);
+}
+
+.djp-tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  margin-bottom: 6px;
+}
+
+.djp-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #f3f6f9;
+  border: 1px solid var(--djp-border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--djp-muted);
+  font-weight: 500;
+}
+
+.djp-tag-chip button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--djp-subtle);
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  margin-left: 2px;
+}
+
+.djp-tag-chip button:hover {
+  color: var(--djp-red);
+}
+
+/* ── Inline error message (below buttons) ── */
+.djp-inline-error {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-left: 4px solid #dc2626;
+  border-radius: 6px;
+  color: #991b1b;
+  font-size: 12px;
+  font-weight: 500;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.djp-inline-error button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 18px;
+  color: #991b1b;
+  padding: 0;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.djp-inline-error button:hover {
+  color: #dc2626;
+}
+
+/* ── Checkbox dot (for multi-select lists) ── */
+.djp-checkbox-dot {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--djp-border-strong);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.djp-name-item.selected .djp-checkbox-dot {
+  background: var(--djp-green);
+  border-color: var(--djp-green);
+}
+
+/* ── Danger button ── */
+.djp-btn-danger {
+  background: #dc2626;
+  color: #fff;
+  border-color: #dc2626;
+}
+
+.djp-btn-danger:hover {
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
+
+.djp-btn-danger:disabled {
+  background: #fca5a5;
+  border-color: #fca5a5;
+  cursor: not-allowed;
+}
+
+/* JITA-like compact layout: dense controls, flat surfaces, same color palette. */
+.djp-container {
+  padding: 14px 6px;
+  font-size: 11px;
+}
+
+.djp-header {
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+}
+
+.djp-header h1 {
+  font-size: 18px;
+}
+
+.djp-header-actions {
+  gap: 6px;
+}
+
+.djp-form,
+.djp-section,
+.djp-config-card,
+.djp-result-box,
+.djp-actions-dropdown {
+  border-radius: 3px;
+  box-shadow: none;
+}
+
+.djp-form {
+  max-width: none;
+  padding: 14px;
+}
+
+.djp-section {
+  margin-top: 12px;
+  padding: 12px;
+}
+
+.djp-section-title,
+.djp-section-title-row {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+}
+
+.djp-section-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.djp-form-group {
+  margin-bottom: 10px;
+}
+
+.djp-form-group label,
+.djp-toggle-row label {
+  margin-bottom: 4px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.djp-form-group textarea,
+.djp-form-group input[type="text"],
+.djp-form-group select,
+.djp-tag-input-row input {
+  min-height: 28px;
+  padding: 5px 8px;
+  border-radius: 2px;
+  font-size: 11px;
+}
+
+.djp-form-group textarea {
+  min-height: 64px;
+}
+
+.djp-btn,
+.djp-actions-item,
+.djp-btn-latest {
+  border-radius: 2px;
+  font-size: 11px;
+}
+
+.djp-btn {
+  min-height: 28px;
+  padding: 5px 10px;
+}
+
+.djp-btn-sm {
+  min-height: 24px !important;
+  padding: 3px 8px !important;
+  font-size: 11px !important;
+}
+
+.djp-btn-lg {
+  padding: 7px 18px;
+  font-size: 12px;
+  border-radius: 2px;
+}
+
+.djp-search-row {
+  gap: 8px;
+}
+
+.djp-search-row .djp-btn {
+  height: 28px;
+}
+
+.djp-toggle {
+  width: 36px;
+  height: 18px;
+  border-radius: 999px;
+}
+
+.djp-toggle-knob {
+  width: 14px;
+  height: 14px;
+  top: 2px;
+  left: 2px;
+}
+
+.djp-toggle.active .djp-toggle-knob {
+  left: 20px;
+}
+
+.djp-tag-patch-toggles {
+  gap: 10px 14px;
+  padding: 8px 10px;
+  border-radius: 3px;
+}
+
+.djp-tag-chip,
+.djp-node-pool-chip,
+.djp-status,
+.djp-release-badge,
+.djp-exec-status {
+  border-radius: 2px !important;
+  font-size: 10px !important;
+}
+
+.djp-table,
+.djp-select-table,
+.djp-exec-table {
+  font-size: 11px;
+}
+
+.djp-table th,
+.djp-table td,
+.djp-select-table th,
+.djp-select-table td,
+.djp-exec-table th,
+.djp-exec-table td {
+  padding: 6px 8px;
+}
+
+.djp-table th,
+.djp-select-table th,
+.djp-exec-table th {
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+
+.djp-pool-results,
+.djp-name-list-selectable,
+.djp-exec-table-wrapper {
+  border-radius: 3px;
+}
+
+.djp-name-item,
+.djp-pool-item,
+.djp-existing-item {
+  padding: 6px 8px;
+}
+
+.djp-radio-dot {
+  width: 13px;
+  height: 13px;
+  border-width: 1px;
+}
+
+.djp-radio-dot-inner {
+  width: 7px;
+  height: 7px;
+}
+
+.djp-checkbox-dot {
+  width: 14px;
+  height: 14px;
+  border-width: 1px;
+  font-size: 10px;
+}
+
+.djp-info-banner,
+.djp-inline-error {
+  padding: 7px 10px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.djp-result-box {
+  padding: 12px 14px;
+}
+
+.djp-result-box h3 {
+  font-size: 12px;
+}
+
+/* Final polish: clean, dense enterprise layout. Keep after compact overrides. */
+.djp-container {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}
+
+.djp-section,
+.djp-config-card,
+.djp-result-box {
+  border-radius: 4px;
+}
+
+.djp-section {
+  margin-top: 14px;
+  padding: 16px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+}
+
+.djp-section-title,
+.djp-section-title-row {
+  margin-bottom: 12px;
+}
+
+.djp-section-title,
+.djp-form-group label,
+.djp-toggle-row label,
+.djp-toggle-label {
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
+.djp-form-group textarea,
+.djp-form-group input[type="text"],
+.djp-form-group select,
+.djp-tag-input-row input {
+  border-radius: 4px;
+}
+
+.djp-search-row {
+  gap: 12px;
+}
+
+.djp-search-row .djp-btn {
+  height: 30px;
+}
+
+.djp-unique-lists {
+  gap: 16px;
+}
+
+.djp-list-heading-row {
+  margin-bottom: 6px;
+}
+
+.djp-name-list-selectable {
+  max-height: 176px;
+  border-radius: 4px;
+}
+
+.djp-name-item,
+.djp-pool-item,
+.djp-existing-item {
+  padding: 7px 9px;
+}
+
+.djp-name-text {
+  line-height: 1.35;
+}
+
+.djp-clone-config {
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.djp-ts-mode-row {
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.djp-ts-mode-option {
+  min-width: auto;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-size: 11px;
+  color: var(--djp-text);
+}
+
+.djp-ts-mode-option.selected {
+  color: var(--djp-text);
+}
+
+.djp-ts-mode-option input {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--djp-green);
+}
+
+.djp-tag-patch-toggles {
+  gap: 10px 16px;
+  padding: 9px 10px;
+  border-radius: 4px;
+  background: #fbfcfd;
+}
+
+.djp-toggles-compact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 8px;
+}
+
+.djp-toggle-row--sm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.djp-toggle-row--sm label {
+  font-size: 12px;
+  margin: 0;
+  color: var(--djp-text);
+  font-weight: 500;
+}
+
+.djp-toggle--sm {
+  width: 32px !important;
+  height: 18px !important;
+  border-radius: 999px !important;
+}
+
+/* Self-contained knob geometry. Uses `left` (matching the base toggle mechanism)
+   and explicitly clears any inherited transform so the active knob can't be pushed
+   off the track by the larger base-toggle rules. */
+.djp-toggle--sm .djp-toggle-knob {
+  width: 14px !important;
+  height: 14px !important;
+  top: 2px !important;
+  left: 2px !important;
+  transform: none !important;
+}
+
+.djp-toggle--sm.active .djp-toggle-knob {
+  left: 16px !important;
+  transform: none !important;
+}
+
+.djp-form-actions {
+  margin-top: 16px;
+  padding-top: 14px;
+}
+
+/* Test Arguments section */
+.djp-test-args-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 12px;
+  background: #f9fafb;
+  border-radius: 4px;
+  margin-top: 8px;
+}
+
+.djp-test-args-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.djp-test-args-section h4 {
+  margin: 0 0 6px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--djp-text);
+}
+
+.djp-kv-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.djp-kv-row input[type="text"] {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--djp-border);
+  border-radius: 4px;
+  font-size: 13px;
+  background: white;
+}
+
+.djp-kv-row input[type="text"]:focus {
+  outline: none;
+  border-color: var(--djp-green);
+}
+
+.djp-kv-row button {
+  padding: 6px 10px;
+  min-width: 32px;
+  background: #e5e7eb;
+  border: 1px solid var(--djp-border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--djp-text);
+}
+
+.djp-kv-row button:hover:not(:disabled) {
+  background: #d1d5db;
+}
+
+.djp-kv-row button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .djp-unique-lists,
+  .djp-name-editor-row {
+    flex-direction: column;
+  }
+
+  .djp-ts-mode-option {
+    min-width: 0;
+  }
+}
+
+/* ============================================================
+   Compact density pass — JITA-like dense layout (keep last so
+   these win). Shrinks fonts, paddings and control heights to
+   fit more on screen.
+   ============================================================ */
+.djp-container {
+  padding: 10px 8px;
+  font-size: 11px;
+}
+
+.djp-header {
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+}
+
+.djp-header h1 {
+  font-size: 16px;
+}
+
+.djp-section {
+  margin-top: 8px !important;
+  padding: 10px 12px !important;
+}
+
+.djp-section-title,
+.djp-section-title-row {
+  margin-bottom: 8px !important;
+  padding-bottom: 6px !important;
+}
+
+.djp-section-title {
+  font-size: 12px;
+}
+
+.djp-section-title h3,
+.djp-section-title-row h3 {
+  font-size: 12px;
+}
+
+.djp-form-group {
+  margin-bottom: 10px;
+}
+
+.djp-form-group label {
+  margin-bottom: 3px;
+  font-size: 10px;
+}
+
+.djp-form-group textarea,
+.djp-form-group input[type="text"],
+.djp-form-group select,
+.djp-kv-row input[type="text"],
+.djp-tag-input-row input {
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
+.djp-form-group textarea {
+  min-height: 64px;
+  line-height: 1.45;
+}
+
+.djp-btn {
+  min-height: 26px;
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.djp-btn-sm {
+  min-height: 22px !important;
+  padding: 2px 8px !important;
+  font-size: 10px !important;
+}
+
+.djp-search-row {
+  gap: 8px;
+}
+
+.djp-search-row .djp-btn {
+  height: 28px;
+}
+
+.djp-toggle-row,
+.djp-toggle-group {
+  gap: 6px;
+}
+
+.djp-toggle-row label,
+.djp-toggle-label {
+  font-size: 10px;
+}
+
+.djp-kv-row {
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.djp-tag-chip {
+  font-size: 10px;
+  padding: 2px 7px;
+}
+
+.djp-info-banner,
+.djp-inline-error {
+  padding: 6px 9px;
+  font-size: 10px;
+}
+
+.djp-result-box {
+  padding: 10px 12px;
+}
+
+.djp-result-box h3 {
+  font-size: 11px;
+}
+
+.djp-defaults-btn {
+  padding: 4px 10px;
+  font-size: 10px;
+}

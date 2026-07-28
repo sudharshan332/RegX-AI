@@ -1,0 +1,109 @@
+{
+  "patterns": [
+    {
+      "id": "nested_vm_qemu_ram_exhaustion",
+      "regex": "Failed to power on nested VM with uuid \\[[\\w\\-]+\\] in base cluster: \\[([\\w\\-]+)\\].*unable to map backing store for guest RAM: Cannot allocate memory",
+      "comment_template": "regx_infra_issue base cluster {base_cluster} RAM exhausted - create PI ticket and report to DIAL Infra",
+      "category": "INFRA_RESOURCE",
+      "description": "QEMU on the base cluster AHV host ran out of physical memory when trying to power on a nested VM. The Linux kernel returned ENOMEM when QEMU attempted to mmap() guest RAM backing store. The base cluster is over-committed (too many co-tenant nested VMs consuming physical RAM). The virDomainCreateXML() call fails immediately, QEMU monitor exits, and the deployer surfaces the error after polling.",
+      "action": "1. Identify the failing base cluster from the error message (e.g. NAHVBase2-Asgardians01-4). 2. Report to DIAL Infra to check host free memory and evict idle co-tenant VMs. 3. Temporarily exclude the base cluster from the RDM pool via the RDM UI until resolved. 4. Re-run after remediation. If same base cluster fails across 3+ cycles, flag as persistent over-commitment.",
+      "root_cause": "Base cluster AHV host has insufficient free physical RAM to back the guest RAM for the new nested VM (typically 80 GB per node). The QEMU process calls mmap() for the memory-backed guest RAM file, the kernel refuses with ENOMEM, QEMU crashes its monitor channel, and libvirt surfaces virDomainCreateXML() failed. This is not a product bug - it is base cluster over-commitment or a hardware memory fault.",
+      "reference_task": "https://rdm.eng.nutanix.com/scheduled_deployments/6a34373792fce905fe4ecd1b",
+      "jira": "PI-20705",
+      "example_failure": "Failed to power on nested VM with uuid [b8e678ea-62a6-4027-a8b2-148d20872b97] in base cluster: [NAHVBase2-Asgardians01-4]. Encountered: {\"error\":{\"code\":500,\"message\":\"virDomainCreateXML() failed: internal error: QEMU unexpectedly closed the monitor (vm='b8e678ea-62a6-4027-a8b2-148d20872b97'): 2026-06-19T19:03:18.579522Z qemu-kvm: warning: Machine type 'pc-i440fx-rhel7.6.0' is deprecated: machines from the previous RHEL major release are subject to deletion in the next RHEL major release\\n2026-06-19T19:03:18.580153Z qemu-kvm: unable to map backing store for guest RAM: Cannot allocate memory\"}}"
+    },
+    {
+      "id": "nutest_cluster_name_as_ip",
+      "regex": "auto_cluster_nested_[\\w]+.*does not appear to be an IPv4 or IPv6 address",
+      "comment_template": "regx_known_issue AUTO-29021 - nutest cluster name parsed as IP address, check JIRA for fix status",
+      "category": "INFRA_BUG",
+      "description": "Nutest framework bug - nested cluster name (auto_cluster_nested_*) is incorrectly passed to ipaddress.ip_address() instead of a real IP, causing ValueError -> SSH timeout -> PC Deploy PluginInitialisationFailedException.",
+      "action": "Known nutest/bhishma framework bug tracked in AUTO-29021. Check JIRA ticket for fix status. Do not rerun - will hit the same error until the framework fix is deployed.",
+      "root_cause": "In nutest get_ip_type(), the cluster resource name (e.g. auto_cluster_nested_6a2a8b48360236147431aeee) is passed where an IP address is expected. This triggers ValueError in ipaddress.ip_address(), which cascades into NuTestError -> SSH connection timeout -> PluginInitialisationFailedException during PC Deploy plugin init.",
+      "jira": "AUTO-29021"
+    },
+    {
+      "id": "installer_node_fatal_aos_install",
+      "regex": "([\\w\\-]+):\\s*Received\\s+\"fatal\"\\s+in\\s+waiting\\s+for\\s+event\\s+\"[^\"]+\".*?AOS installation failed\\.\\s*Reason:\\s*None",
+      "comment_template": "regx_rerun_disable-{node_name}",
+      "category": "INFRA_NODE",
+      "description": "Foundation imaging fatal on specific node(s) - AOS installation failed with Reason: None during AHV install/reboot. Hardware-level failure where installer couldn't determine a reason (BMC/disk/boot issue). Disable all failed nodes and rerun. Report failed nodes with their IPMI IPs to IT for hardware inspection.",
+      "action": "Disable all failed nodes listed in the comment, rerun the deployment, and report the failed node hostnames + IPMI IPs to IT for hardware inspection.",
+      "reference_task": "https://rdm.eng.nutanix.com/scheduled_deployments/6a2a88707298f60be9b6c61d",
+      "root_cause": "Node hardware issue during Foundation bare-metal imaging - installer received fatal during AHV/AOS installation phase. Typically a BMC, boot device, or disk error on the specific node. Reason: None specifically indicates a hardware-level failure, as opposed to a software or config failure that would have a specific reason string. Other nodes succeeding with identical config confirms the build is valid.",
+      "example_failure": "rno-stcp169-2 (IPMI: 10.22.47.154), rno-stcp121-1 (IPMI: 10.22.46.149)"
+    },
+    {
+      "id": "installer_node_failure",
+      "regex": "Installer errors[:\\s]*\\nNodes?:\\s*([\\w\\-]+).*?(?:failed|error|Fatal|Timeout)",
+      "comment_template": "regx_rerun_disable-{node_name}",
+      "category": "INFRA_NODE",
+      "description": "Foundation installer failure or timeout on specific node - disable node and rerun"
+    },
+    {
+      "id": "foundation_imaging_failure",
+      "regex": "(?:foundation|imaging).*(?:failed|error|timeout)",
+      "comment_template": "regx_rerun",
+      "category": "INFRA_INTERMITTENT",
+      "description": "Foundation/imaging failure without specific node - intermittent rerun"
+    },
+    {
+      "id": "cluster_creation_failed",
+      "regex": "(?:cluster.*creation|create.*cluster).*(?:failed|error|timeout)",
+      "comment_template": "regx_rerun",
+      "category": "INFRA_INTERMITTENT",
+      "description": "Cluster creation failure - intermittent rerun"
+    },
+    {
+      "id": "resource_allocation_failed",
+      "regex": "(?:resource|allocation|provision).*(?:failed|unavailable|timeout)",
+      "comment_template": "regx_rerun",
+      "category": "INFRA_INTERMITTENT",
+      "description": "Resource allocation/provisioning failure - intermittent rerun"
+    },
+    {
+      "id": "network_connectivity",
+      "regex": "(?:network|connectivity|unreachable|connection refused|ssh).*(?:failed|error|timeout)",
+      "comment_template": "regx_rerun",
+      "category": "INFRA_INTERMITTENT",
+      "description": "Network/connectivity failure - intermittent rerun"
+    },
+    {
+      "id": "cvm_boot_failure",
+      "regex": "CVM.*(?:boot|booted).*(?:failed|error|timeout|unsuccessfully)",
+      "comment_template": "regx_rerun",
+      "category": "INFRA_INTERMITTENT",
+      "description": "CVM boot failure - intermittent rerun"
+    },
+    {
+      "id": "hypervisor_install_failure",
+      "regex": "(?:hypervisor|esx|ahv).*(?:install|imaging).*(?:failed|error|timeout)",
+      "comment_template": "regx_rerun",
+      "category": "INFRA_INTERMITTENT",
+      "description": "Hypervisor installation failure - intermittent rerun"
+    },
+    {
+      "id": "rdm_internal_error",
+      "regex": "(?:RDM|rdm).*(?:internal.*error|service.*unavailable)",
+      "comment_template": "regx_rerun",
+      "category": "INFRA_INTERMITTENT",
+      "description": "RDM internal error - intermittent rerun"
+    },
+    {
+      "id": "deployment_timeout",
+      "regex": "(?:deployment|deploy).*(?:timeout|timed out)",
+      "comment_template": "regx_rerun",
+      "category": "INFRA_INTERMITTENT",
+      "description": "Deployment timeout - intermittent rerun"
+    },
+    {
+      "id": "nested_cluster_insufficient_resources",
+      "regex": "No nested 2\\.0 base clusters available with enough total resources",
+      "comment_template": "regx_infra_issue check with ask-tool team and create JIRAticket",
+      "category": "INFRA_RESOURCE",
+      "description": "No nested 2.0 base clusters with sufficient resources (nodes, RAM, vCPUs) - no qualifying base cluster in the pool meets the hardware/configuration requirements",
+      "reference_task": "https://rdm.eng.nutanix.com/scheduled_deployments/6a199c7592fce93b2c5ec35f",
+      "root_cause": "RDM cannot find any base clusters in the specified pool that meet the hardware and configuration requirements of the nested deployment request"
+    }
+  ]
+}

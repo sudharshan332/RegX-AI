@@ -1,0 +1,20 @@
+{
+  "tags": [
+    {
+      "name": "central_regression_dry_run_cdp|11-jun-2026",
+      "added_at": "2026-06-12T04:30:12.816874Z"
+    },
+    {
+      "name": "7.6|RC1-june-15-2026",
+      "added_at": "2026-06-16T02:15:07.173260Z"
+    },
+    {
+      "name": "7.6|RC2-june-29-2026",
+      "added_at": "2026-06-29T17:28:52.784543Z"
+    },
+    {
+      "name": "master|Full|25Jul2026",
+      "added_at": "2026-07-28T09:53:00.904374Z"
+    }
+  ]
+}

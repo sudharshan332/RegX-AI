@@ -1,10 +1,17 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import axios from 'axios';
+import api from '../api';
 import { API_BASE_URL } from '../config';
 import './FailedTestcaseAnalysis.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/failed-analysis`;
 const JIRA_URL = 'https://jira.nutanix.com/browse/';
+
+const TEST_STATUS_OPTIONS = [
+  { id: 'failed', label: 'Failed' },
+  { id: 'skipped', label: 'Skipped' },
+  { id: 'warning', label: 'Warning' },
+  { id: 'killed', label: 'Killed' },
+];
 
 const COLUMNS = [
   { id: 'testcase_name', label: 'Testcase Name', defaultVisible: true },
@@ -13,6 +20,8 @@ const COLUMNS = [
   { id: 'failure_stage', label: 'Failure Stage', defaultVisible: true },
   { id: 'exception_summary', label: 'Exception Summary', defaultVisible: true },
   { id: 'ai_summary', label: 'AI Summary', defaultVisible: false },
+  { id: 'glean_search', label: 'Glean Search', defaultVisible: true },
+  { id: 'cursor_ai_analysis', label: 'Cursor AI Deep Analysis', defaultVisible: false },
   { id: 'triage_genie_ticket', label: 'Triage Genie Ticket', defaultVisible: true },
   { id: 'jira_tickets', label: 'Jira Tickets', defaultVisible: true },
   { id: 'comment', label: 'Comment', defaultVisible: true },
@@ -20,6 +29,7 @@ const COLUMNS = [
   { id: 'issue_type', label: 'Issue Type', defaultVisible: false },
   { id: 'suggestion_by_ai_agent', label: 'Suggestion By AI Agent', defaultVisible: false },
   { id: 'intermittent', label: 'Intermittent', defaultVisible: false },
+  { id: 'rdm_analysis', label: 'RDM Analysis', defaultVisible: true },
   { id: 'history_same_branch', label: 'History (Same Branch)', defaultVisible: false },
   { id: 'history_other_branch', label: 'History (Other Branch)', defaultVisible: false },
   { id: 'actions', label: 'Actions', defaultVisible: true },
@@ -45,9 +55,23 @@ function getIntermittentLabel(r) {
   return '-';
 }
 
+const STATUS_GROUP_MAP = {
+  failed: 'Failed', failure: 'Failed',
+  skipped: 'Skipped', skip: 'Skipped',
+  warning: 'Warning', warn: 'Warning',
+  killed: 'Killed', terminated: 'Killed', cancelled: 'Killed',
+};
+const ALL_STATUS_GROUPS = ['Failed', 'Skipped', 'Warning', 'Killed'];
+
+function normalizeStatusGroup(status) {
+  return STATUS_GROUP_MAP[(status || '').toLowerCase()] || 'Failed';
+}
+
 export default function FailedTestcaseAnalysis() {
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [streamPhase, setStreamPhase] = useState('');
+  const [totalExpected, setTotalExpected] = useState(0);
   const [tag, setTag] = useState(() => localStorage.getItem('regressionDashboardTag') || 'cdp_master_full_reg');
   const [taskIds, setTaskIds] = useState('');
   const [inputMode, setInputMode] = useState('tag');
@@ -70,11 +94,196 @@ export default function FailedTestcaseAnalysis() {
   const [filterFailureStage, setFilterFailureStage] = useState('');
   const [filterIntermittent, setFilterIntermittent] = useState('');
   const [filterComment, setFilterComment] = useState('');
+  const [filterTestStatus, setFilterTestStatus] = useState([...ALL_STATUS_GROUPS]);
+  const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
+  const statusDropdownRef = useRef(null);
+  const [selectedStatuses, setSelectedStatuses] = useState(['failed']);
   const [selectedRows, setSelectedRows] = useState([]);
   const [bulkJiraTicket, setBulkJiraTicket] = useState('');
   const [bulkComment, setBulkComment] = useState('');
   const [bulkUpdating, setBulkUpdating] = useState(false);
   const selectAllCheckboxRef = useRef(null);
+
+  // Cursor AI deep analysis state
+  const [cursorAiLoading, setCursorAiLoading] = useState({});
+  const [cursorAiResults, setCursorAiResults] = useState({});
+  const [cursorAiDetailModal, setCursorAiDetailModal] = useState(null);
+  const [cursorAiBatchJobId, setCursorAiBatchJobId] = useState(null);
+  const [cursorAiBatchStatus, setCursorAiBatchStatus] = useState(null);
+  const [cursorAiSessions, setCursorAiSessions] = useState({});
+  const [cursorAiOpenTabs, setCursorAiOpenTabs] = useState([]);
+  const [cursorAiMinimizedTabs, setCursorAiMinimizedTabs] = useState({});
+  const [followUpInput, setFollowUpInput] = useState('');
+  const [followUpLoading, setFollowUpLoading] = useState(false);
+  const [followUpHistory, setFollowUpHistory] = useState([]);
+  const [followUpHistoryByTestcase, setFollowUpHistoryByTestcase] = useState({});
+  const [followUpMode, setFollowUpMode] = useState('agent');
+
+  // Retrigger state
+  const [retriggerModalOpen, setRetriggerModalOpen] = useState(false);
+  const [retriggerLoading, setRetriggerLoading] = useState(false);
+  const RETRIGGER_DEFAULTS = {
+    updateNos: false,
+    nos: { branch: '', updateType: 'tag', buildType: '', tag: '', commitId: '', gbn: '' },
+    updatePc: false,
+    pc: { branch: '', updateType: 'tag', buildType: '', tag: '', commitId: '', gbn: '' },
+    nutest_branch: '',
+    patch_url: '',
+    framework_patch_url: '',
+    resource_pool: '',
+  };
+  const [retriggerOverrides, setRetriggerOverrides] = useState({ ...RETRIGGER_DEFAULTS });
+  const [retriggerResults, setRetriggerResults] = useState(null);
+
+  // Per-row AI summary state
+  const [aiSummaryLoading, setAiSummaryLoading] = useState({});
+
+  // Per-row Glean search state
+  const [gleanSearchLoading, setGleanSearchLoading] = useState({});
+  const [gleanSearchResults, setGleanSearchResults] = useState({});
+  const [gleanDetailModal, setGleanDetailModal] = useState(null);
+
+  // RDM analysis state
+  const [rdmAnalyzing, setRdmAnalyzing] = useState(false);
+  const [rdmAiLoading, setRdmAiLoading] = useState({});
+  const [rdmAiResults, setRdmAiResults] = useState({});
+
+  // Saved tags management
+  const [savedTags, setSavedTags] = useState([]);
+  const [selectedSavedTag, setSelectedSavedTag] = useState('');
+  const [newTagInput, setNewTagInput] = useState('');
+  const [savingResults, setSavingResults] = useState(false);
+  const [tagPickerOpen, setTagPickerOpen] = useState(false);
+  const tagPickerRef = useRef(null);
+
+  const toggleStatus = (statusId) => {
+    setSelectedStatuses(prev =>
+      prev.includes(statusId)
+        ? prev.filter(s => s !== statusId)
+        : [...prev, statusId]
+    );
+  };
+
+  const toggleFilterTestStatus = (group) => {
+    setFilterTestStatus(prev =>
+      prev.includes(group) ? prev.filter(g => g !== group) : [...prev, group]
+    );
+  };
+
+  // Close dropdowns on outside click
+  useEffect(() => {
+    const handler = (e) => {
+      if (statusDropdownRef.current && !statusDropdownRef.current.contains(e.target)) {
+        setStatusDropdownOpen(false);
+      }
+      if (tagPickerRef.current && !tagPickerRef.current.contains(e.target)) {
+        setTagPickerOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // Fetch saved tags on mount
+  useEffect(() => {
+    const fetchSavedTags = async () => {
+      try {
+        const { data } = await api.get(`${API_BASE}/saved-tags`);
+        setSavedTags(data.tags || []);
+      } catch (_) {}
+    };
+    fetchSavedTags();
+  }, []);
+
+  const handleAddTag = async () => {
+    const name = newTagInput.trim();
+    if (!name) return;
+    try {
+      const { data } = await api.post(`${API_BASE}/saved-tags`, { tag: name });
+      if (data.success) {
+        setSavedTags(data.tags || []);
+        setNewTagInput('');
+        setTag(name);
+        setSelectedSavedTag(name);
+        setInputMode('tag');
+      }
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed to add tag');
+    }
+  };
+
+  const handleDeleteTag = async (tagName) => {
+    if (!window.confirm(`Remove "${tagName}" and its cached results?`)) return;
+    try {
+      const { data } = await api.delete(`${API_BASE}/saved-tags/${encodeURIComponent(tagName)}`);
+      if (data.success) {
+        setSavedTags(data.tags || []);
+        if (selectedSavedTag === tagName) {
+          setSelectedSavedTag('');
+          setResults([]);
+          setFilteredResults([]);
+        }
+      }
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed to remove tag');
+    }
+  };
+
+  const handleSelectSavedTag = async (tagName) => {
+    setSelectedSavedTag(tagName);
+    if (!tagName) return;
+    setTag(tagName);
+    setInputMode('tag');
+    setError(null);
+    setSelectedRows([]);
+    setHistoryCache({});
+    setFilterOwner('');
+    setFilterFailureStage('');
+    setFilterIntermittent('');
+    setFilterComment('');
+    try {
+      setLoading(true);
+      const { data } = await api.get(`${API_BASE}/saved-tags/${encodeURIComponent(tagName)}/results`);
+      const cached = data.results || [];
+      setResults(cached);
+      setCurrentBranch(data.current_branch || '');
+      setAnalysisTag(tagName);
+      const cursorAi = data.cursor_ai || {};
+      setCursorAiResults(cursorAi.results || {});
+      setCursorAiSessions(cursorAi.sessions || {});
+      setFollowUpHistoryByTestcase(cursorAi.follow_up_history_by_testcase || {});
+    } catch (_) {
+      setResults([]);
+      setCursorAiResults({});
+      setCursorAiSessions({});
+      setFollowUpHistoryByTestcase({});
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const saveResultsForTag = useCallback(async (tagName, rows, branch, cursorAiState = null) => {
+    if (!tagName) return;
+    setSavingResults(true);
+    try {
+      await api.put(`${API_BASE}/saved-tags/${encodeURIComponent(tagName)}/results`, {
+        results: rows,
+        current_branch: branch,
+        ...(cursorAiState ? { cursor_ai: cursorAiState } : {}),
+      });
+    } catch (_) {}
+    setSavingResults(false);
+  }, []);
+
+  useEffect(() => {
+    if (inputMode !== 'tag' || !analysisTag) return;
+    if (results.length === 0 && Object.keys(cursorAiResults).length === 0 && Object.keys(followUpHistoryByTestcase).length === 0) return;
+    saveResultsForTag(analysisTag, results, currentBranch, {
+      results: cursorAiResults,
+      sessions: cursorAiSessions,
+      follow_up_history_by_testcase: followUpHistoryByTestcase,
+    });
+  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, followUpHistoryByTestcase, saveResultsForTag]);
 
   const buildIncludeParam = useCallback((cols) => {
     const include = new Set(['basic', 'exception_summary', 'intermittent']);
@@ -90,7 +299,13 @@ export default function FailedTestcaseAnalysis() {
       alert('Please provide either a tag or task IDs');
       return;
     }
+    if (selectedStatuses.length === 0) {
+      alert('Please select at least one test status');
+      return;
+    }
     setAnalyzing(true);
+    setStreamPhase('preparing');
+    setTotalExpected(0);
     setError(null);
     setResults([]);
     setFilteredResults([]);
@@ -102,16 +317,33 @@ export default function FailedTestcaseAnalysis() {
     setHistoryCache({});
     const include = buildIncludeParam(visibleColumns);
     const searchParams = new URLSearchParams({ include });
-    if (inputMode === 'tag' && tag.trim()) searchParams.set('tag', tag.trim());
+    const isTagMode = inputMode === 'tag' && tag.trim();
+    if (isTagMode) {
+      searchParams.set('tag', tag.trim());
+      try {
+        await api.put(`${API_BASE}/saved-tags/${encodeURIComponent(tag.trim())}/results`, {
+          results: [],
+          current_branch: '',
+        });
+      } catch (_) {}
+    }
     else if (inputMode === 'task_ids' && taskIds.trim()) searchParams.set('task_ids', taskIds.trim());
+    searchParams.set('statuses', selectedStatuses.join(','));
     const url = `${API_BASE}/analyze-stream?${searchParams.toString()}`;
 
+    const collectedRows = [];
+    let branch = '';
+
     try {
-      const response = await fetch(url);
+      const token = localStorage.getItem('regx_auth_token');
+      const response = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         setError(errData.error || `Request failed: ${response.status}`);
         setAnalyzing(false);
+        setStreamPhase('');
         return;
       }
       const reader = response.body.getReader();
@@ -127,20 +359,29 @@ export default function FailedTestcaseAnalysis() {
           if (line.startsWith('data: ')) {
             try {
               const event = JSON.parse(line.slice(6));
-              if (event.type === 'start') {
-                setCurrentBranch(event.current_branch || '');
+              if (event.type === 'progress') {
+                setStreamPhase(event.phase || 'preparing');
+              } else if (event.type === 'start') {
+                branch = event.current_branch || '';
+                setCurrentBranch(branch);
                 setAnalysisTag(event.tag ?? '');
+                setTotalExpected(event.total || 0);
+                setStreamPhase('streaming');
                 if (event.total === 0) {
                   setAnalyzing(false);
-                  alert('No failed testcases found for the given criteria.');
+                  setStreamPhase('');
+                  alert('No testcases found for the given criteria and selected statuses.');
                 }
               } else if (event.type === 'row' && event.result) {
+                collectedRows.push(event.result);
                 setResults(prev => [...prev, event.result]);
               } else if (event.type === 'done') {
                 setAnalyzing(false);
+                setStreamPhase('');
               } else if (event.type === 'error') {
                 setError(event.message || 'Analysis failed');
                 setAnalyzing(false);
+                setStreamPhase('');
               }
             } catch (e) {
               // skip malformed lines
@@ -154,16 +395,30 @@ export default function FailedTestcaseAnalysis() {
           if (line.startsWith('data: ')) {
             const event = JSON.parse(line.slice(6));
             if (event.type === 'row' && event.result) {
+              collectedRows.push(event.result);
               setResults(prev => [...prev, event.result]);
-            } else if (event.type === 'done') setAnalyzing(false);
-            else if (event.type === 'error') {
+            } else if (event.type === 'done') {
+              setAnalyzing(false);
+              setStreamPhase('');
+            } else if (event.type === 'error') {
               setError(event.message || 'Analysis failed');
               setAnalyzing(false);
+              setStreamPhase('');
             }
           }
         } catch (_) {}
       }
       setAnalyzing(false);
+      setStreamPhase('');
+
+      // Auto-save results for tag mode if the tag is in the saved tags list
+      if (isTagMode && collectedRows.length > 0) {
+        const tagName = tag.trim();
+        const tagEntry = savedTags.find(t => (typeof t === 'string' ? t : t.name) === tagName);
+        if (tagEntry) {
+          await saveResultsForTag(tagName, collectedRows, branch);
+        }
+      }
     } catch (err) {
       console.error('Error analyzing testcases:', err);
       const errorMessage = err.message || 'Failed to analyze testcases';
@@ -173,6 +428,7 @@ export default function FailedTestcaseAnalysis() {
         setError(errorMessage);
       }
       setAnalyzing(false);
+      setStreamPhase('');
     }
   };
 
@@ -205,6 +461,9 @@ export default function FailedTestcaseAnalysis() {
 
   useEffect(() => {
     let filtered = [...results];
+    if (filterTestStatus.length < ALL_STATUS_GROUPS.length) {
+      filtered = filtered.filter(r => filterTestStatus.includes(normalizeStatusGroup(r.status)));
+    }
     if (filterOwner) filtered = filtered.filter(r => r.regression_owner && r.regression_owner.toLowerCase().includes(filterOwner.toLowerCase()));
     if (filterFailureStage) filtered = filtered.filter(r => r.failure_stage === filterFailureStage);
     if (filterIntermittent) filtered = filtered.filter(r => getIntermittentLabel(r) === filterIntermittent);
@@ -219,7 +478,7 @@ export default function FailedTestcaseAnalysis() {
       });
     }
     setFilteredResults(filtered);
-  }, [results, filterOwner, filterFailureStage, filterIntermittent, filterComment, commentEdits]);
+  }, [results, filterTestStatus, filterOwner, filterFailureStage, filterIntermittent, filterComment, commentEdits]);
 
   const uniqueOwners = [...new Set(results.map(r => r.regression_owner).filter(Boolean))].sort();
   const uniqueFailureStages = [...new Set(results.map(r => r.failure_stage).filter(Boolean))].sort();
@@ -233,7 +492,7 @@ export default function FailedTestcaseAnalysis() {
     const key = `${testName}|${sameBranch}`;
     if (historyCache[key]) return historyCache[key];
     try {
-      const { data } = await axios.get(`${API_BASE}/history`, {
+      const { data } = await api.get(`${API_BASE}/history`, {
         params: { test_name: testName, branch: currentBranch, same_branch: sameBranch, tag: analysisTag }
       });
       const runs = data.runs || [];
@@ -244,11 +503,11 @@ export default function FailedTestcaseAnalysis() {
     }
   }, [analysisTag, currentBranch, historyCache]);
 
-  const applyTriageUpdate = async (testId, comment, jiraTicket) => {
-    const { data } = await axios.put(`${API_BASE}/update-triage`, {
+  const applyTriageUpdate = async (testId, comment, jiraTickets) => {
+    const { data } = await api.put(`${API_BASE}/update-triage`, {
       test_id: testId,
       comment: comment || '',
-      jira_ticket: jiraTicket || undefined
+      jira_tickets: jiraTickets || []
     });
     return !!data.success;
   };
@@ -257,15 +516,17 @@ export default function FailedTestcaseAnalysis() {
     const testId = result.testcase_id;
     if (!testId) return;
     const comment = commentEdits[testId] !== undefined ? commentEdits[testId] : (result.comments || '');
-    const tickets = result.jira_tickets || [];
-    const added = jiraAdd[testId];
-    const jiraTicket = (added && added.trim()) ? added.trim() : (tickets[0] || null);
+    const existing = result.jira_tickets || [];
+    const added = (jiraAdd[testId] || '').trim();
+    const merged = added
+      ? [...new Set([...existing, added])]
+      : existing;
     setUpdateLoading(prev => ({ ...prev, [testId]: true }));
     try {
-      const success = await applyTriageUpdate(testId, comment, jiraTicket);
+      const success = await applyTriageUpdate(testId, comment, merged);
       if (success) {
         setResults(prev => prev.map(r => r.testcase_id === testId
-          ? { ...r, comments: comment || r.comments, jira_tickets: jiraTicket ? [jiraTicket] : (r.jira_tickets || []) }
+          ? { ...r, comments: comment || r.comments, jira_tickets: merged }
           : r));
         setCommentEdits(prev => { const n = { ...prev }; delete n[testId]; return n; });
         setJiraAdd(prev => { const n = { ...prev }; delete n[testId]; return n; });
@@ -316,7 +577,10 @@ export default function FailedTestcaseAnalysis() {
     try {
       for (const testId of ids) {
         try {
-          const success = await applyTriageUpdate(testId, comment, jira || undefined);
+          const row = results.find(r => r.testcase_id === testId);
+          const existing = row?.jira_tickets || [];
+          const tickets = jira ? [...new Set([...existing, jira])] : existing;
+          const success = await applyTriageUpdate(testId, comment, tickets);
           if (success) {
             ok++;
             setResults(prev => prev.map(r => {
@@ -324,7 +588,7 @@ export default function FailedTestcaseAnalysis() {
               return {
                 ...r,
                 comments: comment || r.comments,
-                jira_tickets: jira ? [jira] : (r.jira_tickets || [])
+                jira_tickets: tickets
               };
             }));
             setCommentEdits(prev => { const n = { ...prev }; delete n[testId]; return n; });
@@ -345,6 +609,473 @@ export default function FailedTestcaseAnalysis() {
       setBulkUpdating(false);
     }
   };
+
+  // --------------- Cursor AI Deep Analysis handlers ---------------
+
+  const handleCursorAiAnalyze = async (result) => {
+    const testId = result.testcase_id;
+    if (!testId) return;
+    setCursorAiLoading(prev => ({ ...prev, [testId]: true }));
+    try {
+      const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase`, {
+        testcase_name: result.testcase_name,
+        exception_summary: result.exception_summary,
+        exception: result.exception,
+        test_log_url: result.test_log_url,
+        jira_tickets: result.jira_tickets || [],
+        failure_stage: result.failure_stage,
+      });
+      if (resp.data?.success) {
+        setCursorAiResults(prev => ({ ...prev, [testId]: resp.data.analysis }));
+        if (resp.data.session_id) {
+          setCursorAiSessions(prev => ({ ...prev, [testId]: resp.data.session_id }));
+        }
+      } else {
+        setCursorAiResults(prev => ({ ...prev, [testId]: { error: resp.data?.error || 'Analysis failed' } }));
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || 'Cursor AI analysis failed';
+      setCursorAiResults(prev => ({ ...prev, [testId]: { error: msg } }));
+    } finally {
+      setCursorAiLoading(prev => ({ ...prev, [testId]: false }));
+    }
+  };
+
+  const handleCursorAiBatchAnalyze = async () => {
+    const ids = selectedRows.filter(Boolean);
+    if (ids.length === 0) { alert('Select at least one row.'); return; }
+
+    const testcases = ids.map(id => {
+      const r = results.find(row => row.testcase_id === id);
+      if (!r) return null;
+      return {
+        testcase_id: r.testcase_id,
+        testcase_name: r.testcase_name,
+        exception_summary: r.exception_summary,
+        exception: r.exception,
+        test_log_url: r.test_log_url,
+        jira_tickets: r.jira_tickets || [],
+        failure_stage: r.failure_stage,
+      };
+    }).filter(Boolean);
+
+    ids.forEach(id => setCursorAiLoading(prev => ({ ...prev, [id]: true })));
+    setCursorAiBatchStatus({ total: testcases.length, completed: 0, status: 'running' });
+
+    try {
+      const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/analyze-batch`, { testcases });
+      if (resp.data?.success && resp.data.job_id) {
+        setCursorAiBatchJobId(resp.data.job_id);
+        pollBatchJob(resp.data.job_id, ids);
+      } else {
+        ids.forEach(id => setCursorAiLoading(prev => ({ ...prev, [id]: false })));
+        setCursorAiBatchStatus(null);
+        alert(resp.data?.error || 'Batch analysis failed to start');
+      }
+    } catch (err) {
+      ids.forEach(id => setCursorAiLoading(prev => ({ ...prev, [id]: false })));
+      setCursorAiBatchStatus(null);
+      alert(err.response?.data?.error || 'Failed to start batch analysis');
+    }
+  };
+
+  const pollBatchJob = async (jobId, testIds) => {
+    const poll = async () => {
+      try {
+        const resp = await api.get(`${API_BASE_URL}/mcp/regression/cursor-ai/status/${jobId}`);
+        const data = resp.data;
+        setCursorAiBatchStatus({ total: data.total, completed: data.completed, status: data.status });
+
+        if (data.results) {
+          Object.entries(data.results).forEach(([key, val]) => {
+            if (val.success) {
+              setCursorAiResults(prev => ({ ...prev, [key]: val.analysis }));
+              if (val.session_id) {
+                setCursorAiSessions(prev => ({ ...prev, [key]: val.session_id }));
+              }
+              setCursorAiLoading(prev => ({ ...prev, [key]: false }));
+            } else {
+              setCursorAiResults(prev => ({ ...prev, [key]: { error: val.error || 'Failed' } }));
+              setCursorAiLoading(prev => ({ ...prev, [key]: false }));
+            }
+          });
+        }
+
+        if (data.status !== 'done') {
+          setTimeout(poll, 5000);
+        } else {
+          testIds.forEach(id => setCursorAiLoading(prev => ({ ...prev, [id]: false })));
+          setCursorAiBatchJobId(null);
+        }
+      } catch {
+        testIds.forEach(id => setCursorAiLoading(prev => ({ ...prev, [id]: false })));
+        setCursorAiBatchStatus(prev => prev ? { ...prev, status: 'error' } : null);
+      }
+    };
+    setTimeout(poll, 3000);
+  };
+
+  const handleFollowUp = async () => {
+    if (!followUpInput.trim() || !cursorAiDetailModal) return;
+    const sessionId = cursorAiDetailModal._session_id;
+    if (!sessionId) return;
+
+    const question = followUpInput.trim();
+    const selectedMode = followUpMode;
+    setFollowUpLoading(true);
+    const testcaseId = cursorAiDetailModal._testcase_id;
+    setFollowUpHistory(prev => {
+      const next = [...prev, { role: 'user', text: question, mode: selectedMode }];
+      if (testcaseId) {
+        setFollowUpHistoryByTestcase(hist => ({ ...hist, [testcaseId]: next }));
+      }
+      return next;
+    });
+    setFollowUpInput('');
+
+    try {
+      const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/follow-up`, {
+        session_id: sessionId,
+        question,
+        mode: followUpMode,
+        recovery_context: {
+          testcase_name: cursorAiDetailModal.testcase_name || '',
+          latest_analysis: {
+            root_cause: cursorAiDetailModal.root_cause || '',
+            classification: cursorAiDetailModal.classification || '',
+            failing_code: cursorAiDetailModal.failing_code || null,
+            suggested_fix: cursorAiDetailModal.suggested_fix || '',
+            confidence: cursorAiDetailModal.confidence || '',
+            related_components: cursorAiDetailModal.related_components || [],
+            jira_duplicates: cursorAiDetailModal.jira_duplicates || [],
+            triage_report: cursorAiDetailModal.triage_report || '',
+          },
+          prior_history: followUpHistory.slice(-20),
+        },
+      });
+      if (resp.data?.success) {
+        const analysis = resp.data.analysis;
+        setFollowUpHistory(prev => {
+          const next = [...prev, { role: 'assistant', data: analysis, mode: selectedMode }];
+          if (testcaseId) {
+            setFollowUpHistoryByTestcase(hist => ({ ...hist, [testcaseId]: next }));
+          }
+          return next;
+        });
+        setCursorAiDetailModal(prev => ({
+          ...prev,
+          ...analysis,
+          follow_up_answer: analysis.follow_up_answer,
+        }));
+        if (cursorAiDetailModal._testcase_id) {
+          setCursorAiResults(prev => ({
+            ...prev,
+            [cursorAiDetailModal._testcase_id]: {
+              ...prev[cursorAiDetailModal._testcase_id],
+              ...analysis,
+            },
+          }));
+        }
+      } else {
+        setFollowUpHistory(prev => [...prev, { role: 'error', text: resp.data?.error || 'Follow-up failed' }]);
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || 'Follow-up failed';
+      setFollowUpHistory(prev => [...prev, { role: 'error', text: msg }]);
+    } finally {
+      setFollowUpLoading(false);
+    }
+  };
+
+  const getCursorAiStatusBadge = (testId) => {
+    if (cursorAiLoading[testId]) return <span className="badge cursor-ai-loading">Analyzing…</span>;
+    const res = cursorAiResults[testId];
+    if (!res) return null;
+    if (res.error) return <span className="badge cursor-ai-error" title={res.error}>Error</span>;
+    const cls = res.classification || '';
+    const badgeClass = cls.includes('Test') ? 'cursor-ai-test-issue'
+      : cls.includes('Product') ? 'cursor-ai-product-issue'
+      : cls.includes('Infra') ? 'cursor-ai-infra-issue'
+      : 'cursor-ai-other';
+    return (
+      <span className={`badge ${badgeClass}`} title={res.root_cause}>
+        {res.classification || 'Analyzed'}
+      </span>
+    );
+  };
+
+  const openCursorAiInTab = (result) => {
+    const testId = result?.testcase_id;
+    const analysis = testId ? cursorAiResults[testId] : null;
+    if (!testId || !analysis || analysis.error) return;
+
+    const tabId = String(testId);
+    const sessionId = cursorAiSessions[testId] || null;
+    setCursorAiOpenTabs(prev => {
+      const without = prev.filter(t => t.tabId !== tabId);
+      return [...without, {
+        tabId,
+        testcase_id: testId,
+        testcase_name: result.testcase_name,
+        analysis,
+        session_id: sessionId,
+      }];
+    });
+    setCursorAiMinimizedTabs(prev => ({ ...prev, [tabId]: false }));
+  };
+
+  const closeCursorAiTab = (tabId) => {
+    setCursorAiOpenTabs(prev => prev.filter(t => t.tabId !== tabId));
+    setCursorAiMinimizedTabs(prev => {
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+  };
+
+  const toggleCursorAiTabMinimized = (tabId) => {
+    setCursorAiMinimizedTabs(prev => ({ ...prev, [tabId]: !prev[tabId] }));
+  };
+
+  // --------------- Re-trigger handlers ---------------
+
+  const openRetriggerModal = () => {
+    if (selectedRows.length === 0) {
+      alert('Select at least one testcase to re-trigger.');
+      return;
+    }
+    setRetriggerOverrides({ ...RETRIGGER_DEFAULTS,
+      nos: { ...RETRIGGER_DEFAULTS.nos },
+      pc: { ...RETRIGGER_DEFAULTS.pc },
+    });
+    setRetriggerResults(null);
+    setRetriggerModalOpen(true);
+  };
+
+  const handleRetrigger = async () => {
+    const selected = selectedRows.filter(Boolean);
+    if (selected.length === 0) return;
+
+    const testsPayload = selected.map(id => {
+      const r = results.find(row => row.testcase_id === id);
+      if (!r) return null;
+      return {
+        testcase_id: r.testcase_id,
+        testcase_name: r.testcase_name,
+        agave_task_id: r.agave_task_id,
+      };
+    }).filter(Boolean);
+
+    if (testsPayload.length === 0) {
+      alert('No valid tests found for retrigger.');
+      return;
+    }
+
+    const overrides = {};
+    if (retriggerOverrides.updateNos) {
+      const n = retriggerOverrides.nos;
+      if (n.branch) overrides.nos_branch = n.branch.trim();
+      if (n.updateType === 'commit') {
+        if (n.commitId) overrides.nos_commit = n.commitId.trim();
+        if (n.gbn) overrides.nos_gbn = n.gbn.trim();
+      } else if (n.updateType === 'tag') {
+        if (n.tag) overrides.nos_tag = n.tag.trim();
+        if (n.buildType) overrides.nos_build_type = n.buildType.trim();
+      }
+    }
+    if (retriggerOverrides.updatePc) {
+      const p = retriggerOverrides.pc;
+      if (p.branch) overrides.pc_branch = p.branch.trim();
+      if (p.updateType === 'commit') {
+        if (p.commitId) overrides.pc_commit = p.commitId.trim();
+        if (p.gbn) overrides.pc_gbn = p.gbn.trim();
+      } else if (p.updateType === 'tag') {
+        if (p.tag) overrides.pc_tag = p.tag.trim();
+        if (p.buildType) overrides.pc_build_type = p.buildType.trim();
+      }
+    }
+    if (retriggerOverrides.nutest_branch) overrides.nutest_branch = retriggerOverrides.nutest_branch.trim();
+    if (retriggerOverrides.patch_url) overrides.patch_url = retriggerOverrides.patch_url.trim();
+    if (retriggerOverrides.framework_patch_url) overrides.framework_patch_url = retriggerOverrides.framework_patch_url.trim();
+    if (retriggerOverrides.resource_pool) overrides.resource_pool = retriggerOverrides.resource_pool.trim();
+
+    setRetriggerLoading(true);
+    setRetriggerResults(null);
+
+    try {
+      const resp = await api.post(`${API_BASE}/retrigger`, {
+        tests: testsPayload,
+        overrides,
+      });
+      setRetriggerResults(resp.data);
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || 'Retrigger failed';
+      setRetriggerResults({ success: false, error: msg });
+    } finally {
+      setRetriggerLoading(false);
+    }
+  };
+
+  // --------------- RDM Skipped Analysis handler ---------------
+
+  const handleAnalyzeSkipped = async () => {
+    const selected = selectedRows.filter(Boolean);
+    if (selected.length === 0) {
+      alert('Select at least one testcase to analyze.');
+      return;
+    }
+    const skippedRows = selected
+      .map(id => results.find(r => r.testcase_id === id))
+      .filter(r => r && (r.status || '').toLowerCase() === 'skipped' || (r?.status || '').toLowerCase() === 'skip');
+
+    if (skippedRows.length === 0) {
+      alert('No skipped testcases selected. Please select skipped testcases to analyze.');
+      return;
+    }
+
+    const uniqueTaskIds = [...new Set(skippedRows.map(r => r.agave_task_id).filter(Boolean))];
+    if (uniqueTaskIds.length === 0) {
+      alert('Selected skipped testcases have no task IDs.');
+      return;
+    }
+
+    setRdmAnalyzing(true);
+    try {
+      const resp = await api.post(`${API_BASE}/rdm-analyze`, {
+        task_ids: uniqueTaskIds,
+      });
+      if (resp.data?.success && resp.data.results) {
+        const rdmByTask = {};
+        for (const r of resp.data.results) {
+          rdmByTask[r.agave_task_id] = r;
+        }
+        setResults(prev => prev.map(row => {
+          if (!selected.includes(row.testcase_id)) return row;
+          const taskRdm = rdmByTask[row.agave_task_id];
+          if (!taskRdm || !taskRdm.rdm_found) return { ...row, rdm_info: { rdm_found: false } };
+          return {
+            ...row,
+            rdm_info: {
+              rdm_found: true,
+              rdm_message: taskRdm.rdm_message,
+              rdm_link: taskRdm.rdm_link,
+              rdm_category: taskRdm.rdm_category,
+              rdm_resolution: taskRdm.rdm_resolution,
+              failed_deployments: taskRdm.failed_deployments,
+              pattern_matched: taskRdm.pattern_matched,
+              generated_comment: taskRdm.generated_comment,
+              pattern_description: taskRdm.pattern_description,
+              pattern_jira: taskRdm.pattern_jira || '',
+            },
+          };
+        }));
+      }
+    } catch (err) {
+      console.error('RDM analysis failed:', err);
+      alert('RDM analysis failed: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setRdmAnalyzing(false);
+    }
+  };
+
+  const handleRdmApproveComment = async (testcaseId, comment, jiraTicket) => {
+    setRdmAiLoading(prev => ({ ...prev, [testcaseId]: true }));
+    try {
+      const row = results.find(r => r.testcase_id === testcaseId);
+      const existing = row?.jira_tickets || [];
+      const merged = jiraTicket
+        ? [...new Set([...existing, jiraTicket])]
+        : existing;
+      const payload = {
+        test_id: testcaseId,
+        comment: comment,
+        ...(merged.length > 0 ? { jira_tickets: merged } : {}),
+      };
+      const resp = await api.put(`${API_BASE}/update-triage`, payload);
+      if (resp.data?.success) {
+        setResults(prev => prev.map(r =>
+          r.testcase_id === testcaseId
+            ? { ...r, comments: comment, jira_tickets: merged, rdm_info: { ...r.rdm_info, approved: true } }
+            : r
+        ));
+      } else {
+        alert('Failed to update: ' + (resp.data?.error || 'Unknown error'));
+      }
+    } catch (err) {
+      alert('Update failed: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setRdmAiLoading(prev => ({ ...prev, [testcaseId]: false }));
+    }
+  };
+
+  // --------------- Per-row AI Summary handler ---------------
+
+  const handleAiSummarySingle = async (result) => {
+    const testId = result.testcase_id;
+    if (!testId) return;
+    setAiSummaryLoading(prev => ({ ...prev, [testId]: true }));
+    try {
+      const resp = await api.post(`${API_BASE}/ai-summary-single`, {
+        testcase_name: result.testcase_name,
+        exception_summary: result.exception_summary || '',
+        exception: result.exception || '',
+        test_log_url: result.test_log_url || '',
+      });
+      if (resp.data?.success) {
+        setResults(prev => prev.map(r =>
+          r.testcase_id === testId ? { ...r, ai_summary: resp.data.ai_summary } : r
+        ));
+      } else {
+        setResults(prev => prev.map(r =>
+          r.testcase_id === testId ? { ...r, ai_summary: `Error: ${resp.data?.error || 'Unknown error'}` } : r
+        ));
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || 'Failed to generate AI summary';
+      setResults(prev => prev.map(r =>
+        r.testcase_id === testId ? { ...r, ai_summary: `Error: ${msg}` } : r
+      ));
+    } finally {
+      setAiSummaryLoading(prev => ({ ...prev, [testId]: false }));
+    }
+  };
+
+  // --------------- Glean Search handler ---------------
+
+  const handleGleanSearch = async (result) => {
+    const testId = result.testcase_id;
+    if (!testId) return;
+    setGleanSearchLoading(prev => ({ ...prev, [testId]: true }));
+    try {
+      const resp = await api.post(`${API_BASE}/glean-search-single`, {
+        testcase_name: result.testcase_name,
+        exception_summary: result.exception_summary || '',
+        exception: result.exception || '',
+        ai_summary: result.ai_summary || '',
+        test_log_url: result.test_log_url || '',
+        failure_stage: result.failure_stage || '',
+        jira_tickets: result.jira_tickets || [],
+      });
+      if (resp.data?.success) {
+        setGleanSearchResults(prev => ({ ...prev, [testId]: resp.data }));
+      } else {
+        setGleanSearchResults(prev => ({
+          ...prev,
+          [testId]: { error: resp.data?.error || 'Glean search failed' },
+        }));
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || 'Glean search failed';
+      setGleanSearchResults(prev => ({
+        ...prev,
+        [testId]: { error: msg },
+      }));
+    } finally {
+      setGleanSearchLoading(prev => ({ ...prev, [testId]: false }));
+    }
+  };
+
+  // --------------- End Cursor AI handlers ---------------
 
   const renderHistoryCell = (result, sameBranch) => {
     if (!analysisTag) return <span className="history-unknown">—</span>;
@@ -383,14 +1114,41 @@ export default function FailedTestcaseAnalysis() {
         return <td key={colId} className="testcase-name" title={result.testcase_name}>{result.testcase_name || '-'}</td>;
       case 'regression_owner':
         return <td key={colId} className="owner-cell">{result.regression_owner || 'Unknown'}</td>;
-      case 'status':
-        return <td key={colId}><span className="badge badge-failed">FAILED</span></td>;
+      case 'status': {
+        const s = (result.status || 'failed').toLowerCase();
+        const statusLabel = s.charAt(0).toUpperCase() + s.slice(1);
+        const badgeCls = s === 'failed' || s === 'failure' ? 'badge-failed'
+          : s === 'skipped' || s === 'skip' ? 'badge-skipped'
+          : s === 'warning' || s === 'warn' ? 'badge-warning'
+          : s === 'killed' || s === 'terminated' || s === 'cancelled' ? 'badge-killed'
+          : 'badge-failed';
+        return <td key={colId}><span className={`badge ${badgeCls}`}>{statusLabel}</span></td>;
+      }
       case 'failure_stage':
         return <td key={colId}>{getFailureStageBadge(result.failure_stage)}</td>;
       case 'exception_summary':
         return <td key={colId} className="exception-summary-cell" title={result.exception_summary}>{result.exception_summary || '-'}</td>;
-      case 'ai_summary':
-        return <td key={colId} className="ai-summary-cell" title={result.ai_summary}>{result.ai_summary || '-'}</td>;
+      case 'ai_summary': {
+        const summaryLoading = aiSummaryLoading[result.testcase_id];
+        return (
+          <td key={colId} className="ai-summary-cell">
+            {summaryLoading ? (
+              <span className="ai-summary-loading">Generating AI Summary…</span>
+            ) : result.ai_summary ? (
+              <span title={result.ai_summary}>{result.ai_summary}</span>
+            ) : (
+              <button
+                type="button"
+                className="btn-ai-summary"
+                onClick={() => handleAiSummarySingle(result)}
+                title="Generate AI summary for this testcase"
+              >
+                AI Summary
+              </button>
+            )}
+          </td>
+        );
+      }
       case 'jira_tickets': {
         const tickets = result.jira_tickets || [];
         const added = jiraAdd[result.testcase_id];
@@ -443,6 +1201,111 @@ export default function FailedTestcaseAnalysis() {
         return <td key={colId} className="suggestion-cell" title={result.suggestion_by_ai_agent}>{result.suggestion_by_ai_agent || '-'}</td>;
       case 'intermittent':
         return <td key={colId}>{getIntermittentLabel(result)}</td>;
+      case 'rdm_analysis': {
+        const isSkipped = (result.status || '').toLowerCase() === 'skipped' || (result.status || '').toLowerCase() === 'skip';
+        if (!isSkipped) return <td key={colId} className="rdm-cell"><span className="rdm-na">—</span></td>;
+        const rdm = result.rdm_info;
+        const rdmAi = rdmAiResults[result.testcase_id];
+        const rdmAiLoad = rdmAiLoading[result.testcase_id];
+        return (
+          <td key={colId} className="rdm-cell">
+            {!rdm ? (
+              <span className="rdm-pending">Select &amp; click "Analyze Skipped"</span>
+            ) : rdm.rdm_found === false ? (
+              <span className="rdm-no-deploy">No RDM deployment found</span>
+            ) : rdm.approved ? (
+              <div className="rdm-approved">
+                <span className="rdm-badge rdm-badge-approved">Approved</span>
+                <code className="rdm-approved-comment">{rdm.generated_comment || result.comments}</code>
+                {rdm.rdm_link && <a href={rdm.rdm_link} target="_blank" rel="noopener noreferrer" className="rdm-link">RDM Details</a>}
+              </div>
+            ) : rdm.pattern_matched ? (
+              <div className="rdm-matched">
+                <span className="rdm-badge rdm-badge-matched">Pattern Matched</span>
+                <div className="rdm-comment-preview">
+                  <strong>Comment:</strong> <code>{rdm.generated_comment}</code>
+                </div>
+                {rdm.pattern_jira && (
+                  <div className="rdm-pattern-jira">
+                    <strong>Jira:</strong>{' '}
+                    <a href={`${JIRA_URL}${rdm.pattern_jira}`} target="_blank" rel="noopener noreferrer" className="jira-link">{rdm.pattern_jira}</a>
+                  </div>
+                )}
+                <div className="rdm-desc">{rdm.pattern_description}</div>
+                <div className="rdm-actions">
+                  <button
+                    type="button"
+                    className="btn-rdm-approve"
+                    disabled={rdmAiLoad}
+                    onClick={() => handleRdmApproveComment(result.testcase_id, rdm.generated_comment, rdm.pattern_jira || '')}
+                  >
+                    {rdmAiLoad ? 'Updating…' : 'Approve & Update'}
+                  </button>
+                </div>
+                {rdm.rdm_link && <a href={rdm.rdm_link} target="_blank" rel="noopener noreferrer" className="rdm-link">RDM Details</a>}
+              </div>
+            ) : (
+              <div className="rdm-unmatched">
+                <span className="rdm-badge rdm-badge-unmatched">No Pattern Match</span>
+                <div className="rdm-msg-preview" title={rdm.rdm_message}>
+                  {(rdm.rdm_message || '').substring(0, 150)}
+                </div>
+                {rdmAi ? (
+                  <div className="rdm-ai-result">
+                    <div className="rdm-ai-summary">{rdmAi.ai_summary}</div>
+                    {rdmAi.jira_refs && rdmAi.jira_refs.length > 0 && (
+                      <div className="rdm-ai-jiras">
+                        {rdmAi.jira_refs.map(j => (
+                          <a key={j} href={`${JIRA_URL}${j}`} target="_blank" rel="noopener noreferrer" className="jira-link">{j}</a>
+                        ))}
+                      </div>
+                    )}
+                    {rdmAi.suggested_comment && (
+                      <div className="rdm-ai-suggest">
+                        <strong>Suggested:</strong> <code>{rdmAi.suggested_comment}</code>
+                        <button
+                          type="button"
+                          className="btn-rdm-approve btn-rdm-approve-sm"
+                          disabled={rdmAiLoad}
+                          onClick={() => handleRdmApproveComment(result.testcase_id, rdmAi.suggested_comment, rdmAi.jira_ticket || '')}
+                        >
+                          {rdmAiLoad ? '…' : 'Approve'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn-rdm-analyze"
+                    disabled={rdmAiLoad}
+                    onClick={async () => {
+                      setRdmAiLoading(prev => ({ ...prev, [result.testcase_id]: true }));
+                      try {
+                        const resp = await api.post(`${API_BASE}/rdm-analyze-ai`, {
+                          task_id: result.agave_task_id,
+                          rdm_message: rdm.rdm_message,
+                          testcase_name: result.testcase_name,
+                        });
+                        if (resp.data?.success) {
+                          setRdmAiResults(prev => ({ ...prev, [result.testcase_id]: resp.data }));
+                        }
+                      } catch (err) {
+                        console.error('RDM AI analysis failed:', err);
+                      } finally {
+                        setRdmAiLoading(prev => ({ ...prev, [result.testcase_id]: false }));
+                      }
+                    }}
+                  >
+                    {rdmAiLoad ? 'Analyzing…' : 'AI Analyze'}
+                  </button>
+                )}
+                {rdm.rdm_link && <a href={rdm.rdm_link} target="_blank" rel="noopener noreferrer" className="rdm-link">RDM Details</a>}
+              </div>
+            )}
+          </td>
+        );
+      }
       case 'history_same_branch':
         return <td key={colId} className="history-cell">{renderHistoryCell(result, true)}</td>;
       case 'history_other_branch':
@@ -455,11 +1318,129 @@ export default function FailedTestcaseAnalysis() {
             ) : '-'}
           </td>
         );
+      case 'glean_search': {
+        const gleanLoading = gleanSearchLoading[result.testcase_id];
+        const gleanRes = gleanSearchResults[result.testcase_id];
+        const enrichedTickets = gleanRes?.enriched_tickets || [];
+        const openTickets = enrichedTickets.filter(t => t.is_open);
+        return (
+          <td key={colId} className="glean-search-cell">
+            {gleanLoading ? (
+              <span className="glean-search-loading">Searching Glean…</span>
+            ) : gleanRes ? (
+              gleanRes.error ? (
+                <span className="glean-search-error" title={gleanRes.error}>Search failed</span>
+              ) : (
+                <div className="glean-search-result-inline">
+                  <span className={`badge glean-issue-badge glean-issue-${(gleanRes.issue_type || '').replace(/\s+/g, '-').toLowerCase()}`}>
+                    {gleanRes.issue_type || 'Unknown'}
+                  </span>
+                  {enrichedTickets.length > 0 && (
+                    <span className="glean-jira-count" title={enrichedTickets.map(t => t.ticket).join(', ')}>
+                      {enrichedTickets.length} ticket{enrichedTickets.length !== 1 ? 's' : ''}
+                      {openTickets.length > 0 && <span className="glean-open-count"> ({openTickets.length} open)</span>}
+                    </span>
+                  )}
+                  {openTickets.length > 0 && (
+                    <a
+                      href={openTickets[0].url || `${JIRA_URL}${openTickets[0].ticket}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="jira-link glean-top-ticket"
+                      title={openTickets[0].jira_summary || openTickets[0].glean_title}
+                    >
+                      {openTickets[0].ticket}
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    className="btn-glean-view"
+                    onClick={() => setGleanDetailModal({ testcase_name: result.testcase_name, ...gleanRes })}
+                  >
+                    View
+                  </button>
+                </div>
+              )
+            ) : (
+              <button
+                type="button"
+                className="btn-glean-search"
+                onClick={() => handleGleanSearch(result)}
+                title="Search Glean for matching failures and JIRA tickets"
+              >
+                Glean Search
+              </button>
+            )}
+          </td>
+        );
+      }
+      case 'cursor_ai_analysis': {
+        const aiRes = cursorAiResults[result.testcase_id];
+        const isLoading = cursorAiLoading[result.testcase_id];
+        return (
+          <td key={colId} className="cursor-ai-cell">
+            {isLoading ? (
+              <span className="cursor-ai-spinner">Analyzing…</span>
+            ) : aiRes ? (
+              aiRes.error ? (
+                <span className="cursor-ai-error-text" title={aiRes.error}>Failed</span>
+              ) : (
+                <div className="cursor-ai-actions">
+                  <button
+                    type="button"
+                    className="btn-link cursor-ai-view-btn"
+                    onClick={() => {
+                      setCursorAiDetailModal({
+                        testcase_name: result.testcase_name,
+                        _testcase_id: result.testcase_id,
+                        _session_id: cursorAiSessions[result.testcase_id] || null,
+                        ...aiRes,
+                      });
+                      setFollowUpInput('');
+                      setFollowUpHistory(followUpHistoryByTestcase[result.testcase_id] || []);
+                      setFollowUpMode('agent');
+                    }}
+                  >
+                    {getCursorAiStatusBadge(result.testcase_id)} View
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-cursor-ai-open-tab"
+                    onClick={() => openCursorAiInTab(result)}
+                    title="Open analysis in tab on this page"
+                  >
+                    Open Tab
+                  </button>
+                </div>
+              )
+            ) : (
+              <button
+                type="button"
+                className="btn-cursor-ai-analyze"
+                onClick={() => handleCursorAiAnalyze(result)}
+                title="Deep analysis via Cursor AI + nutest source code"
+              >
+                Cursor AI
+              </button>
+            )}
+          </td>
+        );
+      }
       case 'actions':
         return (
-          <td key={colId}>
+          <td key={colId} className="actions-cell">
             {result.test_log_url && (
               <a href={result.test_log_url} target="_blank" rel="noopener noreferrer" className="btn-link">View Log</a>
+            )}
+            {!cursorAiResults[result.testcase_id] && !cursorAiLoading[result.testcase_id] && (
+              <button
+                type="button"
+                className="btn-cursor-ai-small"
+                onClick={() => handleCursorAiAnalyze(result)}
+                title="Analyze with Cursor AI"
+              >
+                AI
+              </button>
             )}
           </td>
         );
@@ -501,6 +1482,7 @@ export default function FailedTestcaseAnalysis() {
           <button type="button" className="btn-customize-columns" onClick={openCustomize}>
             Customize Columns
           </button>
+          {savingResults && <span className="saving-indicator">Saving...</span>}
         </div>
       </div>
 
@@ -509,10 +1491,68 @@ export default function FailedTestcaseAnalysis() {
           <label><input type="radio" value="tag" checked={inputMode === 'tag'} onChange={e => setInputMode(e.target.value)} /> Tag</label>
           <label><input type="radio" value="task_ids" checked={inputMode === 'task_ids'} onChange={e => setInputMode(e.target.value)} /> Task IDs</label>
         </div>
+
         {inputMode === 'tag' ? (
           <div className="form-group">
             <label>Tag <span className="required">*</span></label>
-            <input type="text" value={tag} onChange={e => setTag(e.target.value)} placeholder="e.g., cdp_master_full_reg" onKeyPress={e => e.key === 'Enter' && handleAnalyze()} />
+            <div className="tag-picker-wrapper" ref={tagPickerRef}>
+              <div className="tag-picker-control" onClick={() => setTagPickerOpen(prev => !prev)}>
+                <span className={`tag-picker-value ${selectedSavedTag ? '' : 'tag-picker-placeholder'}`}>
+                  {selectedSavedTag || 'Select or add a tag'}
+                </span>
+                <span className="tag-picker-arrow">{tagPickerOpen ? '▲' : '▼'}</span>
+              </div>
+              {tagPickerOpen && (
+                <div className="tag-picker-dropdown">
+                  {savedTags.length > 0 && (
+                    <div className="tag-picker-list">
+                      {savedTags.map(t => {
+                        const name = typeof t === 'string' ? t : t.name;
+                        return (
+                          <div
+                            key={name}
+                            className={`tag-picker-option ${selectedSavedTag === name ? 'tag-picker-option-active' : ''}`}
+                            onClick={() => { handleSelectSavedTag(name); setTagPickerOpen(false); }}
+                          >
+                            <span className="tag-picker-option-name">{name}</span>
+                            <button
+                              type="button"
+                              className="tag-picker-option-remove"
+                              onClick={e => { e.stopPropagation(); handleDeleteTag(name); }}
+                              title={`Remove "${name}"`}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {savedTags.length === 0 && (
+                    <div className="tag-picker-empty">No saved tags yet</div>
+                  )}
+                  <div className="tag-picker-add-section">
+                    <input
+                      type="text"
+                      className="tag-picker-add-input"
+                      placeholder="Enter new tag name…"
+                      value={newTagInput}
+                      onChange={e => setNewTagInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter' && newTagInput.trim()) { handleAddTag(); setTagPickerOpen(false); } }}
+                      onClick={e => e.stopPropagation()}
+                    />
+                    <button
+                      type="button"
+                      className="tag-picker-add-btn"
+                      disabled={!newTagInput.trim()}
+                      onClick={() => { handleAddTag(); setTagPickerOpen(false); }}
+                    >
+                      + Add Tag
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         ) : (
           <div className="form-group">
@@ -520,22 +1560,161 @@ export default function FailedTestcaseAnalysis() {
             <textarea value={taskIds} onChange={e => setTaskIds(e.target.value)} placeholder="e.g., 697aeae32bc0c49968d713f7" rows={3} />
           </div>
         )}
+        <div className="form-group status-filter-group">
+          <label>Test Status <span className="required">*</span></label>
+          <div className="status-checkbox-row">
+            {TEST_STATUS_OPTIONS.map(opt => (
+              <label key={opt.id} className="status-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={selectedStatuses.includes(opt.id)}
+                  onChange={() => toggleStatus(opt.id)}
+                />
+                <span className={`status-chip status-chip-${opt.id}`}>{opt.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
       </div>
 
       {error && <div className="error-message"><strong>Error:</strong> {error}</div>}
-      {analyzing && (
+      {loading && !analyzing && (
         <div className="loading">
           <div className="spinner" />
-          <p>Analyzing failed testcases... This may take a few moments.</p>
+          <p>Loading cached results...</p>
+        </div>
+      )}
+      {analyzing && results.length === 0 && (
+        <div className="loading">
+          <div className="spinner" />
+          <p>
+            {streamPhase === 'preparing' && 'Preparing analysis... Fetching regression tasks.'}
+            {streamPhase === 'fetching_results' && 'Fetching test results from JITA...'}
+            {streamPhase === 'fetching_triage_genie' && 'Fetching Triage Genie ticket data...'}
+            {streamPhase === 'streaming' && 'Analyzing failed testcases...'}
+            {!streamPhase && 'Analyzing failed testcases... This may take a few moments.'}
+          </p>
         </div>
       )}
 
       {results.length > 0 && (
         <div className="results-container">
           <div className="results-header">
-            <h2>Analysis Results ({filteredResults.length} of {results.length} failed testcases)</h2>
+            <h2>
+              Analysis Results ({filteredResults.length} of {results.length} testcases)
+              {analyzing && totalExpected > 0 && (
+                <span className="stream-progress-inline">
+                  &nbsp;— Loading {results.length} of {totalExpected}…
+                </span>
+              )}
+            </h2>
+            {analyzing && totalExpected > 0 && (
+              <div className="stream-progress-bar-container">
+                <div
+                  className="stream-progress-bar-fill"
+                  style={{ width: `${Math.min(100, Math.round((results.length / totalExpected) * 100))}%` }}
+                />
+              </div>
+            )}
           </div>
+          {cursorAiOpenTabs.length > 0 && (
+            <div className="cursor-ai-tabs-panel">
+              <div className="cursor-ai-tabs-title">Cursor AI Open Tabs</div>
+              {cursorAiOpenTabs.map(tab => {
+                const isMinimized = !!cursorAiMinimizedTabs[tab.tabId];
+                const tabSessionId = cursorAiSessions[tab.testcase_id] || tab.session_id || null;
+                return (
+                  <div key={tab.tabId} className="cursor-ai-inline-tab">
+                    <div className="cursor-ai-inline-tab-header">
+                      <div className="cursor-ai-inline-tab-name" title={tab.testcase_name}>
+                        {tab.testcase_name}
+                      </div>
+                      <div className="cursor-ai-inline-tab-actions">
+                        <button
+                          type="button"
+                          className="btn-inline-tab-action"
+                          onClick={() => {
+                            setCursorAiDetailModal({
+                              testcase_name: tab.testcase_name,
+                              _testcase_id: tab.testcase_id,
+                              _session_id: tabSessionId,
+                              ...(cursorAiResults[tab.testcase_id] || tab.analysis),
+                            });
+                            setFollowUpInput('');
+                            setFollowUpHistory(followUpHistoryByTestcase[tab.testcase_id] || []);
+                            setFollowUpMode('agent');
+                          }}
+                        >
+                          Open Full
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-inline-tab-action"
+                          onClick={() => toggleCursorAiTabMinimized(tab.tabId)}
+                        >
+                          {isMinimized ? 'Expand' : 'Minimize'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-inline-tab-action btn-inline-tab-close"
+                          onClick={() => closeCursorAiTab(tab.tabId)}
+                        >
+                          Close
+                        </button>
+                      </div>
+                    </div>
+                    {!isMinimized && (
+                      <div className="cursor-ai-inline-tab-body">
+                        <div><strong>Classification:</strong> {(cursorAiResults[tab.testcase_id] || tab.analysis)?.classification || 'Unknown'}</div>
+                        <div><strong>Confidence:</strong> {(cursorAiResults[tab.testcase_id] || tab.analysis)?.confidence || 'N/A'}</div>
+                        <div><strong>Root Cause:</strong> {(cursorAiResults[tab.testcase_id] || tab.analysis)?.root_cause || 'N/A'}</div>
+                        <div><strong>Suggested Fix:</strong> {(cursorAiResults[tab.testcase_id] || tab.analysis)?.suggested_fix || 'N/A'}</div>
+                        {!tabSessionId && (
+                          <div className="cursor-ai-inline-tab-warning">
+                            Follow-up is unavailable for this tab (session not found).
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div className="filter-controls">
+            <div className="filter-group filter-group-status-dropdown" ref={statusDropdownRef}>
+              <label>Filter by Test Status:</label>
+              <button
+                type="button"
+                className="filter-select status-dropdown-trigger"
+                onClick={() => setStatusDropdownOpen(prev => !prev)}
+              >
+                {filterTestStatus.length === ALL_STATUS_GROUPS.length
+                  ? 'All Statuses'
+                  : filterTestStatus.length === 0
+                    ? 'None'
+                    : filterTestStatus.join(', ')}
+                <span className="status-dropdown-arrow">{statusDropdownOpen ? '▲' : '▼'}</span>
+              </button>
+              {statusDropdownOpen && (
+                <div className="status-dropdown-menu">
+                  {ALL_STATUS_GROUPS.map(group => (
+                    <label key={group} className="status-dropdown-item">
+                      <input
+                        type="checkbox"
+                        checked={filterTestStatus.includes(group)}
+                        onChange={() => toggleFilterTestStatus(group)}
+                      />
+                      <span className={`status-chip status-chip-${group.toLowerCase()}`}>{group}</span>
+                    </label>
+                  ))}
+                  <div className="status-dropdown-actions">
+                    <button type="button" className="status-dropdown-action-btn" onClick={() => setFilterTestStatus([...ALL_STATUS_GROUPS])}>All</button>
+                    <button type="button" className="status-dropdown-action-btn" onClick={() => setFilterTestStatus([])}>None</button>
+                  </div>
+                </div>
+              )}
+            </div>
             <div className="filter-group">
               <label>Filter by Regression Owner:</label>
               <select value={filterOwner} onChange={e => setFilterOwner(e.target.value)} className="filter-select">
@@ -569,8 +1748,8 @@ export default function FailedTestcaseAnalysis() {
                 onChange={e => setFilterComment(e.target.value)}
               />
             </div>
-            {(filterOwner || filterFailureStage || filterIntermittent || filterComment.trim()) && (
-              <button onClick={() => { setFilterOwner(''); setFilterFailureStage(''); setFilterIntermittent(''); setFilterComment(''); }} className="btn-clear-filters">Clear Filters</button>
+            {(filterOwner || filterFailureStage || filterIntermittent || filterComment.trim() || filterTestStatus.length < ALL_STATUS_GROUPS.length) && (
+              <button onClick={() => { setFilterTestStatus([...ALL_STATUS_GROUPS]); setFilterOwner(''); setFilterFailureStage(''); setFilterIntermittent(''); setFilterComment(''); }} className="btn-clear-filters">Clear Filters</button>
             )}
           </div>
           <div className="results-table-toolbar">
@@ -605,6 +1784,41 @@ export default function FailedTestcaseAnalysis() {
               >
                 {bulkUpdating ? 'Updating…' : 'Bulk Update'}
               </button>
+              <button
+                type="button"
+                className="btn-cursor-ai-batch"
+                disabled={selectedRows.length === 0 || !!cursorAiBatchJobId}
+                onClick={handleCursorAiBatchAnalyze}
+                title="Deep-analyze selected testcases via Cursor AI agent + nutest source"
+              >
+                {cursorAiBatchJobId ? 'AI Analyzing…' : 'Cursor AI Analyze Selected'}
+              </button>
+              <button
+                type="button"
+                className="btn-retrigger"
+                disabled={selectedRows.length === 0}
+                onClick={openRetriggerModal}
+                title="Re-trigger selected failed testcases via Jita"
+              >
+                Re-trigger ({selectedRows.length})
+              </button>
+              <button
+                type="button"
+                className="btn-rdm-analyze-skipped"
+                disabled={rdmAnalyzing || selectedRows.length === 0}
+                onClick={handleAnalyzeSkipped}
+                title="Analyze RDM deployment failures for selected skipped testcases"
+              >
+                {rdmAnalyzing ? 'Analyzing RDM…' : `Analyze Skipped (${selectedRows.length})`}
+              </button>
+              {cursorAiBatchStatus && (
+                <span className="cursor-ai-batch-status">
+                  {cursorAiBatchStatus.status === 'done'
+                    ? `Done (${cursorAiBatchStatus.completed}/${cursorAiBatchStatus.total})`
+                    : `${cursorAiBatchStatus.completed}/${cursorAiBatchStatus.total} analyzed`
+                  }
+                </span>
+              )}
             </div>
           </div>
           <div className="results-table-wrapper">
@@ -669,6 +1883,493 @@ export default function FailedTestcaseAnalysis() {
             <div className="modal-footer">
               <button type="button" className="btn-primary" onClick={handleCustomizeDone}>Done</button>
               <button type="button" className="btn-secondary" onClick={() => setCustomizeOpen(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cursorAiDetailModal && (
+        <div className="modal-overlay" onClick={() => setCursorAiDetailModal(null)}>
+          <div className="modal-content cursor-ai-detail-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Cursor AI Deep Analysis</h3>
+              <button type="button" className="modal-close" onClick={() => setCursorAiDetailModal(null)}>×</button>
+            </div>
+            <div className="modal-body cursor-ai-detail-body">
+              <div className="cursor-ai-tc-name">{cursorAiDetailModal.testcase_name}</div>
+
+              <div className="cursor-ai-section">
+                <h4>Classification</h4>
+                <span className={`badge ${
+                  (cursorAiDetailModal.classification || '').includes('Test') ? 'cursor-ai-test-issue'
+                  : (cursorAiDetailModal.classification || '').includes('Product') ? 'cursor-ai-product-issue'
+                  : (cursorAiDetailModal.classification || '').includes('Infra') ? 'cursor-ai-infra-issue'
+                  : 'cursor-ai-other'
+                }`}>
+                  {cursorAiDetailModal.classification || 'Unknown'}
+                </span>
+                <span className="cursor-ai-confidence">
+                  Confidence: <strong>{cursorAiDetailModal.confidence || 'N/A'}</strong>
+                </span>
+              </div>
+
+              <div className="cursor-ai-section">
+                <h4>Root Cause</h4>
+                <p>{cursorAiDetailModal.root_cause || 'N/A'}</p>
+              </div>
+
+              {cursorAiDetailModal.failing_code && (
+                <div className="cursor-ai-section">
+                  <h4>Failing Code</h4>
+                  <div className="cursor-ai-code-location">
+                    {cursorAiDetailModal.failing_code.file}
+                    {cursorAiDetailModal.failing_code.line_range && ` (lines ${cursorAiDetailModal.failing_code.line_range})`}
+                  </div>
+                  {cursorAiDetailModal.failing_code.snippet && (
+                    <pre className="cursor-ai-code-snippet">{cursorAiDetailModal.failing_code.snippet}</pre>
+                  )}
+                </div>
+              )}
+
+              <div className="cursor-ai-section">
+                <h4>Suggested Fix</h4>
+                <p>{cursorAiDetailModal.suggested_fix || 'N/A'}</p>
+              </div>
+
+              {cursorAiDetailModal.related_components && cursorAiDetailModal.related_components.length > 0 && (
+                <div className="cursor-ai-section">
+                  <h4>Related Components</h4>
+                  <div className="cursor-ai-tags">
+                    {cursorAiDetailModal.related_components.map((c, i) => (
+                      <span key={i} className="cursor-ai-tag">{c}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {followUpHistory.length > 0 && (
+              <div className="cursor-ai-followup-history">
+                <h4>Follow-up Conversation</h4>
+                {followUpHistory.map((msg, i) => (
+                  <div key={i} className={`cursor-ai-followup-msg cursor-ai-followup-${msg.role}`}>
+                    {msg.role === 'user' && (
+                      <div className="cursor-ai-followup-user">
+                        <strong>You:</strong>
+                        {msg.mode && <span className="cursor-ai-followup-mode-badge">{msg.mode.toUpperCase()}</span>}
+                        {' '}
+                        {msg.text}
+                      </div>
+                    )}
+                    {msg.role === 'assistant' && (
+                      <div className="cursor-ai-followup-assistant">
+                        <strong>AI:</strong>
+                        {msg.mode && <span className="cursor-ai-followup-mode-badge">{msg.mode.toUpperCase()}</span>}
+                        {' '}
+                        {msg.data?.follow_up_answer || msg.data?.root_cause || JSON.stringify(msg.data, null, 2)}
+                      </div>
+                    )}
+                    {msg.role === 'error' && (
+                      <div className="cursor-ai-followup-error">{msg.text}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="modal-footer cursor-ai-modal-footer">
+              {cursorAiDetailModal._session_id ? (
+                <div className="cursor-ai-followup-bar">
+                  <select
+                    className="cursor-ai-followup-mode"
+                    value={followUpMode}
+                    onChange={e => setFollowUpMode(e.target.value)}
+                    disabled={followUpLoading}
+                    title="Follow-up AI mode"
+                  >
+                    <option value="ask">Ask</option>
+                    <option value="agent">Agent</option>
+                    <option value="plan">Plan</option>
+                  </select>
+                  <input
+                    type="text"
+                    className="cursor-ai-followup-input"
+                    placeholder="Ask a follow-up question about this analysis..."
+                    value={followUpInput}
+                    onChange={e => setFollowUpInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && !followUpLoading) handleFollowUp(); }}
+                    disabled={followUpLoading}
+                  />
+                  <button
+                    type="button"
+                    className="btn-primary cursor-ai-followup-send"
+                    onClick={handleFollowUp}
+                    disabled={followUpLoading || !followUpInput.trim()}
+                  >
+                    {followUpLoading ? 'Sending...' : 'Ask'}
+                  </button>
+                </div>
+              ) : (
+                <span className="cursor-ai-no-session-hint">
+                  Re-run analysis to enable follow-up questions
+                </span>
+              )}
+              <button type="button" className="btn-secondary" onClick={() => setCursorAiDetailModal(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {gleanDetailModal && (
+        <div className="modal-overlay" onClick={() => setGleanDetailModal(null)}>
+          <div className="modal-content glean-detail-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Glean Search Analysis</h3>
+              <button type="button" className="modal-close" onClick={() => setGleanDetailModal(null)}>×</button>
+            </div>
+            <div className="modal-body glean-detail-body">
+              <div className="glean-tc-name">{gleanDetailModal.testcase_name}</div>
+
+              <div className="glean-section">
+                <h4>Failure Classification</h4>
+                <span className={`badge glean-issue-badge glean-issue-${(gleanDetailModal.issue_type || '').replace(/\s+/g, '-').toLowerCase()}`}>
+                  {gleanDetailModal.issue_type || 'Unknown'}
+                </span>
+              </div>
+
+              {gleanDetailModal.enriched_tickets && gleanDetailModal.enriched_tickets.length > 0 && (
+                <div className="glean-section">
+                  <h4>Matching ENG JIRA Tickets ({gleanDetailModal.enriched_tickets.length})</h4>
+                  <div className="glean-ticket-table-wrapper">
+                    <table className="glean-ticket-table">
+                      <thead>
+                        <tr>
+                          <th>Ticket</th>
+                          <th>Status</th>
+                          <th>Type</th>
+                          <th>Summary</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {gleanDetailModal.enriched_tickets.map(t => (
+                          <tr key={t.ticket} className={t.is_open ? 'glean-ticket-open' : 'glean-ticket-closed'}>
+                            <td>
+                              <a href={t.url || `${JIRA_URL}${t.ticket}`} target="_blank" rel="noopener noreferrer" className="jira-link">{t.ticket}</a>
+                            </td>
+                            <td>
+                              <span className={`glean-status-badge ${t.is_open ? 'glean-status-open' : 'glean-status-closed'}`}>
+                                {t.jira_status || 'Unknown'}
+                              </span>
+                              {t.jira_resolution && <span className="glean-resolution">({t.jira_resolution})</span>}
+                            </td>
+                            <td className="glean-ticket-type">{t.jira_type || '-'}</td>
+                            <td className="glean-ticket-summary" title={t.jira_summary || t.glean_title}>
+                              {t.jira_summary || t.glean_title || '-'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {(!gleanDetailModal.enriched_tickets || gleanDetailModal.enriched_tickets.length === 0)
+                && gleanDetailModal.glean_jira_refs && gleanDetailModal.glean_jira_refs.length > 0 && (
+                <div className="glean-section">
+                  <h4>Matching JIRA Tickets</h4>
+                  <div className="glean-jira-list">
+                    {gleanDetailModal.glean_jira_refs.map(ticket => (
+                      <a key={ticket} href={`${JIRA_URL}${ticket}`} target="_blank" rel="noopener noreferrer" className="jira-link">{ticket}</a>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {gleanDetailModal.ai_analysis && (
+                <div className="glean-section">
+                  <h4>AI Analysis</h4>
+                  <div className="glean-ai-analysis">{gleanDetailModal.ai_analysis}</div>
+                </div>
+              )}
+
+              {gleanDetailModal.glean_snippets && gleanDetailModal.glean_snippets.length > 0 && (
+                <div className="glean-section">
+                  <h4>Glean Search Results</h4>
+                  <div className="glean-snippets-list">
+                    {gleanDetailModal.glean_snippets.map((s, i) => (
+                      <div key={i} className="glean-snippet-item">
+                        {s.url ? (
+                          <a href={s.url} target="_blank" rel="noopener noreferrer" className="glean-snippet-title">{s.title || 'Untitled'}</a>
+                        ) : (
+                          <span className="glean-snippet-title">{s.title || 'Untitled'}</span>
+                        )}
+                        {s.snippet && <div className="glean-snippet-text">{s.snippet}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn-secondary" onClick={() => setGleanDetailModal(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {retriggerModalOpen && (
+        <div className="modal-overlay" onClick={() => !retriggerLoading && setRetriggerModalOpen(false)}>
+          <div className="modal-content retrigger-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Re-trigger Failed Testcases</h3>
+              <button type="button" className="modal-close" onClick={() => !retriggerLoading && setRetriggerModalOpen(false)}>×</button>
+            </div>
+            <div className="modal-body retrigger-modal-body">
+              <p className="retrigger-summary">
+                <strong>{selectedRows.length}</strong> testcase(s) selected for re-trigger.
+                Leave fields blank to use original task defaults.
+              </p>
+
+              {/* Component Selection Checkboxes */}
+              <div className="retrigger-component-select">
+                <span className="retrigger-component-label">Select Components to Override</span>
+                <div className="retrigger-component-checks">
+                  <label className="retrigger-check-label">
+                    <input type="checkbox" checked={retriggerOverrides.updateNos}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, updateNos: e.target.checked }))} />
+                    <span>NOS Build</span>
+                  </label>
+                  <label className="retrigger-check-label">
+                    <input type="checkbox" checked={retriggerOverrides.updatePc}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, updatePc: e.target.checked }))} />
+                    <span>Prism Central Build</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Side-by-side NOS / PC panels */}
+              <div className="retrigger-panels">
+                {retriggerOverrides.updateNos && (
+                  <div className="retrigger-panel">
+                    <h4 className="retrigger-panel-title">NOS Build</h4>
+                    <div className="retrigger-form-group">
+                      <label>Branch</label>
+                      <input type="text" placeholder="e.g. ganges-7.6-stable"
+                        value={retriggerOverrides.nos.branch}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, nos: { ...prev.nos, branch: e.target.value }
+                        }))} />
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Update Type</label>
+                      <div className="retrigger-radio-group">
+                        <label><input type="radio" value="tag"
+                          checked={retriggerOverrides.nos.updateType === 'tag'}
+                          onChange={e => setRetriggerOverrides(prev => ({
+                            ...prev, nos: { ...prev.nos, updateType: e.target.value }
+                          }))} /> By Tag</label>
+                        <label><input type="radio" value="commit"
+                          checked={retriggerOverrides.nos.updateType === 'commit'}
+                          onChange={e => setRetriggerOverrides(prev => ({
+                            ...prev, nos: { ...prev.nos, updateType: e.target.value }
+                          }))} /> By Commit</label>
+                      </div>
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Build Type</label>
+                      <select value={retriggerOverrides.nos.buildType}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, nos: { ...prev.nos, buildType: e.target.value }
+                        }))}>
+                        <option value="">-- Select Build Type --</option>
+                        <option value="release">release</option>
+                        <option value="opt">opt</option>
+                      </select>
+                    </div>
+                    {retriggerOverrides.nos.updateType === 'tag' && (
+                      <div className="retrigger-form-group">
+                        <label>Tag</label>
+                        <select value={retriggerOverrides.nos.tag}
+                          onChange={e => setRetriggerOverrides(prev => ({
+                            ...prev, nos: { ...prev.nos, tag: e.target.value }
+                          }))}>
+                          <option value="">-- Select Tag --</option>
+                          <option value="Latest Smoke Passed">Latest Smoke Passed</option>
+                          <option value="Latest DIAL Passed">Latest DIAL Passed</option>
+                        </select>
+                      </div>
+                    )}
+                    {retriggerOverrides.nos.updateType === 'commit' && (
+                      <>
+                        <div className="retrigger-form-group">
+                          <label>Commit ID</label>
+                          <input type="text" placeholder="e.g. b8b1696d55a4..."
+                            value={retriggerOverrides.nos.commitId}
+                            onChange={e => setRetriggerOverrides(prev => ({
+                              ...prev, nos: { ...prev.nos, commitId: e.target.value }
+                            }))} />
+                        </div>
+                        <div className="retrigger-form-group">
+                          <label>GBN</label>
+                          <input type="text" placeholder="e.g. 1779293625"
+                            value={retriggerOverrides.nos.gbn}
+                            onChange={e => setRetriggerOverrides(prev => ({
+                              ...prev, nos: { ...prev.nos, gbn: e.target.value }
+                            }))} />
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {retriggerOverrides.updatePc && (
+                  <div className="retrigger-panel">
+                    <h4 className="retrigger-panel-title">Prism Central Build</h4>
+                    <div className="retrigger-form-group">
+                      <label>Branch</label>
+                      <input type="text" placeholder="e.g. master"
+                        value={retriggerOverrides.pc.branch}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, pc: { ...prev.pc, branch: e.target.value }
+                        }))} />
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Update Type</label>
+                      <div className="retrigger-radio-group">
+                        <label><input type="radio" value="tag"
+                          checked={retriggerOverrides.pc.updateType === 'tag'}
+                          onChange={e => setRetriggerOverrides(prev => ({
+                            ...prev, pc: { ...prev.pc, updateType: e.target.value }
+                          }))} /> By Tag</label>
+                        <label><input type="radio" value="commit"
+                          checked={retriggerOverrides.pc.updateType === 'commit'}
+                          onChange={e => setRetriggerOverrides(prev => ({
+                            ...prev, pc: { ...prev.pc, updateType: e.target.value }
+                          }))} /> By Commit</label>
+                      </div>
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Build Type</label>
+                      <select value={retriggerOverrides.pc.buildType}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, pc: { ...prev.pc, buildType: e.target.value }
+                        }))}>
+                        <option value="">-- Select Build Type --</option>
+                        <option value="release">release</option>
+                        <option value="opt">opt</option>
+                      </select>
+                    </div>
+                    {retriggerOverrides.pc.updateType === 'tag' && (
+                      <div className="retrigger-form-group">
+                        <label>Tag</label>
+                        <select value={retriggerOverrides.pc.tag}
+                          onChange={e => setRetriggerOverrides(prev => ({
+                            ...prev, pc: { ...prev.pc, tag: e.target.value }
+                          }))}>
+                          <option value="">-- Select Tag --</option>
+                          <option value="Latest Smoke Passed">Latest Smoke Passed</option>
+                          <option value="Latest DIAL Passed">Latest DIAL Passed</option>
+                        </select>
+                      </div>
+                    )}
+                    {retriggerOverrides.pc.updateType === 'commit' && (
+                      <>
+                        <div className="retrigger-form-group">
+                          <label>Commit ID</label>
+                          <input type="text" placeholder="e.g. 49326d5419bb..."
+                            value={retriggerOverrides.pc.commitId}
+                            onChange={e => setRetriggerOverrides(prev => ({
+                              ...prev, pc: { ...prev.pc, commitId: e.target.value }
+                            }))} />
+                        </div>
+                        <div className="retrigger-form-group">
+                          <label>GBN</label>
+                          <input type="text" placeholder="e.g. 1779293332"
+                            value={retriggerOverrides.pc.gbn}
+                            onChange={e => setRetriggerOverrides(prev => ({
+                              ...prev, pc: { ...prev.pc, gbn: e.target.value }
+                            }))} />
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Common fields */}
+              <div className="retrigger-section">
+                <h4>Common Options</h4>
+                <div className="retrigger-fields">
+                  <div className="retrigger-field">
+                    <label>Nutest Branch Name</label>
+                    <input type="text" placeholder="e.g. ganges-7.6-stable"
+                      value={retriggerOverrides.nutest_branch}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, nutest_branch: e.target.value }))} />
+                  </div>
+                  <div className="retrigger-field">
+                    <label>Test Patch URL</label>
+                    <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
+                      value={retriggerOverrides.patch_url}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, patch_url: e.target.value }))} />
+                  </div>
+                  <div className="retrigger-field">
+                    <label>Framework Patch URL</label>
+                    <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
+                      value={retriggerOverrides.framework_patch_url}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, framework_patch_url: e.target.value }))} />
+                  </div>
+                  <div className="retrigger-field">
+                    <label>Resource Pool</label>
+                    <input type="text" placeholder="e.g. Regression_cdp_special_config"
+                      value={retriggerOverrides.resource_pool}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, resource_pool: e.target.value }))} />
+                  </div>
+                </div>
+              </div>
+
+              {retriggerResults && (
+                <div className={`retrigger-results ${retriggerResults.error ? 'retrigger-results-error' : ''}`}>
+                  {retriggerResults.error ? (
+                    <div className="retrigger-error-msg">{retriggerResults.error}</div>
+                  ) : (
+                    <>
+                      <div className="retrigger-results-summary">
+                        <span className="retrigger-stat retrigger-stat-ok">{retriggerResults.succeeded || 0} succeeded</span>
+                        {retriggerResults.failed > 0 && (
+                          <span className="retrigger-stat retrigger-stat-fail">{retriggerResults.failed} failed</span>
+                        )}
+                      </div>
+                      {retriggerResults.results && retriggerResults.results.map((r, i) => (
+                        <div key={i} className={`retrigger-result-row ${r.success ? 'retrigger-result-ok' : 'retrigger-result-fail'}`}>
+                          <span className="retrigger-result-task">Task: {r.agave_task_id}</span>
+                          {r.success ? (
+                            <span className="retrigger-result-new-id">
+                              Rerun ID: <a href={`https://jita.eng.nutanix.com/api/v2/agave_tasks/${r.rerun_task_id}`} target="_blank" rel="noopener noreferrer">{r.rerun_task_id}</a>
+                              {r.message && <span> — {r.message}</span>}
+                            </span>
+                          ) : (
+                            <span className="retrigger-result-err">{r.error}</span>
+                          )}
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn-primary btn-retrigger-submit"
+                disabled={retriggerLoading}
+                onClick={handleRetrigger}
+              >
+                {retriggerLoading ? 'Re-triggering…' : 'Re-trigger'}
+              </button>
+              <button type="button" className="btn-secondary" disabled={retriggerLoading} onClick={() => setRetriggerModalOpen(false)}>
+                {retriggerResults ? 'Close' : 'Cancel'}
+              </button>
             </div>
           </div>
         </div>
