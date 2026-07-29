@@ -1,7 +1,9 @@
 .run-report-container {
-  padding: 20px;
-  max-width: 1400px;
-  margin: 0 auto;
+  padding: 24px 28px 48px;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  box-sizing: border-box;
 }
 
 .run-report-header {

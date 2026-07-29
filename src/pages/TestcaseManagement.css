@@ -1,7 +1,10 @@
 .tc-mgmt-container {
-  padding: 20px;
+  padding: 24px 28px 48px;
   background: white;
-  min-height: 100vh;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  min-height: 0;
 }
 
 /* Header */

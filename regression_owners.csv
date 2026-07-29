@@ -149,7 +149,7 @@ cdp.stargate.storage_policy.upgrade,Shilpa
 cdp.stargate.tiering.test_optane_downmigrate,Swapnil
 cdp.stargate.tiering.test_optane_upmigrate,Swapnil
 cdp.stargate.tiering.test_remove_add_node,Swapnil
-cdp.stargate.tilting.test_merged_vblocks,Swapnil
+cdp.stargate.tilting.test_merged_vblocks,Sudharshan
 cdp.stargate.upgrade.test_controlled_upgrade_build,Sudharshan
 cdp.stargate.vdiskmigration.test_vdiskmigrate,Sudharshan
 cdp.stargate.vdiskmigration.test_vdiskmigrate_with_ops,Sudharshan

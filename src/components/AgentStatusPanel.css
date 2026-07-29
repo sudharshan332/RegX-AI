@@ -1,0 +1,491 @@
+/* Agent Status Panel Styles */
+
+.agent-status-panel {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  min-width: 800px;
+  max-width: min(1200px, 100%);
+  max-height: 600px;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.agent-status-minimized {
+  background: #f8f9fa;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  min-width: 120px;
+}
+
+.agent-status-minimized:hover {
+  background: #e9ecef;
+}
+
+.minimized-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.minimized-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #333;
+}
+
+.minimized-indicators {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.health-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.minimized-text {
+  font-size: 12px;
+  color: #666;
+}
+
+/* Panel Header */
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #eee;
+  background: #f8f9fa;
+}
+
+.panel-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+}
+
+.panel-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.refresh-btn, .close-btn {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.refresh-btn:hover, .close-btn:hover {
+  background: #f8f9fa;
+  border-color: #999;
+}
+
+.refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.close-btn {
+  padding: 4px 8px;
+  font-size: 16px;
+  font-weight: bold;
+}
+
+/* Error Banner */
+.error-banner {
+  background: #fff3cd;
+  border: 1px solid #ffeaa7;
+  color: #856404;
+  padding: 12px 20px;
+  font-size: 14px;
+}
+
+/* Panel Tabs */
+.panel-tabs {
+  display: flex;
+  border-bottom: 1px solid #eee;
+  background: #fff;
+}
+
+.tab-btn {
+  background: none;
+  border: none;
+  padding: 12px 20px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #666;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  color: #333;
+  background: #f8f9fa;
+}
+
+.tab-btn.active {
+  color: #007bff;
+  border-bottom-color: #007bff;
+  background: #fff;
+}
+
+/* Panel Content */
+.panel-content {
+  padding: 20px;
+  height: 400px;
+  overflow-y: auto;
+  position: relative;
+}
+
+.loading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.loading-spinner {
+  padding: 20px;
+  color: #666;
+  font-size: 14px;
+}
+
+/* Overview Tab */
+.agent-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 16px;
+}
+
+.metric-card {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.metric-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.metric-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #333;
+}
+
+.metric-value {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.metric-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.detail-row span:first-child {
+  color: #666;
+}
+
+.detail-row span:last-child {
+  font-weight: 500;
+  color: #333;
+}
+
+/* Recommendations */
+.recommendations-section {
+  margin-top: 20px;
+}
+
+.recommendations-section h4 {
+  margin: 0 0 16px 0;
+  font-size: 16px;
+  color: #333;
+}
+
+.recommendation {
+  background: #fff;
+  border: 1px solid #dee2e6;
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.recommendation.high {
+  border-left: 4px solid #dc3545;
+}
+
+.recommendation.medium {
+  border-left: 4px solid #fd7e14;
+}
+
+.recommendation.low {
+  border-left: 4px solid #6c757d;
+}
+
+.rec-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.rec-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #333;
+}
+
+.rec-priority {
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.rec-priority.high {
+  background: #dc3545;
+  color: white;
+}
+
+.rec-priority.medium {
+  background: #fd7e14;
+  color: white;
+}
+
+.rec-priority.low {
+  background: #6c757d;
+  color: white;
+}
+
+.rec-description {
+  font-size: 13px;
+  color: #666;
+  margin: 8px 0;
+}
+
+.rec-actions {
+  margin: 8px 0 0 0;
+  padding-left: 20px;
+}
+
+.rec-actions li {
+  font-size: 13px;
+  color: #666;
+  margin-bottom: 4px;
+}
+
+/* Agents Tab */
+.agents-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.agent-card {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.agent-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #dee2e6;
+}
+
+.agent-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: #333;
+}
+
+.agent-status {
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.agent-status.healthy {
+  background: #d4edda;
+  color: #155724;
+}
+
+.agent-status.unhealthy {
+  background: #f8d7da;
+  color: #721c24;
+}
+
+.agent-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Cost Tab */
+.cost-details {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.budget-section h4,
+.analysis-breakdown h4 {
+  margin: 0 0 16px 0;
+  font-size: 16px;
+  color: #333;
+}
+
+.budget-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.budget-period {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.period-label {
+  min-width: 60px;
+  font-weight: 600;
+  font-size: 13px;
+  color: #333;
+}
+
+.budget-bar {
+  flex: 1;
+  height: 8px;
+  background: #e9ecef;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.budget-used {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.budget-text {
+  min-width: 80px;
+  font-size: 13px;
+  color: #666;
+  text-align: right;
+}
+
+.breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.breakdown-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #f8f9fa;
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid #dee2e6;
+}
+
+.breakdown-type {
+  font-size: 13px;
+  color: #666;
+  text-transform: capitalize;
+}
+
+.breakdown-credits {
+  font-weight: 600;
+  font-size: 14px;
+  color: #333;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .agent-status-panel {
+    min-width: auto;
+    width: 100%;
+    max-width: none;
+  }
+  
+  .panel-header {
+    padding: 12px 16px;
+  }
+  
+  .panel-content {
+    padding: 16px;
+    height: 350px;
+  }
+  
+  .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .agents-list {
+    grid-template-columns: 1fr;
+  }
+  
+  .breakdown-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .budget-period {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  
+  .period-label {
+    min-width: auto;
+  }
+  
+  .budget-text {
+    min-width: auto;
+    text-align: left;
+  }
+}

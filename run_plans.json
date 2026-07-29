@@ -25,7 +25,8 @@
       "created_at": "2026-05-21T11:40:34.954240",
       "last_triggered": "2026-06-30T17:50:06.677401",
       "branch": "ganges-7.6-stable",
-      "service_account": ""
+      "service_account": "",
+      "is_dummy": false
     },
     {
       "id": "1779419522418",
@@ -56,7 +57,8 @@
       "schedule_triggered": false,
       "created_at": "2026-05-22T03:12:02.418946",
       "last_triggered": null,
-      "service_account": ""
+      "service_account": "",
+      "is_dummy": false
     },
     {
       "id": "1779419663537",
@@ -74,7 +76,8 @@
       "schedule_triggered": false,
       "created_at": "2026-05-22T03:14:23.537037",
       "last_triggered": null,
-      "service_account": ""
+      "service_account": "",
+      "is_dummy": false
     },
     {
       "id": "1780497768683",
@@ -116,7 +119,8 @@
       "schedule_triggered": true,
       "service_account": "",
       "created_at": "2026-06-03T14:42:48.683349",
-      "last_triggered": "2026-06-13T12:29:49.179993"
+      "last_triggered": "2026-06-13T12:29:49.179993",
+      "is_dummy": false
     },
     {
       "id": "1780560814180",
@@ -143,7 +147,8 @@
       "schedule_triggered": false,
       "service_account": "",
       "created_at": "2026-06-04T08:13:34.180083",
-      "last_triggered": "2026-06-04T14:29:21.948199"
+      "last_triggered": "2026-06-04T14:29:21.948199",
+      "is_dummy": false
     },
     {
       "id": "1781508709933",
@@ -161,7 +166,8 @@
       "schedule_triggered": false,
       "service_account": "svc.teamchandra",
       "created_at": "2026-06-15T07:31:49.933727",
-      "last_triggered": null
+      "last_triggered": null,
+      "is_dummy": false
     },
     {
       "id": "1781509022605",
@@ -179,7 +185,8 @@
       "schedule_triggered": false,
       "service_account": "",
       "created_at": "2026-06-15T07:37:02.605213",
-      "last_triggered": "2026-06-29T08:48:23.391367"
+      "last_triggered": "2026-06-29T08:48:23.391367",
+      "is_dummy": false
     },
     {
       "id": "1781509381579",
@@ -200,7 +207,8 @@
       "schedule_triggered": false,
       "service_account": "",
       "created_at": "2026-06-15T07:43:01.579945",
-      "last_triggered": "2026-06-29T06:33:28.790176"
+      "last_triggered": "2026-06-29T06:33:28.790176",
+      "is_dummy": false
     },
     {
       "id": "1781513297610",
@@ -215,6 +223,22 @@
       "schedule_triggered": false,
       "service_account": "svc.teamchandra",
       "created_at": "2026-06-15T08:48:17.610220",
+      "last_triggered": null,
+      "is_dummy": false
+    },
+    {
+      "id": "1785305227383",
+      "name": "Test",
+      "branch": "master",
+      "job_profiles": [
+        "6a1e7ac3b5e475878754da20"
+      ],
+      "tag_name": "Test_1785305227361",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-07-29T11:37:07.383689",
       "last_triggered": null
     }
   ],

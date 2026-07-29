@@ -11,7 +11,7 @@
     "dev:mcp": "node --watch mcp-server.js"
   },
   "dependencies": {
-    "@cursor/sdk": "latest",
+    "@cursor/sdk": "^1.0.23",
     "express": "^4.21.0"
   }
 }

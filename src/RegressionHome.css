@@ -1,8 +1,11 @@
 .container {
-  padding: 20px;
+  padding: 24px 28px 48px;
   font-family: Arial, sans-serif;
   background: white;
-  min-height: 100vh;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  min-height: 0;
 }
 
 .dashboard-table {
@@ -54,4 +57,671 @@
 .task-btn:hover,
 .jira-btn:hover {
   background: #c7dbff;
+}
+
+/* Summary stat cards (dashboard-style) */
+.rh-stat-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.rh-stat-card {
+  position: relative;
+  border-radius: 14px;
+  padding: 18px 18px 16px;
+  color: #fff;
+  overflow: hidden;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.rh-stat-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.18);
+}
+
+.rh-stat-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  line-height: 1;
+  margin-bottom: 12px;
+}
+
+.rh-stat-label {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  opacity: 0.95;
+  margin-bottom: 6px;
+}
+
+.rh-stat-spark {
+  display: block;
+  width: 100%;
+  height: 26px;
+  margin: 2px 0 8px;
+  opacity: 0.9;
+}
+
+.rh-stat-value {
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1.05;
+}
+
+.rh-stat-sub {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.9;
+  margin-top: 2px;
+}
+
+/* Owner-wise ticket breakdown cards (3-up grid) */
+.rh-owner-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+@media (max-width: 1100px) {
+  .rh-owner-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .rh-owner-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.rh-owner-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07);
+}
+
+.rh-owner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.rh-owner-count {
+  font-size: 10.5px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.22);
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.rh-owner-tickets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.rh-owner-tickets li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #f1f1f1;
+  font-size: 12px;
+}
+
+.rh-owner-tickets li:last-child {
+  border-bottom: none;
+}
+
+.rh-ticket-status {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+  min-width: 58px;
+  text-align: center;
+}
+
+.rh-ticket-link {
+  color: #0066cc;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.rh-ticket-link:hover {
+  text-decoration: underline;
+}
+
+.rh-ticket-count {
+  color: #6b7280;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Distance between the issue-type color dot and the ticket number */
+.rh-bug-dot-spaced {
+  margin-right: 8px;
+}
+
+/* Center the ticket status between the ticket number and the right meta group */
+.rh-ticket-state-wrap {
+  flex: 1 1 auto;
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+}
+
+/* Right-aligned metadata group on each ticket row (QI %, risk, tc count) */
+.rh-ticket-meta {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.rh-risk-badge {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+/* QI Impact badge — shown for every ticket once QI is loaded */
+.rh-qi-badge {
+  flex: 0 0 auto;
+  min-width: 54px;
+  text-align: center;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+  background: #eef2ff;
+  color: #3730a3;
+}
+
+/* Bug-type color dots (shared by tiles, ticket rows and summary legend) */
+.rh-bug-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.rh-bug-dot-lg {
+  width: 10px;
+  height: 10px;
+}
+
+/* Bug-type text pill on each ticket row (replaces the old N/A dash) */
+.rh-bugtype-pill {
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  padding: 2px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+  min-width: 58px;
+  text-align: center;
+}
+
+.rh-bugtype-unknown {
+  background: #f3f4f6;
+  color: #9ca3af;
+}
+
+/* Owner tile header: name on the left, bug counts + ticket count on the right */
+.rh-owner-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Clickable owner name -> opens that owner's tickets in Jira */
+.rh-owner-name-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+  max-width: 60%;
+}
+
+.rh-owner-name-link:hover {
+  text-decoration: underline;
+}
+
+.rh-owner-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.rh-owner-bugcounts {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  line-height: 1;
+}
+
+.rh-owner-bugcount {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+/* Bug-type summary panel (donut + legend) above the owner breakdown */
+.rh-bug-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+/* Pie chart */
+.rh-bug-pie {
+  flex: 0 0 auto;
+}
+
+.rh-bug-pie-slice {
+  transition: opacity 0.12s ease;
+  cursor: default;
+}
+
+.rh-bug-pie-slice:hover {
+  opacity: 0.85;
+}
+
+/* Legend list styled like a status breakdown (label + colored count pill) */
+.rh-bug-summary-legend {
+  flex: 1 1 auto;
+  min-width: 220px;
+  max-width: 420px;
+}
+
+.rh-bug-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px 8px;
+  border-bottom: 1px solid #eef0f3;
+  margin-bottom: 4px;
+}
+
+.rh-bug-summary-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.rh-bug-summary-total-pill {
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+  background: #f1f3f5;
+  border-radius: 999px;
+  padding: 2px 12px;
+}
+
+.rh-bug-summary-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.rh-bug-summary-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  padding: 9px 4px;
+  border-bottom: 1px solid #f1f3f5;
+}
+
+.rh-bug-summary-list li:last-child {
+  border-bottom: none;
+}
+
+.rh-bug-summary-item {
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.12s ease;
+}
+
+.rh-bug-summary-item:hover {
+  background: #f6f8fa;
+}
+
+.rh-bug-summary-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #1f2937;
+  font-weight: 500;
+}
+
+.rh-bug-summary-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #e5e7eb;
+  color: #6b7280;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.rh-bug-summary-pill {
+  min-width: 40px;
+  text-align: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: 12.5px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* ── Professional report panels (Triage Accuracy / QI Summary) ── */
+.rh-report-panel {
+  margin-top: 36px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+  overflow: hidden;
+}
+
+.rh-report-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 18px 22px;
+  border-bottom: 1px solid #eef0f3;
+  background: linear-gradient(180deg, #fafbfc 0%, #fff 100%);
+}
+
+.rh-report-title-block {
+  min-width: 0;
+}
+
+.rh-report-eyebrow {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.rh-report-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+
+.rh-report-subtitle {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #64748b;
+  max-width: 640px;
+}
+
+.rh-report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.rh-report-btn {
+  appearance: none;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.rh-report-btn:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #94a3b8;
+}
+
+.rh-report-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.rh-report-btn-primary {
+  background: #0f172a;
+  border-color: #0f172a;
+  color: #fff;
+}
+
+.rh-report-btn-primary:hover:not(:disabled) {
+  background: #1e293b;
+  border-color: #1e293b;
+}
+
+.rh-report-btn-success {
+  background: #166534;
+  border-color: #166534;
+  color: #fff;
+}
+
+.rh-report-btn-success:hover:not(:disabled) {
+  background: #15803d;
+  border-color: #15803d;
+}
+
+.rh-report-body {
+  padding: 20px 22px 24px;
+}
+
+.rh-report-loading,
+.rh-report-empty,
+.rh-report-error {
+  padding: 8px 2px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.rh-report-loading,
+.rh-report-empty {
+  color: #64748b;
+  font-style: italic;
+}
+
+.rh-report-error {
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-style: normal;
+}
+
+.rh-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.rh-metric-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 14px 14px 12px;
+  background: #f8fafc;
+}
+
+.rh-metric-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
+.rh-metric-value {
+  font-size: 22px;
+  font-weight: 800;
+  color: #0f172a;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.rh-metric-value.is-muted { color: #475569; }
+.rh-metric-value.is-ok { color: #166534; }
+.rh-metric-value.is-warn { color: #b45309; }
+.rh-metric-value.is-bad { color: #b91c1c; }
+.rh-metric-value.is-info { color: #0369a1; }
+.rh-metric-value.is-accent { color: #0f766e; }
+
+.rh-metric-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.rh-report-section {
+  margin-top: 8px;
+  margin-bottom: 22px;
+}
+
+.rh-report-section:last-child {
+  margin-bottom: 0;
+}
+
+.rh-report-section-title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #334155;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.rh-report-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+}
+
+.rh-report-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  background: #fff;
+}
+
+.rh-report-table th {
+  text-align: left;
+  padding: 10px 14px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid #e2e8f0;
+  white-space: nowrap;
+}
+
+.rh-report-table th.num,
+.rh-report-table td.num {
+  text-align: center;
+}
+
+.rh-report-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #1e293b;
+  vertical-align: middle;
+}
+
+.rh-report-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.rh-report-table tbody tr:hover td {
+  background: #fafbfc;
+}
+
+.rh-report-table .is-ok { color: #166534; font-weight: 600; }
+.rh-report-table .is-warn { color: #b45309; font-weight: 600; }
+.rh-report-table .is-bad { color: #b91c1c; font-weight: 600; }
+.rh-report-table .is-info { color: #0369a1; font-weight: 600; }
+.rh-report-table .is-accent { color: #0f766e; font-weight: 600; }
+.rh-report-table .is-muted { color: #64748b; font-weight: 600; }
+
+.rh-report-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 860px) {
+  .rh-report-split {
+    grid-template-columns: 1fr;
+  }
 }

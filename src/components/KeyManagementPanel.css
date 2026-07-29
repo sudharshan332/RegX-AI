@@ -1,0 +1,238 @@
+.key-management-panel {
+  padding: 20px;
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.key-management-panel h2 {
+  margin-top: 0;
+  margin-bottom: 10px;
+  color: #2c3e50;
+  font-size: 24px;
+}
+
+.panel-description {
+  margin-bottom: 25px;
+  color: #666;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.message-banner {
+  padding: 12px 15px;
+  border-radius: 4px;
+  margin-bottom: 20px;
+  font-size: 14px;
+}
+
+.error-banner {
+  background-color: #fee;
+  border: 1px solid #fcc;
+  color: #c33;
+}
+
+.success-banner {
+  background-color: #efe;
+  border: 1px solid #cfc;
+  color: #3c3;
+}
+
+.key-section {
+  margin-bottom: 25px;
+}
+
+.key-section label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #2c3e50;
+  font-size: 14px;
+}
+
+.key-section label .required {
+  color: #e74c3c;
+  margin-left: 4px;
+}
+
+.input-with-toggle {
+  position: relative;
+  display: flex;
+  gap: 5px;
+}
+
+.key-section input {
+  flex: 1 1;
+  padding: 10px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+  font-family: 'Courier New', monospace;
+  transition: border-color 0.2s;
+}
+
+.key-section input:focus {
+  outline: none;
+  border-color: #3498db;
+  box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+}
+
+.key-section input:disabled {
+  background-color: #f5f5f5;
+  cursor: not-allowed;
+}
+
+.toggle-visibility-btn {
+  padding: 10px 12px;
+  background: #f8f9fa;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  transition: all 0.2s;
+}
+
+.toggle-visibility-btn:hover {
+  background: #e9ecef;
+}
+
+.toggle-visibility-btn:active {
+  transform: scale(0.95);
+}
+
+.help-text {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #666;
+  line-height: 1.4;
+}
+
+.help-text a {
+  color: #3498db;
+  text-decoration: none;
+}
+
+.help-text a:hover {
+  text-decoration: underline;
+}
+
+.validation-results {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 6px;
+  padding: 15px;
+  margin-bottom: 20px;
+}
+
+.validation-results h3 {
+  margin-top: 0;
+  margin-bottom: 15px;
+  font-size: 16px;
+  color: #2c3e50;
+}
+
+.validation-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  margin-bottom: 8px;
+  background: white;
+  border-radius: 4px;
+  border: 1px solid #e9ecef;
+}
+
+.validation-key {
+  flex: 1 1;
+  font-weight: 500;
+  text-transform: capitalize;
+  color: #495057;
+}
+
+.validation-status {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.validation-status.valid {
+  color: #28a745;
+}
+
+.validation-status.invalid {
+  color: #dc3545;
+}
+
+.validation-status.skipped {
+  color: #6c757d;
+}
+
+.validation-message {
+  flex-basis: 100%;
+  margin: 5px 0 0 0;
+  font-size: 12px;
+  color: #6c757d;
+}
+
+.button-group {
+  display: flex;
+  gap: 10px;
+  margin-top: 25px;
+}
+
+.button-group button {
+  flex: 1 1;
+  padding: 12px 20px;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.button-group button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-validate {
+  background: #17a2b8;
+  color: white;
+}
+
+.btn-validate:hover:not(:disabled) {
+  background: #138496;
+}
+
+.btn-save {
+  background: #28a745;
+  color: white;
+}
+
+.btn-save:hover:not(:disabled) {
+  background: #218838;
+}
+
+.btn-cancel {
+  background: #6c757d;
+  color: white;
+}
+
+.btn-cancel:hover:not(:disabled) {
+  background: #5a6268;
+}
+
+.security-note {
+  margin-top: 25px;
+  padding: 15px;
+  background: #fff3cd;
+  border: 1px solid #ffeaa7;
+  border-radius: 4px;
+}
+
+.security-note p {
+  margin: 0;
+  font-size: 13px;
+  color: #856404;
+  line-height: 1.5;
+}

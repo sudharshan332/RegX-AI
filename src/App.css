@@ -1,7 +1,13 @@
+/* App chrome: sticky sidebar + full-width main. Document/browser scrolls the page. */
+
 .app-container {
   display: flex;
-  height: 100vh;
-  overflow: hidden;
+  align-items: flex-start;
+  width: 100%;
+  min-width: 0;
+  min-height: 100vh;
+  /* Do not lock height or trap overflow — that creates a second scrollbar */
+  overflow: visible;
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
   background: #ffffff;
   color: #2c3e50;
@@ -10,20 +16,31 @@
 /* Sidebar Navigation */
 .sidebar {
   width: 276px;
+  flex: 0 0 276px;
+  max-width: 276px;
   background: linear-gradient(180deg, #24374b 0%, #2c445b 55%, #36516b 100%);
   color: #eef3f8;
   display: flex;
   flex-direction: column;
   box-shadow: 1px 0 0 rgba(15, 23, 42, 0.08);
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  max-height: 100vh;
+  overflow-x: hidden;
   overflow-y: auto;
-  transition: transform 0.3s ease, width 0.3s ease;
-  position: relative;
+  transition: transform 0.3s ease, width 0.3s ease, flex-basis 0.3s ease, max-width 0.3s ease;
+  z-index: 20;
 }
 
 .sidebar.collapsed {
   transform: translateX(-100%);
   width: 0;
+  flex-basis: 0;
+  max-width: 0;
   overflow: hidden;
+  pointer-events: none;
 }
 
 .sidebar-header {
@@ -34,6 +51,7 @@
   align-items: center;
   position: relative;
   min-height: 64px;
+  flex-shrink: 0;
 }
 
 .menu-toggle-btn {
@@ -71,6 +89,7 @@
   margin: 0;
   flex: 1;
   min-height: 0;
+  /* Sidebar menu uses its own scroll only when nav items exceed viewport */
   overflow-y: auto;
 }
 
@@ -81,7 +100,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  transition: all 0.2s ease;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
   border-left: 3px solid transparent;
   border-radius: 10px;
   color: #dbe5f2;
@@ -91,7 +110,6 @@
   background: rgba(95, 135, 168, 0.25);
   color: #fff;
   border-left-color: #8ab1d1;
-  transform: translateX(2px);
 }
 
 .menu-item.active {
@@ -116,6 +134,7 @@
   font-weight: 600;
   text-align: center;
   opacity: 1;
+  flex-shrink: 0;
 }
 
 .menu-item.active .menu-icon {
@@ -128,6 +147,7 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
 .menu-label {
@@ -147,20 +167,27 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px 16px;
+  gap: 10px;
+  padding: 12px 14px 16px;
   margin-top: auto;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 13px;
   flex-shrink: 0;
   background: #2b4257;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .sidebar-user-name {
-  color: #c8d1de;
+  color: #f1f5f9;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 160px;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
 }
 
 .sidebar-user-meta {
@@ -168,6 +195,7 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .sidebar-settings-btn {
@@ -209,16 +237,62 @@
   color: white;
 }
 
-/* Main Content Area */
+/* Main Content Area — full remaining width; no nested vertical scrollbar */
 .main-content {
-  flex: 1;
-  overflow-y: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  max-width: none;
+  overflow: visible;
   background: #ffffff;
-  transition: margin-left 0.3s ease;
+  /* Give pages room — not a cramped centered column */
+  padding: 0;
 }
 
 .main-content.expanded {
   margin-left: 0;
+}
+
+/* Shared page shell used / overridable by all routes */
+.main-content > * {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}
+
+/* Triage Genie coverage — Aladdin-style genie (~2.7cm) */
+.tg-coverage-genie-btn {
+  position: fixed;
+  top: 12px;
+  right: 14px;
+  z-index: 1100;
+  width: 2.7cm;
+  height: 2.7cm;
+  padding: 0;
+  border: 2px solid rgba(14, 165, 233, 0.45);
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #e0f2fe 0%, #bae6fd 40%, #7dd3fc 100%);
+  color: #0284c7;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(2, 132, 199, 0.28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  overflow: hidden;
+}
+
+.tg-coverage-genie-btn:hover {
+  transform: translateY(-2px) scale(1.04);
+  box-shadow: 0 14px 28px rgba(2, 132, 199, 0.35);
+}
+
+.tg-coverage-genie-icon {
+  display: block;
+  width: 86%;
+  height: 86%;
+  flex-shrink: 0;
 }
 
 /* Floating Toggle Button */
@@ -264,16 +338,20 @@
 @media (max-width: 768px) {
   .sidebar {
     width: 240px;
+    flex-basis: 240px;
+    max-width: 240px;
   }
-  
+
   .sidebar.collapsed {
     width: 0;
+    flex-basis: 0;
+    max-width: 0;
   }
-  
+
   .menu-label {
     font-size: 13px;
   }
-  
+
   .menu-description {
     font-size: 10px;
   }
