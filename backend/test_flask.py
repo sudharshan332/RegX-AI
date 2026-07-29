@@ -7617,6 +7617,7 @@ def testcase_mgmt_add_tags():
         return jsonify({"error": "testcase_oids and tags are required"}), 400
 
     results = {"success": 0, "failed": 0, "errors": []}
+    successful_oids = []
 
     for oid in testcase_oids:
         try:
@@ -7625,21 +7626,27 @@ def testcase_mgmt_add_tags():
                 url,
                 auth=_tcms_auth(),
                 data=json.dumps({"tags": tags_to_add}),
+                headers={"Content-Type": "application/json"},
                 verify=False,
                 timeout=30,
             )
             if resp.status_code in (200, 201):
                 results["success"] += 1
+                successful_oids.append(oid)
+                logger.info(f"Successfully added tags to testcase {oid}: {resp.json() if resp.text else 'OK'}")
             else:
                 results["failed"] += 1
-                results["errors"].append({"oid": oid, "status": resp.status_code})
+                error_detail = {"oid": oid, "status": resp.status_code, "response": resp.text[:200]}
+                results["errors"].append(error_detail)
+                logger.error(f"Failed to add tags to testcase {oid}: status={resp.status_code}, response={resp.text[:200]}")
         except Exception as exc:
             results["failed"] += 1
             results["errors"].append({"oid": oid, "error": str(exc)})
+            logger.error(f"Exception adding tags to testcase {oid}: {exc}")
 
     data = _load_tc_data(branch, team)
     for tc in data.get("testcases", []):
-        if tc.get("oid") in testcase_oids:
+        if tc.get("oid") in successful_oids:
             existing = tc.get("tags", [])
             for tag in tags_to_add:
                 if tag not in existing:
@@ -7665,6 +7672,7 @@ def testcase_mgmt_delete_tags():
         return jsonify({"error": "testcase_oids and tags are required"}), 400
 
     results = {"success": 0, "failed": 0, "errors": []}
+    successful_oids = []
 
     for oid in testcase_oids:
         try:
@@ -7673,21 +7681,27 @@ def testcase_mgmt_delete_tags():
                 url,
                 auth=_tcms_auth(),
                 data=json.dumps({"tags": tags_to_delete}),
+                headers={"Content-Type": "application/json"},
                 verify=False,
                 timeout=30,
             )
             if resp.status_code in (200, 204):
                 results["success"] += 1
+                successful_oids.append(oid)
+                logger.info(f"Successfully deleted tags from testcase {oid}: {resp.json() if resp.text else 'OK'}")
             else:
                 results["failed"] += 1
-                results["errors"].append({"oid": oid, "status": resp.status_code})
+                error_detail = {"oid": oid, "status": resp.status_code, "response": resp.text[:200]}
+                results["errors"].append(error_detail)
+                logger.error(f"Failed to delete tags from testcase {oid}: status={resp.status_code}, response={resp.text[:200]}")
         except Exception as exc:
             results["failed"] += 1
             results["errors"].append({"oid": oid, "error": str(exc)})
+            logger.error(f"Exception deleting tags from testcase {oid}: {exc}")
 
     data = _load_tc_data(branch, team)
     for tc in data.get("testcases", []):
-        if tc.get("oid") in testcase_oids:
+        if tc.get("oid") in successful_oids:
             tc["tags"] = [t for t in tc.get("tags", []) if t not in tags_to_delete]
     data["last_updated"] = datetime.utcnow().isoformat() + "Z"
     _save_tc_data(branch, team, data)
@@ -12840,13 +12854,16 @@ def cursor_ai_chat():
                 "tools_used": tools_used,
             })
 
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode() if e.fp else ""
-        logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
-        return jsonify({"error": f"AI API error (HTTP {e.code})"}), 502
-    except urllib.error.URLError as e:
-        logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason}), falling back to Cursor Bridge")
-        # Fallback: route through the Cursor Bridge when the Nutanix AI endpoint is down
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        # Handle both HTTP errors (401, 403, 500, etc) and connection errors
+        if isinstance(e, urllib.error.HTTPError):
+            error_body = e.read().decode() if e.fp else ""
+            logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
+            logger.info(f"[cursor-ai-chat] Nutanix AI returned HTTP {e.code}, falling back to Cursor Bridge")
+        else:
+            logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason}), falling back to Cursor Bridge")
+        
+        # Fallback: route through the Cursor Bridge when the Nutanix AI endpoint fails
         try:
             last_user_msg = ""
             for msg in reversed(messages):
