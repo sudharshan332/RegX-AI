@@ -39,9 +39,15 @@ from tag_extra_task_ids import (
     plan_accept_after_tagging,
     remove_extras_for_tag,
 )
+from user_keys import (
+    get_user_key,
+    get_user_keys_masked,
+    upsert_user_keys,
+)
 
 # ======================================================
-# Load environment variables from a .env file (JIRA_TOKEN, GLEAN_TOKEN, etc.).
+# Load environment variables from a .env file (GLEAN_TOKEN, etc.).
+# Jira auth prefers User Settings → Atlassian Jira Personal Token (see user_keys).
 # Looks in the project root and the backend/ directory. Existing real env vars
 # always win. No-op if python-dotenv isn't installed.
 # ======================================================
@@ -3321,7 +3327,7 @@ def _build_triage_genie_job_url(task_ids, tag=None):
     Build the Triage Genie URL for this Full regression task set.
 
     Always matches JITA → Tests → "View in Triage Genie":
-      http://triage-genie.eng.nutanix.com/?jita_task_ids=<Full_link_ids>
+      http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=<Full_link_ids>
 
     Optionally annotate an exact-match stored job id for display only.
     """
@@ -3335,7 +3341,7 @@ def _build_triage_genie_job_url(task_ids, tag=None):
         }
 
     view_in_tg_url = (
-        "http://triage-genie.eng.nutanix.com/?jita_task_ids="
+        "http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids="
         + ",".join(ids_for_link)
     )
     job_id = None
@@ -6283,13 +6289,45 @@ def create_triage_genie_job():
 JIRA_BASE = "https://jira.nutanix.com/rest/api/2"
 GLEAN_BASE = "https://nutanix-be.glean.com/api/v1"
 
-def get_jira_headers():
-    """Get Jira API headers with authentication"""
-    jira_token = os.getenv("JIRA_TOKEN", "")
+
+def _current_username():
+    """Logged-in username from JWT (g.current_user), if any."""
+    try:
+        user = getattr(g, "current_user", None) or {}
+        return (user.get("sub") or user.get("username") or "").strip()
+    except Exception:
+        return ""
+
+
+def resolve_jira_token(explicit_token=None):
+    """
+    Resolve Jira personal token for API calls.
+
+    Preference:
+      1. explicit_token (captured before thread-pool work)
+      2. User Settings → Atlassian Jira Personal Token (per logged-in user)
+      3. Legacy JIRA_TOKEN env (optional fallback only)
+    """
+    if explicit_token and str(explicit_token).strip():
+        return str(explicit_token).strip()
+    username = _current_username()
+    if username:
+        user_tok = get_user_key(username, "atlassian_jira_token")
+        if user_tok:
+            return user_tok.strip()
+    env_tok = (os.getenv("JIRA_TOKEN") or "").strip()
+    return env_tok or ""
+
+
+def get_jira_headers(token=None):
+    """Get Jira API headers with authentication."""
+    jira_token = resolve_jira_token(token)
     return {
+        "Accept": "application/json",
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {jira_token}" if jira_token else ""
+        "Authorization": f"Bearer {jira_token}" if jira_token else "",
     }
+
 
 def get_glean_headers():
     """Get Glean API headers with authentication"""
@@ -6299,18 +6337,23 @@ def get_glean_headers():
         "Authorization": f"Bearer {glean_token}" if glean_token else ""
     }
 
-def fetch_jira_ticket(ticket_id):
-    """Fetch Jira ticket details"""
+
+def fetch_jira_ticket(ticket_id, token=None):
+    """Fetch Jira ticket details. Pass token when calling from worker threads."""
     try:
-        if not os.getenv("JIRA_TOKEN"):
-            logger.warning("JIRA_TOKEN not set, skipping Jira API call")
+        jira_token = resolve_jira_token(token)
+        if not jira_token:
+            logger.warning(
+                "Jira token not available (set Atlassian Jira Personal Token in User Settings)"
+            )
             return None
-        
-        headers = get_jira_headers()
+
+        headers = get_jira_headers(jira_token)
         resp = session.get(
             f"{JIRA_BASE}/issue/{ticket_id}",
             headers=headers,
-            timeout=30
+            timeout=30,
+            verify=False,
         )
         if resp.status_code == 200:
             return resp.json()
@@ -6320,6 +6363,7 @@ def fetch_jira_ticket(ticket_id):
     except Exception as e:
         logger.warning(f"Error fetching Jira ticket {ticket_id}: {e}")
         return None
+
 
 def search_glean(query_text):
     """Search Glean for similar issues"""
@@ -13561,6 +13605,119 @@ def ai_deep_triage():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/mcp/regression/user-keys", methods=["GET", "PUT"])
+@app.route("/api/mcp/regression/user-keys", methods=["GET", "PUT"])
+@jwt_required
+def user_api_keys():
+    """Load or save per-user API keys (User Settings → API Keys)."""
+    username = _current_username()
+    if not username:
+        return jsonify({"error": "Unable to resolve current user"}), 401
+
+    if request.method == "GET":
+        return jsonify(get_user_keys_masked(username))
+
+    body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "Expected a JSON object of keys"}), 400
+    try:
+        masked = upsert_user_keys(username, body)
+        return jsonify(masked)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logger.error("Failed to save user keys for %s: %s", username, exc, exc_info=True)
+        return jsonify({"error": "Failed to save keys"}), 500
+
+
+@app.route("/mcp/regression/user-keys/validate", methods=["POST"])
+@app.route("/api/mcp/regression/user-keys/validate", methods=["POST"])
+@jwt_required
+def validate_user_api_keys():
+    """Best-effort key checks. Failures here do not block using a saved Jira token."""
+    username = _current_username()
+    body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "Expected a JSON object of keys"}), 400
+
+    results = {}
+
+    cursor_key = (body.get("cursor_api_key") or "").strip()
+    if not cursor_key or "****" in cursor_key:
+        cursor_key = get_user_key(username, "cursor_api_key") or ""
+    if not cursor_key:
+        results["cursor_api_key"] = {"valid": None, "message": "Not provided (optional for Jira lookups)"}
+    elif cursor_key.startswith("crsr_") or cursor_key.startswith("key_"):
+        results["cursor_api_key"] = {"valid": True, "message": "Format looks valid"}
+    else:
+        results["cursor_api_key"] = {
+            "valid": None,
+            "message": "Format unusual — still saved if you clicked Save",
+        }
+
+    # Prefer request body plaintext; otherwise use decrypted User Settings store.
+    jira_tok = (body.get("atlassian_jira_token") or "").strip()
+    if not jira_tok or "****" in jira_tok:
+        jira_tok = get_user_key(username, "atlassian_jira_token") or ""
+    if not jira_tok:
+        results["atlassian_jira_token"] = {
+            "valid": None,
+            "message": "Not saved yet — paste token and click Save (Test Keys is optional)",
+        }
+    else:
+        try:
+            resp = session.get(
+                f"{JIRA_BASE}/myself",
+                headers=get_jira_headers(jira_tok),
+                timeout=15,
+                verify=False,
+            )
+            if resp.status_code == 200:
+                display = (resp.json() or {}).get("displayName") or "OK"
+                results["atlassian_jira_token"] = {
+                    "valid": True,
+                    "message": f"Authenticated as {display}",
+                }
+            elif resp.status_code in (401, 403):
+                # Still keep the token for ticket fetches — auth style can differ.
+                results["atlassian_jira_token"] = {
+                    "valid": None,
+                    "message": (
+                        f"Live /myself check returned HTTP {resp.status_code}. "
+                        "Token is still used for ticket lookups after Save."
+                    ),
+                }
+            else:
+                results["atlassian_jira_token"] = {
+                    "valid": None,
+                    "message": (
+                        f"Live check HTTP {resp.status_code}. "
+                        "Token is still used for ticket lookups after Save."
+                    ),
+                }
+        except Exception as exc:
+            results["atlassian_jira_token"] = {
+                "valid": None,
+                "message": (
+                    f"Could not reach Jira for Test Keys ({exc}). "
+                    "Save the token anyway — dashboard ticket fetches will use it."
+                ),
+            }
+
+    conf_tok = (body.get("atlassian_confluence_token") or "").strip()
+    if not conf_tok or "****" in conf_tok:
+        conf_tok = get_user_key(username, "atlassian_confluence_token") or ""
+    if not conf_tok:
+        results["atlassian_confluence_token"] = {"valid": None, "message": "Not provided"}
+    else:
+        results["atlassian_confluence_token"] = {
+            "valid": True,
+            "message": "Saved (live Confluence probe skipped)",
+        }
+
+    return jsonify({"results": results})
+
+
 @app.route("/mcp/regression/jira-ticket-details", methods=["POST"])
 @app.route("/api/mcp/regression/jira-ticket-details", methods=["POST"])
 @jwt_required
@@ -13572,12 +13729,24 @@ def get_jira_ticket_details():
         if not ticket_ids:
             return jsonify({"error": "No ticket IDs provided"}), 400
 
+        # Capture token on the request thread (Flask g is not safe across workers).
+        jira_token = resolve_jira_token()
+        if not jira_token:
+            return jsonify({
+                "success": False,
+                "error": (
+                    "Jira personal token not configured. "
+                    "Open User Settings → API Keys and add your Atlassian Jira Personal Token."
+                ),
+                "details": {},
+            }), 400
+
         # De-dupe and cap generously; fetch in parallel so large owner maps
         # (100+ unique tickets) return well within the client timeout.
         unique_ids = list(dict.fromkeys(ticket_ids))[:200]
 
         def _one(ticket_id):
-            jira_data = fetch_jira_ticket(ticket_id)
+            jira_data = fetch_jira_ticket(ticket_id, token=jira_token)
             if jira_data:
                 fields = jira_data.get("fields", {})
                 issue_type = fields.get("issuetype", {}).get("name", "Unknown")
@@ -14736,7 +14905,7 @@ def _fetch_ticket_issuetype(ticket):
     if "-" in ticket and ticket.split("-")[0].isalpha():
         ticket = ticket.split("-")[0].upper() + "-" + (ticket.split("-", 1)[1] or "")
 
-    if not os.getenv("JIRA_TOKEN"):
+    if not resolve_jira_token():
         return None, "Jira not configured"
 
     url = "%s/issue/%s" % (JIRA_BASE, ticket)
@@ -14828,7 +14997,7 @@ def _aggregate_jita_test_cases(test_data, min_passes_for_success=1, auto_categor
                         jira_tickets.append(ticket_clean)
 
         bug_types = set()
-        if auto_categorize_bug_types and jira_tickets and os.getenv("JIRA_TOKEN"):
+        if auto_categorize_bug_types and jira_tickets and resolve_jira_token():
             for ticket in jira_tickets:
                 if not ticket or not ticket.strip():
                     continue
@@ -15187,10 +15356,13 @@ def validate_jira_ticket():
     if "-" in ticket and ticket.split("-")[0].isalpha():
         ticket = ticket.split("-")[0].upper() + "-" + (ticket.split("-", 1)[1] or "")
 
-    if not os.getenv("JIRA_TOKEN"):
+    if not resolve_jira_token():
         return jsonify({
             "valid": None, "ticket": ticket, "issuetype": None, "skipped": True,
-            "message": "Jira validation is not configured. Set the JIRA_TOKEN environment variable (same one the dashboard uses) and restart the backend."
+            "message": (
+                "Jira validation is not configured. "
+                "Open User Settings → API Keys and add your Atlassian Jira Personal Token."
+            )
         }), 200
 
     url = "%s/issue/%s" % (JIRA_BASE, ticket)
@@ -15200,7 +15372,10 @@ def validate_jira_ticket():
         if resp.status_code == 401:
             return jsonify({
                 "valid": False, "ticket": ticket, "issuetype": None,
-                "error": "Authentication required. Check the JIRA_TOKEN environment variable."
+                "error": (
+                    "Authentication required. Check your Atlassian Jira Personal Token "
+                    "in User Settings → API Keys."
+                )
             }), 200
         if resp.status_code == 404:
             return jsonify({"valid": False, "ticket": ticket, "issuetype": None, "error": "Ticket not found"}), 200

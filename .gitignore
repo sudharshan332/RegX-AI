@@ -218,3 +218,7 @@ regx_env/
 
 # macOS
 .DS_Store
+
+# Per-user encrypted API keys (User Settings)
+data/user_api_keys.json
+data/user_api_keys.fernet

@@ -6,6 +6,7 @@ import {
   scopeToQueryParams,
   scopeToRequestPayload,
   shouldPostTriageScope,
+  TG_SCOPE_POST_THRESHOLD,
 } from '../utils/regressionScope';
 import './TriageGenieCoverageModal.css';
 
@@ -21,9 +22,42 @@ function formatTime(iso) {
 async function fetchTriageGenieCoverage(scope, { reload = false } = {}) {
   // Coverage is fast (JITA + cached TG tickets); keep timeout modest
   const timeout = 180000;
+  const tag = (scope?.tag || '').trim();
+  const taskIds = Array.isArray(scope?.taskIds) ? scope.taskIds.filter(Boolean) : [];
+
+  // Prefer tag-scoped GET when a dashboard tag is set — works on older backends
+  // that only allow GET, and avoids long URL / POST 405 issues.
+  // Instant View-in-TG / JITA links still use Full-link taskIds from the client.
+  if (tag && !reload) {
+    return api.get('/mcp/regression/triage-genie-coverage', {
+      params: scopeToQueryParams({ mode: 'tag', tag, taskIds: null }, { reload: false }),
+      timeout,
+    });
+  }
+
   if (shouldPostTriageScope(scope)) {
     const body = scopeToRequestPayload(scope, { reload });
-    return api.post('/mcp/regression/triage-genie-coverage', body, { timeout });
+    try {
+      return await api.post('/mcp/regression/triage-genie-coverage', body, { timeout });
+    } catch (err) {
+      // Stale backends may only allow GET — fall back to tag or truncated IDs.
+      if (err?.response?.status === 405) {
+        if (tag) {
+          return api.get('/mcp/regression/triage-genie-coverage', {
+            params: scopeToQueryParams({ mode: 'tag', tag, taskIds: null }, { reload }),
+            timeout,
+          });
+        }
+        return api.get('/mcp/regression/triage-genie-coverage', {
+          params: scopeToQueryParams(
+            { ...scope, taskIds: taskIds.slice(0, TG_SCOPE_POST_THRESHOLD) },
+            { reload },
+          ),
+          timeout,
+        });
+      }
+      throw err;
+    }
   }
   const params = scopeToQueryParams(scope, { reload });
   return api.get('/mcp/regression/triage-genie-coverage', { params, timeout });
@@ -103,11 +137,17 @@ export default function TriageGenieCoverageModal({ open, onClose }) {
   const summary = data?.summary || {};
   const byOwner = data?.by_owner || [];
   // Prefer instant View-in-TG / JITA links from Full link; fall back to API links
+  // TG must use /view_tasks?jita_task_ids=… (same as JITA → View in Triage Genie).
   const jitaUrl = instantLinks.jita_results_url || data?.links?.jita_results_url;
   const tgUrl =
     instantLinks.triage_genie_url ||
     data?.links?.triage_genie_view_url ||
-    data?.links?.triage_genie_url;
+    (data?.links?.triage_genie_url?.includes('/view_tasks?')
+      ? data.links.triage_genie_url
+      : null) ||
+    (Array.isArray(data?.task_ids) && data.task_ids.length
+      ? buildViewInTriageGenieUrl(data.task_ids)
+      : null);
   const activeTag = data?.tag || scope?.tag || '—';
   const taskCount = Array.isArray(scope?.taskIds)
     ? scope.taskIds.length

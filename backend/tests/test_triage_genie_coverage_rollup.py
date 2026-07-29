@@ -96,11 +96,11 @@ class TestTriageGenieCoverageRollup(unittest.TestCase):
         # Primary Open TG link = JITA "View in Triage Genie" style
         self.assertEqual(
             out["links"]["triage_genie_url"],
-            "http://triage-genie.eng.nutanix.com/?jita_task_ids=aaa,bbb",
+            "http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=aaa,bbb",
         )
         self.assertEqual(
             out["links"]["triage_genie_view_url"],
-            "http://triage-genie.eng.nutanix.com/?jita_task_ids=aaa,bbb",
+            "http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=aaa,bbb",
         )
 
     def test_cache_miss_when_full_link_grows(self):
@@ -159,7 +159,7 @@ class TestTriageGenieCoverageRollup(unittest.TestCase):
         job = h["_find_best_triage_genie_job"](wanted)
         self.assertEqual(job["id"], 42)
         links = h["_build_triage_genie_job_url"](wanted, tag="7.6")
-        expected = "http://triage-genie.eng.nutanix.com/?jita_task_ids=" + ",".join(wanted)
+        expected = "http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=" + ",".join(wanted)
         self.assertEqual(links["triage_genie_url"], expected)
         self.assertEqual(links["triage_genie_view_url"], expected)
         self.assertEqual(links["triage_genie_job_id"], 42)
@@ -184,7 +184,7 @@ class TestTriageGenieCoverageRollup(unittest.TestCase):
         links = h["_build_triage_genie_job_url"](wanted, tag="7.6|RC1")
         self.assertEqual(
             links["triage_genie_url"],
-            "http://triage-genie.eng.nutanix.com/?jita_task_ids=" + ",".join(wanted),
+            "http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=" + ",".join(wanted),
         )
         self.assertNotIn("/tasks/3192", links["triage_genie_url"] or "")
         self.assertEqual(links["triage_genie_view_url"], links["triage_genie_url"])

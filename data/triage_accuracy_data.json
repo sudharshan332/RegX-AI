@@ -1,0 +1,411 @@
+{
+  "generated_time": "2026-03-22T17:21:51.926250",
+  "tag": "cdp_reg_751_run_5",
+  "task_ids": [
+    "69ba8bc3d24d8219b09c7599",
+    "69ba89f3b5e475e725ba2615",
+    "69b91978d24d82f7557841fe",
+    "69b91543d24d82f75718b7df",
+    "69b915062bc0c4339a862568",
+    "69b914c08e79ceaa682d63ef",
+    "69b8fd30b5e475bebd2cf232",
+    "69b8ee562bc0c433b63794a0",
+    "69b8de20d24d82f75981e4e2",
+    "69b8cfd32bc0c4339cc3fa76",
+    "69b8ca1d2bc0c433a3d1abe6",
+    "69b7e3728e79ceaa66a400fd",
+    "69b7d8eab5e475a23c180b84",
+    "69b7d8b72bc0c41490dff289",
+    "69b7d8932bc0c41499b9de7c",
+    "69b791cc2bc0c4bb30a8c1bd",
+    "69b76fd28e79cefef349786a",
+    "69b76f99d24d8297c194a72f",
+    "69b76f752bc0c4bb38d7d286",
+    "69b76eccd24d8297b8d8e825",
+    "69b76ea0d24d8297c483ca57",
+    "69b76e9bd24d8297aed74ae8",
+    "69b76e96b5e47547138cd368",
+    "69b76e8d2bc0c4bb2fd98af2",
+    "69b76e85d24d8297aed74a87",
+    "69b76e81b5e475471ce6801d",
+    "69b76e7ad24d8297b797497f",
+    "69b76e432bc0c4bb2fd98ac0",
+    "69b76e3e8e79ceaa87fc11d8",
+    "69b76e392bc0c4bb31330b1d",
+    "69b76e34b5e47547138cd351",
+    "69b76e2d2bc0c4bb4c154de4",
+    "69b76e24b5e47547146bb695",
+    "69b440d6b5e475d4ad4ced67",
+    "69b43f01d24d8239543b23b4",
+    "69b3af50b5e475d4b43e35c9",
+    "69b2faf58e79ceaa9e79f1e5",
+    "69b2ea69b5e475abef05ec49",
+    "69b248afb5e475abf1656367",
+    "69b241888e79ceaaa0e3879f",
+    "69b101fed24d82f62afa0449",
+    "69b101dc2bc0c4f41a67895a",
+    "69b04c262bc0c4cbb332402f",
+    "69b04bfad24d82d27ade9c45",
+    "69b04bf1b5e4755ea8eda0ed",
+    "69b04bed2bc0c4cbc0fd1ee2",
+    "69b04be92bc0c4cbba7c0a36",
+    "69b04be62bc0c4cbb7831aea",
+    "69b04bca8e79ceaa93295d39",
+    "69b04bc58e79ceaa8c8cba4d",
+    "69b043dbd24d82d28b4d810a",
+    "69b043c7b5e4755eb399cb1e",
+    "69b043bc8e79ceaa87fa03b2",
+    "69b043a58e79ceaa8357630b"
+  ],
+  "testcases": [
+    {
+      "testcase_name": "cdp.curator.goldsuite.test_curator_gold_suite.CuratorGoldSuiteTest.test_gold___basic",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-882890",
+      "jira_ticket": "ENG-900236",
+      "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.stargate.dedup.dedup_snapshot_clone.test_dedup_snapshot_clone.DedupSnapshotCloneTest.test_dedup_saving___snapshot_clone_mix_non_overwrite",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-884368",
+      "jira_ticket": "ENG-884368",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.stargate.power_cycling.test_io_integrity_power_cycling.PowerCyclingIOIntegrityTest~~~AES_Brownfield.test_io_integrity___svm_cycle_mixed",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-880225",
+      "jira_ticket": "ENG-880225",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.zookeeper.zookeeper_resilience.test_zk_resilience.TestZkResilience.test_kill_node",
+      "regression_owner": "Swapnil",
+      "status": "Warning",
+      "triage_genie_ticket": "",
+      "jira_ticket": "ENG-842128",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.volume_group.test_vg_v4_api.TestVGV4Api~~~V40a3.test_vg_upgrade___v4_to_v4",
+      "regression_owner": "Suryaprabha",
+      "status": "Warning",
+      "triage_genie_ticket": "ENG-885124",
+      "jira_ticket": "ENG-875658",
+      "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.stargate.volume_group.test_vg_v4_api.TestVGV4Api~~~V40a3.test_vg_upgrade___non_v4_to_v4",
+      "regression_owner": "Suryaprabha",
+      "status": "Warning",
+      "triage_genie_ticket": "ENG-885124",
+      "jira_ticket": "ENG-875658",
+      "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.stargate.abs.test_shared_vg_abs_io_integrity.ABSSharedVGTest.test_shared_vg_io_integrity___upgrade_esx",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-887962",
+      "jira_ticket": "ENG-887962",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.stargate.qos_policy.upgrade.test_qos_policy_upgrade.TestQOSPolicyUpgrade.test_policy_upgrade___esx",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "SMOKE-454",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.aes.brownfield.test_aes_brownfield.AESBrownfield.test_aes_brownfield_upgrade",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-894801",
+      "jira_ticket": "ENG-900842",
+      "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.stargate.abs.test_shared_vg_abs_io_integrity.ABSSharedVGTest~~~Copy_up.test_shared_vg_io_integrity___upgrade",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-887962",
+      "jira_ticket": "ENG-887962",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "manageability.ui.pc.smart_rebuild.test_smart_rebuild_action.TestSmartRebuild.test_smart_rebuild_on_cluster___PESetting",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-895862",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_remove_qos_attribute_batch_action_with_partial_override",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
+    },
+    {
+      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___throttling",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "AUTO-27813",
+      "jira_ticket": "AUTO-27813",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "manageability.api.enhanced_pc_rbac.hades.test_rbac_hades.TestRbacHades.test_rbac_hades",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-893191",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.erasure_code.test_erasure_on_off_io_integrity.ErasureOnOffIOIntegrityTest~~~AES.test_erasure_on_off_io_integrity___component_ei_ft2",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-893274",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.medusa_nike.medusa_nike_integrity_tests.test_medusa_nike_integrity.MedusaNikeIntegrityTest.test_medusa_nike_integrity___unhealthy_rapid_attach_detach_nonallflash_dcfs",
+      "regression_owner": "Thanuja",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-902890",
+      "jira_ticket": "ENG-902890",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.medusa_nike.medusa_nike_integrity_tests.test_medusa_nike_integrity.MedusaNikeIntegrityTest.test_medusa_nike_integrity___self_healing_repeated_restarts_acting_drc_crash_nonallflash_dcfs",
+      "regression_owner": "Thanuja",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-804361",
+      "jira_ticket": "ENG-804361",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.stargate.redhat_guest_cluster.test_rhel_guest_cluster.RHELGuestClusterTest.test_rhel_cluster_io_integrity___direct_attach_vg_with_vglb_vmotion",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-891014",
+      "jira_ticket": "ENG-891014",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___increase_cluster_rf_node_aware",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-897048",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pe.home_page.test_data_resiliency_widget.DataResiliencyTest.test_data_resiliency_widget___decrease_container_rf_block_aware",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
+    },
+    {
+      "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___host_down_block_aware_rf2",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-897048",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___host_down_node_aware_rf2",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-897048",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___node_to_block_awareness_rf2",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-897048",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.erasure_code.aesdb_corrupt.test_erasure_aesdb_corrupt.ErasureAESDBCorrupt.test_erasure_aesdb_corrupt___corrupt_random_sstable_blocks",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-825215",
+      "jira_ticket": "ENG-825215",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.stargate.erasure_code.aesdb_corrupt.test_erasure_aesdb_corrupt.ErasureAESDBCorrupt.test_erasure_aesdb_corrupt___truncate_manifest",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-825215",
+      "jira_ticket": "ENG-825215",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.hades.nvme_hdd_support.test_nvme_hdd_node_ops.TestNvmeHddNodeOps.test_hybrid_node_add_to_blockstore_eligible_cluster",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-836421",
+      "jira_ticket": "ENG-836421",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_error_injected_io_integrity_with_iser",
+      "regression_owner": "Thanuja",
+      "status": "Failed",
+      "triage_genie_ticket": "DIAL-20734",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.qos_policy.upgrade.test_qos_policy_upgrade.TestQOSPolicyUpgrade.test_policy_upgrade",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-884938",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.storage_policy.upgrade.test_sp_upgrade.TestSPUpgrade.test_upgrade___pc_pe_upgrade",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
+    },
+    {
+      "testcase_name": "cdp.stargate.dedup.dedup_upgrade.test_dedup_upgrade.DedupUpgradeTest~~~AES.test_dedup_upgrade___LC_fallback",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
+    },
+    {
+      "testcase_name": "cdp.stargate.dedup.dedup_upgrade.test_dedup_upgrade.DedupUpgradeTest~~~AES.test_dedup_upgrade___LC_fallback_staggered",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
+    },
+    {
+      "testcase_name": "cdp.stargate.dedup.dedup_upgrade.test_dedup_upgrade.DedupUpgradeTest.test_dedup_upgrade___LC_fallback",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
+    },
+    {
+      "testcase_name": "cdp.stargate.dedup.dedup_upgrade.test_dedup_upgrade.DedupUpgradeTest.test_dedup_upgrade___LC_fallback_staggered",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-541213",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.zookeeper.zk_preupgrade_checks.test_preupgradechecks.TestPreUpgradeChecks.test_preupgrade_checks",
+      "regression_owner": "Swapnil",
+      "status": "Warning",
+      "triage_genie_ticket": "",
+      "jira_ticket": "ENG-813036",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.dedup.test_on_disk_dedup_enabled.OnDiskDedupEnabledTest.test_dedup_ratio",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-887526",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.erasure_code.aesdb_corrupt.test_erasure_aesdb_corrupt.ErasureAESDBCorrupt.test_erasure_aesdb_corrupt___truncate_sstable",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-825215",
+      "jira_ticket": "ENG-825215",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.medusa_nike.medusa_nike_integrity_tests.test_medusa_nike_integrity.MedusaNikeIntegrityTest.test_medusa_nike_integrity___metadata_disk_replacement_nonallflash_dcfs",
+      "regression_owner": "Thanuja",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-784238",
+      "jira_ticket": "ENG-784238",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.curator.goldsuite.test_curator_gold_suite.CuratorGoldSuiteTest.test_gold___garbage_collection_only",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-894030",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.zookeeper.zookeeper_resilience.test_zk_resilience.TestZkResilience~~~ft_2.test_kill_node",
+      "regression_owner": "Swapnil",
+      "status": "Warning",
+      "triage_genie_ticket": "ENG-883110",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.enforceftc.test_oru.ORUTest.test_oru___rebuild_node_atfullcapacity",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-893783",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.curator.goldsuite_iointegrity.test_goldsuite.CuratorGoldSuiteTest.test_gold___cluster_upgrade_with_disk_balancing",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-885699",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.curator.goldsuite_iointegrity.test_goldsuite.CuratorGoldSuiteTest.test_gold___cluster_upgrade_and_bg_task_retention",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-845169",
+      "jira_ticket": "",
+      "match_status": ""
+    }
+  ],
+  "triage_summary": {
+    "total_failed_warning_count": 42,
+    "triaged_count": 19,
+    "triage_genie_count": 17,
+    "total_triage_genie_count": 34,
+    "triage_completed_percent": 45.2,
+    "triage_genie_percent": 89.5,
+    "total_triage_genie_percent": 81.0,
+    "matched_count": 13,
+    "unmatched_count": 4,
+    "matched_percent": 76.5,
+    "unmatched_percent": 23.5
+  }
+}

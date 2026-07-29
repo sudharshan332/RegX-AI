@@ -13,5 +13,6 @@
     "master|Full|25Jul2026"
   ],
   "tag": "7.6|RC3-july-13-2026",
-  "task_ids": []
+  "task_ids": [],
+  "tag_extra_task_ids": {}
 }

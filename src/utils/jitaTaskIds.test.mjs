@@ -4,6 +4,7 @@
 import {
   extractJitaTaskIds,
   buildJitaResultsUrl,
+  buildViewInTriageGenieUrl,
   mergeJitaTaskIds,
   normalizeJitaTaskId,
 } from "./jitaTaskIds.js";
@@ -75,6 +76,13 @@ assert(
   "next tag fetch must include prior tag tasks + extras (no miss, no dupe)"
 );
 assert(nextTagFetchUnion.added.length === 1 && nextTagFetchUnion.added[0] === C, "only C is new vs tag set");
+
+assert(
+  buildViewInTriageGenieUrl([A, B]) ===
+    `http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=${A},${B}`,
+  "View in TG matches JITA /view_tasks?jita_task_ids="
+);
+assert(buildViewInTriageGenieUrl([]) === null, "empty TG → null");
 
 if (failed) {
   console.error(`\n${failed} assertion(s) failed`);

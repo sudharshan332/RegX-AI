@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import api, { syncCursorAiSkills } from '../api';
 import { API_BASE_URL } from '../config';
 import AiMarkdown from '../components/AiMarkdown';
+import KeyManagementPanel from '../components/KeyManagementPanel';
 import './CursorAI.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/cursor-ai`;
@@ -362,6 +363,11 @@ export default function CursorAI() {
             </div>
             <div className="settings-modal-body">
               <section className="settings-section">
+                <h4>API Keys</h4>
+                <KeyManagementPanel onClose={() => setShowSettings(false)} />
+              </section>
+
+              <section className="settings-section">
                 <h4>Skill Sync</h4>
                 <p>Sync predefined analysis skills from Sourcegraph into RegX local skills.</p>
                 <div className="settings-skill-list">
@@ -392,13 +398,6 @@ export default function CursorAI() {
                     )}
                   </div>
                 )}
-              </section>
-
-              <section className="settings-section">
-                <h4>Future Integrations</h4>
-                <p>
-                  This area is reserved for user-specific integration settings (for example, external tool tokens).
-                </p>
               </section>
             </div>
           </div>

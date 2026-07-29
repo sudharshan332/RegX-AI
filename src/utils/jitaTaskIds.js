@@ -81,12 +81,12 @@ export function buildJitaResultsUrl(taskIds = []) {
 
 /**
  * Same URL as JITA Tests → "View in Triage Genie" for a results task set.
- * http://triage-genie.eng.nutanix.com/?jita_task_ids=<ids>
+ * http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=<ids>
  */
 export function buildViewInTriageGenieUrl(taskIds = []) {
   const ids = normalizeJitaTaskIdList(taskIds);
   if (ids.length === 0) return null;
-  return `http://triage-genie.eng.nutanix.com/?jita_task_ids=${ids.join(",")}`;
+  return `http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=${ids.join(",")}`;
 }
 
 /**
