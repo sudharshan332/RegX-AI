@@ -14,9 +14,9 @@
   --djp-blue: #365b78;
   --djp-red: #e74c3c;
   --djp-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
-  padding: 14px 6px;
+  padding: 24px 28px 48px;
   background: var(--djp-bg);
-  min-height: auto;
+  min-height: 0;
   font-family: Inter, Arial, sans-serif;
   font-size: 12px;
   color: var(--djp-text);

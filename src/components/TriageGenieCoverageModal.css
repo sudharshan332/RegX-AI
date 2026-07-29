@@ -1,0 +1,250 @@
+.tg-cov-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 64px 20px 24px;
+  box-sizing: border-box;
+}
+
+.tg-cov-panel {
+  width: min(920px, 100%);
+  max-height: calc(100vh - 88px);
+  overflow: auto;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.28);
+  border: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tg-cov-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid #e8edf3;
+  position: sticky;
+  top: 0;
+  background: #fff;
+  z-index: 1;
+}
+
+.tg-cov-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+  color: #1e293b;
+}
+
+.tg-cov-subtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.tg-cov-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.tg-cov-btn {
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tg-cov-btn:hover:not(:disabled) {
+  background: #eef2f7;
+}
+
+.tg-cov-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tg-cov-btn-primary {
+  background: #2f485f;
+  border-color: #2f485f;
+  color: #fff;
+}
+
+.tg-cov-btn-primary:hover:not(:disabled) {
+  background: #36546f;
+}
+
+.tg-cov-close {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 8px;
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tg-cov-close:hover {
+  background: #e2e8f0;
+}
+
+.tg-cov-body {
+  padding: 14px 18px 18px;
+}
+
+.tg-cov-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.tg-cov-tile {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 12px 10px;
+  background: #f8fafc;
+}
+
+.tg-cov-tile-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+
+.tg-cov-tile-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.tg-cov-tile.warn .tg-cov-tile-value {
+  color: #b45309;
+}
+
+.tg-cov-tile.bad .tg-cov-tile-value {
+  color: #b91c1c;
+}
+
+.tg-cov-tile.ok .tg-cov-tile-value {
+  color: #15803d;
+}
+
+.tg-cov-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.tg-cov-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #1d4ed8;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.tg-cov-link:hover {
+  background: #f1f5f9;
+}
+
+.tg-cov-status {
+  padding: 24px 8px;
+  text-align: center;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.tg-cov-status-hint {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.4;
+  max-width: 36em;
+}
+
+.tg-cov-error {
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.tg-cov-table-wrap {
+  overflow: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.tg-cov-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.tg-cov-table th,
+.tg-cov-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid #eef2f7;
+  white-space: nowrap;
+}
+
+.tg-cov-table th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+}
+
+.tg-cov-table td.num,
+.tg-cov-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.tg-cov-table tr.needs-work td {
+  background: #fffbeb;
+}
+
+.tg-cov-meta {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+@media (max-width: 720px) {
+  .tg-cov-overlay {
+    padding: 56px 10px 12px;
+    justify-content: stretch;
+  }
+
+  .tg-cov-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

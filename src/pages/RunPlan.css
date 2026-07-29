@@ -1,7 +1,10 @@
 .run-plan-container {
-  padding: 20px;
+  padding: 24px 28px 48px;
   background: white;
-  min-height: 100vh;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  min-height: 0;
 }
 
 .run-plan-header {
@@ -315,11 +318,18 @@
 
 .form-actions {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: center;
   gap: 10px;
   margin-top: 30px;
   padding-top: 20px;
   border-top: 1px solid #e0e0e0;
+}
+
+.form-actions-right {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
 }
 
 .form-actions button {
@@ -331,8 +341,24 @@
   font-size: 14px;
 }
 
-.form-actions button:hover {
+.form-actions button:hover:not(:disabled) {
   background: #f0f0f0;
+}
+
+.form-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.form-actions .btn-danger-outline {
+  border-color: #e74c3c;
+  color: #c0392b;
+  background: #fff;
+}
+
+.form-actions .btn-danger-outline:hover:not(:disabled) {
+  background: #fdecea;
+  border-color: #c0392b;
 }
 
 .task-ids {

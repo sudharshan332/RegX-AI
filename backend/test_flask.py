@@ -26,6 +26,19 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from auth import LDAPAuth, create_jwt, decode_jwt, jwt_required
+from owner_triage_report import (
+    build_owner_status_table,
+    resolve_task_ids_from_payload,
+)
+from tag_extra_task_ids import (
+    append_extras_for_tag,
+    classify_task_ids_against_tag,
+    get_extras_for_tag,
+    merge_unique_ids,
+    normalize_task_id_list,
+    plan_accept_after_tagging,
+    remove_extras_for_tag,
+)
 
 # ======================================================
 # Load environment variables from a .env file (JIRA_TOKEN, GLEAN_TOKEN, etc.).
@@ -232,7 +245,27 @@ HEADERS = {
 manual_tasks_store = {}
 
 # Run Plan storage file
-RUN_PLAN_STORAGE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "run_plans.json")
+# Production file by default. For isolated feature testing set:
+#   REGX_RUN_PLANS_FILE=/path/to/run_plans_test.json
+# so dummy plans never write into production run_plans.json.
+_RUN_PLANS_DEFAULT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "run_plans.json")
+RUN_PLAN_STORAGE = os.environ.get("REGX_RUN_PLANS_FILE") or _RUN_PLANS_DEFAULT
+
+
+def _is_dummy_run_plan(run_plan):
+    """Dummy/test plans must not auto-trigger into production schedules."""
+    if not isinstance(run_plan, dict):
+        return False
+    if run_plan.get("is_dummy") is True:
+        return True
+    name = (run_plan.get("name") or "").strip()
+    tag = (run_plan.get("tag_name") or "").strip()
+    for value in (name, tag):
+        upper = value.upper()
+        if upper.startswith("[TEST]") or upper.startswith("DUMMY_") or upper.startswith("DUMMY-"):
+            return True
+    return False
+
 
 def load_run_plans():
     """Load run plans from JSON file, backfilling missing fields on older entries."""
@@ -250,6 +283,9 @@ def load_run_plans():
                     dirty = True
                 if "service_account" not in rp:
                     rp["service_account"] = ""
+                    dirty = True
+                if "is_dummy" not in rp:
+                    rp["is_dummy"] = _is_dummy_run_plan(rp)
                     dirty = True
             if dirty:
                 save_run_plans(data)
@@ -351,6 +387,9 @@ def _run_plan_scheduler_loop():
                 now = datetime.now()
                 triggered_any = False
                 for rp in data.get("run_plans", []):
+                    if _is_dummy_run_plan(rp):
+                        # Never auto-trigger dummy/test plans into JITA production runs
+                        continue
                     sched = rp.get("schedule_date")
                     if not sched:
                         continue
@@ -414,13 +453,16 @@ def load_regression_config():
                 else:
                     config["default_tag"] = None
             config["added_tags"] = added
+            if not isinstance(config.get("tag_extra_task_ids"), dict):
+                config["tag_extra_task_ids"] = {}
             return config
         return {
             "input_mode": "tag",
             "tag": "cdp_master_full_reg",
             "default_tag": "cdp_master_full_reg",
             "added_tags": ["cdp_master_full_reg"],
-            "task_ids": []
+            "task_ids": [],
+            "tag_extra_task_ids": {},
         }
     except Exception as e:
         logger.error(f"Error loading regression config: {e}")
@@ -429,7 +471,8 @@ def load_regression_config():
             "tag": "cdp_master_full_reg",
             "default_tag": "cdp_master_full_reg",
             "added_tags": ["cdp_master_full_reg"],
-            "task_ids": []
+            "task_ids": [],
+            "tag_extra_task_ids": {},
         }
 
 def save_regression_config(data):
@@ -468,8 +511,20 @@ def load_triage_accuracy_data(tag=None):
     try:
         path = _triage_accuracy_path(tag)
         if os.path.exists(path):
-            with open(path, 'r') as f:
-                return json.load(f)
+            try:
+                with open(path, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError as e:
+                logger.error(
+                    "Corrupt triage accuracy cache %s: %s — deleting so next load can recompute",
+                    path,
+                    e,
+                )
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                return None
         # Migration: copy legacy triage_accuracy_data.json to per-tag file if tag matches
         if tag:
             legacy_path = os.path.join(TRIAGE_ACCURACY_DATA_DIR, "triage_accuracy_data.json")
@@ -490,10 +545,20 @@ def save_triage_accuracy_data(data, tag=None):
     try:
         path = _triage_accuracy_path(tag)
         os.makedirs(TRIAGE_ACCURACY_DATA_DIR, exist_ok=True)
-        with open(path, 'w') as f:
+        # Atomic write: avoid corrupt JSON if two requests save at once
+        tmp_path = f"{path}.tmp.{os.getpid()}"
+        with open(tmp_path, 'w') as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
     except Exception as e:
         logger.error(f"Error saving triage accuracy data: {e}")
+        try:
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
         raise
 
 def invalidate_triage_accuracy_cache(tag=None):
@@ -653,59 +718,74 @@ def process_failed_tests(task_id, agave_task):
 # ======================================================
 # API-1: Fetch Regression Tasks
 # ======================================================
-def fetch_regression_tasks(tag=None, task_ids=None):
-    """
-    Fetch regression tasks either by tag or by task IDs
-    
-    Args:
-        tag: Tag name to filter tasks
-        task_ids: List of task IDs to fetch
-    
-    Returns:
-        List of task data
-    """
-    if task_ids:
-        # Fetch tasks by task IDs
-        raw_query = {
-            "_id": {
-                "$in": [{"$oid": tid} for tid in task_ids]
-            }
-        }
-    elif tag:
-        # Fetch tasks by tag (original behavior)
-        raw_query = {
-            "$or": [
-                {"created_by": {
-                    "$in": ["shilpa.sattigeri", "sudharshan.musali"]
-                    }
-                },
-                {"user_groups": {"$in": ["cdp_reg_jarvis"]}}
-            ],
-            "tester_tags": {"$in": [tag]},
-            "system_under_test.component": "main"
-        }
-    else:
-        raise ValueError("Either tag or task_ids must be provided")
+# JITA GET /tasks?raw_query=... blows up with 414 when $in list is huge.
+_JITA_TASK_ID_BATCH = 40
 
-    params = {
-        "limit": 2000,
-        "start": 0,
-        "sort": "-_id",
-        "only": (
-            "label,branch,status,created_by,test_result_count,"
-            "created_at,end_time"
-        ),
-        "raw_query": json.dumps(raw_query)
-    }
+
+def _fetch_regression_tasks_raw(tag=None, task_ids=None, only=None):
+    """Low-level JITA task list fetch (no tag-extra merge). Batches large task_id lists."""
+    only_fields = only or (
+        "label,branch,status,created_by,test_result_count,"
+        "created_at,end_time,tester_tags"
+    )
+
+    def _one_get(raw_query):
+        params = {
+            "limit": 2000,
+            "start": 0,
+            "sort": "-_id",
+            "only": only_fields,
+            "raw_query": json.dumps(raw_query),
+        }
+        # Tag queries can be slow; 30s caused empty coverage when cache missing
+        resp = session.get(f"{JITA_BASE}/tasks", params=params, timeout=90)
+        resp.raise_for_status()
+        return resp.json().get("data", []) or []
 
     try:
-        resp = session.get(
-            f"{JITA_BASE}/tasks",
-            params=params,
-            timeout=30
-        )
-        resp.raise_for_status()
-        return resp.json().get("data", [])
+        if task_ids:
+            normalized = [str(t).strip() for t in task_ids if str(t).strip()]
+            if not normalized:
+                return []
+            # Chunk to avoid 414 Request-URI Too Long on JITA
+            if len(normalized) <= _JITA_TASK_ID_BATCH:
+                return _one_get({"_id": {"$in": [{"$oid": tid} for tid in normalized]}})
+            merged = []
+            seen = set()
+            for i in range(0, len(normalized), _JITA_TASK_ID_BATCH):
+                chunk = normalized[i : i + _JITA_TASK_ID_BATCH]
+                logger.info(
+                    "JITA tasks fetch batch %s–%s / %s",
+                    i + 1,
+                    min(i + _JITA_TASK_ID_BATCH, len(normalized)),
+                    len(normalized),
+                )
+                for t in _one_get({"_id": {"$in": [{"$oid": tid} for tid in chunk]}}):
+                    oid = (t.get("_id") or {}).get("$oid")
+                    key = str(oid).lower() if oid else None
+                    if key and key in seen:
+                        continue
+                    if key:
+                        seen.add(key)
+                    merged.append(t)
+            return merged
+
+        if tag:
+            raw_query = {
+                "$or": [
+                    {
+                        "created_by": {
+                            "$in": ["shilpa.sattigeri", "sudharshan.musali"]
+                        }
+                    },
+                    {"user_groups": {"$in": ["cdp_reg_jarvis"]}},
+                ],
+                "tester_tags": {"$in": [tag]},
+                "system_under_test.component": "main",
+            }
+            return _one_get(raw_query)
+
+        raise ValueError("Either tag or task_ids must be provided")
     except requests.exceptions.ConnectionError as e:
         logger.error(f"Connection error fetching regression tasks: {e}")
         raise ConnectionError(f"Failed to connect to JITA API. Please check your network connection and ensure 'jita.eng.nutanix.com' is accessible.")
@@ -715,6 +795,84 @@ def fetch_regression_tasks(tag=None, task_ids=None):
     except requests.exceptions.RequestException as e:
         logger.error(f"Request error fetching regression tasks: {e}")
         raise Exception(f"Error fetching regression tasks: {str(e)}")
+
+
+def fetch_regression_tasks(tag=None, task_ids=None, include_tag_extras=True):
+    """
+    Fetch regression tasks either by tag or by task IDs.
+
+    When tag is used, also merges manually appended task IDs stored under
+    config tag_extra_task_ids[tag] so "+" additions are not lost on next tag fetch.
+
+    If both tag and task_ids are provided, tag wins (selected dashboard job).
+    Pass tag=None for explicit task_ids-only queries.
+    """
+    if tag and task_ids:
+        logger.info(
+            "fetch_regression_tasks: tag=%s provided with %s task_ids — using tag (+ extras)",
+            tag,
+            len(task_ids) if hasattr(task_ids, "__len__") else "?",
+        )
+        task_ids = None
+
+    if task_ids:
+        normalized = normalize_task_id_list(task_ids)
+        return _fetch_regression_tasks_raw(task_ids=normalized) if normalized else []
+
+    if not tag:
+        raise ValueError("Either tag or task_ids must be provided")
+
+    tasks = _fetch_regression_tasks_raw(tag=tag) or []
+    if not include_tag_extras:
+        return tasks
+
+    try:
+        config = load_regression_config()
+        extras = get_extras_for_tag(config, tag)
+    except Exception as e:
+        logger.warning(f"Could not load tag_extra_task_ids for '{tag}': {e}")
+        extras = []
+
+    if not extras:
+        return tasks
+
+    found_ids = set()
+    for t in tasks:
+        oid = (t.get("_id") or {}).get("$oid")
+        if oid:
+            found_ids.add(str(oid).lower())
+
+    missing = [tid for tid in extras if tid not in found_ids]
+    if not missing:
+        logger.info(
+            "Tag '%s': all %s extra task_ids already present in tag query",
+            tag, len(extras),
+        )
+        return tasks
+
+    logger.info(
+        "Tag '%s': merging %s extra task_ids (%s missing from tag query)",
+        tag, len(extras), len(missing),
+    )
+    try:
+        extra_tasks = _fetch_regression_tasks_raw(task_ids=missing) or []
+    except Exception as e:
+        logger.error(f"Failed fetching tag extra task_ids for '{tag}': {e}")
+        return tasks
+
+    # Dedupe by oid, preserve tag-query order then extras
+    merged = []
+    seen = set()
+    for t in list(tasks) + list(extra_tasks):
+        oid = (t.get("_id") or {}).get("$oid")
+        if not oid:
+            continue
+        key = str(oid).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(t)
+    return merged
 
 
 # ======================================================
@@ -731,20 +889,20 @@ def fetch_agave_task(task_id):
 # ======================================================
 # Flask Endpoint
 # ======================================================
-def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120):
+def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120, merge=True):
     """
     Fetch test results for multiple tasks in batch.
-    Always uses merge=True to get merged results across all tasks.
-    Fetches all results in a single request with limit=2000.
-    
+
     Args:
         task_ids: List of task IDs to fetch results for
         limit: Number of results to fetch (default: 2000)
         timeout: Request timeout in seconds (default: 120)
-    
+        merge: If True (default), JITA merges duplicate testcases across tasks.
+               Handover / JITA analysis needs merge=False to count per-run passes.
+
     Returns:
-        List of merged test results
-    
+        List of test results
+
     Raises:
         requests.exceptions.Timeout: If request times out
         requests.exceptions.RequestException: For other request errors
@@ -756,10 +914,12 @@ def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120):
     if len(task_ids) > 50:
         timeout = max(timeout, 180)  # At least 3 minutes for large sets
     
-    logger.info(f"Fetching test results for {len(task_ids)} tasks (timeout: {timeout}s, limit: {limit})")
+    logger.info(
+        f"Fetching test results for {len(task_ids)} tasks "
+        f"(timeout: {timeout}s, limit: {limit}, merge={bool(merge)})"
+    )
     
-    # Correct payload structure for merged test results
-    # Verified format: raw_query at top level with agave_task_id query, merge at top level
+    # Correct payload structure: raw_query + merge at top level
     payload = {
         "raw_query": {
             "agave_task_id": {
@@ -773,7 +933,7 @@ def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120):
         "start": 0,
         "limit": limit,
         "sort": "agave_task_id,status",
-        "merge": True  # Must be at top level to get merged results
+        "merge": bool(merge),
     }
     
     # Log payload for verification
@@ -845,13 +1005,38 @@ def auth_login():
         user_info.get("displayName", ""),
         user_info.get("email", ""),
     )
-    return jsonify({"token": token, "user": user_info})
+    # Return a stable shape for FE (login LDAP keys + JWT-style aliases)
+    username = user_info.get("username") or ""
+    display_name = user_info.get("displayName") or username
+    email = user_info.get("email") or ""
+    return jsonify({
+        "token": token,
+        "user": {
+            "username": username,
+            "displayName": display_name,
+            "email": email,
+            "sub": username,
+            "name": display_name,
+        },
+    })
 
 
 @app.route("/mcp/regression/auth/me", methods=["GET"])
 @jwt_required
 def auth_me():
-    return jsonify({"user": g.current_user})
+    payload = g.current_user or {}
+    username = payload.get("sub") or payload.get("username") or ""
+    display_name = payload.get("name") or payload.get("displayName") or username
+    email = payload.get("email") or ""
+    return jsonify({
+        "user": {
+            "username": username,
+            "displayName": display_name,
+            "email": email,
+            "sub": username,
+            "name": display_name,
+        },
+    })
 
 
 @app.route("/mcp/regression/auth/logout", methods=["POST"])
@@ -1306,12 +1491,21 @@ def save_regression_config_endpoint():
         if not isinstance(added_tags, list):
             added_tags = []
         
+        existing = load_regression_config()
+        # Preserve per-tag appended task IDs across config saves
+        preserved_extras = existing.get("tag_extra_task_ids") or {}
+        if not isinstance(preserved_extras, dict):
+            preserved_extras = {}
+        if isinstance(data.get("tag_extra_task_ids"), dict):
+            preserved_extras = data.get("tag_extra_task_ids")
+
         config = {
             "input_mode": input_mode,
             "default_tag": default_tag if default_tag else None,
             "added_tags": [str(t).strip() for t in added_tags if t and str(t).strip()],
             "tag": (default_tag or "").strip() if input_mode == "tag" else "",
-            "task_ids": data.get("task_ids", []) if input_mode == "task_ids" else []
+            "task_ids": data.get("task_ids", []) if input_mode == "task_ids" else [],
+            "tag_extra_task_ids": preserved_extras,
         }
         
         # Validate based on input mode
@@ -1332,6 +1526,506 @@ def save_regression_config_endpoint():
         return jsonify(config)
     except Exception as e:
         logger.error(f"Error saving regression config: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def _jita_task_oid(task):
+    """Extract 24-char task oid from JITA task dict (_id as {$oid} or plain string)."""
+    if not isinstance(task, dict):
+        return ""
+    oid = task.get("_id")
+    if isinstance(oid, dict):
+        return str(oid.get("$oid") or "").strip().lower()
+    if oid is not None:
+        return str(oid).strip().lower()
+    return ""
+
+
+def _classify_task_ids_for_tag(task_ids, expected_tag):
+    """
+    Fetch tasks from JITA and classify whether each has expected tester_tag.
+    Returns classify_task_ids_against_tag(...) dict.
+    """
+    normalized = normalize_task_id_list(task_ids)
+    if not normalized:
+        return {"matched": [], "wrong_tag": [], "not_found": []}
+
+    tasks = _fetch_regression_tasks_raw(
+        task_ids=normalized,
+        only="tester_tags,label,branch,status",
+    ) or []
+    meta = {}
+    for t in tasks:
+        oid = _jita_task_oid(t)
+        if not oid:
+            continue
+        meta[oid] = {"tester_tags": t.get("tester_tags") or []}
+    return classify_task_ids_against_tag(normalized, expected_tag, meta)
+
+
+def _add_tester_tag_to_task(task_id, tag_name):
+    """
+    Ensure tester_tag exists on a JITA task.
+
+    Important: JITA rejects full-document PUT on AgaveTask ("list index out of range").
+    Only PUT {"tester_tags": [...]} (partial update) succeeds.
+    Auth is required — unauthenticated PUT returns 403.
+    """
+    task_id = (task_id or "").strip().lower()
+    tag_name = (tag_name or "").strip()
+    if not task_id or not tag_name:
+        return {"task_id": task_id, "success": False, "error": "task_id and tag required"}
+
+    # Resolved at call time (JITA_SVC_AUTH is assigned later in this module).
+    auth = globals().get("JITA_SVC_AUTH")
+    if not auth:
+        return {
+            "task_id": task_id,
+            "success": False,
+            "error": "JITA service auth not configured (restart backend)",
+        }
+
+    headers = {"Content-Type": "application/json"}
+    get_url = f"{JITA_BASE}/tasks/{task_id}"
+    try:
+        get_resp = requests.get(
+            get_url, headers=headers, auth=auth, verify=False, timeout=30
+        )
+        if get_resp.status_code != 200:
+            return {
+                "task_id": task_id,
+                "success": False,
+                "error": f"Failed to fetch task: HTTP {get_resp.status_code}",
+            }
+        existing = get_resp.json().get("data") or {}
+        if not existing:
+            return {"task_id": task_id, "success": False, "error": "Empty task data"}
+
+        tester_tags = existing.get("tester_tags") or []
+        if not isinstance(tester_tags, list):
+            tester_tags = []
+        if tag_name in tester_tags:
+            return {"task_id": task_id, "success": True, "message": "Tag already exists"}
+
+        new_tags = list(tester_tags) + [tag_name]
+        # Partial PUT only — full-document PUT breaks AgaveTask updates on JITA
+        put_resp = requests.put(
+            f"{JITA_BASE}/tasks/{task_id}",
+            headers=headers,
+            json={"tester_tags": new_tags},
+            auth=auth,
+            verify=False,
+            timeout=30,
+        )
+        resp_json = {}
+        try:
+            resp_json = put_resp.json() if put_resp.content else {}
+        except Exception:
+            resp_json = {}
+        msg = (resp_json.get("message") or "").strip()
+        put_ok = put_resp.status_code == 200 and (
+            resp_json.get("success") is True
+            or "successfully updated" in msg.lower()
+            or (resp_json.get("success") is not False and resp_json.get("data") is not None
+                and "failed" not in msg.lower())
+        )
+        if put_resp.status_code == 200 and resp_json.get("success") is False:
+            return {
+                "task_id": task_id,
+                "success": False,
+                "error": msg or "Update failed",
+            }
+        if put_resp.status_code == 200 and "failed" in msg.lower():
+            return {"task_id": task_id, "success": False, "error": msg}
+        if not put_ok:
+            error_msg = msg or (put_resp.text[:200] if put_resp.text else f"HTTP {put_resp.status_code}")
+            return {"task_id": task_id, "success": False, "error": error_msg}
+
+        # Verify tag actually present (JITA can report success without applying)
+        verify = requests.get(
+            get_url, headers=headers, auth=auth, verify=False, timeout=30
+        )
+        if verify.status_code == 200:
+            verified_tags = (verify.json().get("data") or {}).get("tester_tags") or []
+            if tag_name not in (verified_tags if isinstance(verified_tags, list) else []):
+                return {
+                    "task_id": task_id,
+                    "success": False,
+                    "error": f"PUT reported success but tag '{tag_name}' not on task after update",
+                }
+        return {"task_id": task_id, "success": True, "message": "Tag added"}
+    except Exception as e:
+        logger.error(f"Exception adding tester_tag to task {task_id}: {e}", exc_info=True)
+        return {"task_id": task_id, "success": False, "error": str(e)}
+
+
+def _ensure_tester_tag_on_tasks(task_ids, tag_name):
+    """Add tester_tag on each task in parallel. Returns (succeeded_ids, failed_ids, details)."""
+    ids = normalize_task_id_list(task_ids)
+    if not ids:
+        return [], [], []
+    succeeded, failed, details = [], [], []
+    with ThreadPoolExecutor(max_workers=min(5, len(ids))) as executor:
+        futures = {executor.submit(_add_tester_tag_to_task, tid, tag_name): tid for tid in ids}
+        for future in as_completed(futures):
+            result = future.result()
+            details.append(result)
+            tid = result.get("task_id")
+            if result.get("success"):
+                succeeded.append(tid)
+            else:
+                failed.append(tid)
+    return succeeded, failed, details
+
+
+def _remove_tester_tag_from_task(task_id, tag_name):
+    """
+    Remove tester_tag from a JITA task (partial PUT of tester_tags only).
+    """
+    task_id = (task_id or "").strip().lower()
+    tag_name = (tag_name or "").strip()
+    if not task_id or not tag_name:
+        return {"task_id": task_id, "success": False, "error": "task_id and tag required"}
+
+    auth = globals().get("JITA_SVC_AUTH")
+    if not auth:
+        return {
+            "task_id": task_id,
+            "success": False,
+            "error": "JITA service auth not configured (restart backend)",
+        }
+
+    headers = {"Content-Type": "application/json"}
+    get_url = f"{JITA_BASE}/tasks/{task_id}"
+    try:
+        get_resp = requests.get(
+            get_url, headers=headers, auth=auth, verify=False, timeout=30
+        )
+        if get_resp.status_code != 200:
+            return {
+                "task_id": task_id,
+                "success": False,
+                "error": f"Failed to fetch task: HTTP {get_resp.status_code}",
+            }
+        existing = get_resp.json().get("data") or {}
+        if not existing:
+            return {"task_id": task_id, "success": False, "error": "Empty task data"}
+
+        tester_tags = existing.get("tester_tags") or []
+        if not isinstance(tester_tags, list):
+            tester_tags = []
+        if tag_name not in tester_tags:
+            return {"task_id": task_id, "success": True, "message": "Tag already absent"}
+
+        new_tags = [t for t in tester_tags if t != tag_name]
+        put_resp = requests.put(
+            f"{JITA_BASE}/tasks/{task_id}",
+            headers=headers,
+            json={"tester_tags": new_tags},
+            auth=auth,
+            verify=False,
+            timeout=30,
+        )
+        resp_json = {}
+        try:
+            resp_json = put_resp.json() if put_resp.content else {}
+        except Exception:
+            resp_json = {}
+        msg = (resp_json.get("message") or "").strip()
+        if put_resp.status_code == 200 and resp_json.get("success") is False:
+            return {"task_id": task_id, "success": False, "error": msg or "Update failed"}
+        if put_resp.status_code == 200 and "failed" in msg.lower():
+            return {"task_id": task_id, "success": False, "error": msg}
+        put_ok = put_resp.status_code == 200 and (
+            resp_json.get("success") is True
+            or "successfully updated" in msg.lower()
+            or (resp_json.get("success") is not False and "failed" not in msg.lower())
+        )
+        if not put_ok:
+            error_msg = msg or (put_resp.text[:200] if put_resp.text else f"HTTP {put_resp.status_code}")
+            return {"task_id": task_id, "success": False, "error": error_msg}
+
+        verify = requests.get(
+            get_url, headers=headers, auth=auth, verify=False, timeout=30
+        )
+        if verify.status_code == 200:
+            verified_tags = (verify.json().get("data") or {}).get("tester_tags") or []
+            if tag_name in (verified_tags if isinstance(verified_tags, list) else []):
+                return {
+                    "task_id": task_id,
+                    "success": False,
+                    "error": f"PUT reported success but tag '{tag_name}' still on task",
+                }
+        return {"task_id": task_id, "success": True, "message": "Tag removed"}
+    except Exception as e:
+        logger.error(f"Exception removing tester_tag from task {task_id}: {e}", exc_info=True)
+        return {"task_id": task_id, "success": False, "error": str(e)}
+
+
+def _ensure_tester_tag_removed_from_tasks(task_ids, tag_name):
+    """Remove tester_tag on each task in parallel. Returns (succeeded_ids, failed_ids, details)."""
+    ids = normalize_task_id_list(task_ids)
+    if not ids:
+        return [], [], []
+    succeeded, failed, details = [], [], []
+    with ThreadPoolExecutor(max_workers=min(5, len(ids))) as executor:
+        futures = {
+            executor.submit(_remove_tester_tag_from_task, tid, tag_name): tid for tid in ids
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            details.append(result)
+            tid = result.get("task_id")
+            if result.get("success"):
+                succeeded.append(tid)
+            else:
+                failed.append(tid)
+    return succeeded, failed, details
+
+
+@app.route("/mcp/regression/config/tag-extra-task-ids", methods=["GET", "POST", "DELETE"])
+@app.route("/api/mcp/regression/config/tag-extra-task-ids", methods=["GET", "POST", "DELETE"])
+@jwt_required
+def tag_extra_task_ids_endpoint():
+    """
+    Persist / read / remove manually appended JITA task IDs for a regression tag.
+
+    GET  ?tag=...
+    POST { "tag": "...", "task_ids": ["...", "..."], "validate_tag": true }
+         — if a task is missing the tester_tag, add the tag on JITA then persist
+    DELETE / POST action=remove
+         { "tag": "...", "task_ids": ["..."], "remove_tag_from_jita": true }
+         — strip tester_tag on JITA (default), drop from tag_extra_task_ids if present.
+           Client also drops IDs from the regression JITA link.
+    """
+    try:
+        if request.method == "GET":
+            tag = (request.args.get("tag") or "").strip()
+            if not tag:
+                return jsonify({"error": "tag is required"}), 400
+            config = load_regression_config()
+            extras = get_extras_for_tag(config, tag)
+            return jsonify({
+                "tag": tag,
+                "task_ids": extras,
+                "count": len(extras),
+            })
+
+        body = request.get_json(silent=True) or {}
+        action = (body.get("action") or "").strip().lower()
+        if request.method == "DELETE" or action in ("remove", "delete"):
+            tag = (body.get("tag") or request.args.get("tag") or "").strip()
+            task_ids = body.get("task_ids")
+            if task_ids is None and request.args.get("task_ids"):
+                task_ids = request.args.get("task_ids")
+            # Mirror add: strip tag on JITA by default
+            remove_tag_from_jita = body.get("remove_tag_from_jita", True)
+            if isinstance(remove_tag_from_jita, str):
+                remove_tag_from_jita = remove_tag_from_jita.strip().lower() in (
+                    "1", "true", "yes",
+                )
+            if not tag:
+                return jsonify({"error": "tag is required"}), 400
+            incoming = normalize_task_id_list(task_ids)
+            if not incoming:
+                return jsonify({
+                    "error": "No valid 24-char JITA task IDs provided",
+                    "type": "validation_error",
+                }), 400
+
+            tag_stripped = []
+            tag_strip_failed = []
+            tag_strip_errors = []
+            if remove_tag_from_jita:
+                tag_stripped, tag_strip_failed, details = _ensure_tester_tag_removed_from_tasks(
+                    incoming, tag
+                )
+                tag_strip_errors = [
+                    f"{d.get('task_id')}: {d.get('error') or d.get('message')}"
+                    for d in details
+                    if d and not d.get("success")
+                ]
+            else:
+                # No JITA strip — still allow dropping from extras / link
+                tag_stripped = list(incoming)
+
+            # Drop from extras for IDs we successfully untagged (or all if strip skipped)
+            drop_from_extras = list(tag_stripped) if remove_tag_from_jita else list(incoming)
+            config = load_regression_config()
+            removed_from_extras = []
+            remaining = get_extras_for_tag(config, tag)
+            if drop_from_extras:
+                try:
+                    updated, remaining, removed_from_extras = remove_extras_for_tag(
+                        config, tag, drop_from_extras
+                    )
+                    if removed_from_extras:
+                        save_regression_config(updated)
+                except ValueError as ve:
+                    return jsonify({"error": str(ve), "type": "validation_error"}), 400
+
+            if not tag_stripped and tag_strip_failed:
+                return jsonify({
+                    "success": False,
+                    "error": (
+                        f"Could not remove tester_tag '{tag}' from any task. "
+                        "Nothing changed on JITA / extras."
+                        + (f" Details: {'; '.join(tag_strip_errors[:5])}" if tag_strip_errors else "")
+                    ),
+                    "type": "untag_failed",
+                    "tag": tag,
+                    "removed": [],
+                    "removed_from_extras": [],
+                    "untagged_now": [],
+                    "untag_failed": tag_strip_failed,
+                    "tag_strip_errors": tag_strip_errors,
+                    "task_ids": remaining,
+                    "count": len(remaining),
+                }), 400
+
+            logger.info(
+                "tag_extra_task_ids | REMOVE tag=%s | untagged=%s | extras_removed=%s | "
+                "remaining_extras=%s | strip_failed=%s",
+                tag, len(tag_stripped), len(removed_from_extras), len(remaining),
+                len(tag_strip_failed),
+            )
+            # Full regression link changed → stale triage-accuracy / TG coverage cache
+            try:
+                invalidate_triage_accuracy_cache(tag)
+            except Exception as inv_err:
+                logger.warning("Failed to invalidate triage accuracy cache after remove: %s", inv_err)
+            return jsonify({
+                "success": True,
+                "tag": tag,
+                "task_ids": remaining,
+                # IDs safe to drop from regression JITA link (tag stripped / already absent)
+                "removed": tag_stripped,
+                "removed_from_extras": removed_from_extras,
+                "untagged_now": tag_stripped,
+                "untag_failed": tag_strip_failed,
+                "tag_strip_errors": tag_strip_errors,
+                "count": len(remaining),
+            })
+
+        tag = (body.get("tag") or "").strip()
+        task_ids = body.get("task_ids")
+        validate_tag = body.get("validate_tag", True)
+        add_missing_tag = body.get("add_missing_tag", True)
+        if isinstance(validate_tag, str):
+            validate_tag = validate_tag.strip().lower() in ("1", "true", "yes")
+        if isinstance(add_missing_tag, str):
+            add_missing_tag = add_missing_tag.strip().lower() in ("1", "true", "yes")
+        if not tag:
+            return jsonify({"error": "tag is required"}), 400
+
+        incoming = normalize_task_id_list(task_ids)
+        if not incoming:
+            return jsonify({
+                "error": "No valid 24-char JITA task IDs provided",
+                "type": "validation_error",
+            }), 400
+
+        tagged_now = []
+        rejected_tag_failed = []
+        rejected_not_found = []
+        tag_apply_details = []
+        accepted = list(incoming)
+
+        if validate_tag:
+            try:
+                classification = _classify_task_ids_for_tag(incoming, tag)
+            except Exception as e:
+                logger.error(f"Tag validation failed for extras under '{tag}': {e}", exc_info=True)
+                return jsonify({
+                    "error": f"Failed to validate task tags against JITA: {e}",
+                    "type": "jita_validation_error",
+                }), 502
+
+            needs_tag = classification["wrong_tag"]
+            rejected_not_found = classification["not_found"]
+
+            tag_apply_details = []
+            if needs_tag and add_missing_tag:
+                logger.info(
+                    "tag_extra_task_ids | adding tester_tag '%s' on %s task(s)",
+                    tag, len(needs_tag),
+                )
+                succeeded, failed, tag_apply_details = _ensure_tester_tag_on_tasks(needs_tag, tag)
+                tagged_now = succeeded
+                rejected_tag_failed = failed
+            elif needs_tag:
+                rejected_tag_failed = list(needs_tag)
+
+            planned = plan_accept_after_tagging(
+                classification,
+                successfully_tagged=tagged_now,
+                failed_to_tag=rejected_tag_failed,
+            )
+            accepted = planned["accepted"]
+            tagged_now = planned["tagged_now"]
+            rejected_tag_failed = planned["rejected_tag_failed"]
+            rejected_not_found = planned["rejected_not_found"]
+
+        if not accepted:
+            fail_msgs = [
+                f"{d.get('task_id')}: {d.get('error') or d.get('message')}"
+                for d in (tag_apply_details if validate_tag else [])
+                if d and not d.get("success")
+            ]
+            detail = ("; ".join(fail_msgs[:5]) if fail_msgs else "")
+            return jsonify({
+                "success": False,
+                "error": (
+                    f"Could not add any task IDs under tag '{tag}'. "
+                    "Tasks were not found or tag could not be applied."
+                    + (f" Details: {detail}" if detail else "")
+                ),
+                "type": "tag_mismatch",
+                "tag": tag,
+                "newly_added": [],
+                "tagged_now": [],
+                "rejected_wrong_tag": rejected_tag_failed,
+                "rejected_not_found": rejected_not_found,
+                "tag_apply_errors": fail_msgs,
+                "task_ids": get_extras_for_tag(load_regression_config(), tag),
+                "count": len(get_extras_for_tag(load_regression_config(), tag)),
+            }), 400
+
+        config = load_regression_config()
+        try:
+            updated, merged, newly_added = append_extras_for_tag(config, tag, accepted)
+        except ValueError as ve:
+            return jsonify({"error": str(ve), "type": "validation_error"}), 400
+
+        save_regression_config(updated)
+        tag_apply_errors = [
+            f"{d.get('task_id')}: {d.get('error') or d.get('message')}"
+            for d in (tag_apply_details if validate_tag else [])
+            if d and not d.get("success")
+        ]
+        logger.info(
+            "tag_extra_task_ids | tag=%s | added=%s | tagged_now=%s | total=%s | tag_failed=%s | not_found=%s",
+            tag, len(newly_added), len(tagged_now), len(merged),
+            len(rejected_tag_failed), len(rejected_not_found),
+        )
+        # Full regression link grew → force TG coverage / triage-accuracy recompute
+        try:
+            invalidate_triage_accuracy_cache(tag)
+        except Exception as inv_err:
+            logger.warning("Failed to invalidate triage accuracy cache after add: %s", inv_err)
+        return jsonify({
+            "success": True,
+            "tag": tag,
+            "task_ids": merged,
+            "newly_added": newly_added,
+            "tagged_now": tagged_now,
+            "rejected_wrong_tag": rejected_tag_failed,
+            "rejected_not_found": rejected_not_found,
+            "tag_apply_errors": tag_apply_errors,
+            "count": len(merged),
+        })
+    except Exception as e:
+        logger.error(f"Error in tag_extra_task_ids endpoint: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -1387,6 +2081,10 @@ def delete_config_tag():
         if config.get("default_tag") == tag:
             config["default_tag"] = None
             config["tag"] = ""
+        extras_map = config.get("tag_extra_task_ids") or {}
+        if isinstance(extras_map, dict) and tag in extras_map:
+            del extras_map[tag]
+            config["tag_extra_task_ids"] = extras_map
         save_regression_config(config)
         
         invalidate_triage_accuracy_cache(tag)
@@ -2175,208 +2873,712 @@ def get_triage_count():
 
 
 # ---------------------------------------------------
+# Owner triage report (notebook Report 2 schema)
+# ---------------------------------------------------
+@app.route("/mcp/regression/owner-triage-report", methods=["POST"])
+@app.route("/api/mcp/regression/owner-triage-report", methods=["POST"])
+@jwt_required
+def owner_triage_report():
+    """
+    Aggregate untriaged counts per regression owner (Jupyter Report 2 columns).
+
+    JSON body:
+      - task_ids: array (or comma-separated string) of JITA task OIDs — full list each call
+      - execution_url: optional JITA results URL (used if task_ids omitted)
+      - tag: optional; resolve tasks via tag when no task_ids / execution_url
+
+    Response rows use exact keys:
+      Regression_owner | Total | Total untriaged | Failed | Skipped | Warning | Killed
+    """
+    start = time.time()
+    body = request.get_json(silent=True) or {}
+    tag = (body.get("tag") or "").strip() or None
+
+    try:
+        load_owner_mapping()
+
+        task_ids, invalid_ids, resolve_err, source = resolve_task_ids_from_payload(
+            task_ids=body.get("task_ids"),
+            execution_url=body.get("execution_url"),
+        )
+
+        if not task_ids and tag:
+            try:
+                tasks = fetch_regression_tasks(tag=tag)
+            except TimeoutError as e:
+                return jsonify({"error": str(e), "type": "jita_timeout"}), 504
+            except ConnectionError as e:
+                return jsonify({"error": str(e), "type": "jita_connection_error"}), 503
+            task_ids = [
+                t.get("_id", {}).get("$oid")
+                for t in (tasks or [])
+                if t.get("_id", {}).get("$oid")
+            ]
+            source = "tag"
+            if not task_ids:
+                return jsonify({
+                    "error": f"No tasks found for tag '{tag}'",
+                    "type": "not_found",
+                    "tag": tag,
+                    "rows": [],
+                }), 404
+        elif resolve_err:
+            return jsonify({
+                "error": resolve_err,
+                "type": "validation_error",
+                "invalid_task_ids": invalid_ids,
+                "rows": [],
+            }), 400
+
+        logger.info(
+            "[START] Owner triage report | source=%s | tasks=%s | invalid=%s",
+            source, len(task_ids), len(invalid_ids),
+        )
+
+        try:
+            test_data = fetch_test_results_batch_with_pagination(task_ids, timeout=180)
+        except requests.exceptions.Timeout:
+            return jsonify({
+                "error": f"Timed out fetching test results for {len(task_ids)} tasks",
+                "type": "timeout_error",
+                "task_count": len(task_ids),
+                "rows": [],
+            }), 504
+        except requests.exceptions.RequestException as e:
+            return jsonify({
+                "error": f"Failed to fetch test results: {e}",
+                "type": "request_error",
+                "rows": [],
+            }), 500
+
+        result = build_owner_status_table(test_data, resolve_owner)
+        elapsed = round(time.time() - start, 2)
+        logger.info(
+            "[END] Owner triage report | time=%ss | owners=%s",
+            elapsed, len(result["rows"]),
+        )
+
+        return jsonify({
+            "success": True,
+            "generated_at": datetime.utcnow().isoformat(),
+            "elapsed_seconds": elapsed,
+            "source": source,
+            "tag": tag,
+            "task_ids": task_ids,
+            "task_count": len(task_ids),
+            "invalid_task_ids": invalid_ids,
+            "duplicate_input_dropped": True,
+            "rows": result["rows"],
+            "unmapped_tests": result["unmapped_tests"],
+            "meta": result["meta"],
+        })
+    except Exception as e:
+        logger.error(f"Error in owner triage report: {e}", exc_info=True)
+        return jsonify({"error": str(e), "type": "server_error", "rows": []}), 500
+
+
+# ---------------------------------------------------
 # Triage Accuracy Analyzer Endpoint
 # ---------------------------------------------------
+def _sorted_task_id_fingerprint(task_ids):
+    """Lowercased sorted OID fingerprint for cache / Full-regression link compares."""
+    out = []
+    seen = set()
+    for t in task_ids or []:
+        s = str(t).strip().lower()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    out.sort()
+    return out
+
+
 def _config_matches_cached(cached, tag, task_ids):
-    """Check if cached data matches current tag/task_ids config."""
+    """
+    Check if cached triage-accuracy data matches current scope.
+
+    Full regression link (explicit task_ids) always wins: cache must have the same
+    task set. Tag-only requests also invalidate when tag_extra_task_ids change.
+    """
     if not cached:
         return False
     cached_tag = (cached.get("tag") or "").strip()
-    cached_task_ids = cached.get("task_ids") or []
+    cached_task_ids_sorted = _sorted_task_id_fingerprint(cached.get("task_ids") or [])
     req_tag = (tag or "").strip()
-    req_task_ids = sorted([str(t).strip() for t in (task_ids or []) if t and str(t).strip()])
-    cached_task_ids_sorted = sorted([str(t).strip() for t in cached_task_ids if t])
-    # Tag mode: match by tag only
+    req_task_ids = _sorted_task_id_fingerprint(task_ids)
+
+    # Explicit Full-regression / task_ids scope: require identical task set
+    if req_task_ids:
+        if cached_task_ids_sorted != req_task_ids:
+            return False
+        # If a tag is also provided, require tag match when cache has a tag
+        if req_tag and cached_tag and req_tag != cached_tag:
+            return False
+        return True
+
+    # Tag-only: tag name + persisted extras fingerprint must match
     if req_tag:
-        return req_tag == cached_tag
-    # Task IDs mode: match by task_ids
-    return req_task_ids == cached_task_ids_sorted
+        if req_tag != cached_tag:
+            return False
+        try:
+            extras_now = _sorted_task_id_fingerprint(
+                get_extras_for_tag(load_regression_config(), req_tag)
+            )
+        except Exception:
+            extras_now = []
+        cached_extras = _sorted_task_id_fingerprint(cached.get("tag_extra_task_ids") or [])
+        return extras_now == cached_extras
+
+    return False
 
 
-@app.route("/mcp/regression/triage-accuracy", methods=["GET"])
-@app.route("/api/mcp/regression/triage-accuracy", methods=["GET"])
-@jwt_required
-def get_triage_accuracy():
-    """Triage Accuracy Analyzer: fetch Failed+Warning testcases, compare Jira vs Triage Genie, store in JSON."""
-    start = time.time()
+def _empty_triage_accuracy_payload(tag=None, task_ids=None):
+    return {
+        "generated_time": datetime.utcnow().isoformat(),
+        "tag": tag or None,
+        "task_ids": list(task_ids) if task_ids else [],
+        "tag_extra_task_ids": [],
+        "testcases": [],
+        "triage_summary": {
+            "total_failed_warning_count": 0,
+            "triaged_count": 0,
+            "triage_genie_count": 0,
+            "total_triage_genie_count": 0,
+            "triage_completed_percent": 0,
+            "triage_genie_percent": 0,
+            "total_triage_genie_percent": 0,
+            "matched_count": 0,
+            "unmatched_count": 0,
+            "matched_percent": 0,
+            "unmatched_percent": 0,
+        },
+    }
+
+
+def _tg_ticket_map_from_cached_payload(cached):
+    """Reuse previously fetched TG tickets by testcase id / name (no network)."""
+    ticket_map = {}
+    if not cached or not isinstance(cached, dict):
+        return ticket_map
+    for tc in cached.get("testcases") or []:
+        if not isinstance(tc, dict):
+            continue
+        ticket = (tc.get("triage_genie_ticket") or "").strip()
+        if not ticket:
+            continue
+        name = (tc.get("testcase_name") or "").strip()
+        tid = (tc.get("testcase_id") or "").strip()
+        if name:
+            ticket_map[name] = ticket
+        if tid:
+            ticket_map[tid] = ticket
+    return ticket_map
+
+
+def _compute_triage_accuracy_payload(tag=None, task_ids=None, reload=False, skip_tg_lookup=False):
+    """
+    Compute (or load cached) triage-accuracy payload for tag / task_ids.
+    Shared by Triage Accuracy Analyzer and Triage Genie coverage moon dashboard.
+
+    skip_tg_lookup=True: skip slow per-testcase Triage Genie API calls; reuse TG
+    tickets from any prior cache by testcase name. Used by coverage Refresh so it
+    stays fast (JITA only). Full TG refresh remains on Triage Accuracy Reload.
+    """
+    tag = (tag or "").strip() or None
+    if isinstance(task_ids, str):
+        task_ids = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+    elif task_ids:
+        task_ids = [str(tid).strip() for tid in task_ids if str(tid).strip()]
+    else:
+        task_ids = None
+
+    if not tag and not task_ids:
+        raise ValueError("Either tag or task_ids is required")
+
+    load_owner_mapping()
+    cache_tag = tag if tag else None
+    # Snapshot extras for this tag (used in cache key + payload)
+    try:
+        tag_extras = (
+            get_extras_for_tag(load_regression_config(), tag) if tag else []
+        )
+    except Exception:
+        tag_extras = []
+
+    # Always load prior cache for TG ticket reuse (even when reload skips hit)
+    prior_cache = load_triage_accuracy_data(cache_tag)
+
+    # On reload: skip reading cache but keep file until new payload saves.
+    # Deleting first left coverage/accuracy empty for 10–45+ min during TG lookups.
+    if reload:
+        cached = None
+        logger.info("[Triage Accuracy] Reload requested — skipping cache, keeping file until save")
+    else:
+        cached = prior_cache
+    if cached and _config_matches_cached(cached, tag, task_ids):
+        logger.info("[Triage Accuracy] Using cached data")
+        return cached
+
+    # Full regression link (task_ids) is source of truth when provided; else tag + extras
+    fetch_ids = None
+    if task_ids:
+        fetch_ids = list(task_ids)
+        if tag and tag_extras:
+            seen = {str(x).strip().lower() for x in fetch_ids}
+            for eid in tag_extras:
+                key = str(eid).strip().lower()
+                if key and key not in seen:
+                    fetch_ids.append(eid)
+                    seen.add(key)
+        tasks = fetch_regression_tasks(tag=None, task_ids=fetch_ids)
+    else:
+        tasks = fetch_regression_tasks(tag=tag, task_ids=None)
+
+    if not tasks:
+        result = _empty_triage_accuracy_payload(tag, task_ids or fetch_ids)
+        result["tag_extra_task_ids"] = list(tag_extras)
+        save_triage_accuracy_data(result, cache_tag)
+        return result
+
+    collected_task_ids = [t["_id"]["$oid"] for t in tasks]
+    logger.info(f"Fetching test results for {len(collected_task_ids)} tasks")
+    test_data = fetch_test_results_batch_with_pagination(collected_task_ids, timeout=180)
+
+    failed_warning = [
+        tr for tr in test_data
+        if tr.get("status", "").lower() in ("failed", "failure", "warning", "warn")
+    ]
+    seen_tests = set()
+    unique_results = []
+    for tr in failed_warning:
+        test_name = (tr.get("test") or {}).get("name", "") if isinstance(tr.get("test"), dict) else ""
+        if not test_name or test_name in seen_tests:
+            continue
+        seen_tests.add(test_name)
+        unique_results.append(tr)
+
+    _test_result_ids = []
+    for tr in unique_results:
+        _rid = tr.get("_id")
+        if isinstance(_rid, dict) and "$oid" in _rid:
+            _test_result_ids.append(_rid["$oid"])
+        elif _rid:
+            _test_result_ids.append(str(_rid))
+
+    if skip_tg_lookup:
+        tg_ticket_map = _tg_ticket_map_from_cached_payload(prior_cache)
+        logger.info(
+            "[Triage Accuracy] skip_tg_lookup — reused %s TG ticket(s) from cache (no TG API)",
+            len(tg_ticket_map),
+        )
+    else:
+        tg_ticket_map = build_triage_genie_ticket_map(_test_result_ids)
+
+    def process_one(tr):
+        try:
+            test_field = tr.get("test", {})
+            testcase_name = (test_field.get("name", "") if isinstance(test_field, dict) else
+                            str(test_field) if test_field else "")
+            status = tr.get("status", "Failed")
+            jira_tickets = tr.get("jira_tickets", [])
+            jira_ticket = (jira_tickets[0] if jira_tickets else "") or ""
+            if isinstance(jira_ticket, dict):
+                jira_ticket = jira_ticket.get("$oid", "") or str(jira_ticket)
+            jira_ticket = str(jira_ticket).strip() if jira_ticket else ""
+
+            testcase_id = None
+            if isinstance(tr.get("_id"), dict) and "$oid" in tr.get("_id", {}):
+                testcase_id = tr["_id"]["$oid"]
+            else:
+                testcase_id = str(tr.get("_id", "")) if tr.get("_id") else ""
+
+            triage_genie_ticket = ""
+            tg = (
+                tg_ticket_map.get(testcase_id)
+                or tg_ticket_map.get(testcase_name)
+            )
+            if tg:
+                triage_genie_ticket = str(tg).strip()
+
+            if jira_ticket and triage_genie_ticket:
+                match_status = "Matched" if jira_ticket.upper() == triage_genie_ticket.upper() else "Unmatched"
+            else:
+                match_status = "N/A" if not jira_ticket and not triage_genie_ticket else ("" if not (jira_ticket and triage_genie_ticket) else "N/A")
+
+            regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
+            return {
+                "testcase_name": testcase_name,
+                "regression_owner": regression_owner,
+                "status": status,
+                "triage_genie_ticket": triage_genie_ticket,
+                "jira_ticket": jira_ticket,
+                "match_status": match_status,
+            }
+        except Exception as e:
+            logger.warning(f"Error processing test result for triage accuracy: {e}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        raw = list(executor.map(process_one, unique_results))
+        testcases = [tc for tc in raw if tc is not None]
+
+    total = len(testcases)
+    triaged_count = sum(1 for tc in testcases if tc.get("jira_ticket"))
+    triage_genie_count = sum(1 for tc in testcases if tc.get("jira_ticket") and tc.get("triage_genie_ticket"))
+    total_triage_genie_count = sum(1 for tc in testcases if tc.get("triage_genie_ticket"))
+    matched_count = sum(1 for tc in testcases if tc.get("match_status") == "Matched")
+    unmatched_count = sum(1 for tc in testcases if tc.get("match_status") == "Unmatched")
+
+    triage_completed_percent = round(100 * triaged_count / total, 1) if total else 0
+    triage_genie_percent = round(100 * triage_genie_count / triaged_count, 1) if triaged_count else 0
+    total_triage_genie_percent = round(100 * total_triage_genie_count / total, 1) if total else 0
+    denom = matched_count + unmatched_count
+    matched_percent = round(100 * matched_count / denom, 1) if denom else 0
+    unmatched_percent = round(100 * unmatched_count / denom, 1) if denom else 0
+
+    result = {
+        "generated_time": datetime.utcnow().isoformat(),
+        "tag": tag if tag else None,
+        "task_ids": collected_task_ids,
+        "tag_extra_task_ids": list(tag_extras),
+        "testcases": testcases,
+        "triage_summary": {
+            "total_failed_warning_count": total,
+            "triaged_count": triaged_count,
+            "triage_genie_count": triage_genie_count,
+            "total_triage_genie_count": total_triage_genie_count,
+            "triage_completed_percent": triage_completed_percent,
+            "triage_genie_percent": triage_genie_percent,
+            "total_triage_genie_percent": total_triage_genie_percent,
+            "matched_count": matched_count,
+            "unmatched_count": unmatched_count,
+            "matched_percent": matched_percent,
+            "unmatched_percent": unmatched_percent,
+        },
+    }
+    save_triage_accuracy_data(result, cache_tag)
+    return result
+
+
+def _job_jita_task_ids(job):
+    """Extract JITA task OIDs from a stored / API Triage Genie job record."""
+    if not isinstance(job, dict):
+        return []
+    if job.get("jita_task_id_list"):
+        return [str(x).strip().lower() for x in job["jita_task_id_list"] if str(x).strip()]
+    raw = job.get("jita_task_ids") or ""
+    if isinstance(raw, list):
+        return [str(x).strip().lower() for x in raw if str(x).strip()]
+    return [x.strip().lower() for x in str(raw).split(",") if x.strip()]
+
+
+def _find_best_triage_genie_job(task_ids):
+    """
+    Pick TG job for the selected Full regression task set only.
+
+    Reject weak overlap (e.g. 1 shared OID out of a large run) so Open Triage Genie
+    never deep-links into an unrelated stored job.
+    """
+    wanted = set(_sorted_task_id_fingerprint(task_ids))
+    if not wanted:
+        return None
+    try:
+        jobs = (load_triage_genie_jobs() or {}).get("jobs") or []
+    except Exception:
+        jobs = []
+    best = None
+    best_score = -1
+    for job in jobs:
+        ids = set(_job_jita_task_ids(job))
+        if not ids:
+            continue
+        overlap = len(wanted & ids)
+        if overlap == 0:
+            continue
+        # Exact match wins
+        if ids == wanted:
+            return job
+        cov_wanted = overlap / len(wanted)
+        cov_job = overlap / len(ids)
+        # Require strong agreement: majority of the selected job AND of the TG job
+        if cov_wanted < 0.5 or cov_job < 0.5:
+            continue
+        score = overlap * 1000
+        if wanted <= ids:
+            score += 250
+        elif ids <= wanted:
+            score += 100
+        score += int(min(cov_wanted, cov_job) * 100)
+        if score > best_score:
+            best_score = score
+            best = job
+    return best
+
+
+def _build_triage_genie_job_url(task_ids, tag=None):
+    """
+    Build the Triage Genie URL for this Full regression task set.
+
+    Always matches JITA → Tests → "View in Triage Genie":
+      http://triage-genie.eng.nutanix.com/?jita_task_ids=<Full_link_ids>
+
+    Optionally annotate an exact-match stored job id for display only.
+    """
+    ids_for_link = [str(t).strip() for t in (task_ids or []) if str(t).strip()]
+    if not ids_for_link:
+        return {
+            "triage_genie_url": "http://triage-genie.eng.nutanix.com/",
+            "triage_genie_job_id": None,
+            "triage_genie_job_name": tag or None,
+            "triage_genie_view_url": None,
+        }
+
+    view_in_tg_url = (
+        "http://triage-genie.eng.nutanix.com/?jita_task_ids="
+        + ",".join(ids_for_link)
+    )
+    job_id = None
+    job_name = tag or None
+    job = _find_best_triage_genie_job(ids_for_link)
+    if job and job.get("id") is not None:
+        job_ids = set(_job_jita_task_ids(job))
+        wanted = set(_sorted_task_id_fingerprint(ids_for_link))
+        if job_ids and wanted and job_ids == wanted:
+            job_id = job.get("id")
+            job_name = job.get("name") or job_name
+
+    return {
+        "triage_genie_url": view_in_tg_url,
+        "triage_genie_job_id": job_id,
+        "triage_genie_job_name": job_name,
+        "triage_genie_view_url": view_in_tg_url,
+    }
+
+
+def _rollup_triage_genie_coverage(accuracy_payload):
+    """Build per-owner + summary coverage metrics from a triage-accuracy payload."""
+    testcases = accuracy_payload.get("testcases") or []
+    task_ids = accuracy_payload.get("task_ids") or []
+
+    def _blank_owner(name):
+        return {
+            "owner": name,
+            "total": 0,
+            "via_triage_genie": 0,
+            "jira_tagged": 0,
+            "remaining_need_tg": 0,
+            "manual_only": 0,
+            "pct_tg": 0.0,
+        }
+
+    by_owner = {}
+    for tc in testcases:
+        owner = (tc.get("regression_owner") or "Unknown").strip() or "Unknown"
+        row = by_owner.setdefault(owner, _blank_owner(owner))
+        row["total"] += 1
+        has_jira = bool((tc.get("jira_ticket") or "").strip())
+        has_tg = bool((tc.get("triage_genie_ticket") or "").strip())
+        if has_jira:
+            row["jira_tagged"] += 1
+        if has_tg:
+            row["via_triage_genie"] += 1
+        else:
+            row["remaining_need_tg"] += 1
+        if has_jira and not has_tg:
+            row["manual_only"] += 1
+
+    for row in by_owner.values():
+        row["pct_tg"] = round(100.0 * row["via_triage_genie"] / row["total"], 1) if row["total"] else 0.0
+
+    by_owner_list = sorted(
+        by_owner.values(),
+        key=lambda r: (-r["remaining_need_tg"], -r["total"], r["owner"].lower()),
+    )
+
+    total = len(testcases)
+    via_tg = sum(1 for tc in testcases if (tc.get("triage_genie_ticket") or "").strip())
+    jira_tagged = sum(1 for tc in testcases if (tc.get("jira_ticket") or "").strip())
+    remaining = total - via_tg
+    manual_only = sum(
+        1 for tc in testcases
+        if (tc.get("jira_ticket") or "").strip() and not (tc.get("triage_genie_ticket") or "").strip()
+    )
+
+    ids_for_link = [str(t).strip() for t in task_ids if str(t).strip()]
+    jita_results_url = None
+    if ids_for_link:
+        jita_results_url = (
+            "https://jita.eng.nutanix.com/results?task_ids="
+            + ",".join(ids_for_link)
+            + "&active_tab=1&merge_tests=true"
+        )
+
+    tg_link = _build_triage_genie_job_url(ids_for_link, tag=accuracy_payload.get("tag"))
+
+    return {
+        "generated_time": accuracy_payload.get("generated_time") or datetime.utcnow().isoformat(),
+        "tag": accuracy_payload.get("tag"),
+        "task_ids": ids_for_link,
+        "task_count": len(ids_for_link),
+        "summary": {
+            "total": total,
+            "via_triage_genie": via_tg,
+            "jira_tagged": jira_tagged,
+            "remaining_need_tg": remaining,
+            "manual_only": manual_only,
+            "pct_tg": round(100.0 * via_tg / total, 1) if total else 0.0,
+        },
+        "by_owner": by_owner_list,
+        "links": {
+            "jita_results_url": jita_results_url,
+            "triage_genie_url": tg_link.get("triage_genie_url"),
+            "triage_genie_view_url": tg_link.get("triage_genie_view_url"),
+            "triage_genie_home": "http://triage-genie.eng.nutanix.com/",
+            "triage_genie_job_id": tg_link.get("triage_genie_job_id"),
+            "triage_genie_job_name": tg_link.get("triage_genie_job_name"),
+        },
+    }
+
+
+def _normalize_task_ids_arg(raw):
+    """Normalize task_ids from query string, JSON list, or comma-separated string."""
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        out = [str(tid).strip() for tid in raw if str(tid).strip()]
+        return out or None
+    s = str(raw).strip()
+    if not s:
+        return None
+    out = [tid.strip() for tid in s.split(",") if tid.strip()]
+    return out or None
+
+
+def _resolve_triage_scope_from_request():
+    """
+    Parse tag/task_ids from query args or JSON body (POST), falling back to config.
+
+    Full-link task_ids (Regression_Run_Tasks) are the preferred analysis scope —
+    same set as JITA → View in Triage Genie.
+    """
+    body = {}
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+
     tag = request.args.get("tag")
+    if tag is None and "tag" in body:
+        tag = body.get("tag")
     if tag is not None:
         tag = (tag or "").strip() or None
-    task_ids_param = request.args.get("task_ids")
-    task_ids = None
-    if task_ids_param:
-        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
 
-    # Fall back to config if params missing
+    task_ids = _normalize_task_ids_arg(request.args.get("task_ids"))
+    if task_ids is None and "task_ids" in body:
+        task_ids = _normalize_task_ids_arg(body.get("task_ids"))
+
     if not tag and not task_ids:
         config = load_regression_config()
         if config.get("input_mode") == "tag":
             tag = config.get("default_tag") or config.get("tag", "") or ""
+            tag = (tag or "").strip() or None
         if not tag and config.get("input_mode") == "task_ids" and config.get("task_ids"):
             task_ids = config.get("task_ids", [])
+    return tag, task_ids
+
+
+def _request_wants_reload():
+    """reload flag from query (?reload=true) or JSON body ({reload: true})."""
+    q = request.args.get("reload", "false")
+    if str(q).lower() in ("true", "1", "yes"):
+        return True
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        v = body.get("reload", False)
+        if isinstance(v, bool):
+            return v
+        return str(v).lower() in ("true", "1", "yes")
+    return False
+
+
+@app.route("/mcp/regression/triage-accuracy", methods=["GET", "POST"])
+@app.route("/api/mcp/regression/triage-accuracy", methods=["GET", "POST"])
+@jwt_required
+def get_triage_accuracy():
+    """Triage Accuracy Analyzer: fetch Failed+Warning testcases, compare Jira vs Triage Genie, store in JSON."""
+    start = time.time()
+    tag, task_ids = _resolve_triage_scope_from_request()
 
     if not tag and not task_ids:
         return jsonify({"error": "Either tag or task_ids is required"}), 400
 
-    if tag:
-        logger.info(f"[START] Triage Accuracy | tag={tag}")
+    if task_ids:
+        logger.info(
+            f"[START] Triage Accuracy | task_ids={len(task_ids)} (Full link)"
+            + (f" | tag={tag}" if tag else "")
+        )
     else:
-        logger.info(f"[START] Triage Accuracy | task_ids={len(task_ids)} tasks")
+        logger.info(f"[START] Triage Accuracy | tag={tag}")
 
     try:
-        load_owner_mapping()
-        cache_tag = tag if tag else None
-        reload = request.args.get("reload", "false").lower() == "true"
-        if reload:
-            invalidate_triage_accuracy_cache(cache_tag)
-            cached = None
-            logger.info("[Triage Accuracy] Cache invalidated, fetching fresh data")
-        else:
-            cached = load_triage_accuracy_data(cache_tag)
-        if cached and _config_matches_cached(cached, tag, task_ids):
-            logger.info("[Triage Accuracy] Using cached data")
-            return jsonify(cached)
-
-        tasks = fetch_regression_tasks(tag=tag, task_ids=task_ids)
-        if not tasks:
-            result = {
-                "generated_time": datetime.utcnow().isoformat(),
-                "tag": tag or None,
-                "task_ids": list(task_ids) if task_ids else [],
-                "testcases": [],
-                "triage_summary": {
-                    "total_failed_warning_count": 0,
-                    "triaged_count": 0,
-                    "triage_genie_count": 0,
-                    "total_triage_genie_count": 0,
-                    "triage_completed_percent": 0,
-                    "triage_genie_percent": 0,
-                    "total_triage_genie_percent": 0,
-                    "matched_count": 0,
-                    "unmatched_count": 0,
-                    "matched_percent": 0,
-                    "unmatched_percent": 0,
-                },
-            }
-            save_triage_accuracy_data(result, cache_tag)
-            return jsonify(result)
-
-        collected_task_ids = [t["_id"]["$oid"] for t in tasks]
-        logger.info(f"Fetching test results for {len(collected_task_ids)} tasks")
-        test_data = fetch_test_results_batch_with_pagination(collected_task_ids, timeout=180)
-
-        # Filter Failed or Warning; deduplicate by test name
-        failed_warning = [
-            tr for tr in test_data
-            if tr.get("status", "").lower() in ("failed", "failure", "warning", "warn")
-        ]
-        seen_tests = set()
-        unique_results = []
-        for tr in failed_warning:
-            test_name = (tr.get("test") or {}).get("name", "") if isinstance(tr.get("test"), dict) else ""
-            if not test_name or test_name in seen_tests:
-                continue
-            seen_tests.add(test_name)
-            unique_results.append(tr)
-
-        # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
-        _test_result_ids = []
-        for tr in unique_results:
-            _rid = tr.get("_id")
-            if isinstance(_rid, dict) and "$oid" in _rid:
-                _test_result_ids.append(_rid["$oid"])
-            elif _rid:
-                _test_result_ids.append(str(_rid))
-        tg_ticket_map = build_triage_genie_ticket_map(_test_result_ids)
-
-        def process_one(tr):
-            try:
-                test_field = tr.get("test", {})
-                testcase_name = (test_field.get("name", "") if isinstance(test_field, dict) else
-                                str(test_field) if test_field else "")
-                status = tr.get("status", "Failed")
-                jira_tickets = tr.get("jira_tickets", [])
-                jira_ticket = (jira_tickets[0] if jira_tickets else "") or ""
-                if isinstance(jira_ticket, dict):
-                    jira_ticket = jira_ticket.get("$oid", "") or str(jira_ticket)
-                jira_ticket = str(jira_ticket).strip() if jira_ticket else ""
-
-                testcase_id = None
-                if isinstance(tr.get("_id"), dict) and "$oid" in tr.get("_id", {}):
-                    testcase_id = tr["_id"]["$oid"]
-                else:
-                    testcase_id = str(tr.get("_id", "")) if tr.get("_id") else ""
-
-                triage_genie_ticket = ""
-                tg = (
-                    tg_ticket_map.get(testcase_id)
-                    or tg_ticket_map.get(testcase_name)
-                )
-                if tg:
-                    triage_genie_ticket = str(tg).strip()
-
-                if jira_ticket and triage_genie_ticket:
-                    match_status = "Matched" if jira_ticket.upper() == triage_genie_ticket.upper() else "Unmatched"
-                else:
-                    match_status = "N/A" if not jira_ticket and not triage_genie_ticket else ("" if not (jira_ticket and triage_genie_ticket) else "N/A")
-
-                regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
-                return {
-                    "testcase_name": testcase_name,
-                    "regression_owner": regression_owner,
-                    "status": status,
-                    "triage_genie_ticket": triage_genie_ticket,
-                    "jira_ticket": jira_ticket,
-                    "match_status": match_status,
-                }
-            except Exception as e:
-                logger.warning(f"Error processing test result for triage accuracy: {e}")
-                return None
-
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            raw = list(executor.map(process_one, unique_results))
-            testcases = [tc for tc in raw if tc is not None]
-
-        total = len(testcases)
-        triaged_count = sum(1 for tc in testcases if tc.get("jira_ticket"))
-        # Triage Genie % = among triaged (JITA tagged), how many have Triage Genie ticket
-        triage_genie_count = sum(1 for tc in testcases if tc.get("jira_ticket") and tc.get("triage_genie_ticket"))
-        # Total Triage Genie Tagged = among ALL failed/warning, how many have Triage Genie ticket
-        total_triage_genie_count = sum(1 for tc in testcases if tc.get("triage_genie_ticket"))
-        matched_count = sum(1 for tc in testcases if tc.get("match_status") == "Matched")
-        unmatched_count = sum(1 for tc in testcases if tc.get("match_status") == "Unmatched")
-
-        triage_completed_percent = round(100 * triaged_count / total, 1) if total else 0
-        triage_genie_percent = round(100 * triage_genie_count / triaged_count, 1) if triaged_count else 0
-        total_triage_genie_percent = round(100 * total_triage_genie_count / total, 1) if total else 0
-        denom = matched_count + unmatched_count
-        matched_percent = round(100 * matched_count / denom, 1) if denom else 0
-        unmatched_percent = round(100 * unmatched_count / denom, 1) if denom else 0
-
-        result = {
-            "generated_time": datetime.utcnow().isoformat(),
-            "tag": tag if tag else None,
-            "task_ids": collected_task_ids,
-            "testcases": testcases,
-            "triage_summary": {
-                "total_failed_warning_count": total,
-                "triaged_count": triaged_count,
-                "triage_genie_count": triage_genie_count,
-                "total_triage_genie_count": total_triage_genie_count,
-                "triage_completed_percent": triage_completed_percent,
-                "triage_genie_percent": triage_genie_percent,
-                "total_triage_genie_percent": total_triage_genie_percent,
-                "matched_count": matched_count,
-                "unmatched_count": unmatched_count,
-                "matched_percent": matched_percent,
-                "unmatched_percent": unmatched_percent,
-            },
-        }
-        save_triage_accuracy_data(result, cache_tag)
-        logger.info(f"[END] Triage Accuracy | testcases={len(testcases)} | time={time.time() - start:.2f}s")
+        reload = _request_wants_reload()
+        result = _compute_triage_accuracy_payload(tag=tag, task_ids=task_ids, reload=reload)
+        logger.info(f"[END] Triage Accuracy | testcases={len(result.get('testcases') or [])} | time={time.time() - start:.2f}s")
         return jsonify(result)
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
     except Exception as e:
         logger.error(f"Error in triage accuracy: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/triage-genie-coverage", methods=["GET", "POST"])
+@app.route("/api/mcp/regression/triage-genie-coverage", methods=["GET", "POST"])
+@jwt_required
+def get_triage_genie_coverage():
+    """
+    Per-owner Triage Genie coverage for Regression_Run_Tasks (Full link) / tag.
+    Used by the Triage Genie coverage dashboard overlay.
+    """
+    start = time.time()
+    tag, task_ids = _resolve_triage_scope_from_request()
+    if not tag and not task_ids:
+        return jsonify({"error": "Either tag or task_ids is required (or set default tag in Configuration)"}), 400
+
+    try:
+        reload = _request_wants_reload()
+        if task_ids:
+            logger.info(
+                f"[START] Triage Genie Coverage | task_ids={len(task_ids)} (Full link)"
+                + (f" | tag={tag}" if tag else "")
+                + f" | reload={reload} | skip_tg_lookup=True"
+            )
+        else:
+            logger.info(
+                f"[START] Triage Genie Coverage | tag={tag} | reload={reload} | skip_tg_lookup=True"
+            )
+        # Coverage must stay fast: never do per-testcase TG API lookups here.
+        # Reuse cached TG tickets; full TG refresh is Triage Accuracy → Reload data.
+        accuracy = _compute_triage_accuracy_payload(
+            tag=tag, task_ids=task_ids, reload=reload, skip_tg_lookup=True
+        )
+        coverage = _rollup_triage_genie_coverage(accuracy)
+        logger.info(
+            "[END] Triage Genie Coverage | owners=%s remaining=%s | time=%.2fs",
+            len(coverage.get("by_owner") or []),
+            (coverage.get("summary") or {}).get("remaining_need_tg"),
+            time.time() - start,
+        )
+        return jsonify(coverage)
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except TimeoutError as e:
+        logger.error(f"Timeout in triage genie coverage: {e}")
+        return jsonify({
+            "error": str(e),
+            "hint": "JITA/TG lookups timed out. Retry without Refresh first (uses cache), or wait and Refresh once.",
+        }), 504
+    except Exception as e:
+        logger.error(f"Error in triage genie coverage: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -3709,15 +4911,21 @@ def create_run_plan():
         
         # Create new run plan
         new_id = str(int(time.time() * 1000))
+        is_dummy = bool(req_data.get("is_dummy"))
+        name = req_data.get("name")
+        # Auto-mark dummy by name convention so test data stays out of scheduler
+        if not is_dummy:
+            is_dummy = _is_dummy_run_plan({"name": name, "tag_name": tag_name, "is_dummy": False})
         new_run_plan = {
             "id": new_id,
-            "name": req_data.get("name"),
+            "name": name,
             "branch": req_data.get("branch", ""),
             "job_profiles": job_profiles,
             "tag_name": tag_name,
             "schedule_date": req_data.get("schedule_date"),
             "schedule_triggered": False,
             "service_account": req_data.get("service_account", ""),
+            "is_dummy": is_dummy,
             "created_at": datetime.now().isoformat(),
             "last_triggered": None
         }
@@ -3749,7 +4957,7 @@ def update_run_plan(run_plan_id):
             if rp.get("id") == run_plan_id:
                 # Check if already triggered (restrict edits)
                 if rp.get("last_triggered"):
-                    # Only allow editing schedule_date, name, branch, service_account, and tag_name
+                    # Only allow editing schedule_date, name, branch, service_account, tag_name, is_dummy
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data["schedule_date"]
                         rp["schedule_triggered"] = False
@@ -3759,6 +4967,8 @@ def update_run_plan(run_plan_id):
                         rp["branch"] = req_data["branch"]
                     if "service_account" in req_data:
                         rp["service_account"] = req_data["service_account"]
+                    if "is_dummy" in req_data:
+                        rp["is_dummy"] = bool(req_data["is_dummy"])
                     if "tag_name" in req_data:
                         # Validate uniqueness
                         tag_name = req_data["tag_name"]
@@ -3773,6 +4983,10 @@ def update_run_plan(run_plan_id):
                         rp["branch"] = req_data["branch"]
                     if "service_account" in req_data:
                         rp["service_account"] = req_data["service_account"]
+                    if "is_dummy" in req_data:
+                        rp["is_dummy"] = bool(req_data["is_dummy"])
+                    elif "name" in req_data:
+                        rp["is_dummy"] = _is_dummy_run_plan(rp)
                     
                     # Validate and filter job profiles if provided
                     if "job_profiles" in req_data:
@@ -7251,6 +8465,24 @@ TESTCASE_MGMT_BRANCHES = {
 TESTCASE_MGMT_TEAMS = ["CDP", "AHV"]
 
 
+def _normalize_tc_branch_key(branch):
+    """
+    Canonical Testcase Management storage/UI key.
+
+    master → master
+    ganges-7.6-stable / 7.6 → 7.6
+    keeps unknown names as-is
+    """
+    b = (branch or "master").strip()
+    if not b or b == "master":
+        return "master"
+    if b.startswith("ganges-") and b.endswith("-stable"):
+        return b[len("ganges-"):-len("-stable")]
+    if re.match(r"^\d+\.\d+(\.\d+)?$", b):
+        return b
+    return b
+
+
 def _resolve_branch_config(branch):
     """Resolve branch config from static map or dynamically from a version string.
 
@@ -7259,18 +8491,20 @@ def _resolve_branch_config(branch):
     branches the static TESTCASE_MGMT_BRANCHES entry is returned.  For
     anything else a release-style config is generated on-the-fly.
     """
-    if branch in TESTCASE_MGMT_BRANCHES:
-        return TESTCASE_MGMT_BRANCHES[branch]
+    key = _normalize_tc_branch_key(branch)
+    # Prefer static full-name entries when key is a known release
+    for full_name, cfg in TESTCASE_MGMT_BRANCHES.items():
+        if full_name == branch or _normalize_tc_branch_key(full_name) == key:
+            return cfg
 
-    version = branch
-    if branch.startswith("ganges-") and branch.endswith("-stable"):
-        version = branch.replace("ganges-", "").replace("-stable", "")
+    if key == "master":
+        return TESTCASE_MGMT_BRANCHES["master"]
 
-    if re.match(r"^\d+\.\d+(\.\d+)?$", version):
+    if re.match(r"^\d+\.\d+(\.\d+)?$", key):
         return {
-            "milestone": version,
-            "team_prefix": version,
-            "test_set_regex": f"test_sets/milestones/{version}/",
+            "milestone": key,
+            "team_prefix": key,
+            "test_set_regex": f"test_sets/milestones/{key}/",
         }
 
     return None
@@ -7278,6 +8512,410 @@ def _resolve_branch_config(branch):
 
 def _tcms_auth():
     return (TCMS_USER, TCMS_PASSWORD)
+
+
+def _tcms_nutest_target_branch(branch):
+    """
+    Map Testcase Management branch key → NutestPy3Tests target_branch in TCMS.
+
+    UI / storage use short versions ('7.6'); all_test_cases uses 'ganges-7.6-stable'.
+    """
+    key = _normalize_tc_branch_key(branch)
+    if key == "master":
+        return "master"
+    if re.match(r"^\d+\.\d+(\.\d+)?$", key):
+        return f"ganges-{key}-stable"
+    b = (branch or "").strip()
+    if b.startswith("ganges-") and b.endswith("-stable"):
+        return b
+    return b or "master"
+
+
+def _extract_mongo_oid(value):
+    if isinstance(value, dict):
+        return str(value.get("$oid") or "").strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _resolve_tcms_all_testcase_oid(tc_name, branch_key):
+    """
+    Resolve NutestPy3Tests all_test_cases document oid (+ current tags) by name.
+
+    Tag write API is /all_test_cases/tags/{oid} and needs this oid — NOT the
+    milestone aggregate _id stored as local 'oid'.
+    """
+    name = (tc_name or "").strip()
+    if not name:
+        return None, []
+    target_branch = _tcms_nutest_target_branch(branch_key)
+    try:
+        raw_query = json.dumps({
+            "$and": [
+                {
+                    "target_service": "NutestPy3Tests",
+                    "target_branch": target_branch,
+                    "target_package_type": "tar",
+                    "deleted": False,
+                },
+                {"test_case.name": name},
+                {"test_case.deprecated": False},
+            ]
+        })
+        url = (
+            f"{TCMS_TESTDB_BASE}/all_test_cases"
+            f"?raw_query={urllib.parse.quote(raw_query)}&sort=name&limit=1"
+        )
+        resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
+        if resp.status_code != 200:
+            return None, []
+        rows = resp.json().get("data") or []
+        if not rows:
+            return None, []
+        row = rows[0]
+        oid = _extract_mongo_oid(row.get("_id"))
+        tags = (row.get("additional_data") or {}).get("tags") or []
+        if not isinstance(tags, list):
+            tags = []
+        return (oid or None), tags
+    except Exception as exc:
+        logger.warning("Failed to resolve TCMS all_test_cases oid for %s: %s", name, exc)
+        return None, []
+
+
+def _tcms_mutate_testcase_tags(tcms_oid, tags, action="add"):
+    """
+    Add or delete tags on a TCMS all_test_cases document.
+    Returns (ok: bool, status_code: int, message: str).
+    """
+    oid = (tcms_oid or "").strip()
+    tag_list = [str(t).strip() for t in (tags or []) if str(t).strip()]
+    if not oid or not tag_list:
+        return False, 400, "tcms_oid and tags required"
+    url = f"{TCMS_WRITE_BASE}/all_test_cases/tags/{oid}"
+    headers = {"Content-Type": "application/json"}
+    try:
+        if action == "add":
+            resp = requests.post(
+                url,
+                auth=_tcms_auth(),
+                headers=headers,
+                json={"tags": tag_list},
+                verify=False,
+                timeout=30,
+            )
+            ok = resp.status_code in (200, 201)
+        else:
+            # DELETE with JSON body — use data= for broad server compatibility
+            resp = requests.delete(
+                url,
+                auth=_tcms_auth(),
+                headers=headers,
+                data=json.dumps({"tags": tag_list}),
+                verify=False,
+                timeout=30,
+            )
+            ok = resp.status_code in (200, 204)
+        msg = ""
+        try:
+            body = resp.json() if resp.content else {}
+            msg = str(body.get("message") or body.get("detail") or "")[:300]
+        except Exception:
+            msg = (resp.text or "")[:300]
+        return ok, resp.status_code, msg
+    except Exception as exc:
+        return False, 0, str(exc)
+
+
+def _apply_testcase_tag_ops(testcase_oids, tags, branch, team, action="add"):
+    """
+    Apply tag add/delete for many local testcases (by aggregate oid).
+    Resolves each to TCMS all_test_cases oid, mutates TCMS, updates local JSON
+    only for successes. Works for 1..N selections.
+
+    Critical behaviors:
+    - Deduped tags; case-insensitive presence checks
+    - Add: skip tags already present (no false TCMS churn); still success
+    - Delete: prefer remote TCMS tags for presence; never claim "not present"
+      solely from a failed resolve when we still have a tcms_oid (attempt delete)
+    - On HTTP 404: re-resolve oid once and retry (stale tcms_oid)
+    - Local cache updated only after TCMS success (or pure local no-op add)
+    """
+    branch = _normalize_tc_branch_key(branch)
+    team = (team or "CDP").strip() or "CDP"
+    oids = list(dict.fromkeys(str(o).strip() for o in (testcase_oids or []) if str(o).strip()))
+    # Dedupe tags case-insensitively, keep first spelling
+    tag_list = []
+    _seen_tag = set()
+    for t in (tags or []):
+        s = str(t).strip()
+        if not s:
+            continue
+        k = s.lower()
+        if k in _seen_tag:
+            continue
+        _seen_tag.add(k)
+        tag_list.append(s)
+
+    results = {
+        "success": 0,
+        "failed": 0,
+        "errors": [],
+        "updated_oids": [],
+        "not_present": [],  # delete: tags requested but not on the testcase
+        "already_present": [],  # add: tags already on the testcase
+        "action": action,
+        "tags": tag_list,
+        "branch": branch,
+        "team": team,
+    }
+    if not oids or not tag_list:
+        results["errors"].append({"error": "testcase_oids and tags are required"})
+        results["failed"] = 1 if oids or tag_list else 0
+        return results
+
+    data = _load_tc_data(branch, team)
+    by_oid = {
+        str(tc.get("oid") or ""): tc
+        for tc in (data.get("testcases") or [])
+        if tc.get("oid")
+    }
+
+    def _split_present_missing(current_tags, requested):
+        current_list = [str(t).strip() for t in (current_tags or []) if str(t).strip()]
+        lower_map = {}
+        for t in current_list:
+            lower_map.setdefault(t.lower(), t)
+        present, missing = [], []
+        for tag in requested:
+            hit = lower_map.get(tag.lower())
+            if hit is not None:
+                present.append(hit)
+            else:
+                missing.append(tag)
+        return list(dict.fromkeys(present)), list(dict.fromkeys(missing))
+
+    def _merge_tags_local(existing, to_add):
+        out = list(existing or [])
+        lower = {t.lower() for t in out}
+        for tag in to_add:
+            if tag.lower() not in lower:
+                out.append(tag)
+                lower.add(tag.lower())
+        return out
+
+    def _remove_tags_local(existing, to_remove):
+        drop = {t.lower() for t in (to_remove or [])}
+        return [t for t in (existing or []) if t.lower() not in drop]
+
+    def _refresh_tcms(name, tc, prefer_remote_tags):
+        """Resolve oid (+ optional remote tags). Returns (tcms_oid, tags, resolved_ok)."""
+        resolved_oid, remote_tags = _resolve_tcms_all_testcase_oid(name, branch)
+        tcms_oid = (tc.get("tcms_oid") or "").strip()
+        current = list(tc.get("tags") or [])
+        resolved_ok = bool(resolved_oid)
+        if resolved_oid:
+            tcms_oid = resolved_oid
+            tc["tcms_oid"] = tcms_oid
+            if prefer_remote_tags and isinstance(remote_tags, list):
+                current = list(remote_tags)
+                tc["tags"] = list(remote_tags)
+        return tcms_oid, current, resolved_ok
+
+    def _mutate_with_stale_retry(name, tc, tcms_oid, tags_to_apply):
+        ok, status, msg = _tcms_mutate_testcase_tags(tcms_oid, tags_to_apply, action=action)
+        if ok:
+            return True, status, msg, tcms_oid
+        # Stale / wrong oid → re-resolve once and retry
+        if status == 404 or (status and 400 <= int(status) < 500 and "not found" in (msg or "").lower()):
+            new_oid, _, resolved_ok = _refresh_tcms(name, tc, prefer_remote_tags=False)
+            if resolved_ok and new_oid and new_oid != tcms_oid:
+                ok2, status2, msg2 = _tcms_mutate_testcase_tags(new_oid, tags_to_apply, action=action)
+                return ok2, status2, msg2, new_oid
+        return False, status, msg, tcms_oid
+
+    def _one(local_oid):
+        tc = by_oid.get(local_oid)
+        if not tc:
+            return {
+                "oid": local_oid,
+                "ok": False,
+                "error": "Not present in local testcase cache — Reload from TCMS",
+            }
+        name = tc.get("name") or ""
+        # Always refresh oid for delete (presence accuracy); for add when missing
+        need_resolve = (not (tc.get("tcms_oid") or "").strip()) or action == "delete"
+        if need_resolve:
+            tcms_oid, current_tags, resolved_ok = _refresh_tcms(
+                name, tc, prefer_remote_tags=(action == "delete")
+            )
+        else:
+            tcms_oid = (tc.get("tcms_oid") or "").strip()
+            current_tags = list(tc.get("tags") or [])
+            resolved_ok = False
+
+        if not tcms_oid:
+            return {
+                "oid": local_oid,
+                "name": name,
+                "ok": False,
+                "error": f"Not present in TCMS all_test_cases for branch '{branch}'",
+            }
+
+        missing_tags = []
+        already = []
+
+        if action == "add":
+            present, missing_tags = _split_present_missing(current_tags, tag_list)
+            # If any tag looks new locally, refresh from TCMS so we don't double-add
+            if missing_tags:
+                new_oid, remote_current, refreshed = _refresh_tcms(
+                    name, tc, prefer_remote_tags=True
+                )
+                if new_oid:
+                    tcms_oid = new_oid
+                if refreshed:
+                    current_tags = remote_current
+                    present, missing_tags = _split_present_missing(current_tags, tag_list)
+            already = present
+            tags_to_apply = missing_tags  # only add what's not present
+            if not tags_to_apply:
+                tc["tags"] = list(current_tags)
+                return {
+                    "oid": local_oid,
+                    "name": name,
+                    "tcms_oid": tcms_oid,
+                    "ok": True,
+                    "already_present": already,
+                    "not_present": [],
+                    "noop": True,
+                }
+        else:
+            # delete
+            if resolved_ok:
+                present, missing_tags = _split_present_missing(current_tags, tag_list)
+                if not present:
+                    return {
+                        "oid": local_oid,
+                        "name": name,
+                        "tcms_oid": tcms_oid,
+                        "ok": False,
+                        "not_present": missing_tags,
+                        "error": f"Tag not present: {', '.join(missing_tags)}",
+                    }
+                tags_to_apply = present
+            else:
+                # Resolve failed — do NOT trust stale local emptiness.
+                # Attempt delete of requested tags; TCMS is source of truth.
+                present_local, _missing_local = _split_present_missing(current_tags, tag_list)
+                tags_to_apply = present_local if present_local else list(tag_list)
+                missing_tags = []
+
+        ok, status, msg, tcms_oid = _mutate_with_stale_retry(
+            name, tc, tcms_oid, tags_to_apply
+        )
+        if not ok:
+            # Delete + resolve failed earlier: map common "not found" to Tag not present
+            err = msg or f"HTTP {status}"
+            if action == "delete" and (
+                status == 404
+                or "not present" in err.lower()
+                or "not found" in err.lower()
+            ):
+                if not missing_tags:
+                    missing_tags = list(tag_list)
+                return {
+                    "oid": local_oid,
+                    "name": name,
+                    "tcms_oid": tcms_oid,
+                    "ok": False,
+                    "status": status,
+                    "not_present": missing_tags,
+                    "error": f"Tag not present: {', '.join(missing_tags)}",
+                }
+            return {
+                "oid": local_oid,
+                "name": name,
+                "tcms_oid": tcms_oid,
+                "ok": False,
+                "status": status,
+                "error": err,
+                "not_present": missing_tags,
+            }
+
+        # Local cache update only after TCMS success
+        existing = list(tc.get("tags") or [])
+        if action == "add":
+            tc["tags"] = _merge_tags_local(existing, tags_to_apply)
+        else:
+            tc["tags"] = _remove_tags_local(existing, tags_to_apply)
+        return {
+            "oid": local_oid,
+            "name": name,
+            "tcms_oid": tcms_oid,
+            "ok": True,
+            "not_present": missing_tags,
+            "already_present": already,
+            "removed_tags": tags_to_apply if action == "delete" else [],
+        }
+
+    # Parallel for multi-select
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(oids)))) as pool:
+        futures = {pool.submit(_one, oid): oid for oid in oids}
+        for fut in as_completed(futures):
+            item = fut.result()
+            missing = item.get("not_present") or []
+            already = item.get("already_present") or []
+            if missing:
+                results["not_present"].append({
+                    "oid": item.get("oid"),
+                    "name": item.get("name"),
+                    "tags": missing,
+                })
+            if already:
+                results["already_present"].append({
+                    "oid": item.get("oid"),
+                    "name": item.get("name"),
+                    "tags": already,
+                })
+            if item.get("ok"):
+                results["success"] += 1
+                results["updated_oids"].append(item.get("oid"))
+            else:
+                results["failed"] += 1
+                results["errors"].append({
+                    "oid": item.get("oid"),
+                    "name": item.get("name"),
+                    "error": item.get("error"),
+                    "status": item.get("status"),
+                    "not_present": missing,
+                })
+
+    if results["success"]:
+        data["last_updated"] = datetime.utcnow().isoformat() + "Z"
+        _save_tc_data(branch, team, data)
+
+    if (
+        action == "delete"
+        and results["success"] == 0
+        and results["failed"] > 0
+        and all(
+            (e.get("error") or "").startswith("Tag not present")
+            for e in results["errors"]
+        )
+    ):
+        all_missing = []
+        for e in results["errors"]:
+            all_missing.extend(e.get("not_present") or [])
+        all_missing = list(dict.fromkeys(all_missing))
+        results["error"] = (
+            f"Tag not present: {', '.join(all_missing)}"
+            if all_missing
+            else "Tag not present"
+        )
+
+    return results
 
 
 def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip, limit):
@@ -7409,16 +9047,17 @@ def _normalize_testcase(item):
         "total_results": score.get("total_results"),
         "tickets": item.get("tickets", []),
         "resource_spec": tc.get("resource_spec", []),
+        "tcms_oid": "",  # all_test_cases oid for tag write API (filled by tag fetch)
     }
 
 
 def _fetch_tags_for_testcases(testcases, branch_key):
-    """Batch-fetch tags from the GET all_test_cases API using regex matching."""
+    """Batch-fetch tags + all_test_cases oid from TCMS (correct target_branch)."""
     if not testcases:
         return testcases
 
-    name_map = {tc["name"]: tc for tc in testcases}
-    target_branch = branch_key
+    name_map = {tc["name"]: tc for tc in testcases if tc.get("name")}
+    target_branch = _tcms_nutest_target_branch(branch_key)
 
     batch_size = 50
     names = list(name_map.keys())
@@ -7445,58 +9084,160 @@ def _fetch_tags_for_testcases(testcases, branch_key):
                 resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
                 if resp.status_code == 200:
                     data = resp.json().get("data", [])
-                    if data:
-                        tags = data[0].get("additional_data", {}).get("tags", [])
-                        if tc_name in name_map:
-                            name_map[tc_name]["tags"] = tags
+                    if data and tc_name in name_map:
+                        row = data[0]
+                        tags = (row.get("additional_data") or {}).get("tags", []) or []
+                        name_map[tc_name]["tags"] = tags if isinstance(tags, list) else []
+                        name_map[tc_name]["tcms_oid"] = _extract_mongo_oid(row.get("_id"))
             except Exception as exc:
                 logger.warning(f"Failed to fetch tags for {tc_name}: {exc}")
 
     with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = []
         for i in range(0, len(names), batch_size):
             batch = names[i:i + batch_size]
-            pool.submit(_fetch_batch, batch)
+            futures.append(pool.submit(_fetch_batch, batch))
+        for fut in as_completed(futures):
+            fut.result()
 
     return testcases
 
 
 def _tc_data_file(branch, team):
-    """Return the path for a per-branch/team JSON file."""
-    safe_name = f"testcase_management_{branch}_{team}.json".replace("/", "_")
+    """Return canonical path for a per-branch/team JSON file (short branch key)."""
+    key = _normalize_tc_branch_key(branch)
+    safe_name = f"testcase_management_{key}_{team}.json".replace("/", "_")
     return os.path.join(TESTCASE_MGMT_DATA_DIR, safe_name)
 
 
-def _load_tc_data(branch, team):
-    fpath = _tc_data_file(branch, team)
+def _tc_data_candidate_paths(branch, team):
+    """
+    Candidate JSON paths for a branch/team.
+
+    Canonical short key first, then legacy full ganges-* filenames so old
+    caches (e.g. testcase_management_ganges-7.6-stable_CDP.json) still load.
+    """
+    key = _normalize_tc_branch_key(branch)
+    team = (team or "CDP").strip() or "CDP"
+    paths = [_tc_data_file(key, team)]
+    if key != "master" and re.match(r"^\d+\.\d+(\.\d+)?$", key):
+        legacy = os.path.join(
+            TESTCASE_MGMT_DATA_DIR,
+            f"testcase_management_ganges-{key}-stable_{team}.json".replace("/", "_"),
+        )
+        if legacy not in paths:
+            paths.append(legacy)
+    # Also accept an accidental full-name canonical path if someone saved raw
+    raw = (branch or "").strip()
+    if raw and raw != key:
+        alt = os.path.join(
+            TESTCASE_MGMT_DATA_DIR,
+            f"testcase_management_{raw}_{team}.json".replace("/", "_"),
+        )
+        if alt not in paths:
+            paths.append(alt)
+    return paths
+
+
+def _tc_data_last_updated_ts(data):
+    """Parse last_updated to a comparable timestamp (0 if missing/invalid)."""
+    raw = (data or {}).get("last_updated") or ""
+    if not raw:
+        return 0.0
     try:
-        with open(fpath, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"last_updated": None, "branch": branch, "team": team, "testcases": []}
+        s = str(raw).strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _load_tc_data(branch, team):
+    """
+    Load testcase cache for branch/team.
+
+    Prefer newest last_updated, then richest tags/tcms_oid population.
+    (Avoids stale legacy ganges-* files undoing tag add/delete saved to short key.)
+    """
+    key = _normalize_tc_branch_key(branch)
+    team = (team or "CDP").strip() or "CDP"
+    best = None  # (score, data, path)
+    for fpath in _tc_data_candidate_paths(branch, team):
+        try:
+            with open(fpath, "r") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        tcs = data.get("testcases") or []
+        if not isinstance(tcs, list) or not tcs:
+            continue
+        tagged = sum(1 for t in tcs if isinstance(t, dict) and t.get("tags"))
+        with_tcms = sum(1 for t in tcs if isinstance(t, dict) and t.get("tcms_oid"))
+        # Newest write wins first — critical after tag mutations
+        score = (_tc_data_last_updated_ts(data), tagged, with_tcms, len(tcs))
+        if best is None or score > best[0]:
+            best = (score, data, fpath)
+
+    if best is None:
+        return {"last_updated": None, "branch": key, "team": team, "testcases": []}
+
+    data = best[1]
+    data["branch"] = key
+    data["team"] = team
+    logger.info(
+        "Loaded testcase cache %s (updated_ts=%s tagged=%s tcms_oid=%s total=%s)",
+        best[2], best[0][0], best[0][1], best[0][2], best[0][3],
+    )
+    return data
 
 
 def _save_tc_data(branch, team, data):
+    """
+    Persist testcase cache to canonical short-key path AND any legacy candidate
+    paths so load cannot prefer a stale ganges-* file after tag edits.
+    """
     os.makedirs(TESTCASE_MGMT_DATA_DIR, exist_ok=True)
-    fpath = _tc_data_file(branch, team)
-    with open(fpath, "w") as f:
-        json.dump(data, f, indent=2, default=str)
+    key = _normalize_tc_branch_key(branch)
+    team = (team or "CDP").strip() or "CDP"
+    if isinstance(data, dict):
+        data["branch"] = key
+        data["team"] = team
+        if not data.get("last_updated"):
+            data["last_updated"] = datetime.utcnow().isoformat() + "Z"
+    payload = json.dumps(data, indent=2, default=str)
+    written = []
+    for fpath in _tc_data_candidate_paths(key, team):
+        try:
+            with open(fpath, "w") as f:
+                f.write(payload)
+            written.append(fpath)
+        except OSError as exc:
+            logger.warning("Failed writing testcase cache %s: %s", fpath, exc)
+    if not written:
+        # Fallback: at least write canonical
+        fpath = _tc_data_file(key, team)
+        with open(fpath, "w") as f:
+            f.write(payload)
 
 
 @app.route("/mcp/regression/testcase-mgmt/fetch-data", methods=["GET"])
 @jwt_required
 def testcase_mgmt_fetch_data():
     """Fetch all test cases from TCMS for a given branch/team and persist to JSON."""
-    branch = request.args.get("branch", "master")
+    branch_in = request.args.get("branch", "master")
     team = request.args.get("team", "CDP")
+    branch = _normalize_tc_branch_key(branch_in)
     page_limit = 500
 
     branch_cfg = _resolve_branch_config(branch)
     if not branch_cfg:
-        return jsonify({"error": f"Unknown branch: {branch}. Use a known branch name or a version number like 7.7"}), 400
+        return jsonify({"error": f"Unknown branch: {branch_in}. Use a known branch name or a version number like 7.7"}), 400
 
     milestone = branch_cfg["milestone"]
     team_prefix = branch_cfg["team_prefix"]
     test_set_regex = branch_cfg["test_set_regex"]
+    nutest_branch = _tcms_nutest_target_branch(branch)
 
     all_testcases = []
     skip = 0
@@ -7528,16 +9269,31 @@ def testcase_mgmt_fetch_data():
                 break
             skip += page_limit
 
-        logger.info(f"Total testcases fetched from aggregate API: {len(all_testcases)} for {branch}/{team}")
+        logger.info(
+            "Total testcases fetched from aggregate API: %s for %s/%s (nutest_target_branch=%s)",
+            len(all_testcases), branch, team, nutest_branch,
+        )
 
         _fetch_tags_for_testcases(all_testcases, branch)
+        tagged = sum(1 for t in all_testcases if t.get("tags"))
+        with_tcms = sum(1 for t in all_testcases if t.get("tcms_oid"))
+        logger.info(
+            "Tag population for %s/%s: tagged=%s/%s tcms_oid=%s/%s",
+            branch, team, tagged, len(all_testcases), with_tcms, len(all_testcases),
+        )
 
         now = datetime.utcnow().isoformat() + "Z"
         data = {
             "last_updated": now,
             "branch": branch,
             "team": team,
+            "nutest_target_branch": nutest_branch,
             "testcases": all_testcases,
+            "tag_stats": {
+                "tagged": tagged,
+                "with_tcms_oid": with_tcms,
+                "total": len(all_testcases),
+            },
         }
         _save_tc_data(branch, team, data)
 
@@ -7545,7 +9301,10 @@ def testcase_mgmt_fetch_data():
             "status": "ok",
             "branch": branch,
             "team": team,
+            "nutest_target_branch": nutest_branch,
             "count": len(all_testcases),
+            "tagged_count": tagged,
+            "tcms_oid_count": with_tcms,
             "last_updated": now,
         })
 
@@ -7558,7 +9317,7 @@ def testcase_mgmt_fetch_data():
 @jwt_required
 def testcase_mgmt_get_testcases():
     """Return testcases from local JSON with optional filters."""
-    branch = request.args.get("branch", "master")
+    branch = _normalize_tc_branch_key(request.args.get("branch", "master"))
     team = request.args.get("team", "CDP")
     tag_filter = request.args.get("tags", "")
     name_filter = request.args.get("name", "").lower()
@@ -7606,8 +9365,8 @@ def testcase_mgmt_get_testcases():
 @app.route("/mcp/regression/testcase-mgmt/tags/add", methods=["POST"])
 @jwt_required
 def testcase_mgmt_add_tags():
-    """Add tags to selected test cases via TCMS write API."""
-    body = request.get_json(force=True)
+    """Add tags to selected test cases via TCMS write API (1..N)."""
+    body = request.get_json(force=True) or {}
     testcase_oids = body.get("testcase_oids", [])
     tags_to_add = body.get("tags", [])
     branch = body.get("branch", "master")
@@ -7616,53 +9375,18 @@ def testcase_mgmt_add_tags():
     if not testcase_oids or not tags_to_add:
         return jsonify({"error": "testcase_oids and tags are required"}), 400
 
-    results = {"success": 0, "failed": 0, "errors": []}
-    successful_oids = []
-
-    for oid in testcase_oids:
-        try:
-            url = f"{TCMS_WRITE_BASE}/all_test_cases/tags/{oid}"
-            resp = requests.post(
-                url,
-                auth=_tcms_auth(),
-                data=json.dumps({"tags": tags_to_add}),
-                headers={"Content-Type": "application/json"},
-                verify=False,
-                timeout=30,
-            )
-            if resp.status_code in (200, 201):
-                results["success"] += 1
-                successful_oids.append(oid)
-                logger.info(f"Successfully added tags to testcase {oid}: {resp.json() if resp.text else 'OK'}")
-            else:
-                results["failed"] += 1
-                error_detail = {"oid": oid, "status": resp.status_code, "response": resp.text[:200]}
-                results["errors"].append(error_detail)
-                logger.error(f"Failed to add tags to testcase {oid}: status={resp.status_code}, response={resp.text[:200]}")
-        except Exception as exc:
-            results["failed"] += 1
-            results["errors"].append({"oid": oid, "error": str(exc)})
-            logger.error(f"Exception adding tags to testcase {oid}: {exc}")
-
-    data = _load_tc_data(branch, team)
-    for tc in data.get("testcases", []):
-        if tc.get("oid") in successful_oids:
-            existing = tc.get("tags", [])
-            for tag in tags_to_add:
-                if tag not in existing:
-                    existing.append(tag)
-            tc["tags"] = existing
-    data["last_updated"] = datetime.utcnow().isoformat() + "Z"
-    _save_tc_data(branch, team, data)
-
-    return jsonify(results)
+    results = _apply_testcase_tag_ops(
+        testcase_oids, tags_to_add, branch, team, action="add"
+    )
+    status = 200 if results.get("success") else 400
+    return jsonify(results), status
 
 
 @app.route("/mcp/regression/testcase-mgmt/tags/delete", methods=["POST"])
 @jwt_required
 def testcase_mgmt_delete_tags():
-    """Delete tags from selected test cases via TCMS write API."""
-    body = request.get_json(force=True)
+    """Delete tags from selected test cases via TCMS write API (1..N)."""
+    body = request.get_json(force=True) or {}
     testcase_oids = body.get("testcase_oids", [])
     tags_to_delete = body.get("tags", [])
     branch = body.get("branch", "master")
@@ -7671,42 +9395,11 @@ def testcase_mgmt_delete_tags():
     if not testcase_oids or not tags_to_delete:
         return jsonify({"error": "testcase_oids and tags are required"}), 400
 
-    results = {"success": 0, "failed": 0, "errors": []}
-    successful_oids = []
-
-    for oid in testcase_oids:
-        try:
-            url = f"{TCMS_WRITE_BASE}/all_test_cases/tags/{oid}"
-            resp = requests.delete(
-                url,
-                auth=_tcms_auth(),
-                data=json.dumps({"tags": tags_to_delete}),
-                headers={"Content-Type": "application/json"},
-                verify=False,
-                timeout=30,
-            )
-            if resp.status_code in (200, 204):
-                results["success"] += 1
-                successful_oids.append(oid)
-                logger.info(f"Successfully deleted tags from testcase {oid}: {resp.json() if resp.text else 'OK'}")
-            else:
-                results["failed"] += 1
-                error_detail = {"oid": oid, "status": resp.status_code, "response": resp.text[:200]}
-                results["errors"].append(error_detail)
-                logger.error(f"Failed to delete tags from testcase {oid}: status={resp.status_code}, response={resp.text[:200]}")
-        except Exception as exc:
-            results["failed"] += 1
-            results["errors"].append({"oid": oid, "error": str(exc)})
-            logger.error(f"Exception deleting tags from testcase {oid}: {exc}")
-
-    data = _load_tc_data(branch, team)
-    for tc in data.get("testcases", []):
-        if tc.get("oid") in successful_oids:
-            tc["tags"] = [t for t in tc.get("tags", []) if t not in tags_to_delete]
-    data["last_updated"] = datetime.utcnow().isoformat() + "Z"
-    _save_tc_data(branch, team, data)
-
-    return jsonify(results)
+    results = _apply_testcase_tag_ops(
+        testcase_oids, tags_to_delete, branch, team, action="delete"
+    )
+    status = 200 if results.get("success") else 400
+    return jsonify(results), status
 
 
 @app.route("/mcp/regression/testcase-mgmt/resource-spec/download", methods=["GET"])
@@ -8007,11 +9700,18 @@ def testcase_mgmt_resolve_job_profiles():
 def testcase_mgmt_branches():
     """Return available branches and teams for the testcase management module.
 
-    Also signals that the UI can send arbitrary release versions (e.g. '7.7')
-    which the backend resolves dynamically.
+    Branch list uses short canonical keys (master, 7.6, 7.5) matching UI storage.
+    Arbitrary release versions (e.g. '7.7') are still accepted dynamically.
     """
+    short_branches = []
+    seen = set()
+    for full in TESTCASE_MGMT_BRANCHES.keys():
+        key = _normalize_tc_branch_key(full)
+        if key not in seen:
+            seen.add(key)
+            short_branches.append(key)
     return jsonify({
-        "branches": list(TESTCASE_MGMT_BRANCHES.keys()),
+        "branches": short_branches,
         "teams": TESTCASE_MGMT_TEAMS,
         "custom_release_supported": True,
     })
@@ -11279,35 +12979,82 @@ def _emails_as_ids(entity_data):
     return ids, (emails[0] if emails else None)
 
 
+def _oid_from_ref(value):
+    """Extract ObjectId string from a JITA ref (bare string, {$oid}, or {_id:{$oid}})."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        v = value.strip()
+        return v or None
+    if isinstance(value, dict):
+        if value.get("$oid"):
+            return str(value["$oid"]).strip() or None
+        inner = value.get("_id")
+        if isinstance(inner, dict) and inner.get("$oid"):
+            return str(inner["$oid"]).strip() or None
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip()
+    return None
+
+
+def _owner_record_from_entity(entity_data):
+    """Resolve the creator/owner user record from created_by_user / created_by / creator.
+
+    Prefer the **creator** identity — never treat the notification ``emails`` list
+    as the creator. ``emails`` is only used later for service-account-created JPs.
+    """
+    # 1) Expanded created_by_user (full user doc)
+    cbu = entity_data.get("created_by_user")
+    if isinstance(cbu, dict) and (cbu.get("user_name") or cbu.get("email") or cbu.get("display_name")):
+        return cbu
+
+    # 2) Explicit creator field (some JITA payloads)
+    creator = entity_data.get("creator")
+    if isinstance(creator, dict) and (creator.get("user_name") or creator.get("email") or creator.get("display_name")):
+        return creator
+    creator_oid = _oid_from_ref(creator)
+    if creator_oid:
+        resolved = _resolve_jita_user(creator_oid)
+        if resolved:
+            return resolved
+
+    # 3) created_by ObjectId (string or {$oid}) — resolve via users API
+    cb_oid = _oid_from_ref(entity_data.get("created_by"))
+    if not cb_oid:
+        cb_oid = _oid_from_ref(cbu)  # unexpanded created_by_user: {"$oid": "..."}
+    if cb_oid:
+        resolved = _resolve_jita_user(cb_oid)
+        if resolved:
+            return resolved
+
+    return {}
+
+
 def _entity_owner_identity(entity_data):
     """Resolve who is allowed to delete a JITA entity.
 
     Returns ``(owner_ids, owner_display)`` — a lowercased set of the owner's
     identifiers (user_name, email, email local-part) plus a human-readable name.
 
-    Rules (matching JITA's model + how the RegX tool records ownership):
-    - If ``created_by`` resolves to a **real human**, only that person owns it
-      (their team-mates listed in ``emails`` are just notification recipients and
-      must NOT be able to delete it).
-    - If ``created_by`` is a **service/bot/tool account** (e.g. svc.cdp.regression,
-      agave_bot) or can't be resolved, fall back to the ``emails``/``user`` list —
-      that's where the tool stores the user who requested the clone/create, so the
-      requester (and anyone explicitly listed) can delete it.
+    Rules:
+    - If **creator** / ``created_by`` / ``created_by_user`` resolves to a **real human**,
+      ONLY that person may delete (notification ``emails`` are ignored).
+    - If creator is a **service/bot/tool** account, fall back to ``emails``/``user``
+      (where RegX records the human requester).
+    - If creator cannot be resolved at all, return empty owner_ids (caller blocks delete).
     """
-    owner = {}
-    cbu = entity_data.get("created_by_user")
-    if isinstance(cbu, dict) and (cbu.get("user_name") or cbu.get("email")):
-        owner = cbu
-    else:
-        cb = entity_data.get("created_by")
-        oid = cb.get("$oid") if isinstance(cb, dict) else cb
-        if not oid and isinstance(cbu, dict):
-            oid = cbu.get("$oid")
-        owner = _resolve_jita_user(oid)
+    owner = _owner_record_from_entity(entity_data or {})
 
     owner_user_name = (owner.get("user_name") or "").strip().lower()
     owner_email = (owner.get("email") or "").strip().lower()
-    creator_is_human = bool(owner_user_name or owner_email) and not _is_service_account(owner_user_name, owner_email)
+    owner_display_name = (owner.get("display_name") or "").strip().lower()
+    # Some expanded users only expose display_name/first_name
+    if not owner_user_name and owner_display_name and " " not in owner_display_name:
+        owner_user_name = owner_display_name
+
+    creator_is_human = bool(owner_user_name or owner_email) and not _is_service_account(
+        owner_user_name, owner_email
+    )
 
     if creator_is_human:
         owner_ids = set()
@@ -11321,10 +13068,19 @@ def _entity_owner_identity(entity_data):
         )
         return owner_ids, owner_display
 
-    # Service/bot/tool-created (or unresolved) — ownership comes from emails/user.
-    owner_ids, first_email = _emails_as_ids(entity_data)
-    owner_display = first_email or owner.get("user_name") or owner.get("display_name") or "the creator"
-    return owner_ids, owner_display
+    if owner_user_name or owner_email:
+        # Resolved creator is a service/bot — allow requester(s) from emails/user.
+        owner_ids, first_email = _emails_as_ids(entity_data)
+        owner_display = (
+            first_email
+            or owner.get("user_name")
+            or owner.get("display_name")
+            or "the creator"
+        )
+        return owner_ids, owner_display
+
+    # Creator unresolved — do NOT fall back to emails (would let any CC'd teammate delete).
+    return set(), "unverified creator"
 
 
 @app.route("/mcp/regression/dynamic-jp/delete", methods=["POST"])

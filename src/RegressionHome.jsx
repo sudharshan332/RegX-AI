@@ -2,16 +2,129 @@ import React, { useEffect, useState } from "react";
 import api from "./api";
 import { API_BASE_URL } from "./config";
 import AiMarkdown from "./components/AiMarkdown";
+import TriageGenieCoverageModal from "./components/TriageGenieCoverageModal";
+import {
+  buildJitaResultsUrl,
+  extractJitaTaskIds,
+  mergeJitaTaskIds,
+  normalizeJitaTaskId,
+} from "./utils/jitaTaskIds";
+import { shouldRefetchOwnerJiraDetails } from "./utils/dashboardRefreshAfterAppend";
+import {
+  clearFullRegressionLink,
+  persistFullRegressionLink,
+  readScopedFullRegressionTaskIds,
+  scopeToRequestPayload,
+  shouldPostTriageScope,
+  TG_SCOPE_POST_THRESHOLD,
+} from "./utils/regressionScope";
 import "./RegressionHome.css";
 
 const API_URL = `${API_BASE_URL}/mcp/regression/home`;
 const CONFIG_API = `${API_BASE_URL}/mcp/regression/config`;
 const CONFIG_TAGS_API = `${API_BASE_URL}/mcp/regression/config/tags`;
+const TAG_EXTRA_TASK_IDS_API = `${API_BASE_URL}/mcp/regression/config/tag-extra-task-ids`;
 const TCMS_OVERALL_QI_API = `${API_BASE_URL}/mcp/regression/tcms-overall-qi`;
 const TEAM_CONFIG_API = `${API_BASE_URL}/mcp/regression/team-config`;
 const DEFAULT_TAG = "cdp_master_full_reg";
 const JITA_RESULTS_URL = "https://jita.eng.nutanix.com/results?task_ids=";
 const JIRA_URL = "https://jira.nutanix.com/browse/";
+const OWNER_TRIAGE_REPORT_API = `${API_BASE_URL}/mcp/regression/owner-triage-report`;
+
+/** Collect JITA task IDs for the selected job only (scoped Full regression + rows). */
+const collectJitaTaskIdsFromPage = (rowList = []) => {
+  const seen = new Set();
+  const out = [];
+  const add = (ids) => {
+    (ids || []).forEach((raw) => {
+      const id = normalizeJitaTaskId(raw);
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        out.push(id);
+      }
+    });
+  };
+
+  const tag = (localStorage.getItem("regressionDashboardTag") || "").trim();
+  add(readScopedFullRegressionTaskIds(tag || null));
+  (rowList || []).forEach((row) => add(row.actualTasks || []));
+  return out;
+};
+
+/**
+ * Build API params for the selected dashboard job (home / QI / triage-count).
+ * Tag mode → tag only (JITA tester_tag = selected job; avoids 414 from mega task_ids).
+ * Task-ids mode → Full regression link IDs.
+ * Explicit taskIdsToUse wins only when no tag (or caller is task_ids mode).
+ */
+const resolveTagOrTaskIdsParams = (tagToUse, taskIdsToUse, tagState) => {
+  const params = {};
+  const activeTag = (tagToUse || tagState || "").trim() || null;
+  const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
+
+  // Selected job by tag: never send Full-link task_ids (stale mega-lists → JITA 414)
+  if (savedMode === "tag" || activeTag) {
+    const tag = activeTag || (localStorage.getItem("regressionDashboardTag") || "").trim();
+    if (tag) {
+      params.tag = tag;
+      return params;
+    }
+  }
+
+  if (taskIdsToUse) {
+    const ids = Array.isArray(taskIdsToUse)
+      ? taskIdsToUse.map(normalizeJitaTaskId).filter(Boolean)
+      : String(taskIdsToUse)
+          .split(",")
+          .map(normalizeJitaTaskId)
+          .filter(Boolean);
+    if (ids.length) {
+      params.task_ids = ids.join(",");
+      return params;
+    }
+  }
+
+  const scoped = readScopedFullRegressionTaskIds(null);
+  if (scoped.length) {
+    params.task_ids = scoped.join(",");
+  }
+  return params;
+};
+
+/**
+ * Scope for Triage Accuracy / TG analysis: Regression_Run_Tasks Full link wins
+ * (same task set as JITA → View in Triage Genie). Tag kept for label/cache.
+ */
+const resolveTriageAccuracyScope = (tagToUse, taskIdsToUse, tagState, globalIds = []) => {
+  const activeTag = (
+    tagToUse ||
+    tagState ||
+    localStorage.getItem("regressionDashboardTag") ||
+    ""
+  ).trim() || null;
+
+  let taskIds = [];
+  if (taskIdsToUse) {
+    taskIds = Array.isArray(taskIdsToUse)
+      ? taskIdsToUse.map(normalizeJitaTaskId).filter(Boolean)
+      : String(taskIdsToUse)
+          .split(",")
+          .map(normalizeJitaTaskId)
+          .filter(Boolean);
+  }
+  if (!taskIds.length && Array.isArray(globalIds) && globalIds.length) {
+    taskIds = globalIds.map(normalizeJitaTaskId).filter(Boolean);
+  }
+  if (!taskIds.length) {
+    taskIds = readScopedFullRegressionTaskIds(activeTag);
+  }
+
+  return {
+    mode: taskIds.length ? "task_ids" : "tag",
+    tag: activeTag,
+    taskIds: taskIds.length ? taskIds : null,
+  };
+};
 
 // Bug-type color code shared across the owner breakdown tiles and the donut graph.
 const BUG_TYPE_COLORS = {
@@ -125,18 +238,13 @@ const getStoredTag = () => {
   return stored || DEFAULT_TAG;
 };
 
-// Load hidden branches from localStorage
-const getStoredHiddenBranches = () => {
-  const stored = localStorage.getItem("regressionDashboardHiddenBranches");
-  return stored ? JSON.parse(stored) : [];
-};
 
 // Load advanced action options from localStorage
 const getStoredAdvancedOptions = () => {
-  const stored = localStorage.getItem("regressionDashboardAdvancedOptions");
-  return stored ? JSON.parse(stored) : {
+  const defaults = {
     triageCount: true, // Load by default
     triageAccuracy: false, // Triage Accuracy Analyzer
+    triageGenieCoverage: false, // Triage Genie coverage
     qiSummaryReport: false,
     flakyTestInsights: false,
     aiRootCauseSummary: false,
@@ -144,6 +252,13 @@ const getStoredAdvancedOptions = () => {
     bulkIssuesQiImpact: false,
     qiImpactedBulkIssue: false // QI Impacted Bulk issue - not loaded by default
   };
+  const stored = localStorage.getItem("regressionDashboardAdvancedOptions");
+  if (!stored) return defaults;
+  try {
+    return { ...defaults, ...JSON.parse(stored) };
+  } catch {
+    return defaults;
+  }
 };
 
 export default function RegressionHome() {
@@ -151,6 +266,8 @@ export default function RegressionHome() {
   const [loading, setLoading] = useState(true);
   const [tag, setTag] = useState(getStoredTag());
   const [showConfigModal, setShowConfigModal] = useState(false);
+  const [showAddRemoveTaskIds, setShowAddRemoveTaskIds] = useState(false);
+  const [tgCoverageOpen, setTgCoverageOpen] = useState(false);
   const [configTagInput, setConfigTagInput] = useState(tag);
   const [addedTags, setAddedTags] = useState([]);
   const [defaultTag, setDefaultTag] = useState(null);
@@ -164,15 +281,18 @@ export default function RegressionHome() {
     const savedTaskIds = localStorage.getItem("regressionDashboardTaskIds");
     return savedTaskIds ? JSON.parse(savedTaskIds).join(", ") : "";
   });
+  // Add / remove JITA task IDs + tag under active tag (Configuration → tag mode)
+  const [taskIdsActionInput, setTaskIdsActionInput] = useState("");
+  const [appendingTaskIds, setAppendingTaskIds] = useState(false);
+  const [removingTaskIds, setRemovingTaskIds] = useState(false);
+  // Quiet inline status — no alerts, no full-page refresh
+  const [taskIdsActionStatus, setTaskIdsActionStatus] = useState(null);
   // Track task IDs as string to trigger useEffect when they change
   const [taskIdsKey, setTaskIdsKey] = useState(() => {
     const savedTaskIds = localStorage.getItem("regressionDashboardTaskIds");
     return savedTaskIds ? savedTaskIds : null; // Store as string for comparison
   });
-  const [hiddenBranches, setHiddenBranches] = useState(getStoredHiddenBranches()); // Branches to hide
-  const [newBranchTagInput, setNewBranchTagInput] = useState("");
   const [loadingBranches, setLoadingBranches] = useState(false);
-  const [availableBranches, setAvailableBranches] = useState([]);
   const [advancedOptions, setAdvancedOptions] = useState(getStoredAdvancedOptions());
   const [triageCount, setTriageCount] = useState(null);
   const [qiSummaryReport, setQiSummaryReport] = useState(null);
@@ -193,6 +313,22 @@ export default function RegressionHome() {
   const [ownerJiraDetails, setOwnerJiraDetails] = useState({});
   const [loadingJiraDetails, setLoadingJiraDetails] = useState(false);
 
+  // Owner triage report (notebook schema) — FE holds full task_ids list
+  const [ownerReportTaskIds, setOwnerReportTaskIds] = useState([]);
+  const [ownerReportRows, setOwnerReportRows] = useState(null);
+  const [ownerReportMeta, setOwnerReportMeta] = useState(null);
+  const [loadingOwnerReport, setLoadingOwnerReport] = useState(false);
+  const [ownerReportError, setOwnerReportError] = useState(null);
+  const [ownerReportInvalid, setOwnerReportInvalid] = useState([]);
+  // Global JITA task IDs (option B) — drives Regression_Run_Tasks link
+  const [globalJitaTaskIds, setGlobalJitaTaskIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem("regressionDashboardTaskIds");
+      return saved ? JSON.parse(saved).map(normalizeJitaTaskId).filter(Boolean) : [];
+    } catch (_) {
+      return [];
+    }
+  });
   // Deep Analysis tabs state
   const [activeTab, setActiveTab] = useState("home");
   const [deepAnalysisTabs, setDeepAnalysisTabs] = useState([]);
@@ -228,6 +364,11 @@ export default function RegressionHome() {
 
   // Load configuration from JSON file on component mount
   useEffect(() => {
+    // Hidden Branches feature removed — drop stale client filter
+    try {
+      localStorage.removeItem("regressionDashboardHiddenBranches");
+    } catch (_) { /* ignore */ }
+
     const loadConfigFromJSON = async () => {
       try {
         const response = await api.get(CONFIG_API);
@@ -273,6 +414,13 @@ export default function RegressionHome() {
       .catch((err) => console.error("Error loading team config:", err));
   }, []); // Only run on mount
 
+  const activeConfigTag = (
+    defaultTag ||
+    configTagInput ||
+    tag ||
+    ""
+  ).trim();
+
   // When config modal opens, refresh config to sync addedTags and defaultTag
   useEffect(() => {
     if (showConfigModal) {
@@ -311,25 +459,7 @@ export default function RegressionHome() {
         
         const aggregated = aggregateByBranch(response.data.runs, response.data.branch_start_dates || {});
         console.log("Aggregated by branch:", aggregated);
-        console.log("Hidden branches:", hiddenBranches);
-        
-        // Filter out hidden branches
-        const hiddenSet = new Set(hiddenBranches);
-        const filtered = aggregated.filter(row => {
-          const isHidden = hiddenSet.has(row.branch);
-          if (isHidden) {
-            console.log(`Branch "${row.branch}" is hidden, filtering out`);
-          }
-          return !isHidden;
-        });
-        console.log("After filtering hidden branches:", filtered);
-        
-        // If no rows after filtering, check if all were filtered out
-        if (filtered.length === 0 && aggregated.length > 0) {
-          console.warn("All branches were filtered out! Aggregated branches:", aggregated.map(r => r.branch));
-        }
-        
-        setRows(filtered);
+        setRows(aggregated);
         
       } else {
         console.error("Invalid response data or empty runs:", response.data);
@@ -386,50 +516,116 @@ export default function RegressionHome() {
     }
     
     fetchData(params);
-  }, [tag, hiddenBranches, inputMode, taskIdsKey, configLoaded]);
+  }, [tag, inputMode, taskIdsKey, configLoaded]);
 
-  // Load Triage Count automatically on page load and when tag/task_ids change
+  // Load Triage Count for selected job (tag = tester_tag job; task_ids mode = Full link)
   useEffect(() => {
     const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
-    
-    // Only load if we have valid parameters
     if (savedMode === "tag" && tag) {
       fetchTriageCount(tag, null);
     } else if (savedMode === "task_ids") {
-      const savedTaskIds = localStorage.getItem("regressionDashboardTaskIds");
-      if (savedTaskIds) {
-        try {
-          const taskIds = JSON.parse(savedTaskIds);
-          if (taskIds && taskIds.length > 0) {
-            fetchTriageCount(null, taskIds.join(","));
-          }
-        } catch (e) {
-          console.error("Error parsing saved task IDs:", e);
-        }
+      const ids = globalJitaTaskIds.length
+        ? globalJitaTaskIds
+        : readScopedFullRegressionTaskIds(null);
+      if (ids.length > 0) {
+        fetchTriageCount(null, ids.join(","));
       }
     }
-  }, [tag, inputMode, taskIdsKey]); // Re-run when tag, inputMode, or taskIdsKey changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tag, inputMode, taskIdsKey]);
 
-  // Load Triage Accuracy Analyzer when enabled and config changes
+  // Keep global JITA link list in sync when config / taskIdsKey changes (tag-scoped)
   useEffect(() => {
-    if (!advancedOptions.triageAccuracy) return;
+    const activeTag = (tag || localStorage.getItem("regressionDashboardTag") || "").trim();
+    const mode = localStorage.getItem("regressionDashboardInputMode") || "tag";
+    if (mode === "tag" && activeTag) {
+      const linkTag = (localStorage.getItem("regressionDashboardFullLinkTag") || "").trim();
+      if (linkTag && linkTag !== activeTag) {
+        clearFullRegressionLink();
+        setGlobalJitaTaskIds([]);
+        return;
+      }
+    }
+    const ids = readScopedFullRegressionTaskIds(mode === "tag" ? activeTag || null : null);
+    setGlobalJitaTaskIds(ids);
+  }, [taskIdsKey, tag]);
+
+  // Tag mode: ALWAYS replace Regression_Run_Tasks from current home rows (no cross-job merge).
+  useEffect(() => {
+    if (inputMode !== "tag") return;
+    const currentTag = (tag || "").trim();
+    if (!currentTag) return;
+
+    const fromRows = [];
+    const seen = new Set();
+    (rows || []).forEach((row) => {
+      (row.actualTasks || []).forEach((raw) => {
+        const id = normalizeJitaTaskId(raw);
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          fromRows.push(id);
+        }
+      });
+    });
+    if (!fromRows.length) return;
+
+    const same =
+      fromRows.length === globalJitaTaskIds.length &&
+      fromRows.every((id, i) => id === globalJitaTaskIds[i]);
+    if (!same) {
+      updateRegressionLinkQuietly(fromRows, currentTag);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- sync when home rows / tag change
+  }, [rows, inputMode, tag]);
+
+  // Owner triage report for selected job
+  useEffect(() => {
+    if (!advancedOptions.triageCount) return;
     const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
     if (savedMode === "tag" && tag) {
+      fetchOwnerTriageReport({ tagToUse: tag });
+      return;
+    }
+    const ids = globalJitaTaskIds.length
+      ? globalJitaTaskIds
+      : readScopedFullRegressionTaskIds(null);
+    if (ids.length > 0) {
+      setOwnerReportTaskIds(ids);
+      fetchOwnerTriageReport({ taskIds: ids });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [advancedOptions.triageCount, tag, inputMode, taskIdsKey]);
+
+  // Triage Accuracy for selected job (Full link = View in Triage Genie scope)
+  useEffect(() => {
+    if (!advancedOptions.triageAccuracy) return;
+    const ids = globalJitaTaskIds.length
+      ? globalJitaTaskIds
+      : readScopedFullRegressionTaskIds(tag || null);
+    if (ids.length > 0) {
+      fetchTriageAccuracy(tag || null, ids.join(","));
+    } else if (tag) {
       fetchTriageAccuracy(tag, null);
-    } else if (savedMode === "task_ids") {
-      const savedTaskIds = localStorage.getItem("regressionDashboardTaskIds");
-      if (savedTaskIds) {
-        try {
-          const taskIds = JSON.parse(savedTaskIds);
-          if (taskIds && taskIds.length > 0) {
-            fetchTriageAccuracy(null, taskIds.join(","));
-          }
-        } catch (e) {
-          console.error("Error parsing saved task IDs:", e);
-        }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [advancedOptions.triageAccuracy, tag, inputMode, taskIdsKey]);
+
+  // QI Summary for selected job
+  useEffect(() => {
+    if (!advancedOptions.qiSummaryReport) return;
+    const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
+    if (savedMode === "tag" && tag) {
+      fetchQiSummaryReport(tag, null);
+    } else {
+      const ids = globalJitaTaskIds.length
+        ? globalJitaTaskIds
+        : readScopedFullRegressionTaskIds(null);
+      if (ids.length > 0) {
+        fetchQiSummaryReport(null, ids.join(","));
       }
     }
-  }, [advancedOptions.triageAccuracy, tag, inputMode, taskIdsKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [advancedOptions.qiSummaryReport, tag, inputMode, taskIdsKey]);
 
   // Fetch JIRA details (status, issue type) for all tickets in owner_ticket_map
   const fetchOwnerJiraDetails = async () => {
@@ -454,16 +650,17 @@ export default function RegressionHome() {
     }
   };
 
-  // Auto-fetch JIRA details when owner_ticket_map becomes available.
-  // Refetch if nothing is cached yet, or if every cached entry is stale N/A
-  // (e.g. from an earlier run before JIRA_TOKEN was configured).
+  // Auto-fetch JIRA details when owner_ticket_map changes (new task IDs → new tickets).
   useEffect(() => {
     if (!triageCount || !triageCount.owner_ticket_map) return;
     const entries = Object.values(ownerJiraDetails);
     const allStale = entries.length > 0 && entries.every(
       (d) => (d?.status === "N/A" || d?.status === "Unknown" || !d?.status) && !d?.bug_type
     );
-    if (entries.length === 0 || allStale) {
+    if (
+      allStale ||
+      shouldRefetchOwnerJiraDetails(triageCount.owner_ticket_map, ownerJiraDetails)
+    ) {
       fetchOwnerJiraDetails();
     }
   }, [triageCount]);
@@ -484,12 +681,13 @@ export default function RegressionHome() {
         };
         await api.post(CONFIG_API, configData);
         
-        // Update local state
+        // Update local state — reset Full regression link so prior job IDs never leak
         setTag(selectedTag || null);
         setConfigTagInput(selectedTag || "");
         localStorage.setItem("regressionDashboardTag", selectedTag || "");
         localStorage.setItem("regressionDashboardInputMode", "tag");
-        localStorage.removeItem("regressionDashboardTaskIds");
+        clearFullRegressionLink();
+        setGlobalJitaTaskIds([]);
         setTaskIdsKey(null);
         
         // Update global inputMode state (this will trigger useEffects)
@@ -540,13 +738,14 @@ export default function RegressionHome() {
         };
         await api.post(CONFIG_API, configData);
         
-        // Store task IDs and clear tag
+        // Store task IDs and clear tag (task_ids mode = selected job link)
         setTag(null);
         setDefaultTag(null);
         localStorage.removeItem("regressionDashboardTag");
         localStorage.setItem("regressionDashboardInputMode", "task_ids");
-        const taskIdsString = JSON.stringify(taskIds);
-        localStorage.setItem("regressionDashboardTaskIds", taskIdsString);
+        const normalized = persistFullRegressionLink(taskIds, null);
+        setGlobalJitaTaskIds(normalized);
+        const taskIdsString = JSON.stringify(normalized);
         
         // Update global inputMode state and taskIdsKey state (this will trigger useEffects)
         setInputMode("task_ids");
@@ -602,7 +801,6 @@ export default function RegressionHome() {
       const updatedAdded = response.data.added_tags || [];
       setAddedTags(updatedAdded);
       setNewTagInput("");
-      setAvailableBranches([]);
       // Optionally set newly added tag as default for quick selection
       if (!defaultTag && updatedAdded.includes(tagToAdd)) {
         setDefaultTag(tagToAdd);
@@ -637,101 +835,43 @@ export default function RegressionHome() {
     }
   };
 
-  // Fetch branches from tag
-  const fetchBranchesFromTag = async (tagName) => {
-    if (!tagName.trim()) {
-      alert("Tag name cannot be empty");
-      return;
-    }
-    
-    setLoadingBranches(true);
-    try {
-      const response = await api.get(`${API_BASE_URL}/mcp/regression/branches`, {
-        params: { tag: tagName.trim() }
-      });
-      setAvailableBranches(response.data.branches || []);
-    } catch (err) {
-      console.error("Error fetching branches:", err);
-      alert("Failed to fetch branches. Please check if the tag name is correct.");
-      setAvailableBranches([]);
-    } finally {
-      setLoadingBranches(false);
-    }
-  };
-
-  // Add new branch
-  const handleAddNewBranch = (branchName) => {
-    if (!branchName || !branchName.trim()) {
-      alert("Please select a branch");
-      return;
-    }
-    
-    const branch = branchName.trim();
-    
-    // Remove from hidden branches if it was hidden
-    setHiddenBranches(prev => {
-      const updated = prev.filter(b => b !== branch);
-      localStorage.setItem("regressionDashboardHiddenBranches", JSON.stringify(updated));
-      return updated;
-    });
-    
-    setNewBranchTagInput("");
-    setAvailableBranches([]);
-    
-    // The table will automatically refresh due to useEffect dependency on hiddenBranches
-    alert(`Branch "${branch}" will be shown in the table.`);
-  };
-
-  // Delete branch (hide it)
-  const handleDeleteBranch = (branchName) => {
-    if (window.confirm(`Are you sure you want to hide branch "${branchName}" from the table?`)) {
-      setHiddenBranches(prev => {
-        if (!prev.includes(branchName)) {
-          const updated = [...prev, branchName];
-          localStorage.setItem("regressionDashboardHiddenBranches", JSON.stringify(updated));
-          return updated;
-        }
-        return prev;
-      });
-      alert(`Branch "${branchName}" has been hidden from the table.`);
-    }
-  };
-
-  // Fetch Triage Accuracy Analyzer - supports both tag and task_ids; reload=true invalidates cache
+  // Fetch Triage Accuracy — Full-link task_ids (Regression_Run_Tasks) win when present
   const fetchTriageAccuracy = async (tagToUse = null, taskIdsToUse = null, reload = false) => {
     setLoadingTriageAccuracy(true);
     try {
-      const params = {};
-      if (tagToUse || tag) {
-        params.tag = tagToUse || tag;
-      } else if (taskIdsToUse) {
-        params.task_ids = Array.isArray(taskIdsToUse) ? taskIdsToUse.join(",") : taskIdsToUse;
+      const scope = resolveTriageAccuracyScope(
+        tagToUse,
+        taskIdsToUse,
+        tag,
+        globalJitaTaskIds
+      );
+      if (!scope.tag && !(scope.taskIds && scope.taskIds.length)) {
+        setLoadingTriageAccuracy(false);
+        return;
+      }
+      const timeout = 900000; // 15 minutes - Triage Genie lookups can be slow for large runs
+      const headers = reload ? { "Cache-Control": "no-cache", "Pragma": "no-cache" } : {};
+      let response;
+      if (shouldPostTriageScope(scope) || (scope.taskIds && scope.taskIds.length > TG_SCOPE_POST_THRESHOLD)) {
+        const body = scopeToRequestPayload(scope, { reload });
+        response = await api.post(`${API_BASE_URL}/mcp/regression/triage-accuracy`, body, {
+          timeout,
+          headers,
+        });
       } else {
-        const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
-        if (savedMode === "tag" && tag) {
-          params.tag = tag;
-        } else if (savedMode === "task_ids") {
-          const savedTaskIds = localStorage.getItem("regressionDashboardTaskIds");
-          if (savedTaskIds) {
-            params.task_ids = JSON.parse(savedTaskIds).join(",");
-          } else {
-            setLoadingTriageAccuracy(false);
-            return;
-          }
-        } else {
-          setLoadingTriageAccuracy(false);
-          return;
+        const params = {};
+        if (scope.tag) params.tag = scope.tag;
+        if (scope.taskIds?.length) params.task_ids = scope.taskIds.join(",");
+        if (reload) {
+          params.reload = "true";
+          params._t = Date.now();
         }
+        response = await api.get(`${API_BASE_URL}/mcp/regression/triage-accuracy`, {
+          params,
+          timeout,
+          headers,
+        });
       }
-      if (reload) {
-        params.reload = "true";
-        params._t = Date.now(); // Cache-bust to avoid any HTTP caching
-      }
-      const response = await api.get(`${API_BASE_URL}/mcp/regression/triage-accuracy`, {
-        params,
-        timeout: 900000, // 15 minutes - Triage Genie lookups can be slow for large runs
-        headers: reload ? { "Cache-Control": "no-cache", "Pragma": "no-cache" } : {}
-      });
       setTriageAccuracyData(response.data);
     } catch (err) {
       console.error("Error fetching triage accuracy:", err);
@@ -754,32 +894,21 @@ export default function RegressionHome() {
     }
   };
 
-  // Reload Triage Accuracy data (invalidate cache + refetch from JITA/Triage Genie)
-  // Uses same param resolution as initial load (useEffect) to ensure correct tag/task_ids
+  // Reload Triage Accuracy — prefer Regression_Run_Tasks Full link (View in TG scope)
   const handleReloadTriageAccuracy = () => {
-    const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
-    if (savedMode === "tag" && (tag || defaultTag)) {
-      const effectiveTag = tag || defaultTag;
-      fetchTriageAccuracy(effectiveTag, null, true);
-    } else if (savedMode === "task_ids") {
-      const savedTaskIds = localStorage.getItem("regressionDashboardTaskIds");
-      if (savedTaskIds) {
-        try {
-          const taskIds = JSON.parse(savedTaskIds);
-          if (taskIds && taskIds.length > 0) {
-            fetchTriageAccuracy(null, taskIds.join(","), true);
-          } else {
-            alert("No task IDs configured. Configure JITA Task IDs in Configuration first.");
-          }
-        } catch (e) {
-          alert("Invalid task IDs in config.");
-        }
-      } else {
-        alert("No task IDs configured. Configure JITA Task IDs in Configuration first.");
-      }
-    } else {
-      alert("No tag or task IDs configured. Configure in Configuration first.");
+    const effectiveTag = tag || defaultTag || null;
+    const ids = globalJitaTaskIds.length
+      ? globalJitaTaskIds
+      : readScopedFullRegressionTaskIds(effectiveTag);
+    if (ids.length > 0) {
+      fetchTriageAccuracy(effectiveTag, ids.join(","), true);
+      return;
     }
+    if (effectiveTag) {
+      fetchTriageAccuracy(effectiveTag, null, true);
+      return;
+    }
+    alert("No tag or Regression_Run_Tasks link configured. Configure in Configuration first.");
   };
 
   // Download Excel report for Triage Accuracy
@@ -808,35 +937,314 @@ export default function RegressionHome() {
     }
   };
 
+  // Owner triage report — notebook columns; always send full task_ids when using ID mode
+  const fetchOwnerTriageReport = async ({ taskIds = null, tagToUse = null, executionUrl = null } = {}) => {
+    setLoadingOwnerReport(true);
+    setOwnerReportError(null);
+    try {
+      const body = {};
+      const normalized = (taskIds || []).map(normalizeJitaTaskId).filter(Boolean);
+      if (normalized.length > 0) {
+        body.task_ids = normalized;
+      } else if (executionUrl) {
+        body.execution_url = executionUrl;
+      } else {
+        // Prefer localStorage mode over stale React `tag` after "+" append
+        const resolved = resolveTagOrTaskIdsParams(tagToUse, null, tag);
+        if (resolved.task_ids) {
+          body.task_ids = resolved.task_ids.split(",").map(normalizeJitaTaskId).filter(Boolean);
+        } else if (resolved.tag) {
+          body.tag = resolved.tag;
+        } else {
+          setOwnerReportError("No JITA task IDs or tag available.");
+          setOwnerReportRows([]);
+          setLoadingOwnerReport(false);
+          return;
+        }
+      }
+
+      const response = await api.post(OWNER_TRIAGE_REPORT_API, body, { timeout: 180000 });
+      const data = response.data || {};
+      if (data.error && !data.rows) {
+        setOwnerReportError(data.error);
+        setOwnerReportRows([]);
+        return;
+      }
+      setOwnerReportRows(Array.isArray(data.rows) ? data.rows : []);
+      setOwnerReportMeta(data.meta || null);
+      setOwnerReportInvalid(data.invalid_task_ids || []);
+      if (Array.isArray(data.task_ids) && data.task_ids.length > 0) {
+        setOwnerReportTaskIds(data.task_ids);
+      } else if (taskIds && taskIds.length > 0) {
+        setOwnerReportTaskIds(taskIds);
+      }
+      if (data.error) {
+        setOwnerReportError(data.error);
+      }
+    } catch (err) {
+      console.error("Error fetching owner triage report:", err);
+      const msg =
+        err.response?.data?.error ||
+        err.message ||
+        "Failed to fetch owner triage report.";
+      setOwnerReportError(msg);
+      setOwnerReportRows([]);
+    } finally {
+      setLoadingOwnerReport(false);
+    }
+  };
+
+  /** 1-click: scrape page for JITA task IDs, else prompt, else fall back to tag. */
+  const handleOneClickOwnerReport = async () => {
+    let ids = collectJitaTaskIdsFromPage(rows);
+    if (ownerReportTaskIds.length > 0) {
+      // Prefer already-tracked list (includes user appends)
+      ids = ownerReportTaskIds;
+    }
+    if (ids.length === 0) {
+      const prompted = window.prompt(
+        "No JITA task IDs found on page. Paste a JITA results URL or comma-separated task IDs:"
+      );
+      if (prompted == null) return;
+      ids = extractJitaTaskIds(prompted);
+      if (ids.length === 0 && (tag || "").trim()) {
+        await fetchOwnerTriageReport({ tagToUse: tag });
+        return;
+      }
+      if (ids.length === 0) {
+        setOwnerReportError("No valid 24-char JITA task IDs found in input.");
+        return;
+      }
+    }
+    setOwnerReportTaskIds(ids);
+    await fetchOwnerTriageReport({ taskIds: ids });
+  };
+
+  const getRegressionLinkTaskIds = () => {
+    let base = globalJitaTaskIds.length > 0 ? [...globalJitaTaskIds] : [];
+    if (base.length === 0) {
+      try {
+        const saved = localStorage.getItem("regressionDashboardTaskIds");
+        if (saved) {
+          base = JSON.parse(saved).map(normalizeJitaTaskId).filter(Boolean);
+        }
+      } catch (_) { /* ignore */ }
+    }
+    if (base.length === 0) {
+      base = collectJitaTaskIdsFromPage(rows);
+    }
+    return base;
+  };
+
+  /** Update JITA link in memory + localStorage without bumping taskIdsKey (no page refetch). */
+  const updateRegressionLinkQuietly = (nextIds, scopeTag = null) => {
+    const tagForLink = (
+      scopeTag ||
+      tag ||
+      localStorage.getItem("regressionDashboardTag") ||
+      ""
+    ).trim();
+    const merged = persistFullRegressionLink(nextIds, tagForLink || null);
+    setGlobalJitaTaskIds(merged);
+    try {
+      window.dispatchEvent(
+        new CustomEvent("regressionFullLinkUpdated", {
+          detail: { taskIds: merged, tag: tagForLink || null },
+        })
+      );
+    } catch (_) { /* ignore */ }
+  };
+
+  /**
+   * Add task ID(s) + tag in background. Silent: no alerts, no dashboard refresh.
+   */
+  const handleAppendTaskIdsToTag = async (rawInput) => {
+    const prompted = (rawInput != null ? String(rawInput) : taskIdsActionInput).trim();
+    if (!prompted) {
+      setTaskIdsActionStatus({ type: "warn", text: "Paste a task ID or JITA URL first." });
+      return;
+    }
+
+    const base = getRegressionLinkTaskIds();
+    const { added, duplicates } = mergeJitaTaskIds(base, prompted);
+    if (added.length === 0) {
+      setTaskIdsActionStatus({
+        type: "warn",
+        text:
+          extractJitaTaskIds(prompted).length === 0
+            ? "No valid 24-char JITA task IDs found."
+            : `Already in link${duplicates.length ? `: ${duplicates.join(", ")}` : "."}`,
+      });
+      return;
+    }
+
+    const sourceTag = activeConfigTag || (
+      localStorage.getItem("regressionDashboardTag") || ""
+    ).trim();
+
+    if (!sourceTag) {
+      const { merged } = mergeJitaTaskIds(base, added);
+      updateRegressionLinkQuietly(merged);
+      setTaskIdsActionInput("");
+      setTaskIdsActionStatus({
+        type: "ok",
+        text: `Added to link (${added.length}). No default tag — tag not applied on JITA.`,
+      });
+      return;
+    }
+
+    // Optimistic: clear input, show quiet working status, run API in background
+    setTaskIdsActionInput("");
+    setAppendingTaskIds(true);
+    setTaskIdsActionStatus({
+      type: "info",
+      text: `Adding ${added.length} task ID(s) in background…`,
+    });
+
+    try {
+      const resp = await api.post(
+        TAG_EXTRA_TASK_IDS_API,
+        {
+          tag: sourceTag,
+          task_ids: added,
+          validate_tag: true,
+          add_missing_tag: true,
+        },
+        { timeout: 90000 }
+      );
+      const data = resp.data || {};
+      const accepted = data.newly_added || [];
+      const notFound = data.rejected_not_found || [];
+      const tagFailed = data.rejected_wrong_tag || [];
+
+      if (accepted.length > 0) {
+        const { merged } = mergeJitaTaskIds(base, accepted);
+        updateRegressionLinkQuietly(merged);
+      }
+
+      const parts = [];
+      if (accepted.length) parts.push(`Added ${accepted.length}`);
+      if (notFound.length) parts.push(`Not present: ${notFound.join(", ")}`);
+      if (tagFailed.length) parts.push(`Tag apply failed: ${tagFailed.join(", ")}`);
+      if (!parts.length) parts.push(data.error || "Nothing added");
+
+      setTaskIdsActionStatus({
+        type: accepted.length ? (notFound.length || tagFailed.length ? "warn" : "ok") : "warn",
+        text: parts.join(" · "),
+      });
+    } catch (err) {
+      console.error("Failed to persist/validate tag_extra_task_ids:", err);
+      const data = err.response?.data || {};
+      const notFound = data.rejected_not_found || [];
+      let text = data.error || "Add failed.";
+      if (!err.response) text = "Backend not reachable (:5001).";
+      if (notFound.length) text = `Not present: ${notFound.join(", ")}`;
+      setTaskIdsActionStatus({ type: "err", text });
+    } finally {
+      setAppendingTaskIds(false);
+    }
+  };
+
+  /**
+   * Remove tag + drop from link in background. Silent. "Not present" if ID not in link.
+   */
+  const handleRemoveTaskIdsFromTag = async () => {
+    const prompted = taskIdsActionInput.trim();
+    if (!prompted) {
+      setTaskIdsActionStatus({ type: "warn", text: "Paste a task ID or JITA URL first." });
+      return;
+    }
+
+    const sourceTag = activeConfigTag;
+    if (!sourceTag) {
+      setTaskIdsActionStatus({ type: "warn", text: "Select a Default Tag Name first." });
+      return;
+    }
+
+    const toRemove = extractJitaTaskIds(prompted);
+    if (toRemove.length === 0) {
+      setTaskIdsActionStatus({ type: "warn", text: "No valid 24-char JITA task IDs found." });
+      return;
+    }
+
+    const base = getRegressionLinkTaskIds();
+    const baseSet = new Set(base.map((id) => String(id).toLowerCase()));
+    const present = toRemove.filter((id) => baseSet.has(id));
+    const notPresent = toRemove.filter((id) => !baseSet.has(id));
+
+    if (present.length === 0) {
+      setTaskIdsActionStatus({
+        type: "warn",
+        text: `Not present: ${notPresent.join(", ")}`,
+      });
+      return;
+    }
+
+    setTaskIdsActionInput("");
+    setRemovingTaskIds(true);
+    setTaskIdsActionStatus({
+      type: "info",
+      text: `Removing ${present.length} task ID(s) in background…`,
+    });
+
+    try {
+      const resp = await api.post(
+        TAG_EXTRA_TASK_IDS_API,
+        {
+          action: "remove",
+          tag: sourceTag,
+          task_ids: present,
+          remove_tag_from_jita: true,
+        },
+        { timeout: 90000 }
+      );
+      const data = resp.data || {};
+      const removed = data.removed || data.untagged_now || present;
+      const removeSet = new Set(removed.map((t) => String(t).toLowerCase()));
+      updateRegressionLinkQuietly(base.filter((id) => !removeSet.has(String(id).toLowerCase())));
+
+      const parts = [];
+      if (removed.length) parts.push(`Removed ${removed.length}`);
+      if ((data.untag_failed || []).length) {
+        parts.push(`Tag strip failed: ${(data.untag_failed || []).join(", ")}`);
+      }
+      if (notPresent.length) parts.push(`Not present: ${notPresent.join(", ")}`);
+
+      setTaskIdsActionStatus({
+        type: (data.untag_failed || []).length || notPresent.length ? "warn" : "ok",
+        text: parts.join(" · ") || "Done",
+      });
+    } catch (err) {
+      console.error("Failed to remove task IDs / tag:", err);
+      const data = err.response?.data || {};
+      let text = data.error || "Remove failed.";
+      if (!err.response) text = "Backend not reachable (:5001).";
+      setTaskIdsActionStatus({ type: "err", text });
+    } finally {
+      setRemovingTaskIds(false);
+    }
+  };
+
+  /** Remove one ID from task_ids-mode textarea (local until Save). */
+  const handleRemoveConfigTaskIdChip = (tid) => {
+    const id = normalizeJitaTaskId(tid);
+    if (!id) return;
+    const current = parseTaskIds(configTaskIdsInput);
+    setConfigTaskIdsInput(current.filter((x) => normalizeJitaTaskId(x) !== id).join(", "));
+  };
+
   // Fetch Triage Count - supports both tag and task_ids
   // By default, exclude bulk issues QI calculation for faster loading
   const fetchTriageCount = async (tagToUse = null, taskIdsToUse = null, includeBulkQi = false) => {
     setLoadingTriage(true);
     try {
-      const params = {};
-      if (tagToUse || tag) {
-        params.tag = tagToUse || tag;
-      } else if (taskIdsToUse) {
-        params.task_ids = Array.isArray(taskIdsToUse) ? taskIdsToUse.join(",") : taskIdsToUse;
-      } else {
-        // Try to get from localStorage
-        const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
-        if (savedMode === "tag" && tag) {
-          params.tag = tag;
-        } else if (savedMode === "task_ids") {
-          const savedTaskIds = localStorage.getItem("regressionDashboardTaskIds");
-          if (savedTaskIds) {
-            params.task_ids = JSON.parse(savedTaskIds).join(",");
-          } else {
-            setLoadingTriage(false);
-            return;
-          }
-        } else {
-          setLoadingTriage(false);
-          return;
-        }
+      // CRITICAL: task_ids must win over stale React `tag` state after "+" append
+      const params = resolveTagOrTaskIdsParams(tagToUse, taskIdsToUse, tag);
+      if (!params.tag && !params.task_ids) {
+        setLoadingTriage(false);
+        return;
       }
-      
+
       // Only include bulk QI calculation if explicitly requested
       if (includeBulkQi) {
         params.include_bulk_qi = "true";
@@ -863,20 +1271,8 @@ export default function RegressionHome() {
     
     setLoadingBulkQi(true);
     try {
-      const params = {};
-      const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
-      
-      if (savedMode === "tag" && tag) {
-        params.tag = tag;
-      } else if (savedMode === "task_ids") {
-        const savedTaskIds = localStorage.getItem("regressionDashboardTaskIds");
-        if (savedTaskIds) {
-          params.task_ids = JSON.parse(savedTaskIds).join(",");
-        } else {
-          setLoadingBulkQi(false);
-          return;
-        }
-      } else {
+      const params = resolveTagOrTaskIdsParams(null, null, tag);
+      if (!params.tag && !params.task_ids) {
         setLoadingBulkQi(false);
         return;
       }
@@ -1094,28 +1490,10 @@ export default function RegressionHome() {
   const fetchQiSummaryReport = async (tagToUse = null, taskIdsToUse = null) => {
     setLoadingQiSummary(true);
     try {
-      const params = {};
-      if (tagToUse || tag) {
-        params.tag = tagToUse || tag;
-      } else if (taskIdsToUse) {
-        params.task_ids = Array.isArray(taskIdsToUse) ? taskIdsToUse.join(",") : taskIdsToUse;
-      } else {
-        // Try to get from localStorage
-        const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
-        if (savedMode === "tag" && tag) {
-          params.tag = tag;
-        } else if (savedMode === "task_ids") {
-          const savedTaskIds = localStorage.getItem("regressionDashboardTaskIds");
-          if (savedTaskIds) {
-            params.task_ids = JSON.parse(savedTaskIds).join(",");
-          } else {
-            setLoadingQiSummary(false);
-            return;
-          }
-        } else {
-          setLoadingQiSummary(false);
-          return;
-        }
+      const params = resolveTagOrTaskIdsParams(tagToUse, taskIdsToUse, tag);
+      if (!params.tag && !params.task_ids) {
+        setLoadingQiSummary(false);
+        return;
       }
       
       const response = await api.get(`${API_BASE_URL}/mcp/regression/qi-summary`, {
@@ -1487,6 +1865,69 @@ export default function RegressionHome() {
 
       {/* Home Tab Content */}
       {activeTab === "home" && <>
+      {advancedOptions.triageGenieCoverage && (
+        <>
+          <button
+            type="button"
+            className="tg-coverage-genie-btn"
+            onClick={() => setTgCoverageOpen(true)}
+            title="Triage Genie coverage"
+            aria-label="Triage Genie coverage"
+          >
+            <svg
+              className="tg-coverage-genie-icon"
+              viewBox="0 0 120 120"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <defs>
+                <linearGradient id="tgGenieBlue" x1="20" y1="10" x2="100" y2="110" gradientUnits="userSpaceOnUse">
+                  <stop offset="0%" stopColor="#7dd3fc" />
+                  <stop offset="45%" stopColor="#38bdf8" />
+                  <stop offset="100%" stopColor="#0284c7" />
+                </linearGradient>
+                <linearGradient id="tgGenieSmoke" x1="40" y1="70" x2="80" y2="118" gradientUnits="userSpaceOnUse">
+                  <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.95" />
+                  <stop offset="100%" stopColor="#0ea5e9" stopOpacity="0.15" />
+                </linearGradient>
+              </defs>
+              <path
+                fill="url(#tgGenieSmoke)"
+                d="M48 72c-6 8-4 16 2 22 6 6 4 14-4 18 14-2 28-8 34-18 6-10 2-20-6-26-4 8-14 10-26 4z"
+              />
+              <ellipse cx="60" cy="58" rx="28" ry="22" fill="url(#tgGenieBlue)" />
+              <path
+                fill="url(#tgGenieBlue)"
+                d="M34 52c-10 2-16 12-14 20 2 6 8 8 14 6 2-8 4-16 0-26zm52 0c10 2 16 12 14 20-2 6-8 8-14 6-2-8-4-16 0-26z"
+              />
+              <circle cx="60" cy="34" r="18" fill="url(#tgGenieBlue)" />
+              <ellipse cx="60" cy="14" rx="7" ry="9" fill="#0ea5e9" />
+              <circle cx="60" cy="6" r="4" fill="#38bdf8" />
+              <ellipse cx="53" cy="32" rx="3.2" ry="3.8" fill="#0f172a" />
+              <ellipse cx="67" cy="32" rx="3.2" ry="3.8" fill="#0f172a" />
+              <circle cx="54" cy="31" r="1" fill="#fff" />
+              <circle cx="68" cy="31" r="1" fill="#fff" />
+              <path d="M48 26q5-4 10 0" stroke="#0f172a" strokeWidth="1.6" fill="none" strokeLinecap="round" />
+              <path d="M62 26q5-4 10 0" stroke="#0f172a" strokeWidth="1.6" fill="none" strokeLinecap="round" />
+              <path
+                d="M48 40c4 8 20 8 24 0"
+                stroke="#0f172a"
+                strokeWidth="2.2"
+                fill="none"
+                strokeLinecap="round"
+              />
+              <path d="M52 40c3 5 13 5 16 0" fill="#be185d" opacity="0.85" />
+              <rect x="24" y="66" width="10" height="5" rx="2" fill="#fbbf24" />
+              <rect x="86" y="66" width="10" height="5" rx="2" fill="#fbbf24" />
+              <path d="M40 72h40" stroke="#fbbf24" strokeWidth="3" strokeLinecap="round" />
+            </svg>
+          </button>
+          <TriageGenieCoverageModal
+            open={tgCoverageOpen}
+            onClose={() => setTgCoverageOpen(false)}
+          />
+        </>
+      )}
       <div style={{ 
         display: "flex", 
         justifyContent: "space-between", 
@@ -1510,6 +1951,9 @@ export default function RegressionHome() {
                 onChange={async (e) => {
                   const selected = e.target.value || null;
                   if (selected === (tag || defaultTag)) return;
+                  // Drop prior job's Full regression IDs before loading new tag
+                  clearFullRegressionLink();
+                  setGlobalJitaTaskIds([]);
                   setTag(selected);
                   setDefaultTag(selected);
                   localStorage.setItem("regressionDashboardTag", selected || "");
@@ -1580,6 +2024,7 @@ export default function RegressionHome() {
                 setConfigTaskIdsInput(savedTaskIds ? JSON.parse(savedTaskIds).join(", ") : "");
                 setConfigTagInput("");
               }
+              setShowAddRemoveTaskIds(false);
               setShowConfigModal(true);
             }}
             style={{
@@ -1694,49 +2139,10 @@ export default function RegressionHome() {
                   <option key={t} value={t}>{t}</option>
                 ))}
               </select>
-              {defaultTag && (
-                <div style={{ marginTop: "10px" }}>
-                  <button
-                    type="button"
-                    onClick={() => fetchBranchesFromTag(defaultTag)}
-                    disabled={loadingBranches}
-                    style={{
-                      padding: "6px 12px",
-                      fontSize: "12px",
-                      background: loadingBranches ? "#ccc" : "#17a2b8",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "4px",
-                      cursor: loadingBranches ? "not-allowed" : "pointer"
-                    }}
-                  >
-                    {loadingBranches ? "Loading..." : "Fetch Branches"}
-                  </button>
-                  {availableBranches.length > 0 && (
-                    <select
-                      onChange={(e) => {
-                        if (e.target.value) handleAddNewBranch(e.target.value);
-                      }}
-                      style={{
-                        marginLeft: "10px",
-                        padding: "6px",
-                        fontSize: "13px",
-                        border: "1px solid #ddd",
-                        borderRadius: "4px"
-                      }}
-                    >
-                      <option value="">-- Select branch to show --</option>
-                      {availableBranches.map((b) => (
-                        <option key={b} value={b}>{b}</option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-              )}
             </div>
             <div style={{ marginBottom: "20px" }}>
               <label style={{ display: "block", marginBottom: "5px", fontWeight: "bold" }}>
-                2. Added Tag List:
+                2. Add Tag:
               </label>
               <div style={{ display: "flex", gap: "8px", marginBottom: "8px" }}>
                 <input
@@ -1766,7 +2172,7 @@ export default function RegressionHome() {
                     whiteSpace: "nowrap"
                   }}
                 >
-                  {loadingBranches ? "Adding..." : "Fetch & Add"}
+                  {loadingBranches ? "Adding..." : "Add Tag"}
                 </button>
               </div>
               {addedTags.length > 0 ? (
@@ -1823,50 +2229,221 @@ export default function RegressionHome() {
                 }}
               />
               <small style={{ display: "block", marginTop: "5px", color: "#666", fontSize: "12px" }}>
-                You can enter either comma-separated task IDs or paste a JITA results link. The link will be automatically parsed to extract task IDs.
+                You can enter either comma-separated task IDs or paste a JITA results link. The link will be automatically parsed to extract task IDs. Click × on a chip below to drop one ID, then Save.
               </small>
-            </div>
-            )}
-
-            {/* Delete Branch */}
-            <div style={{ marginBottom: "20px" }}>
-              <label style={{ display: "block", marginBottom: "5px", fontWeight: "bold" }}>
-                {modalInputMode === "tag" ? "3" : "2"}. Hide Branch:
-              </label>
-              {rows.length > 0 ? (
-                <select
-                  onChange={(e) => {
-                    if (e.target.value) {
-                      handleDeleteBranch(e.target.value);
-                      e.target.value = ""; // Reset selection
-                    }
-                  }}
+              {parseTaskIds(configTaskIdsInput).length > 0 && (
+                <div
                   style={{
-                    width: "100%",
-                    padding: "8px",
-                    fontSize: "14px",
-                    border: "1px solid #ddd",
-                    borderRadius: "4px",
-                    boxSizing: "border-box"
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: "6px",
+                    marginTop: "10px",
                   }}
                 >
-                  <option value="">-- Select a branch to hide --</option>
-                  {rows.map((row) => (
-                    <option key={row.branch} value={row.branch}>
-                      {row.branch}
-                    </option>
+                  {parseTaskIds(configTaskIdsInput).map((tid) => (
+                    <span
+                      key={tid}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "4px",
+                        padding: "4px 8px",
+                        background: "#eef2f7",
+                        borderRadius: "4px",
+                        fontFamily: "monospace",
+                        fontSize: "11px",
+                      }}
+                    >
+                      {tid}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveConfigTaskIdChip(tid)}
+                        title="Remove this task ID"
+                        style={{
+                          border: "none",
+                          background: "transparent",
+                          color: "#dc3545",
+                          cursor: "pointer",
+                          fontWeight: 700,
+                          fontSize: "14px",
+                          lineHeight: 1,
+                          padding: "0 2px",
+                        }}
+                      >
+                        ×
+                      </button>
+                    </span>
                   ))}
-                </select>
-              ) : (
-                <div style={{ color: "#666", fontSize: "13px" }}>No branches available</div>
+                </div>
               )}
             </div>
+            )}
 
             {/* Advanced Options */}
             <div style={{ marginBottom: "20px", paddingTop: "20px", borderTop: "1px solid #ddd" }}>
               <label style={{ display: "block", marginBottom: "15px", fontWeight: "bold", fontSize: "16px" }}>
-                {modalInputMode === "tag" ? "4" : "3"}. Advanced Options:
+                {modalInputMode === "tag" ? "3" : "2"}. Advanced Options:
               </label>
+
+              {modalInputMode === "tag" && (
+              <div style={{ marginBottom: "15px" }}>
+                <label style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "10px",
+                  marginBottom: "12px",
+                  cursor: "pointer",
+                  padding: "8px",
+                  borderRadius: "4px",
+                  transition: "background 0.2s"
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "#f8f9fa"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                >
+                  <input
+                    type="checkbox"
+                    checked={showAddRemoveTaskIds}
+                    onChange={(e) => setShowAddRemoveTaskIds(e.target.checked)}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontSize: "14px", fontWeight: "500" }}>Add / Remove task ID and tag</span>
+                </label>
+                {showAddRemoveTaskIds && (
+                  <div
+                    style={{
+                      marginLeft: "8px",
+                      padding: "12px",
+                      border: "1px solid #e0e0e0",
+                      borderRadius: "6px",
+                      background: "#fafafa",
+                    }}
+                  >
+                    <textarea
+                      value={taskIdsActionInput}
+                      onChange={(e) => setTaskIdsActionInput(e.target.value)}
+                      placeholder="Paste task ID(s) or JITA results URL"
+                      style={{
+                        width: "100%",
+                        padding: "8px",
+                        fontSize: "14px",
+                        border: "1px solid #ddd",
+                        borderRadius: "4px",
+                        boxSizing: "border-box",
+                        minHeight: "64px",
+                        resize: "vertical",
+                        fontFamily: "monospace",
+                        marginBottom: "8px",
+                      }}
+                    />
+                    <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        onClick={() => handleAppendTaskIdsToTag()}
+                        disabled={
+                          appendingTaskIds ||
+                          removingTaskIds ||
+                          !taskIdsActionInput.trim() ||
+                          !activeConfigTag
+                        }
+                        style={{
+                          padding: "8px 16px",
+                          background:
+                            appendingTaskIds ||
+                            removingTaskIds ||
+                            !taskIdsActionInput.trim() ||
+                            !activeConfigTag
+                              ? "#ccc"
+                              : "#0d6efd",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor:
+                            appendingTaskIds ||
+                            removingTaskIds ||
+                            !taskIdsActionInput.trim() ||
+                            !activeConfigTag
+                              ? "not-allowed"
+                              : "pointer",
+                          whiteSpace: "nowrap",
+                          fontWeight: 600,
+                        }}
+                        title="Add tester_tag on JITA and include task ID(s) in regression JITA link"
+                      >
+                        {appendingTaskIds ? "Adding..." : "+ Add"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveTaskIdsFromTag()}
+                        disabled={
+                          removingTaskIds ||
+                          appendingTaskIds ||
+                          !taskIdsActionInput.trim() ||
+                          !activeConfigTag
+                        }
+                        style={{
+                          padding: "8px 16px",
+                          background:
+                            removingTaskIds ||
+                            appendingTaskIds ||
+                            !taskIdsActionInput.trim() ||
+                            !activeConfigTag
+                              ? "#ccc"
+                              : "#dc3545",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor:
+                            removingTaskIds ||
+                            appendingTaskIds ||
+                            !taskIdsActionInput.trim() ||
+                            !activeConfigTag
+                              ? "not-allowed"
+                              : "pointer",
+                          whiteSpace: "nowrap",
+                          fontWeight: 600,
+                        }}
+                        title="Remove tester_tag on JITA and drop task ID(s) from regression JITA link"
+                      >
+                        {removingTaskIds ? "Removing..." : "− Remove"}
+                      </button>
+                    </div>
+                    {taskIdsActionStatus && (
+                      <div
+                        style={{
+                          marginTop: "8px",
+                          padding: "8px 10px",
+                          borderRadius: "4px",
+                          fontSize: "12px",
+                          background:
+                            taskIdsActionStatus.type === "ok"
+                              ? "#e8f5e9"
+                              : taskIdsActionStatus.type === "err"
+                                ? "#fdecea"
+                                : taskIdsActionStatus.type === "warn"
+                                  ? "#fff8e1"
+                                  : "#eef2f7",
+                          color:
+                            taskIdsActionStatus.type === "ok"
+                              ? "#1b5e20"
+                              : taskIdsActionStatus.type === "err"
+                                ? "#b71c1c"
+                                : taskIdsActionStatus.type === "warn"
+                                  ? "#8d6e00"
+                                  : "#334155",
+                        }}
+                      >
+                        {taskIdsActionStatus.text}
+                      </div>
+                    )}
+                    {!activeConfigTag && (
+                      <small style={{ display: "block", marginTop: "6px", color: "#b45309", fontSize: "12px" }}>
+                        Select a Default Tag Name first.
+                      </small>
+                    )}
+                  </div>
+                )}
+              </div>
+              )}
               
               <div style={{ marginBottom: "15px" }}>
                 <label style={{ 
@@ -1923,6 +2500,37 @@ export default function RegressionHome() {
                     style={{ width: "18px", height: "18px", cursor: "pointer" }}
                   />
                   <span style={{ fontSize: "14px", fontWeight: "500" }}>Triage Accuracy Analyzer</span>
+                </label>
+              </div>
+
+              <div style={{ marginBottom: "15px" }}>
+                <label style={{ 
+                  display: "flex", 
+                  alignItems: "center", 
+                  gap: "10px", 
+                  marginBottom: "12px", 
+                  cursor: "pointer",
+                  padding: "8px",
+                  borderRadius: "4px",
+                  transition: "background 0.2s"
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "#f8f9fa"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                >
+                  <input
+                    type="checkbox"
+                    checked={advancedOptions.triageGenieCoverage || false}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setAdvancedOptions(prev => ({
+                        ...prev,
+                        triageGenieCoverage: checked
+                      }));
+                      if (!checked) setTgCoverageOpen(false);
+                    }}
+                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                  />
+                  <span style={{ fontSize: "14px", fontWeight: "500" }}>Triage Genie Coverage</span>
                 </label>
               </div>
 
@@ -2154,8 +2762,11 @@ export default function RegressionHome() {
                   <td className={`status ${(row.status || "").toLowerCase()}`}>
                     {row.status}
                   </td>
-                  <td>
-                    {renderTaskButton(row.actualTasks, "Regression_Run_Tasks")}
+                  <td style={{ textAlign: "center", verticalAlign: "middle" }}>
+                    {renderTaskButton(
+                      globalJitaTaskIds.length > 0 ? globalJitaTaskIds : row.actualTasks,
+                      "Regression_Run_Tasks"
+                    )}
                   </td>
                   <td style={{ textAlign: "center", verticalAlign: "middle", fontSize: "12px" }}>
                     <div style={{ marginBottom: "10px" }}>
@@ -2359,6 +2970,56 @@ export default function RegressionHome() {
       {advancedOptions.triageCount && (
         <div style={{ marginTop: "40px", padding: "20px", background: "#f8f9fa", borderRadius: "8px" }}>
           <h3 style={{ marginTop: 0, marginBottom: "15px", color: "#333" }}>Triage Count by Regression Owner</h3>
+
+          {ownerReportError && (
+            <div style={{ color: "#dc3545", marginBottom: "12px", fontSize: "13px" }}>
+              {ownerReportError}
+            </div>
+          )}
+
+          {/* Notebook-schema owner table — 1-Click moves to top-right in Phase 4 */}
+          <div style={{ marginBottom: "20px" }}>
+            <h4 style={{ marginBottom: "10px" }}>Owner status breakdown (Failed / Skipped / Warning / Killed)</h4>
+            {loadingOwnerReport && !ownerReportRows ? (
+              <div style={{ color: "#666", fontStyle: "italic" }}>
+                Loading owner triage report…
+              </div>
+            ) : ownerReportRows && ownerReportRows.length > 0 ? (
+              <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "15px", background: "#fff" }}>
+                <thead>
+                  <tr style={{ background: "#e9ecef" }}>
+                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "left" }}>Regression_owner</th>
+                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Total</th>
+                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Total untriaged</th>
+                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Failed</th>
+                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Skipped</th>
+                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Warning</th>
+                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Killed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ownerReportRows.map((r) => (
+                    <tr key={r.Regression_owner}>
+                      <td style={{ padding: "8px", border: "1px solid #ddd" }}>{r.Regression_owner}</td>
+                      <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{r.Total}</td>
+                      <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center", color: "#dc3545", fontWeight: 600 }}>
+                        {r["Total untriaged"]}
+                      </td>
+                      <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{r.Failed}</td>
+                      <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{r.Skipped}</td>
+                      <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{r.Warning}</td>
+                      <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{r.Killed}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div style={{ color: "#666", fontSize: "13px", marginBottom: "15px" }}>
+                No owner rows yet.
+              </div>
+            )}
+          </div>
+
           {loadingTriage ? (
             <div style={{ color: "#666", fontStyle: "italic" }}>
               Loading triage count... This may take a minute as the backend processes data...
@@ -2369,7 +3030,7 @@ export default function RegressionHome() {
                 <div style={{ color: "#dc3545" }}>{triageCount.error}</div>
               ) : (
                 <div>
-                  {/* Display Triage Summary */}
+                  {/* Display Triage Summary cards (legacy overview) */}
                   {triageCount.triage_summary && (
                     <div style={{ marginBottom: "20px" }}>
                       <h4 style={{ marginBottom: "10px" }}>Triage Summary:</h4>
@@ -2418,26 +3079,6 @@ export default function RegressionHome() {
                           </div>
                         );
                       })()}
-                      <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "15px" }}>
-                        <thead>
-                          <tr style={{ background: "#e9ecef" }}>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "left" }}>Owner</th>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Total Failed</th>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Triaged</th>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>UnTriaged</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {Object.entries(triageCount.triage_summary).map(([owner, stats]) => (
-                            <tr key={owner}>
-                              <td style={{ padding: "8px", border: "1px solid #ddd" }}>{owner}</td>
-                              <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{stats["Total Failed"]}</td>
-                              <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center", color: "#28a745" }}>{stats["Triaged"]}</td>
-                              <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center", color: "#dc3545" }}>{stats["UnTriaged"]}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
                     </div>
                   )}
 
@@ -2778,7 +3419,12 @@ export default function RegressionHome() {
                         </div>
                       </div>
                       <div className="rh-owner-grid">
-                        {Object.entries(triageCount.owner_ticket_map).map(([owner, tickets]) => {
+                        {(() => {
+                          // QI badges only after "Load QI Impact" — no placeholder before that
+                          const qiImpactReady =
+                            (triageCount.ticket_qi_map && Object.keys(triageCount.ticket_qi_map).length > 0) ||
+                            (triageCount.bulk_issues_with_qi && Object.keys(triageCount.bulk_issues_with_qi).length > 0);
+                          return Object.entries(triageCount.owner_ticket_map).map(([owner, tickets]) => {
                           // Highest testcase-impact ticket first.
                           const ticketEntries = Object.entries(tickets).sort((a, b) => b[1] - a[1]);
                           // Per-owner bug-type tallies for the tile header badges.
@@ -2827,7 +3473,9 @@ export default function RegressionHome() {
                               <ul className="rh-owner-tickets">
                                 {ticketEntries.map(([ticket, count]) => {
                                   const jiraInfo = ownerJiraDetails[ticket];
-                                  const qiData = triageCount.ticket_qi_map?.[ticket] || triageCount.bulk_issues_with_qi?.[ticket];
+                                  const qiData = qiImpactReady
+                                    ? (triageCount.ticket_qi_map?.[ticket] || triageCount.bulk_issues_with_qi?.[ticket])
+                                    : null;
                                   const bt = bugTypeOf(jiraInfo);
                                   const risk = qiData ? riskFromQi(qiData.overall_qi_impact) : null;
                                   const hasStatus = jiraInfo && jiraInfo.status && jiraInfo.status !== "N/A";
@@ -2837,12 +3485,10 @@ export default function RegressionHome() {
                                     : (jiraInfo ? `Other — Issue Type: ${jiraInfo.issue_type || "N/A"}` : "Loading bug type…");
                                   return (
                                     <li key={ticket}>
-                                      {/* Color code (red = product bug, orange = test bug, grey = other/loading) */}
                                       <span className="rh-bug-dot rh-bug-dot-lg rh-bug-dot-spaced" style={{ background: dotColor }} title={dotTip} />
                                       <a className="rh-ticket-link" href={`${JIRA_URL}${ticket}`} target="_blank" rel="noreferrer">
                                         {ticket}
                                       </a>
-                                      {/* State of the ticket — centered in the row */}
                                       <span className="rh-ticket-state-wrap">
                                         <span
                                           className="rh-ticket-status"
@@ -2853,9 +3499,11 @@ export default function RegressionHome() {
                                         </span>
                                       </span>
                                       <span className="rh-ticket-meta">
-                                        <span className="rh-qi-badge" title="QI Impact for this ticket">
-                                          {qiData ? `${qiData.overall_qi_impact.toFixed(1)}% QI` : "— QI"}
-                                        </span>
+                                        {qiData && (
+                                          <span className="rh-qi-badge" title="QI Impact for this ticket">
+                                            {qiData.overall_qi_impact.toFixed(1)}% QI
+                                          </span>
+                                        )}
                                         {risk && (
                                           <span
                                             className="rh-risk-badge"
@@ -2865,7 +3513,6 @@ export default function RegressionHome() {
                                             {risk}
                                           </span>
                                         )}
-                                        {/* Count of testcases affected by this ticket */}
                                         <span className="rh-ticket-count" title="Testcases affected">{count} tc</span>
                                       </span>
                                     </li>
@@ -2874,7 +3521,8 @@ export default function RegressionHome() {
                               </ul>
                             </div>
                           );
-                        })}
+                        });
+                        })()}
                       </div>
 
                       {loadingOwnerAi && (
@@ -2915,100 +3563,130 @@ export default function RegressionHome() {
 
       {/* Triage Accuracy Analyzer Section */}
       {advancedOptions.triageAccuracy && (
-        <div style={{ marginTop: "40px", padding: "20px", background: "#f8f9fa", borderRadius: "8px" }}>
-          <h3 style={{ marginTop: 0, marginBottom: "15px", color: "#333" }}>Triage Accuracy Analyzer</h3>
-          {loadingTriageAccuracy ? (
-            <div style={{ color: "#666", fontStyle: "italic" }}>
-              Loading triage accuracy... This may take several minutes as Triage Genie tickets are fetched for each testcase...
+        <section className="rh-report-panel" aria-labelledby="rh-triage-accuracy-title">
+          <header className="rh-report-header">
+            <div className="rh-report-title-block">
+              <p className="rh-report-eyebrow">Analysis</p>
+              <h3 id="rh-triage-accuracy-title" className="rh-report-title">Triage Accuracy</h3>
+              <p className="rh-report-subtitle">
+                Compare completed triage against Triage Genie recommendations for failed and warning testcases.
+              </p>
             </div>
-          ) : triageAccuracyData ? (
-            <div style={{ fontSize: "14px" }}>
-              {triageAccuracyData.error ? (
-                <div style={{ color: "#dc3545" }}>{triageAccuracyData.error}</div>
-              ) : (
-                <div>
-                  {/* Triage Summary */}
-                  {triageAccuracyData.triage_summary && (
-                    <div style={{ marginBottom: "20px" }}>
-                      <h4 style={{ marginBottom: "10px" }}>Triage Summary:</h4>
-                      {/* Summary message above table */}
-                      <p style={{ marginBottom: "12px", lineHeight: "1.6", color: "#333" }}>
-                        Total failed/warning testcases: <strong>{triageAccuracyData?.triage_summary?.total_failed_warning_count ?? triageAccuracyData?.testcases?.length ?? 0}</strong>.
-                        Triage Completed: <strong>{(triageAccuracyData?.triage_summary?.triage_completed_percent ?? 0)}%</strong> ({(triageAccuracyData?.triage_summary?.triaged_count ?? 0)} testcases).
-                        Total Triage Genie Tagged: <strong>{(triageAccuracyData?.triage_summary?.total_triage_genie_percent ?? 0)}%</strong> ({(triageAccuracyData?.triage_summary?.total_triage_genie_count ?? 0)} testcases).
-                      </p>
-                      {/* Table with Metric | Count | Percentage */}
-                      <table style={{ width: "100%", maxWidth: "450px", borderCollapse: "collapse", marginBottom: "15px" }}>
-                        <thead>
-                          <tr style={{ background: "#e9ecef" }}>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "left" }}>Metric</th>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Count</th>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Percentage</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd" }}>Triage Genie Ticket %(based on completed triaged)</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{triageAccuracyData?.triage_summary?.triage_genie_count ?? 0}</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{triageAccuracyData?.triage_summary?.triage_genie_percent ?? 0}%</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd" }}>Matched %</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{triageAccuracyData?.triage_summary?.matched_count ?? 0}</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{triageAccuracyData?.triage_summary?.matched_percent ?? 0}%</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd" }}>Unmatched %</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{triageAccuracyData?.triage_summary?.unmatched_count ?? 0}</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{triageAccuracyData?.triage_summary?.unmatched_percent ?? 0}%</td>
-                          </tr>
-                        </tbody>
-                      </table>
+            <div className="rh-report-actions">
+              <button
+                type="button"
+                className="rh-report-btn rh-report-btn-primary"
+                onClick={handleReloadTriageAccuracy}
+                disabled={loadingTriageAccuracy}
+              >
+                {loadingTriageAccuracy ? "Reloading…" : "Reload data"}
+              </button>
+              <button
+                type="button"
+                className="rh-report-btn rh-report-btn-success"
+                onClick={handleDownloadTriageAccuracyExcel}
+                disabled={loadingTriageAccuracy || !triageAccuracyData || !!triageAccuracyData.error}
+              >
+                Download Excel
+              </button>
+            </div>
+          </header>
+          <div className="rh-report-body">
+            {loadingTriageAccuracy ? (
+              <div className="rh-report-loading">
+                Loading triage accuracy… Triage Genie lookups can take several minutes for large runs.
+              </div>
+            ) : triageAccuracyData?.error ? (
+              <div className="rh-report-error">{triageAccuracyData.error}</div>
+            ) : triageAccuracyData?.triage_summary ? (
+              <>
+                <div className="rh-metric-grid">
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Failed / warning</div>
+                    <div className="rh-metric-value">
+                      {triageAccuracyData.triage_summary.total_failed_warning_count
+                        ?? triageAccuracyData?.testcases?.length
+                        ?? 0}
                     </div>
-                  )}
-                  {/* Reload Data and Download Excel Report Buttons */}
-                  <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-                    <button
-                      onClick={handleReloadTriageAccuracy}
-                      disabled={loadingTriageAccuracy}
-                      style={{
-                        padding: "8px 16px",
-                        background: loadingTriageAccuracy ? "#ccc" : "#17a2b8",
-                        color: "white",
-                        border: "none",
-                        borderRadius: "4px",
-                        cursor: loadingTriageAccuracy ? "not-allowed" : "pointer",
-                        fontSize: "14px",
-                        fontWeight: "500"
-                      }}
-                    >
-                      {loadingTriageAccuracy ? "Reloading..." : "Reload Data"}
-                    </button>
-                    <button
-                      onClick={handleDownloadTriageAccuracyExcel}
-                      style={{
-                        padding: "8px 16px",
-                        background: "#28a745",
-                        color: "white",
-                        border: "none",
-                        borderRadius: "4px",
-                        cursor: "pointer",
-                        fontSize: "14px",
-                        fontWeight: "500"
-                      }}
-                    >
-                      Download Excel Report
-                    </button>
+                    <div className="rh-metric-hint">Testcases in scope</div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Triage completed</div>
+                    <div className="rh-metric-value is-ok">
+                      {triageAccuracyData.triage_summary.triage_completed_percent ?? 0}%
+                    </div>
+                    <div className="rh-metric-hint">
+                      {triageAccuracyData.triage_summary.triaged_count ?? 0} triaged
+                    </div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Genie tagged</div>
+                    <div className="rh-metric-value is-info">
+                      {triageAccuracyData.triage_summary.total_triage_genie_percent ?? 0}%
+                    </div>
+                    <div className="rh-metric-hint">
+                      {triageAccuracyData.triage_summary.total_triage_genie_count ?? 0} testcases
+                    </div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Matched</div>
+                    <div className="rh-metric-value is-ok">
+                      {triageAccuracyData.triage_summary.matched_percent ?? 0}%
+                    </div>
+                    <div className="rh-metric-hint">
+                      {triageAccuracyData.triage_summary.matched_count ?? 0} aligned
+                    </div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Unmatched</div>
+                    <div className="rh-metric-value is-warn">
+                      {triageAccuracyData.triage_summary.unmatched_percent ?? 0}%
+                    </div>
+                    <div className="rh-metric-hint">
+                      {triageAccuracyData.triage_summary.unmatched_count ?? 0} diverge
+                    </div>
                   </div>
                 </div>
-              )}
-            </div>
-          ) : (
-            <div style={{ color: "#666", fontStyle: "italic" }}>
-              Enable this option and click "Save" in Advanced Action to load triage accuracy data.
-            </div>
-          )}
-        </div>
+
+                <div className="rh-report-section">
+                  <h4 className="rh-report-section-title">Breakdown</h4>
+                  <div className="rh-report-table-wrap">
+                    <table className="rh-report-table">
+                      <thead>
+                        <tr>
+                          <th>Metric</th>
+                          <th className="num">Count</th>
+                          <th className="num">Percentage</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td>Triage Genie ticket rate (of completed triage)</td>
+                          <td className="num">{triageAccuracyData.triage_summary.triage_genie_count ?? 0}</td>
+                          <td className="num is-info">{triageAccuracyData.triage_summary.triage_genie_percent ?? 0}%</td>
+                        </tr>
+                        <tr>
+                          <td>Matched with Triage Genie</td>
+                          <td className="num">{triageAccuracyData.triage_summary.matched_count ?? 0}</td>
+                          <td className="num is-ok">{triageAccuracyData.triage_summary.matched_percent ?? 0}%</td>
+                        </tr>
+                        <tr>
+                          <td>Unmatched with Triage Genie</td>
+                          <td className="num">{triageAccuracyData.triage_summary.unmatched_count ?? 0}</td>
+                          <td className="num is-warn">{triageAccuracyData.triage_summary.unmatched_percent ?? 0}%</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="rh-report-empty">
+                Enable this option and save configuration to load triage accuracy data.
+              </div>
+            )}
+          </div>
+        </section>
       )}
 
       {/* QI Impacted Bulk issue Section - Separate from Triage Count */}
@@ -3161,123 +3839,189 @@ export default function RegressionHome() {
 
       {/* QI Summary Report Section */}
       {advancedOptions.qiSummaryReport && (
-        <div style={{ marginTop: "40px", padding: "20px", background: "#f8f9fa", borderRadius: "8px" }}>
-          <h3 style={{ marginTop: 0, marginBottom: "15px", color: "#333" }}>QI Summary Report</h3>
-          {loadingQiSummary ? (
-            <div style={{ color: "#666", fontStyle: "italic" }}>
-              Loading QI Summary Report... This may take a minute as the backend processes data...
+        <section className="rh-report-panel" aria-labelledby="rh-qi-summary-title">
+          <header className="rh-report-header">
+            <div className="rh-report-title-block">
+              <p className="rh-report-eyebrow">Quality</p>
+              <h3 id="rh-qi-summary-title" className="rh-report-title">QI Summary Report</h3>
+              <p className="rh-report-subtitle">
+                Task and test outcome snapshot for the current tag or task ID set, including per-branch rollup.
+              </p>
             </div>
-          ) : qiSummaryReport ? (
-            <div style={{ fontSize: "14px" }}>
-              {qiSummaryReport.error ? (
-                <div style={{ color: "#dc3545" }}>{qiSummaryReport.error}</div>
-              ) : (
-                <div>
-                  {/* Display Status Summary */}
+          </header>
+          <div className="rh-report-body">
+            {loadingQiSummary ? (
+              <div className="rh-report-loading">
+                Loading QI summary… Backend is aggregating task and test results.
+              </div>
+            ) : qiSummaryReport?.error ? (
+              <div className="rh-report-error">{qiSummaryReport.error}</div>
+            ) : qiSummaryReport ? (
+              <>
+                <div className="rh-metric-grid">
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Total tasks</div>
+                    <div className="rh-metric-value">{qiSummaryReport.total_tasks ?? 0}</div>
+                  </div>
                   {qiSummaryReport.status_summary && (
-                    <div style={{ marginBottom: "20px" }}>
-                      <h4 style={{ marginBottom: "10px" }}>Status Summary:</h4>
-                      <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "15px" }}>
-                        <tbody>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Total Tasks:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd" }}>{qiSummaryReport.total_tasks}</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Testing:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", color: "#6f42c1" }}>{qiSummaryReport.status_summary.testing}</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Completed:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", color: "#28a745" }}>{qiSummaryReport.status_summary.completed}</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Pending:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", color: "#17a2b8" }}>{qiSummaryReport.status_summary.pending}</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Failed:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", color: "#dc3545" }}>{qiSummaryReport.status_summary.failed}</td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
+                    <>
+                      <div className="rh-metric-card">
+                        <div className="rh-metric-label">Completed</div>
+                        <div className="rh-metric-value is-ok">{qiSummaryReport.status_summary.completed ?? 0}</div>
+                      </div>
+                      <div className="rh-metric-card">
+                        <div className="rh-metric-label">Testing</div>
+                        <div className="rh-metric-value is-accent">{qiSummaryReport.status_summary.testing ?? 0}</div>
+                      </div>
+                      <div className="rh-metric-card">
+                        <div className="rh-metric-label">Pending</div>
+                        <div className="rh-metric-value is-info">{qiSummaryReport.status_summary.pending ?? 0}</div>
+                      </div>
+                      <div className="rh-metric-card">
+                        <div className="rh-metric-label">Failed tasks</div>
+                        <div className="rh-metric-value is-bad">{qiSummaryReport.status_summary.failed ?? 0}</div>
+                      </div>
+                    </>
                   )}
-                  
-                  {/* Display Test Summary */}
                   {qiSummaryReport.test_summary && (
-                    <div style={{ marginBottom: "20px" }}>
-                      <h4 style={{ marginBottom: "10px" }}>Test Summary:</h4>
-                      <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "15px" }}>
-                        <tbody>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Total:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd" }}>{qiSummaryReport.test_summary.total}</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Succeeded:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", color: "#28a745" }}>{qiSummaryReport.test_summary.succeeded}</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Failed:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", color: "#dc3545" }}>{qiSummaryReport.test_summary.failed}</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Pending:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", color: "#17a2b8" }}>{qiSummaryReport.test_summary.pending}</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Warning:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", color: "#fd7e14" }}>{qiSummaryReport.test_summary.warning}</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Running:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", color: "#6f42c1" }}>{qiSummaryReport.test_summary.running}</td>
-                          </tr>
-                          <tr>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", fontWeight: "bold" }}>Skipped:</td>
-                            <td style={{ padding: "8px", border: "1px solid #ddd", color: "#ffc107" }}>{qiSummaryReport.test_summary.skipped}</td>
-                          </tr>
-                        </tbody>
-                      </table>
+                    <>
+                      <div className="rh-metric-card">
+                        <div className="rh-metric-label">Total tests</div>
+                        <div className="rh-metric-value">{qiSummaryReport.test_summary.total ?? 0}</div>
+                      </div>
+                      <div className="rh-metric-card">
+                        <div className="rh-metric-label">Succeeded</div>
+                        <div className="rh-metric-value is-ok">{qiSummaryReport.test_summary.succeeded ?? 0}</div>
+                      </div>
+                      <div className="rh-metric-card">
+                        <div className="rh-metric-label">Failed tests</div>
+                        <div className="rh-metric-value is-bad">{qiSummaryReport.test_summary.failed ?? 0}</div>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="rh-report-split">
+                  {qiSummaryReport.status_summary && (
+                    <div className="rh-report-section">
+                      <h4 className="rh-report-section-title">Task status</h4>
+                      <div className="rh-report-table-wrap">
+                        <table className="rh-report-table">
+                          <thead>
+                            <tr>
+                              <th>Status</th>
+                              <th className="num">Count</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr>
+                              <td>Total tasks</td>
+                              <td className="num">{qiSummaryReport.total_tasks ?? 0}</td>
+                            </tr>
+                            <tr>
+                              <td>Testing</td>
+                              <td className="num is-accent">{qiSummaryReport.status_summary.testing ?? 0}</td>
+                            </tr>
+                            <tr>
+                              <td>Completed</td>
+                              <td className="num is-ok">{qiSummaryReport.status_summary.completed ?? 0}</td>
+                            </tr>
+                            <tr>
+                              <td>Pending</td>
+                              <td className="num is-info">{qiSummaryReport.status_summary.pending ?? 0}</td>
+                            </tr>
+                            <tr>
+                              <td>Failed</td>
+                              <td className="num is-bad">{qiSummaryReport.status_summary.failed ?? 0}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   )}
-                  
-                  {/* Display Branch Summary */}
-                  {qiSummaryReport.branch_summary && Object.keys(qiSummaryReport.branch_summary).length > 0 && (
-                    <div style={{ marginTop: "20px" }}>
-                      <h4 style={{ marginBottom: "10px" }}>Branch Summary:</h4>
-                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+
+                  {qiSummaryReport.test_summary && (
+                    <div className="rh-report-section">
+                      <h4 className="rh-report-section-title">Test outcomes</h4>
+                      <div className="rh-report-table-wrap">
+                        <table className="rh-report-table">
+                          <thead>
+                            <tr>
+                              <th>Outcome</th>
+                              <th className="num">Count</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr>
+                              <td>Total</td>
+                              <td className="num">{qiSummaryReport.test_summary.total ?? 0}</td>
+                            </tr>
+                            <tr>
+                              <td>Succeeded</td>
+                              <td className="num is-ok">{qiSummaryReport.test_summary.succeeded ?? 0}</td>
+                            </tr>
+                            <tr>
+                              <td>Failed</td>
+                              <td className="num is-bad">{qiSummaryReport.test_summary.failed ?? 0}</td>
+                            </tr>
+                            <tr>
+                              <td>Pending</td>
+                              <td className="num is-info">{qiSummaryReport.test_summary.pending ?? 0}</td>
+                            </tr>
+                            <tr>
+                              <td>Warning</td>
+                              <td className="num is-warn">{qiSummaryReport.test_summary.warning ?? 0}</td>
+                            </tr>
+                            <tr>
+                              <td>Running</td>
+                              <td className="num is-accent">{qiSummaryReport.test_summary.running ?? 0}</td>
+                            </tr>
+                            <tr>
+                              <td>Skipped</td>
+                              <td className="num is-muted">{qiSummaryReport.test_summary.skipped ?? 0}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {qiSummaryReport.branch_summary && Object.keys(qiSummaryReport.branch_summary).length > 0 && (
+                  <div className="rh-report-section">
+                    <h4 className="rh-report-section-title">Branch rollup</h4>
+                    <div className="rh-report-table-wrap">
+                      <table className="rh-report-table">
                         <thead>
-                          <tr style={{ background: "#e9ecef" }}>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "left" }}>Branch</th>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Total Tasks</th>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Total Tests</th>
-                            <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Failed Tests</th>
+                          <tr>
+                            <th>Branch</th>
+                            <th className="num">Tasks</th>
+                            <th className="num">Tests</th>
+                            <th className="num">Failed tests</th>
                           </tr>
                         </thead>
                         <tbody>
                           {Object.entries(qiSummaryReport.branch_summary).map(([branch, stats]) => (
                             <tr key={branch}>
-                              <td style={{ padding: "8px", border: "1px solid #ddd" }}>{branch}</td>
-                              <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{stats.total_tasks}</td>
-                              <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{stats.total_tests}</td>
-                              <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center", color: "#dc3545" }}>{stats.failed_tests}</td>
+                              <td>{branch}</td>
+                              <td className="num">{stats.total_tasks}</td>
+                              <td className="num">{stats.total_tests}</td>
+                              <td className="num is-bad">{stats.failed_tests}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div style={{ color: "#666", fontStyle: "italic" }}>
-              Click "Save" in Advanced Action to load QI Summary Report data.
-            </div>
-          )}
-        </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="rh-report-empty">
+                Save configuration with this option enabled to load the QI summary report.
+              </div>
+            )}
+          </div>
+        </section>
       )}
 
       {/* TCMS Detail Modal */}
@@ -3431,16 +4175,19 @@ function deriveStatus(statuses) {
 
 function renderTaskButton(taskIds, buttonName) {
   if (!taskIds || taskIds.length === 0) return "-";
-  
-  const taskIdsString = taskIds.join(",");
-  const url = `${JITA_RESULTS_URL}${taskIdsString}&active_tab=1&merge_tests=true`;
-  
+
+  const url = buildJitaResultsUrl(taskIds);
+  if (!url) return "-";
+  const isFullRegression = buttonName === "Regression_Run_Tasks";
+
   return (
     <a
       href={url}
       target="_blank"
       rel="noreferrer"
       className="task-btn"
+      title={url}
+      {...(isFullRegression ? { "data-regression-run-tasks": "1" } : {})}
       style={{
         display: "inline-block",
         padding: "6px 12px",

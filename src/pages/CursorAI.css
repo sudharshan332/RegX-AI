@@ -1,7 +1,12 @@
 .cursor-ai-container {
   display: flex;
   flex-direction: column;
+  /* Fill viewport beside sticky sidebar; chat pane scrolls internally */
+  min-height: 100vh;
   height: 100vh;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
   background: #f8fafc;
   color: #1e293b;
 }

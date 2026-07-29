@@ -12,6 +12,7 @@ import { TaskProvider } from './context/TaskContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import TaskStatusIcon from './components/TaskStatusIcon';
 import LoginPage from './components/LoginPage';
+import { resolveDisplayName } from './utils/authUser';
 import './App.css';
 
 function Dashboard() {
@@ -66,7 +67,7 @@ function Dashboard() {
     }
   };
 
-  const displayName = user?.name || user?.sub || 'User';
+  const displayName = resolveDisplayName(user);
   const openSidebarSettings = () => {
     setActivePage('cursor-ai');
     setTimeout(() => {
@@ -88,24 +89,6 @@ function Dashboard() {
               {menuVisible ? '◀' : '▶'}
             </button>
           </div>
-          <div className="sidebar-user-info">
-            <div className="sidebar-user-meta">
-              <span className="sidebar-user-name" title={user?.email || ''}>
-                {displayName}
-              </span>
-              <button
-                className="sidebar-settings-btn"
-                onClick={openSidebarSettings}
-                title="Open Cursor AI settings"
-                aria-label="Open Cursor AI settings"
-              >
-                ⚙
-              </button>
-            </div>
-            <button className="sidebar-logout-btn" onClick={logout} title="Sign out">
-              Logout
-            </button>
-          </div>
           <ul className="menu-list">
             {menuItems.map((item) => (
               <li
@@ -121,6 +104,27 @@ function Dashboard() {
               </li>
             ))}
           </ul>
+          <div className="sidebar-user-info">
+            <div className="sidebar-user-meta">
+              <span
+                className="sidebar-user-name"
+                title={user?.email || user?.username || displayName}
+              >
+                {displayName}
+              </span>
+              <button
+                className="sidebar-settings-btn"
+                onClick={openSidebarSettings}
+                title="Open Cursor AI settings"
+                aria-label="Open Cursor AI settings"
+              >
+                ⚙
+              </button>
+            </div>
+            <button className="sidebar-logout-btn" onClick={logout} title="Sign out">
+              Logout
+            </button>
+          </div>
         </nav>
 
         {!menuVisible && (
