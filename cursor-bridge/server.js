@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 const PORT = parseInt(process.env.CURSOR_BRIDGE_PORT || "5002", 10);
-const API_KEY = process.env.CURSOR_API_KEY;
+const DEFAULT_API_KEY = process.env.CURSOR_API_KEY;
 const MODEL_ID = process.env.CURSOR_MODEL_ID || "claude-sonnet-4-6";
 const BATCH_CONCURRENCY = Math.max(
   3,
@@ -21,7 +21,7 @@ const SKILLS = {
   gleanSearch: `${NUTEST_SOURCEGRAPH}/-/tree/.cursor/skills/glean-search`,
 };
 
-const MCP_SERVERS = {
+const BASE_MCP_SERVERS = {
   "regx-data": {
     url: process.env.REGX_MCP_URL || "http://localhost:5003",
   },
@@ -37,19 +37,35 @@ const MCP_SERVERS = {
   "gw-glean": {
     url: "https://panacea-dev.eng.nutanix.com/mcp/glean",
   },
-  "atlassian": {
-    url: "https://panacea-dev.eng.nutanix.com/mcp/atlassian",
-    headers: {
-      "X-Atlassian-Jira-Personal-Token": process.env.ATLASSIAN_JIRA_TOKEN || "",
-      "X-Atlassian-Jira-Url": "https://jira.nutanix.com",
-      "X-Atlassian-Confluence-Url": "https://confluence.eng.nutanix.com:8443/",
-      "X-Atlassian-Confluence-Personal-Token": process.env.ATLASSIAN_CONFLUENCE_TOKEN || "",
-    },
-  },
   "gw-supportgpt": {
     url: "https://panacea-dev.eng.nutanix.com/mcp/supportgpt",
   },
 };
+
+/**
+ * Build MCP servers with optional per-request Atlassian tokens.
+ * @param {Object} atlassianTokens - { jira: string, confluence: string }
+ */
+function buildMcpServers(atlassianTokens = {}) {
+  const mcpServers = { ...BASE_MCP_SERVERS };
+  
+  const jiraToken = atlassianTokens.jira || process.env.ATLASSIAN_JIRA_TOKEN || "";
+  const confluenceToken = atlassianTokens.confluence || process.env.ATLASSIAN_CONFLUENCE_TOKEN || "";
+  
+  if (jiraToken || confluenceToken) {
+    mcpServers["atlassian"] = {
+      url: "https://panacea-dev.eng.nutanix.com/mcp/atlassian",
+      headers: {
+        "X-Atlassian-Jira-Personal-Token": jiraToken,
+        "X-Atlassian-Jira-Url": "https://jira.nutanix.com",
+        "X-Atlassian-Confluence-Url": "https://confluence.eng.nutanix.com:8443/",
+        "X-Atlassian-Confluence-Personal-Token": confluenceToken,
+      },
+    };
+  }
+  
+  return mcpServers;
+}
 
 // In-memory job store for async batch analysis
 const jobs = new Map();
@@ -94,7 +110,7 @@ function sanitizeRecoveryHistory(history = []) {
   }).filter(Boolean);
 }
 
-async function recoverSessionFromContext(sessionId, recoveryContext = {}) {
+async function recoverSessionFromContext(sessionId, recoveryContext = {}, userApiKey = null, atlassianTokens = {}) {
   const testcaseName = String(recoveryContext.testcase_name || "");
   const latestAnalysis = recoveryContext.latest_analysis || {};
   const priorHistory = sanitizeRecoveryHistory(recoveryContext.prior_history || []);
@@ -103,10 +119,13 @@ async function recoverSessionFromContext(sessionId, recoveryContext = {}) {
     return null;
   }
 
+  const apiKey = userApiKey || DEFAULT_API_KEY;
+  const mcpServers = buildMcpServers(atlassianTokens);
+
   const agent = await Agent.create({
-    apiKey: API_KEY,
+    apiKey,
     model: { id: MODEL_ID },
-    mcpServers: MCP_SERVERS,
+    mcpServers,
   });
 
   const bootstrapPrompt = `You are continuing a previously completed failed-testcase analysis session.
@@ -165,14 +184,20 @@ app.post("/analyze-testcase", async (req, res) => {
     jira_tickets,
     failure_stage,
     analysis_type = "failed",
+    cursor_api_key,
+    atlassian_tokens = {},
   } = req.body;
 
   if (!testcase_name) {
     return res.status(400).json({ error: "testcase_name is required" });
   }
-  if (!API_KEY) {
+
+  const apiKey = cursor_api_key || DEFAULT_API_KEY;
+  if (!apiKey) {
     return res.status(500).json({ error: "CURSOR_API_KEY not configured on bridge" });
   }
+
+  const mcpServers = buildMcpServers(atlassian_tokens);
 
   const promptOpts = {
     testcaseName: testcase_name,
@@ -195,9 +220,9 @@ app.post("/analyze-testcase", async (req, res) => {
 
   try {
     const agent = await Agent.create({
-      apiKey: API_KEY,
+      apiKey,
       model: { id: MODEL_ID },
-      mcpServers: MCP_SERVERS,
+      mcpServers,
     });
 
     const run = await agent.send(prompt);
@@ -231,7 +256,14 @@ app.post("/analyze-testcase", async (req, res) => {
 // The agent retains full conversation context from the initial triage.
 // ---------------------------------------------------------------------------
 app.post("/follow-up", async (req, res) => {
-  const { session_id, question, mode = "agent", recovery_context = {} } = req.body;
+  const {
+    session_id,
+    question,
+    mode = "agent",
+    recovery_context = {},
+    cursor_api_key,
+    atlassian_tokens = {},
+  } = req.body;
 
   if (!session_id || !question) {
     return res.status(400).json({ error: "session_id and question are required" });
@@ -240,7 +272,7 @@ app.post("/follow-up", async (req, res) => {
   let session = sessions.get(session_id);
   if (!session) {
     try {
-      session = await recoverSessionFromContext(session_id, recovery_context);
+      session = await recoverSessionFromContext(session_id, recovery_context, cursor_api_key, atlassian_tokens);
     } catch (recoverErr) {
       console.error("[follow-up] Session recovery failed:", recoverErr.message);
     }
@@ -317,11 +349,13 @@ app.delete("/session/:sessionId", async (req, res) => {
 // POST /analyze-batch  (async — returns job_id immediately, poll /status/:id)
 // ---------------------------------------------------------------------------
 app.post("/analyze-batch", (req, res) => {
-  const { testcases } = req.body;
+  const { testcases, cursor_api_key, atlassian_tokens = {} } = req.body;
   if (!Array.isArray(testcases) || testcases.length === 0) {
     return res.status(400).json({ error: "testcases array is required" });
   }
-  if (!API_KEY) {
+
+  const apiKey = cursor_api_key || DEFAULT_API_KEY;
+  if (!apiKey) {
     return res.status(500).json({ error: "CURSOR_API_KEY not configured on bridge" });
   }
 
@@ -336,7 +370,7 @@ app.post("/analyze-batch", (req, res) => {
   };
   jobs.set(jobId, job);
 
-  processBatch(job, testcases);
+  processBatch(job, testcases, apiKey, atlassian_tokens);
 
   return res.json({ success: true, job_id: jobId, total: testcases.length });
 });
@@ -361,7 +395,9 @@ app.get("/status/:jobId", (req, res) => {
 // ---------------------------------------------------------------------------
 // Batch processing — creates durable sessions per testcase for follow-ups
 // ---------------------------------------------------------------------------
-async function processBatch(job, testcases) {
+async function processBatch(job, testcases, apiKey, atlassianTokens = {}) {
+  const mcpServers = buildMcpServers(atlassianTokens);
+
   async function analyzeOne(tc) {
     const key = tc.testcase_id || tc.testcase_name;
     try {
@@ -384,9 +420,9 @@ async function processBatch(job, testcases) {
         : buildFailedAnalysisPrompt(promptOpts);
 
       const agent = await Agent.create({
-        apiKey: API_KEY,
+        apiKey,
         model: { id: MODEL_ID },
-        mcpServers: MCP_SERVERS,
+        mcpServers,
       });
       const run = await agent.send(prompt);
       const result = await run.wait();
@@ -452,7 +488,8 @@ function parseAgentResult(text) {
 app.listen(PORT, () => {
   console.log(`[cursor-bridge] listening on :${PORT}`);
   console.log(`[cursor-bridge] nutest via Sourcegraph = ${NUTEST_SOURCEGRAPH}`);
-  console.log(`[cursor-bridge] MCP servers = ${Object.keys(MCP_SERVERS).join(", ")}`);
-  console.log(`[cursor-bridge] API key configured = ${!!API_KEY}`);
+  console.log(`[cursor-bridge] MCP servers = ${Object.keys(BASE_MCP_SERVERS).join(", ")}, atlassian`);
+  console.log(`[cursor-bridge] Default API key configured = ${!!DEFAULT_API_KEY}`);
+  console.log(`[cursor-bridge] Per-request API keys = enabled`);
   console.log(`[cursor-bridge] batch concurrency = ${BATCH_CONCURRENCY}`);
 });

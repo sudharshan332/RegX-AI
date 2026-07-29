@@ -2769,17 +2769,19 @@ export default function RegressionHome() {
                     )}
                   </td>
                   <td style={{ textAlign: "center", verticalAlign: "middle", fontSize: "12px" }}>
-                    <div style={{ marginBottom: "10px" }}>
-                      <div style={{ fontWeight: "bold", marginBottom: "3px" }}>SUCCEEDED</div>
-                    <div style={{ color: "#28a745" }}>{row.succeeded || 0}</div>
-                    </div>
-                    <div>
-                      <div style={{ fontWeight: "bold", marginBottom: "3px" }}>FAILED</div>
-                      <div style={{ color: "#dc3545" }}>{row.failed || 0}</div>
-                    </div>
+                    <div style={{ fontWeight: "bold", marginBottom: "3px" }}>SUCCEEDED</div>
+                    <div style={{ color: "#28a745", fontSize: "16px", fontWeight: "bold" }}>{row.succeeded || 0}</div>
                   </td>
                   <td style={{ textAlign: "center", verticalAlign: "middle" }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", fontSize: "12px" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px", fontSize: "12px" }}>
+                      <div>
+                        <div style={{ fontWeight: "bold", marginBottom: "3px" }}>FAILED</div>
+                        <div style={{ color: "#dc3545" }}>{row.failed || 0}</div>
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: "bold", marginBottom: "3px" }}>KILLED</div>
+                        <div style={{ color: "#6c757d" }}>{row.killed || 0}</div>
+                      </div>
                       <div>
                         <div style={{ fontWeight: "bold", marginBottom: "3px" }}>SKIPPED</div>
                         <div style={{ color: "#ffc107" }}>{row.skipped || 0}</div>
@@ -2988,9 +2990,9 @@ export default function RegressionHome() {
               <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "15px", background: "#fff" }}>
                 <thead>
                   <tr style={{ background: "#e9ecef" }}>
-                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "left" }}>Regression_owner</th>
-                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Total</th>
-                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Total untriaged</th>
+                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "left" }}>Regression owner</th>
+                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Total Triages</th>
+                    <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Untriaged</th>
                     <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Failed</th>
                     <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Skipped</th>
                     <th style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>Warning</th>
@@ -3011,6 +3013,31 @@ export default function RegressionHome() {
                       <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{r.Killed}</td>
                     </tr>
                   ))}
+                  {/* Totals Row */}
+                  {ownerReportRows.length > 0 && (() => {
+                    const totals = ownerReportRows.reduce((acc, r) => ({
+                      total: acc.total + (r.Total || 0),
+                      untriaged: acc.untriaged + (r["Total untriaged"] || 0),
+                      failed: acc.failed + (r.Failed || 0),
+                      skipped: acc.skipped + (r.Skipped || 0),
+                      warning: acc.warning + (r.Warning || 0),
+                      killed: acc.killed + (r.Killed || 0),
+                    }), { total: 0, untriaged: 0, failed: 0, skipped: 0, warning: 0, killed: 0 });
+                    
+                    return (
+                      <tr style={{ backgroundColor: "#e9ecef", fontWeight: "bold", borderTop: "2px solid #495057" }}>
+                        <td style={{ padding: "8px", border: "1px solid #ddd" }}>TOTAL</td>
+                        <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{totals.total}</td>
+                        <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center", color: "#dc3545" }}>
+                          {totals.untriaged}
+                        </td>
+                        <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{totals.failed}</td>
+                        <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{totals.skipped}</td>
+                        <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{totals.warning}</td>
+                        <td style={{ padding: "8px", border: "1px solid #ddd", textAlign: "center" }}>{totals.killed}</td>
+                      </tr>
+                    );
+                  })()}
                 </tbody>
               </table>
             ) : (
@@ -3030,58 +3057,6 @@ export default function RegressionHome() {
                 <div style={{ color: "#dc3545" }}>{triageCount.error}</div>
               ) : (
                 <div>
-                  {/* Display Triage Summary cards (legacy overview) */}
-                  {triageCount.triage_summary && (
-                    <div style={{ marginBottom: "20px" }}>
-                      <h4 style={{ marginBottom: "10px" }}>Triage Summary:</h4>
-                      {(() => {
-                        const owners = Object.values(triageCount.triage_summary || {});
-                        const sum = (k) => owners.reduce((acc, s) => acc + (Number(s?.[k]) || 0), 0);
-                        const totalFailed = sum("Total Failed");
-                        const triaged = sum("Triaged");
-                        const untriaged = sum("UnTriaged");
-                        const bulk = sum("Bulk Issues");
-                        const pending = Number(triageCount.pending_tests) || 0;
-                        const triagedPct = totalFailed ? Math.round((triaged / totalFailed) * 100) : 0;
-                        const spark = (pts) => {
-                          const max = Math.max(...pts, 1);
-                          const min = Math.min(...pts, 0);
-                          const range = max - min || 1;
-                          const coords = pts.map((p, i) => {
-                            const x = (i / (pts.length - 1)) * 100;
-                            const y = 24 - ((p - min) / range) * 22 - 1;
-                            return `${x.toFixed(1)},${y.toFixed(1)}`;
-                          });
-                          return (
-                            <svg className="rh-stat-spark" viewBox="0 0 100 26" preserveAspectRatio="none">
-                              <polyline points={coords.join(" ")} fill="none" stroke="rgba(255,255,255,0.9)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                            </svg>
-                          );
-                        };
-                        const cards = [
-                          { label: "Total Failed/Warning", value: totalFailed, icon: "\u26A0", bg: "linear-gradient(135deg, #3a6ea5 0%, #2b5278 100%)", pts: [3, 5, 4, 6, 5, 7, 6] },
-                          { label: "Triaged", value: triaged, sub: `${triagedPct}% of failures`, icon: "\u2713", bg: "linear-gradient(135deg, #27ae60 0%, #1e8449 100%)", pts: [2, 3, 5, 4, 6, 7, 8] },
-                          { label: "UnTriaged", value: untriaged, icon: "\u29D7", bg: "linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)", pts: [7, 6, 6, 4, 5, 3, 2] },
-                          { label: "Bulk Issues", value: bulk, icon: "\u2637", bg: "linear-gradient(135deg, #f5a623 0%, #e8890c 100%)", pts: [4, 5, 4, 5, 6, 5, 6] },
-                          { label: "Pending/Running", value: pending, icon: "\u27F3", bg: "linear-gradient(135deg, #4aa3df 0%, #2e86c1 100%)", pts: [5, 4, 5, 6, 4, 5, 4] },
-                        ];
-                        return (
-                          <div className="rh-stat-cards">
-                            {cards.map((c) => (
-                              <div key={c.label} className="rh-stat-card" style={{ background: c.bg }}>
-                                <div className="rh-stat-icon">{c.icon}</div>
-                                <div className="rh-stat-label">{c.label}</div>
-                                {spark(c.pts)}
-                                <div className="rh-stat-value">{c.value}</div>
-                                {c.sub && <div className="rh-stat-sub">{c.sub}</div>}
-                              </div>
-                            ))}
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  )}
-
                   {/* Display Bulk Issues Table - Always shown, QI Impact loaded on demand */}
                   {triageCount.bulk_issues && Object.keys(triageCount.bulk_issues).length > 0 && (
                     <div style={{ marginBottom: "20px" }}>
@@ -3842,8 +3817,7 @@ export default function RegressionHome() {
         <section className="rh-report-panel" aria-labelledby="rh-qi-summary-title">
           <header className="rh-report-header">
             <div className="rh-report-title-block">
-              <p className="rh-report-eyebrow">Quality</p>
-              <h3 id="rh-qi-summary-title" className="rh-report-title">QI Summary Report</h3>
+              <h3 id="rh-qi-summary-title" className="rh-report-title">Current Run Summary Report</h3>
               <p className="rh-report-subtitle">
                 Task and test outcome snapshot for the current tag or task ID set, including per-branch rollup.
               </p>
@@ -4130,6 +4104,7 @@ function aggregateByBranch(runs, branchStartDates = {}) {
         pending: 0,
         warning: 0,
         running: 0,
+        killed: 0,
         statuses: new Set(),
         actualTasks: [],
         mergedTasks: [],
@@ -4145,6 +4120,7 @@ function aggregateByBranch(runs, branchStartDates = {}) {
     map[branch].pending += counts.Pending || counts.pending || 0;
     map[branch].warning += counts.Warning || counts.warning || 0;
     map[branch].running += counts.Running || counts.running || 0;
+    map[branch].killed += counts.Killed || counts.killed || 0;
     
     map[branch].statuses.add(run.status);
 
@@ -4160,6 +4136,7 @@ function aggregateByBranch(runs, branchStartDates = {}) {
     pending: b.pending,
     warning: b.warning,
     running: b.running,
+    killed: b.killed,
     status: deriveStatus([...b.statuses]),
     actualTasks: b.actualTasks,
     mergedTasks: b.mergedTasks,

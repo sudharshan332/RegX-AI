@@ -13345,6 +13345,63 @@ def _call_ai_chat(system_prompt, user_content, max_tokens=2048):
         return content.strip()
 
 
+def _build_owner_tickets_fallback_analysis(all_tickets, jira_details, owner_for_ticket, ticket_test_count, tag):
+    """Generate deterministic markdown when AI endpoint is unavailable for owner tickets analysis."""
+    table_header = (
+        "| Ticket ID | Owner | Status | Issue Type | Root Cause Category | Impact | AI Recommended Action |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |"
+    )
+    table_rows = []
+    for ticket_id in sorted(all_tickets):
+        jd = jira_details.get(ticket_id, {})
+        owners = ", ".join(owner_for_ticket.get(ticket_id, []))
+        tc_count = ticket_test_count.get(ticket_id, 0)
+        status = jd.get("status", "N/A")
+        issue_type = jd.get("issue_type", "N/A")
+        
+        # Simple classification based on issue type
+        if "bug" in issue_type.lower():
+            root_cause = "Product" if "product" in jd.get("summary", "").lower() else "Test"
+        elif "test" in issue_type.lower():
+            root_cause = "Test"
+        else:
+            root_cause = "Unknown"
+        
+        impact = f"{tc_count} testcase(s) affected"
+        
+        # Recommendation based on status
+        if status.lower() in ["open", "to do", "new"]:
+            recommended_action = "Prioritize triage and assign to appropriate owner"
+        elif status.lower() in ["in progress", "in review"]:
+            recommended_action = "Monitor progress and verify fix"
+        elif status.lower() in ["resolved", "closed", "done"]:
+            recommended_action = "Verify fix is complete and re-run affected tests"
+        else:
+            recommended_action = "Review status and update as needed"
+        
+        table_rows.append(
+            f"| {ticket_id} | {owners or 'Unassigned'} | {status} | {issue_type} | {root_cause} | {impact} | {recommended_action} |"
+        )
+    
+    analysis = (
+        f"# Owner Ticket Breakdown Analysis\n\n"
+        f"**Note:** AI analysis endpoint unavailable. Showing basic breakdown.\n\n"
+        f"**Regression Tag:** {tag}\n"
+        f"**Total Unique Tickets:** {len(all_tickets)}\n\n"
+        f"## Ticket Details\n\n"
+        f"{table_header}\n" + "\n".join(table_rows) + "\n\n"
+        f"## Summary\n\n"
+        f"- Total tickets requiring attention: {len(all_tickets)}\n"
+        f"- Please review each ticket status and ensure proper ownership assignment\n"
+        f"- Priority should be given to tickets with multiple testcases impacted\n\n"
+        f"## Recommended Actions\n\n"
+        f"1. Review all Open/To Do tickets and assign owners\n"
+        f"2. Monitor In Progress tickets for timely completion\n"
+        f"3. Verify Resolved/Closed tickets and re-run affected tests\n"
+    )
+    return analysis
+
+
 def _build_bulk_issues_fallback_analysis(issue_rows, tag, total_tests):
     """Generate deterministic markdown when external AI endpoint is unavailable."""
     table_header = (
@@ -13889,7 +13946,21 @@ def ai_analyze_owner_tickets():
             "Use markdown tables. Use the exact ticket IDs and data provided — never invent data."
         )
 
-        analysis = _call_ai_chat(system_prompt, user_content)
+        try:
+            analysis = _call_ai_chat(system_prompt, user_content)
+        except urllib.error.HTTPError as err:
+            if err.code == 401:
+                logger.warning(f"AI endpoint returned 401 Unauthorized; returning fallback analysis.")
+                analysis = _build_owner_tickets_fallback_analysis(
+                    all_tickets, jira_details, owner_for_ticket, ticket_test_count, tag
+                )
+            else:
+                raise
+        except urllib.error.URLError as err:
+            logger.warning(f"AI owner tickets endpoint unreachable ({err.reason}); returning fallback analysis.")
+            analysis = _build_owner_tickets_fallback_analysis(
+                all_tickets, jira_details, owner_for_ticket, ticket_test_count, tag
+            )
 
         # Return both analysis and jira_details for the frontend table
         return jsonify({
@@ -14098,6 +14169,26 @@ def cursor_ai_analyze_testcase():
         if not testcase_name:
             return jsonify({"error": "testcase_name is required"}), 400
 
+        # Get user API keys for Cursor SDK
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        
+        if not cursor_api_key:
+            return jsonify({
+                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "require_key_setup": True
+            }), 403
+
+        # Get Atlassian tokens (optional)
+        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
+        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
+        
+        atlassian_tokens = {}
+        if atlassian_jira_token:
+            atlassian_tokens["jira"] = atlassian_jira_token
+        if atlassian_confluence_token:
+            atlassian_tokens["confluence"] = atlassian_confluence_token
+
         exception_summary = body.get("exception_summary", "")
         exception = body.get("exception", "")
         test_log_url = body.get("test_log_url", "")
@@ -14121,6 +14212,8 @@ def cursor_ai_analyze_testcase():
             "test_log_url": test_log_url,
             "jira_tickets": jira_tickets,
             "failure_stage": failure_stage,
+            "cursor_api_key": cursor_api_key,
+            "atlassian_tokens": atlassian_tokens,
         }
 
         resp = requests.post(
@@ -14160,6 +14253,26 @@ def cursor_ai_analyze_batch():
         if not testcases:
             return jsonify({"error": "testcases array is required"}), 400
 
+        # Get user API keys for Cursor SDK
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        
+        if not cursor_api_key:
+            return jsonify({
+                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "require_key_setup": True
+            }), 403
+
+        # Get Atlassian tokens (optional)
+        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
+        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
+        
+        atlassian_tokens = {}
+        if atlassian_jira_token:
+            atlassian_tokens["jira"] = atlassian_jira_token
+        if atlassian_confluence_token:
+            atlassian_tokens["confluence"] = atlassian_confluence_token
+
         # Enrich each testcase with logs if missing
         enriched = []
         for tc in testcases:
@@ -14173,7 +14286,11 @@ def cursor_ai_analyze_batch():
 
         resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/analyze-batch",
-            json={"testcases": enriched},
+            json={
+                "testcases": enriched,
+                "cursor_api_key": cursor_api_key,
+                "atlassian_tokens": atlassian_tokens,
+            },
             timeout=30,
         )
         if resp.status_code != 200:
@@ -14285,6 +14402,26 @@ def cursor_ai_follow_up():
         if not question:
             return jsonify({"error": "question is required"}), 400
 
+        # Get user API keys for Cursor SDK
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        
+        if not cursor_api_key:
+            return jsonify({
+                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "require_key_setup": True
+            }), 403
+
+        # Get Atlassian tokens (optional)
+        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
+        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
+        
+        atlassian_tokens = {}
+        if atlassian_jira_token:
+            atlassian_tokens["jira"] = atlassian_jira_token
+        if atlassian_confluence_token:
+            atlassian_tokens["confluence"] = atlassian_confluence_token
+
         resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/follow-up",
             json={
@@ -14292,6 +14429,8 @@ def cursor_ai_follow_up():
                 "question": question,
                 "mode": mode,
                 "recovery_context": recovery_context,
+                "cursor_api_key": cursor_api_key,
+                "atlassian_tokens": atlassian_tokens,
             },
             timeout=600,
         )
