@@ -5,7 +5,8 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "bash start.sh",
+    "start:raw": "node server.js",
     "start:mcp": "node mcp-server.js",
     "dev": "node --watch server.js",
     "dev:mcp": "node --watch mcp-server.js"

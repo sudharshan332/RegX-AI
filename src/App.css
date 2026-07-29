@@ -260,6 +260,12 @@
   box-sizing: border-box;
 }
 
+/* Lazy keep-alive: visited pages stay mounted; inactive panes are hidden */
+.page-pane[hidden],
+.page-pane:not(.is-active) {
+  display: none !important;
+}
+
 /* Triage Genie coverage — Aladdin-style genie (~2.7cm) */
 .tg-coverage-genie-btn {
   position: fixed;

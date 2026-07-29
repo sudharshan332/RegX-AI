@@ -228,9 +228,9 @@ BRANCH_SHORT_NAME_MAP = {
     "ganges-7.5.1-stable": "7.5.1",
 }
 
-# AI Endpoint for failure summary
-AI_BASE = "https://hkn12.ai.nutanix.com/enterpriseai/v1"
-AI_API_KEY = "ddb2b793-1004-49a1-b005-4ddf4c2ade8c"
+# AI Endpoint for failure summary (override via env when the embedded key expires)
+AI_BASE = os.getenv("AI_BASE", "https://hkn12.ai.nutanix.com/enterpriseai/v1")
+AI_API_KEY = os.getenv("AI_API_KEY", "ddb2b793-1004-49a1-b005-4ddf4c2ade8c")
 
 # SSL context for AI endpoint (skip TLS verify)
 SSL_CTX = ssl.create_default_context()
@@ -14829,11 +14829,101 @@ def cursor_ai_sync_skills():
         return jsonify({"error": str(e)}), 500
 
 
+def _cursor_bridge_chat(messages, system_prompt, mode):
+    """Send chat to cursor-bridge /chat using the caller's Cursor API key.
+
+    Returns (response_dict, http_status). response_dict has success=True on OK.
+    """
+    last_user_msg = ""
+    for msg in reversed(messages or []):
+        if msg.get("role") == "user":
+            last_user_msg = (msg.get("content") or "").strip()
+            break
+    if not last_user_msg:
+        return {"error": "No user message for Cursor Bridge chat"}, 400
+
+    username = _current_username()
+    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+    if not cursor_api_key:
+        return {
+            "error": (
+                "Cursor API key required for chat (Nutanix AI key is invalid/unavailable). "
+                "Add it under Settings → API Keys."
+            ),
+            "require_key_setup": True,
+        }, 403
+
+    atlassian_tokens = {}
+    jira_tok = get_user_key(username, "atlassian_jira_token") if username else None
+    conf_tok = get_user_key(username, "atlassian_confluence_token") if username else None
+    if jira_tok:
+        atlassian_tokens["jira"] = jira_tok
+    if conf_tok:
+        atlassian_tokens["confluence"] = conf_tok
+
+    try:
+        bridge_resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/chat",
+            json={
+                "message": last_user_msg,
+                "system_prompt": system_prompt or "",
+                "cursor_api_key": cursor_api_key,
+                "atlassian_tokens": atlassian_tokens,
+            },
+            timeout=600,
+        )
+    except requests.exceptions.ConnectionError:
+        logger.error("[cursor-ai-chat] Cursor bridge not reachable at %s", CURSOR_BRIDGE_URL)
+        return {
+            "error": (
+                f"Cursor Bridge is not reachable at {CURSOR_BRIDGE_URL}. "
+                "Start it with: cd cursor-bridge && npm start"
+            ),
+        }, 503
+    except requests.exceptions.Timeout:
+        return {"error": "Cursor Bridge chat timed out (>600s)."}, 504
+    except Exception as bridge_exc:
+        logger.error("[cursor-ai-chat] Cursor Bridge request failed: %s", bridge_exc)
+        return {"error": f"Cursor Bridge request failed: {bridge_exc}"}, 503
+
+    if bridge_resp.status_code == 200:
+        bridge_data = bridge_resp.json() or {}
+        reply = (bridge_data.get("reply") or "").strip()
+        if not reply:
+            analysis = bridge_data.get("analysis") or {}
+            reply = (
+                analysis.get("follow_up_answer")
+                or analysis.get("root_cause")
+                or json.dumps(analysis or bridge_data, indent=2)
+            )
+        return {
+            "success": True,
+            "reply": reply,
+            "mode": mode,
+            "model": "cursor-bridge",
+            "tools_used": [],
+        }, 200
+
+    bridge_err = ""
+    try:
+        bridge_err = ((bridge_resp.json() or {}).get("error") or "") or bridge_resp.text
+    except Exception:
+        bridge_err = bridge_resp.text
+    logger.error(
+        "[cursor-ai-chat] Cursor Bridge HTTP %s: %s",
+        bridge_resp.status_code,
+        (bridge_err or "")[:500],
+    )
+    return {
+        "error": f"Cursor Bridge chat failed: {bridge_err or bridge_resp.status_code}",
+    }, 503
+
+
 @app.route("/mcp/regression/cursor-ai/chat", methods=["POST"])
 @app.route("/api/mcp/regression/cursor-ai/chat", methods=["POST"])
 @jwt_required
 def cursor_ai_chat():
-    """Interactive Cursor AI chat endpoint supporting multiple modes and MCP context."""
+    """Interactive chat: prefer Cursor Bridge (user key), else Nutanix AI."""
     try:
         body = request.get_json(force=True) or {}
         messages = body.get("messages", [])
@@ -14849,7 +14939,6 @@ def cursor_ai_chat():
 
         system_prompt = MODE_SYSTEM_PROMPTS[mode]
 
-        # Add MCP context to system prompt
         if mcp_servers:
             active_tools = []
             for sid in mcp_servers:
@@ -14864,19 +14953,32 @@ def cursor_ai_chat():
                     "data-driven insights where possible."
                 )
 
-        # Build chat messages in OpenAI-compatible format
+        # Prefer Cursor Bridge when the user has a Cursor API key — Nutanix AI
+        # enterprise key is frequently expired/unauthorized in local/dev setups.
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        if cursor_api_key:
+            bridge_body, bridge_status = _cursor_bridge_chat(messages, system_prompt, mode)
+            if bridge_body.get("success"):
+                return jsonify(bridge_body), bridge_status
+            logger.warning(
+                "[cursor-ai-chat] Cursor Bridge preferred path failed (%s); trying Nutanix AI",
+                bridge_body.get("error", bridge_status),
+            )
+        else:
+            bridge_body, bridge_status = None, None
+
         chat_messages = [{"role": "system", "content": system_prompt}]
         for msg in messages:
             role = msg.get("role", "user")
             if role in ("user", "assistant"):
                 chat_messages.append({"role": role, "content": msg.get("content", "")})
 
-        # Map model names
         ai_model = model
         if model in ("claude-sonnet-4.6-high", "claude-sonnet-4.6"):
             ai_model = "hack-reason"
 
-        payload = {
+        nutanix_payload = {
             "model": ai_model,
             "messages": chat_messages,
             "max_tokens": 4096,
@@ -14890,83 +14992,48 @@ def cursor_ai_chat():
             "Content-Type": "application/json",
         }
 
-        data = json.dumps(payload).encode("utf-8")
+        data = json.dumps(nutanix_payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, context=SSL_CTX, timeout=120) as resp:
-            if resp.getcode() != 200:
-                return jsonify({"error": f"AI API returned HTTP {resp.getcode()}"}), 502
-
-            response_data = json.loads(resp.read().decode())
-            choices = response_data.get("choices", [])
-            if not choices:
-                return jsonify({"error": "AI returned no choices"}), 502
-
-            content = (choices[0].get("message") or {}).get("content", "")
-
-            tools_used = []
-            if mcp_servers:
-                for sid in mcp_servers[:5]:
-                    cfg = MCP_SERVER_CONFIGS.get(sid)
-                    if cfg and cfg["description"].lower() in content.lower():
-                        tools_used.append(sid)
-
-            return jsonify({
-                "success": True,
-                "reply": content.strip(),
-                "mode": mode,
-                "model": model,
-                "tools_used": tools_used,
-            })
-
-    except (urllib.error.HTTPError, urllib.error.URLError) as e:
-        # Handle both HTTP errors (401, 403, 500, etc) and connection errors
-        if isinstance(e, urllib.error.HTTPError):
-            error_body = e.read().decode() if e.fp else ""
-            logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
-            logger.info(f"[cursor-ai-chat] Nutanix AI returned HTTP {e.code}, falling back to Cursor Bridge")
-        else:
-            logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason}), falling back to Cursor Bridge")
-        
-        # Fallback: route through the Cursor Bridge when the Nutanix AI endpoint fails
         try:
-            last_user_msg = ""
-            for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    last_user_msg = msg.get("content", "")
-                    break
-            if not last_user_msg:
-                return jsonify({"error": "Cannot reach AI API endpoint and no user message for fallback"}), 503
+            with urllib.request.urlopen(req, context=SSL_CTX, timeout=120) as resp:
+                if resp.getcode() != 200:
+                    return jsonify({"error": f"AI API returned HTTP {resp.getcode()}"}), 502
 
-            bridge_resp = requests.post(
-                f"{CURSOR_BRIDGE_URL}/analyze-testcase",
-                json={
-                    "testcase_name": "cursor-ai-chat-fallback",
-                    "exception_summary": last_user_msg,
-                    "exception": "",
-                    "steps_log": "",
-                    "nutest_test_log": "",
-                    "test_log_url": "",
-                    "jira_tickets": [],
-                    "failure_stage": "chat",
-                },
-                timeout=600,
-            )
-            if bridge_resp.status_code == 200:
-                bridge_data = bridge_resp.json()
-                analysis = bridge_data.get("analysis", {})
-                reply = analysis.get("follow_up_answer") or analysis.get("root_cause") or json.dumps(analysis, indent=2)
+                response_data = json.loads(resp.read().decode())
+                choices = response_data.get("choices", [])
+                if not choices:
+                    return jsonify({"error": "AI returned no choices"}), 502
+
+                content = (choices[0].get("message") or {}).get("content", "")
+
+                tools_used = []
+                if mcp_servers:
+                    for sid in mcp_servers[:5]:
+                        cfg = MCP_SERVER_CONFIGS.get(sid)
+                        if cfg and cfg["description"].lower() in content.lower():
+                            tools_used.append(sid)
+
                 return jsonify({
                     "success": True,
-                    "reply": reply,
+                    "reply": content.strip(),
                     "mode": mode,
-                    "model": "cursor-bridge-fallback",
-                    "tools_used": [],
+                    "model": model,
+                    "tools_used": tools_used,
                 })
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            if isinstance(e, urllib.error.HTTPError):
+                error_body = e.read().decode() if e.fp else ""
+                logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
             else:
-                return jsonify({"error": "Cannot reach AI API endpoint and Cursor Bridge also failed"}), 503
-        except Exception as fallback_err:
-            logger.error(f"[cursor-ai-chat] Cursor Bridge fallback also failed: {fallback_err}")
-            return jsonify({"error": "Cannot reach AI API endpoint. Cursor Bridge fallback also unavailable."}), 503
+                logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason})")
+
+            if cursor_api_key and bridge_body is not None:
+                return jsonify(bridge_body), bridge_status
+
+            # No Cursor key — bridge call returns require_key_setup
+            fb_body, fb_status = _cursor_bridge_chat(messages, system_prompt, mode)
+            return jsonify(fb_body), fb_status
+
     except Exception as e:
         logger.error(f"Error in cursor-ai chat: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500

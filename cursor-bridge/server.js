@@ -485,6 +485,50 @@ function parseAgentResult(text) {
 }
 
 // ---------------------------------------------------------------------------
+// POST /chat
+// Lightweight conversational path for Cursor AI chat UI fallback.
+// ---------------------------------------------------------------------------
+app.post("/chat", async (req, res) => {
+  const {
+    message,
+    system_prompt = "",
+    cursor_api_key,
+    atlassian_tokens = {},
+  } = req.body || {};
+
+  if (!message || !String(message).trim()) {
+    return res.status(400).json({ error: "message is required" });
+  }
+
+  const apiKey = cursor_api_key || DEFAULT_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: "CURSOR_API_KEY not configured on bridge" });
+  }
+
+  const prompt = system_prompt
+    ? `${system_prompt}\n\n---\nUser message:\n${message}`
+    : String(message);
+
+  try {
+    const agent = await Agent.create({
+      apiKey,
+      model: { id: MODEL_ID },
+      mcpServers: buildMcpServers(atlassian_tokens),
+    });
+    const run = await agent.send(prompt);
+    const result = await run.wait();
+    return res.json({
+      success: true,
+      reply: (result.result || "").trim(),
+      agent_id: agent.agentId,
+    });
+  } catch (err) {
+    console.error("[chat] Agent error:", err.message);
+    return res.status(502).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 app.listen(PORT, () => {
   console.log(`[cursor-bridge] listening on :${PORT}`);
   console.log(`[cursor-bridge] nutest via Sourcegraph = ${NUTEST_SOURCEGRAPH}`);

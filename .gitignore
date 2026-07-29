@@ -222,3 +222,4 @@ regx_env/
 # Per-user encrypted API keys (User Settings)
 data/user_api_keys.json
 data/user_api_keys.fernet
+node_modules
