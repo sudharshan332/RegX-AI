@@ -4,6 +4,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Optional local overrides (gitignored). Example: CURSOR_BRIDGE_PORT=5012
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 CA_BUNDLE="${NODE_EXTRA_CA_CERTS:-$HOME/.regx-system-cas.pem}"
 if [[ ! -s "$CA_BUNDLE" ]]; then
   echo "[cursor-bridge] Building CA bundle at $CA_BUNDLE ..."
@@ -16,4 +24,5 @@ fi
 export NODE_EXTRA_CA_CERTS="$CA_BUNDLE"
 export CURSOR_BRIDGE_PORT="${CURSOR_BRIDGE_PORT:-5002}"
 echo "[cursor-bridge] NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS"
+echo "[cursor-bridge] CURSOR_BRIDGE_PORT=$CURSOR_BRIDGE_PORT"
 exec node server.js

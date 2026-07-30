@@ -14229,6 +14229,7 @@ def cursor_ai_analyze_testcase():
         return jsonify({
             "success": True,
             "session_id": data.get("session_id", ""),
+            "agent_id": data.get("agent_id", ""),
             "analysis": data.get("analysis", {}),
         })
 
@@ -14444,6 +14445,7 @@ def cursor_ai_follow_up():
         return jsonify({
             "success": True,
             "session_id": session_id,
+            "agent_id": data.get("agent_id", ""),
             "analysis": data.get("analysis", {}),
         })
 
@@ -14502,8 +14504,10 @@ MODE_SYSTEM_PROMPTS = {
         "suggest diagnostic steps, and methodically narrow down root causes using available MCP tools and logs."
     ),
     "ask": (
-        "You are Cursor AI in Ask mode — a knowledge assistant for exploring code and answering questions. "
-        "Provide clear, concise explanations. Reference specific files, functions, and architecture when relevant. "
+        "You are RegX AI in Ask mode — a fast regression-analysis assistant. "
+        "Answer briefly and directly (a few sentences or a short list). "
+        "If regression run data is provided in the conversation, treat it as authoritative and use it for any "
+        "counts/metrics — never say data is unavailable when it is present. "
         "Do not make changes, only inform."
     ),
 }
@@ -14829,7 +14833,7 @@ def cursor_ai_sync_skills():
         return jsonify({"error": str(e)}), 500
 
 
-def _cursor_bridge_chat(messages, system_prompt, mode):
+def _cursor_bridge_chat(messages, system_prompt, mode, agent_id=None, session_id=None):
     """Send chat to cursor-bridge /chat using the caller's Cursor API key.
 
     Returns (response_dict, http_status). response_dict has success=True on OK.
@@ -14853,22 +14857,18 @@ def _cursor_bridge_chat(messages, system_prompt, mode):
             "require_key_setup": True,
         }, 403
 
-    atlassian_tokens = {}
-    jira_tok = get_user_key(username, "atlassian_jira_token") if username else None
-    conf_tok = get_user_key(username, "atlassian_confluence_token") if username else None
-    if jira_tok:
-        atlassian_tokens["jira"] = jira_tok
-    if conf_tok:
-        atlassian_tokens["confluence"] = conf_tok
+    # Keep ask/system prompts short — long MCP tool catalogs slow cold starts.
+    trimmed_system = (system_prompt or "")[:2500]
 
     try:
         bridge_resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/chat",
             json={
                 "message": last_user_msg,
-                "system_prompt": system_prompt or "",
+                "system_prompt": trimmed_system,
+                "agent_id": agent_id or "",
+                "session_id": session_id or "",
                 "cursor_api_key": cursor_api_key,
-                "atlassian_tokens": atlassian_tokens,
             },
             timeout=600,
         )
@@ -14901,6 +14901,8 @@ def _cursor_bridge_chat(messages, system_prompt, mode):
             "reply": reply,
             "mode": mode,
             "model": "cursor-bridge",
+            "agent_id": bridge_data.get("agent_id") or agent_id or "",
+            "session_id": bridge_data.get("session_id") or session_id or "",
             "tools_used": [],
         }, 200
 
@@ -14919,6 +14921,133 @@ def _cursor_bridge_chat(messages, system_prompt, mode):
     }, 503
 
 
+def _build_chat_system_prompt(mode, mcp_servers):
+    """System prompt for the given mode; attach MCP catalog only for agent/debug."""
+    system_prompt = MODE_SYSTEM_PROMPTS[mode]
+    if mcp_servers and mode in ("agent", "debug"):
+        active_tools = []
+        for sid in mcp_servers:
+            cfg = MCP_SERVER_CONFIGS.get(sid)
+            if cfg:
+                active_tools.append(f"- {sid}: {cfg['description']}")
+        if active_tools:
+            system_prompt += (
+                "\n\nYou have access to the following MCP tools/servers:\n"
+                + "\n".join(active_tools)
+                + "\n\nWhen answering, reference which tools you would use and provide specific, "
+                "data-driven insights where possible."
+            )
+    return system_prompt
+
+
+@app.route("/mcp/regression/cursor-ai/chat-warm", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/chat-warm", methods=["POST"])
+@jwt_required
+def cursor_ai_chat_warm():
+    """Pre-warm a chat agent so the first real message resumes (fast) instead of cold-starting."""
+    body = request.get_json(silent=True) or {}
+    model = body.get("model", "")
+    username = _current_username()
+    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+    if not cursor_api_key:
+        return jsonify({"error": "Cursor API key required.", "require_key_setup": True}), 403
+    try:
+        r = requests.post(
+            f"{CURSOR_BRIDGE_URL}/chat-warm",
+            json={"cursor_api_key": cursor_api_key, "model": model},
+            timeout=120,
+        )
+        try:
+            data = r.json()
+        except Exception:
+            data = {"error": r.text}
+        return jsonify(data), (200 if r.status_code == 200 else 502)
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cursor Bridge is not reachable."}), 503
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Warm-up timed out."}), 504
+    except Exception as e:
+        logger.error("[cursor-ai-chat-warm] error: %s", e)
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route("/mcp/regression/cursor-ai/chat-stream", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/chat-stream", methods=["POST"])
+@jwt_required
+def cursor_ai_chat_stream():
+    """Streaming interactive chat (SSE) via Cursor Bridge — tokens arrive as generated."""
+    body = request.get_json(force=True) or {}
+    messages = body.get("messages", [])
+    mode = body.get("mode", "ask")
+    model = body.get("model", "")
+    mcp_servers = body.get("mcp_servers", [])
+    agent_id = body.get("agent_id") or ""
+    session_id = body.get("session_id") or ""
+
+    if not messages:
+        return jsonify({"error": "messages are required"}), 400
+    if mode not in MODE_SYSTEM_PROMPTS:
+        return jsonify({"error": f"Invalid mode: {mode}. Use: agent, plan, debug, ask"}), 400
+
+    last_user_msg = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user_msg = (m.get("content") or "").strip()
+            break
+    if not last_user_msg:
+        return jsonify({"error": "No user message for chat"}), 400
+
+    username = _current_username()
+    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+    if not cursor_api_key:
+        return jsonify({
+            "error": "Cursor API key required for chat. Add it under Settings → API Keys.",
+            "require_key_setup": True,
+        }), 403
+
+    system_prompt = _build_chat_system_prompt(mode, mcp_servers)[:2500]
+
+    def gen():
+        try:
+            with requests.post(
+                f"{CURSOR_BRIDGE_URL}/chat-stream",
+                json={
+                    "message": last_user_msg,
+                    "system_prompt": system_prompt,
+                    "model": model,
+                    "agent_id": agent_id,
+                    "session_id": session_id,
+                    "cursor_api_key": cursor_api_key,
+                },
+                stream=True,
+                timeout=600,
+            ) as bridge_resp:
+                if bridge_resp.status_code != 200:
+                    try:
+                        err = (bridge_resp.json() or {}).get("error") or bridge_resp.text
+                    except Exception:
+                        err = bridge_resp.text
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'Bridge error: {err}'})}\n\n".encode()
+                    return
+                for chunk in bridge_resp.iter_content(chunk_size=None):
+                    if chunk:
+                        yield chunk
+        except requests.exceptions.ConnectionError:
+            msg = f"Cursor Bridge is not reachable at {CURSOR_BRIDGE_URL}. Start it with: cd cursor-bridge && npm start"
+            yield f"data: {json.dumps({'type': 'error', 'message': msg})}\n\n".encode()
+        except requests.exceptions.Timeout:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Chat timed out (>600s).'})}\n\n".encode()
+        except Exception as stream_exc:
+            logger.error("[cursor-ai-chat-stream] error: %s", stream_exc)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(stream_exc)})}\n\n".encode()
+
+    return Response(
+        stream_with_context(gen()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.route("/mcp/regression/cursor-ai/chat", methods=["POST"])
 @app.route("/api/mcp/regression/cursor-ai/chat", methods=["POST"])
 @jwt_required
@@ -14927,9 +15056,11 @@ def cursor_ai_chat():
     try:
         body = request.get_json(force=True) or {}
         messages = body.get("messages", [])
-        mode = body.get("mode", "agent")
+        mode = body.get("mode", "ask")
         model = body.get("model", "claude-sonnet-4.6-high")
         mcp_servers = body.get("mcp_servers", [])
+        agent_id = body.get("agent_id") or ""
+        session_id = body.get("session_id") or ""
 
         if not messages:
             return jsonify({"error": "messages are required"}), 400
@@ -14939,7 +15070,8 @@ def cursor_ai_chat():
 
         system_prompt = MODE_SYSTEM_PROMPTS[mode]
 
-        if mcp_servers:
+        # Only attach MCP catalog for agent/debug — ask/plan stay lean/fast.
+        if mcp_servers and mode in ("agent", "debug"):
             active_tools = []
             for sid in mcp_servers:
                 cfg = MCP_SERVER_CONFIGS.get(sid)
@@ -14958,7 +15090,9 @@ def cursor_ai_chat():
         username = _current_username()
         cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
         if cursor_api_key:
-            bridge_body, bridge_status = _cursor_bridge_chat(messages, system_prompt, mode)
+            bridge_body, bridge_status = _cursor_bridge_chat(
+                messages, system_prompt, mode, agent_id=agent_id, session_id=session_id
+            )
             if bridge_body.get("success"):
                 return jsonify(bridge_body), bridge_status
             logger.warning(

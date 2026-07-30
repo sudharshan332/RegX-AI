@@ -112,14 +112,17 @@ export default function FailedTestcaseAnalysis() {
   const [cursorAiDetailModal, setCursorAiDetailModal] = useState(null);
   const [cursorAiBatchJobId, setCursorAiBatchJobId] = useState(null);
   const [cursorAiBatchStatus, setCursorAiBatchStatus] = useState(null);
-  const [cursorAiSessions, setCursorAiSessions] = useState({});
+  const [cursorAiSessions, setCursorAiSessions] = useState({}); // testId -> session_id
+  const [cursorAiAgentIds, setCursorAiAgentIds] = useState({}); // testId -> agent_id
   const [cursorAiOpenTabs, setCursorAiOpenTabs] = useState([]);
   const [cursorAiMinimizedTabs, setCursorAiMinimizedTabs] = useState({});
   const [followUpInput, setFollowUpInput] = useState('');
   const [followUpLoading, setFollowUpLoading] = useState(false);
   const [followUpHistory, setFollowUpHistory] = useState([]);
   const [followUpHistoryByTestcase, setFollowUpHistoryByTestcase] = useState({});
-  const [followUpMode, setFollowUpMode] = useState('agent');
+  // Ask is the fast path (answer from existing analysis; minimal/no MCP).
+  // Use Agent/Plan only when the user wants deeper re-investigation.
+  const [followUpMode, setFollowUpMode] = useState('ask');
 
   // Retrigger state
   const [retriggerModalOpen, setRetriggerModalOpen] = useState(false);
@@ -266,11 +269,13 @@ export default function FailedTestcaseAnalysis() {
       const cursorAi = data.cursor_ai || {};
       setCursorAiResults(cursorAi.results || {});
       setCursorAiSessions(cursorAi.sessions || {});
+      setCursorAiAgentIds(cursorAi.agent_ids || {});
       setFollowUpHistoryByTestcase(cursorAi.follow_up_history_by_testcase || {});
     } catch (_) {
       setResults([]);
       setCursorAiResults({});
       setCursorAiSessions({});
+      setCursorAiAgentIds({});
       setFollowUpHistoryByTestcase({});
     } finally {
       setLoading(false);
@@ -296,9 +301,10 @@ export default function FailedTestcaseAnalysis() {
     saveResultsForTag(analysisTag, results, currentBranch, {
       results: cursorAiResults,
       sessions: cursorAiSessions,
+      agent_ids: cursorAiAgentIds,
       follow_up_history_by_testcase: followUpHistoryByTestcase,
     });
-  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, followUpHistoryByTestcase, saveResultsForTag]);
+  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, cursorAiAgentIds, followUpHistoryByTestcase, saveResultsForTag]);
 
   const buildIncludeParam = useCallback((cols) => {
     const include = new Set(['basic', 'exception_summary', 'intermittent']);
@@ -645,6 +651,9 @@ export default function FailedTestcaseAnalysis() {
         if (resp.data.session_id) {
           setCursorAiSessions(prev => ({ ...prev, [testId]: resp.data.session_id }));
         }
+        if (resp.data.agent_id) {
+          setCursorAiAgentIds(prev => ({ ...prev, [testId]: resp.data.agent_id }));
+        }
       } else {
         setCursorAiResults(prev => ({ ...prev, [testId]: { error: resp.data?.error || 'Analysis failed' } }));
       }
@@ -708,6 +717,9 @@ export default function FailedTestcaseAnalysis() {
               if (val.session_id) {
                 setCursorAiSessions(prev => ({ ...prev, [key]: val.session_id }));
               }
+              if (val.agent_id) {
+                setCursorAiAgentIds(prev => ({ ...prev, [key]: val.agent_id }));
+              }
               setCursorAiLoading(prev => ({ ...prev, [key]: false }));
             } else {
               setCursorAiResults(prev => ({ ...prev, [key]: { error: val.error || 'Failed' } }));
@@ -755,21 +767,23 @@ export default function FailedTestcaseAnalysis() {
         mode: followUpMode,
         recovery_context: {
           testcase_name: cursorAiDetailModal.testcase_name || '',
+          agent_id: cursorAiDetailModal._agent_id || cursorAiAgentIds[testcaseId] || '',
+          // Lean payload only — full triage_report makes cold recovery very slow.
           latest_analysis: {
-            root_cause: cursorAiDetailModal.root_cause || '',
+            root_cause: String(cursorAiDetailModal.root_cause || '').slice(0, 1500),
             classification: cursorAiDetailModal.classification || '',
             failing_code: cursorAiDetailModal.failing_code || null,
-            suggested_fix: cursorAiDetailModal.suggested_fix || '',
+            suggested_fix: String(cursorAiDetailModal.suggested_fix || '').slice(0, 800),
             confidence: cursorAiDetailModal.confidence || '',
-            related_components: cursorAiDetailModal.related_components || [],
-            jira_duplicates: cursorAiDetailModal.jira_duplicates || [],
-            triage_report: cursorAiDetailModal.triage_report || '',
           },
-          prior_history: followUpHistory.slice(-20),
+          prior_history: followUpHistory.slice(-6),
         },
       });
       if (resp.data?.success) {
         const analysis = resp.data.analysis;
+        if (resp.data.agent_id && testcaseId) {
+          setCursorAiAgentIds(prev => ({ ...prev, [testcaseId]: resp.data.agent_id }));
+        }
         setFollowUpHistory(prev => {
           const next = [...prev, { role: 'assistant', data: analysis, mode: selectedMode }];
           if (testcaseId) {
@@ -780,6 +794,7 @@ export default function FailedTestcaseAnalysis() {
         setCursorAiDetailModal(prev => ({
           ...prev,
           ...analysis,
+          _agent_id: resp.data.agent_id || prev._agent_id,
           follow_up_answer: analysis.follow_up_answer,
         }));
         if (cursorAiDetailModal._testcase_id) {
@@ -1693,11 +1708,12 @@ export default function FailedTestcaseAnalysis() {
                         testcase_name: result.testcase_name,
                         _testcase_id: result.testcase_id,
                         _session_id: cursorAiSessions[result.testcase_id] || null,
+                        _agent_id: cursorAiAgentIds[result.testcase_id] || null,
                         ...aiRes,
                       });
                       setFollowUpInput('');
                       setFollowUpHistory(followUpHistoryByTestcase[result.testcase_id] || []);
-                      setFollowUpMode('agent');
+                      setFollowUpMode('ask');
                     }}
                   >
                     {getCursorAiStatusBadge(result.testcase_id)} View
@@ -2094,11 +2110,12 @@ export default function FailedTestcaseAnalysis() {
                               testcase_name: tab.testcase_name,
                               _testcase_id: tab.testcase_id,
                               _session_id: tabSessionId,
+                              _agent_id: cursorAiAgentIds[tab.testcase_id] || null,
                               ...(cursorAiResults[tab.testcase_id] || tab.analysis),
                             });
                             setFollowUpInput('');
                             setFollowUpHistory(followUpHistoryByTestcase[tab.testcase_id] || []);
-                            setFollowUpMode('agent');
+                            setFollowUpMode('ask');
                           }}
                         >
                           Open Full
@@ -2443,14 +2460,14 @@ export default function FailedTestcaseAnalysis() {
                     disabled={followUpLoading}
                     title="Follow-up AI mode"
                   >
-                    <option value="ask">Ask</option>
-                    <option value="agent">Agent</option>
+                    <option value="ask">Ask (fast)</option>
+                    <option value="agent">Agent (deep)</option>
                     <option value="plan">Plan</option>
                   </select>
                   <input
                     type="text"
                     className="cursor-ai-followup-input"
-                    placeholder="Ask a follow-up question about this analysis..."
+                    placeholder="Ask a follow-up (Ask mode is fastest)..."
                     value={followUpInput}
                     onChange={e => setFollowUpInput(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter' && !followUpLoading) handleFollowUp(); }}
