@@ -250,7 +250,8 @@ const getStoredAdvancedOptions = () => {
     aiRootCauseSummary: false,
     regressionRiskScore: false,
     bulkIssuesQiImpact: false,
-    qiImpactedBulkIssue: false // QI Impacted Bulk issue - not loaded by default
+    qiImpactedBulkIssue: false, // QI Impacted Bulk issue - not loaded by default
+    tcmsOverview: false // TCMS Overview & Comparison
   };
   const stored = localStorage.getItem("regressionDashboardAdvancedOptions");
   if (!stored) return defaults;
@@ -313,6 +314,14 @@ export default function RegressionHome() {
   const [ownerJiraDetails, setOwnerJiraDetails] = useState({});
   const [loadingJiraDetails, setLoadingJiraDetails] = useState(false);
 
+  // TCMS Overview & Comparison
+  const [tcmsOverviewData, setTcmsOverviewData] = useState(null);
+  const [loadingTcmsOverview, setLoadingTcmsOverview] = useState(false);
+  const [jitaTcmsComparison, setJitaTcmsComparison] = useState(null);
+  const [loadingComparison, setLoadingComparison] = useState(false);
+  const [showComparisonModal, setShowComparisonModal] = useState(false);
+  const [comparisonActiveTab, setComparisonActiveTab] = useState("matched");
+
   // Owner triage report (notebook schema) — FE holds full task_ids list
   const [ownerReportTaskIds, setOwnerReportTaskIds] = useState([]);
   const [ownerReportRows, setOwnerReportRows] = useState(null);
@@ -338,6 +347,14 @@ export default function RegressionHome() {
   const [deepAnalysisFollowUp, setDeepAnalysisFollowUp] = useState({});
   const [deepAnalysisFollowUpLoading, setDeepAnalysisFollowUpLoading] = useState({});
   const [deepAnalysisHistory, setDeepAnalysisHistory] = useState({});
+
+  // Helper function to determine QI color based on value
+  const qiColor = (val) => {
+    if (val === "error") return "#dc3545";
+    if (val >= 80) return "#28a745";
+    if (val >= 50) return "#fd7e14";
+    return "#dc3545";
+  };
 
   // Parse JITA task link or comma-separated task IDs
   const parseTaskIds = (input) => {
@@ -626,6 +643,21 @@ export default function RegressionHome() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [advancedOptions.qiSummaryReport, tag, inputMode, taskIdsKey]);
+
+  // TCMS Overview for selected job
+  useEffect(() => {
+    if (!advancedOptions.tcmsOverview) return;
+    const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
+    if (savedMode === "tag" && tag) {
+      fetchTcmsOverview(tag, null);
+    } else if (savedMode === "task_ids") {
+      const ids = globalJitaTaskIds.length ? globalJitaTaskIds : readScopedFullRegressionTaskIds(tag || null);
+      if (ids && ids.length > 0) {
+        fetchTcmsOverview(null, ids.join(","));
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [advancedOptions.tcmsOverview, tag, inputMode, taskIdsKey]);
 
   // Fetch JIRA details (status, issue type) for all tickets in owner_ticket_map
   const fetchOwnerJiraDetails = async () => {
@@ -1357,6 +1389,72 @@ export default function RegressionHome() {
       setOwnerTicketsAiAnalysis(`Error: ${err.response?.data?.error || err.message}`);
     } finally {
       setLoadingOwnerAi(false);
+    }
+  };
+
+  // Fetch TCMS Overview
+  const fetchTcmsOverview = async (tagToUse, taskIdsToUse) => {
+    setLoadingTcmsOverview(true);
+    try {
+      const params = {
+        tag: tagToUse,
+        task_ids: taskIdsToUse,
+        time_filter: "all"
+      };
+      const response = await api.get(`${API_BASE_URL}/mcp/regression/tcms-overview`, { params });
+      setTcmsOverviewData(response.data);
+    } catch (error) {
+      console.error("Error fetching TCMS overview:", error);
+      setTcmsOverviewData(null);
+    } finally {
+      setLoadingTcmsOverview(false);
+    }
+  };
+
+  // Fetch JITA vs TCMS Comparison
+  const fetchJitaTcmsComparison = async () => {
+    if (!tcmsOverviewData) {
+      alert("Please wait for TCMS Overview data to load first");
+      return;
+    }
+    
+    setLoadingComparison(true);
+    try {
+      const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
+      let payload = {
+        team_name: tcmsOverviewData.team_name,
+        branch_name: tcmsOverviewData.branch_name
+      };
+      
+      if (savedMode === "tag" && tag) {
+        payload.tag = tag;
+      } else {
+        const ids = globalJitaTaskIds.length ? globalJitaTaskIds : readScopedFullRegressionTaskIds(tag || null);
+        if (ids && ids.length > 0) {
+          payload.task_ids = ids;
+        } else if (tag) {
+          payload.tag = tag;
+        }
+      }
+      
+      const response = await api.post(
+        `${API_BASE_URL}/mcp/regression/jita-tcms-comparison`,
+        payload,
+        { timeout: 120000 }
+      );
+      
+      if (response.data.success) {
+        setJitaTcmsComparison(response.data);
+        setShowComparisonModal(true);
+        setComparisonActiveTab("matched");
+      } else {
+        alert(`Error: ${response.data.error || "Unknown error"}`);
+      }
+    } catch (error) {
+      console.error("Error fetching Jita-TCMS comparison:", error);
+      alert(`Error: ${error.response?.data?.error || error.message}`);
+    } finally {
+      setLoadingComparison(false);
     }
   };
 
@@ -2684,6 +2782,29 @@ export default function RegressionHome() {
                   <span style={{ fontSize: "14px", fontWeight: "500" }}>Bulk Issues QI Impacting Testcases</span>
                 </label>
               </div>
+
+              <div
+                style={{
+                  padding: "10px",
+                  background: "#f8f9fa",
+                  borderRadius: "4px",
+                  border: "1px solid #dee2e6"
+                }}
+              >
+                <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={advancedOptions.tcmsOverview || false}
+                    onChange={(e) => {
+                      setAdvancedOptions(prev => ({
+                        ...prev,
+                        tcmsOverview: e.target.checked
+                      }));
+                    }}
+                  />
+                  <span style={{ fontSize: "14px", fontWeight: "500" }}>TCMS Overview & Comparison</span>
+                </label>
+              </div>
             </div>
 
             <div style={{ display: "flex", gap: "10px", justifyContent: "flex-end" }}>
@@ -3998,6 +4119,120 @@ export default function RegressionHome() {
         </section>
       )}
 
+      {/* TCMS Overview Section */}
+      {advancedOptions.tcmsOverview && (
+        <section className="rh-report-panel" aria-labelledby="rh-tcms-overview-title">
+          <header className="rh-report-header">
+            <div className="rh-report-title-block">
+              <h3 id="rh-tcms-overview-title" className="rh-report-title">TCMS Overview</h3>
+              <p className="rh-report-subtitle">Quality Index metrics from TCMS for verification</p>
+            </div>
+            <div style={{ display: "flex", gap: "10px" }}>
+              <button
+                className="rh-btn-secondary"
+                onClick={() => window.open(tcmsOverviewData?.tcms_ui_url, "_blank")}
+                disabled={!tcmsOverviewData?.tcms_ui_url}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "4px",
+                  border: "1px solid #6c757d",
+                  background: tcmsOverviewData?.tcms_ui_url ? "#6c757d" : "#e9ecef",
+                  color: tcmsOverviewData?.tcms_ui_url ? "white" : "#6c757d",
+                  cursor: tcmsOverviewData?.tcms_ui_url ? "pointer" : "not-allowed"
+                }}
+              >
+                Open TCMS
+              </button>
+              <button
+                className="rh-btn-primary"
+                onClick={fetchJitaTcmsComparison}
+                disabled={loadingComparison || !tcmsOverviewData}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "4px",
+                  border: "none",
+                  background: (loadingComparison || !tcmsOverviewData) ? "#e9ecef" : "#007bff",
+                  color: (loadingComparison || !tcmsOverviewData) ? "#6c757d" : "white",
+                  cursor: (loadingComparison || !tcmsOverviewData) ? "not-allowed" : "pointer"
+                }}
+              >
+                {loadingComparison ? "Comparing..." : "Compare Jita vs TCMS"}
+              </button>
+            </div>
+          </header>
+
+          <div className="rh-report-body">
+            {loadingTcmsOverview ? (
+              <div className="rh-report-loading">
+                Loading TCMS overview data...
+              </div>
+            ) : tcmsOverviewData ? (
+              <>
+                <div className="rh-metric-grid">
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">QI (avg_total_op_success_%)</div>
+                    <div className="rh-metric-value" style={{ 
+                      color: qiColor(tcmsOverviewData.qi_value),
+                      fontWeight: "bold"
+                    }}>
+                      {tcmsOverviewData.qi_value != null ? `${tcmsOverviewData.qi_value}%` : "-"}
+                    </div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Total Tests</div>
+                    <div className="rh-metric-value">{tcmsOverviewData.total_tests ?? "-"}</div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Run</div>
+                    <div className="rh-metric-value">{tcmsOverviewData.run ?? "-"}</div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Passed</div>
+                    <div className="rh-metric-value is-ok">{tcmsOverviewData.passed ?? "-"}</div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Failed</div>
+                    <div className="rh-metric-value is-bad">{tcmsOverviewData.failed ?? "-"}</div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Not Run</div>
+                    <div className="rh-metric-value">{tcmsOverviewData.not_run ?? "-"}</div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Run %</div>
+                    <div className="rh-metric-value">
+                      {tcmsOverviewData.run_percentage != null ? `${tcmsOverviewData.run_percentage}%` : "-"}
+                    </div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Total Triaged</div>
+                    <div className="rh-metric-value">{tcmsOverviewData.total_triaged ?? "-"}</div>
+                  </div>
+                  <div className="rh-metric-card">
+                    <div className="rh-metric-label">Triage %</div>
+                    <div className="rh-metric-value">
+                      {tcmsOverviewData.triage_percentage != null ? `${tcmsOverviewData.triage_percentage}%` : "-"}
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: "16px", padding: "12px", background: "#f8f9fa", borderRadius: "4px" }}>
+                  <div style={{ fontSize: "12px", color: "#666" }}>
+                    <strong>Milestone:</strong> {tcmsOverviewData.milestone} | {" "}
+                    <strong>Team:</strong> {tcmsOverviewData.team_name} | {" "}
+                    <strong>Branch:</strong> {tcmsOverviewData.branch_name}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="rh-report-empty">
+                Save configuration with this option enabled to load TCMS overview data.
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       {/* TCMS Detail Modal */}
       </>}
       {tcmsDetailModal && (
@@ -4051,15 +4286,40 @@ export default function RegressionHome() {
                 {tcmsDetailModal.data.unique_tickets && tcmsDetailModal.data.unique_tickets.length > 0 && (
                   <div style={{ marginTop: "16px" }}>
                     <strong>Unique Tickets ({tcmsDetailModal.data.unique_tickets.length}):</strong>
-                    <div style={{ marginTop: "8px" }}>
-                      <a
-                        href={`https://jira.nutanix.com/issues/?jql=issuekey%20in%20(${tcmsDetailModal.data.unique_tickets.join("%2C")})`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{ padding: "4px 10px", fontSize: "12px", background: "#007bff", color: "white", borderRadius: "4px", textDecoration: "none" }}
-                      >
-                        View All in JIRA
-                      </a>
+                    <div style={{ marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" }}>
+                      {(() => {
+                        const jiraUrl = jiraJqlUrl(tcmsDetailModal.data.unique_tickets);
+                        const urlLength = jiraUrl ? jiraUrl.length : 0;
+                        const isUrlTooLong = urlLength > 2000;
+                        
+                        if (isUrlTooLong) {
+                          return (
+                            <>
+                              <button
+                                onClick={() => openTickets(tcmsDetailModal.data.unique_tickets)}
+                                style={{ padding: "4px 10px", fontSize: "12px", background: "#007bff", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                                title="Open tickets in JIRA (URL too long for direct link)"
+                              >
+                                View All in JIRA ({tcmsDetailModal.data.unique_tickets.length} tickets)
+                              </button>
+                              <span style={{ fontSize: "10px", color: "#dc3545" }}>
+                                (URL too long, using popup)
+                              </span>
+                            </>
+                          );
+                        }
+                        
+                        return (
+                          <a
+                            href={jiraUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ padding: "4px 10px", fontSize: "12px", background: "#007bff", color: "white", borderRadius: "4px", textDecoration: "none", display: "inline-block" }}
+                          >
+                            View All in JIRA ({tcmsDetailModal.data.unique_tickets.length} tickets)
+                          </a>
+                        );
+                      })()}
                     </div>
                   </div>
                 )}
@@ -4067,6 +4327,353 @@ export default function RegressionHome() {
             ) : (
               <div style={{ color: "#666", fontStyle: "italic" }}>No detail data available.</div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* JITA vs TCMS Comparison Modal */}
+      {showComparisonModal && jitaTcmsComparison && (
+        <div style={{
+          position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+          background: "rgba(0,0,0,0.5)", zIndex: 9999,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }} onClick={() => setShowComparisonModal(false)}>
+          <div style={{
+            background: "white", borderRadius: "8px", padding: "0",
+            maxWidth: "1400px", width: "95%", maxHeight: "90vh",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+            display: "flex", flexDirection: "column"
+          }} onClick={(e) => e.stopPropagation()}>
+            {/* Header */}
+            <div style={{ 
+              padding: "20px 24px", 
+              borderBottom: "1px solid #dee2e6",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center"
+            }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: "20px" }}>Jita vs TCMS Testcase Comparison</h3>
+                <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "#666" }}>
+                  Milestone: {jitaTcmsComparison.milestone} | Team: {jitaTcmsComparison.team_name} | Branch: {jitaTcmsComparison.branch_name}
+                </p>
+              </div>
+              <button onClick={() => setShowComparisonModal(false)}
+                style={{ 
+                  background: "none", border: "none", fontSize: "24px", 
+                  cursor: "pointer", color: "#666", padding: "0 8px"
+                }}>✕</button>
+            </div>
+
+            {/* Summary Stats */}
+            <div style={{ padding: "20px 24px", borderBottom: "1px solid #dee2e6" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "16px" }}>
+                <div className="stat-card">
+                  <div className="stat-label">Jita Testcases</div>
+                  <div className="stat-value">{jitaTcmsComparison.summary.total_jita}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">TCMS Testcases</div>
+                  <div className="stat-value">{jitaTcmsComparison.summary.total_tcms}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Matched</div>
+                  <div className="stat-value" style={{ color: "#28a745" }}>
+                    {jitaTcmsComparison.summary.matched_count}
+                  </div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Missing in Jita</div>
+                  <div className="stat-value" style={{ color: "#ffc107" }}>
+                    {jitaTcmsComparison.summary.missing_in_jita_count}
+                  </div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-label">Match Rate</div>
+                  <div className="stat-value" style={{ color: "#007bff" }}>
+                    {jitaTcmsComparison.summary.exact_match_percentage}%
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Tabs */}
+            <div className="comparison-tabs" style={{ 
+              display: "flex", 
+              gap: "0", 
+              borderBottom: "1px solid #dee2e6",
+              padding: "0 24px",
+              background: "#f8f9fa"
+            }}>
+              <button
+                className={comparisonActiveTab === "matched" ? "active" : ""}
+                onClick={() => setComparisonActiveTab("matched")}
+                style={{
+                  padding: "12px 20px",
+                  border: "none",
+                  background: comparisonActiveTab === "matched" ? "white" : "transparent",
+                  cursor: "pointer",
+                  borderBottom: comparisonActiveTab === "matched" ? "2px solid #007bff" : "2px solid transparent",
+                  color: comparisonActiveTab === "matched" ? "#007bff" : "#666",
+                  fontWeight: comparisonActiveTab === "matched" ? "600" : "normal",
+                  fontSize: "14px"
+                }}
+              >
+                Matched ({jitaTcmsComparison.summary.matched_count})
+              </button>
+              <button
+                className={comparisonActiveTab === "missing_jita" ? "active" : ""}
+                onClick={() => setComparisonActiveTab("missing_jita")}
+                style={{
+                  padding: "12px 20px",
+                  border: "none",
+                  background: comparisonActiveTab === "missing_jita" ? "white" : "transparent",
+                  cursor: "pointer",
+                  borderBottom: comparisonActiveTab === "missing_jita" ? "2px solid #007bff" : "2px solid transparent",
+                  color: comparisonActiveTab === "missing_jita" ? "#007bff" : "#666",
+                  fontWeight: comparisonActiveTab === "missing_jita" ? "600" : "normal",
+                  fontSize: "14px"
+                }}
+              >
+                Missing in Jita ({jitaTcmsComparison.summary.missing_in_jita_count})
+              </button>
+              <button
+                className={comparisonActiveTab === "missing_tcms" ? "active" : ""}
+                onClick={() => setComparisonActiveTab("missing_tcms")}
+                style={{
+                  padding: "12px 20px",
+                  border: "none",
+                  background: comparisonActiveTab === "missing_tcms" ? "white" : "transparent",
+                  cursor: "pointer",
+                  borderBottom: comparisonActiveTab === "missing_tcms" ? "2px solid #007bff" : "2px solid transparent",
+                  color: comparisonActiveTab === "missing_tcms" ? "#007bff" : "#666",
+                  fontWeight: comparisonActiveTab === "missing_tcms" ? "600" : "normal",
+                  fontSize: "14px"
+                }}
+              >
+                Missing in TCMS ({jitaTcmsComparison.summary.missing_in_tcms_count})
+              </button>
+            </div>
+
+            {/* Tab Content */}
+            <div style={{ 
+              flex: 1, 
+              overflowY: "auto", 
+              padding: "20px 24px" 
+            }}>
+              {/* Matched Tab */}
+              {comparisonActiveTab === "matched" && (
+                <div>
+                  <p style={{ marginTop: 0, fontSize: "13px", color: "#666" }}>
+                    Testcases present in both Jita run and TCMS registry
+                  </p>
+                  {jitaTcmsComparison.matched.length > 0 ? (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ 
+                        width: "100%", 
+                        borderCollapse: "collapse", 
+                        fontSize: "12px",
+                        border: "1px solid #dee2e6"
+                      }}>
+                        <thead>
+                          <tr style={{ background: "#f8f9fa" }}>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "left", minWidth: "300px" }}>Testcase Name</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "center", width: "100px" }}>Jita Status</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "center", width: "100px" }}>TCMS Status</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "center", width: "80px" }}>TCMS QI</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "left", width: "150px" }}>Test Area</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "left", width: "120px" }}>Owner</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "center", width: "100px" }}>Status Match</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {jitaTcmsComparison.matched.slice(0, 500).map((item, idx) => (
+                            <tr key={idx} style={{ background: idx % 2 === 0 ? "white" : "#f8f9fa" }}>
+                              <td style={{ padding: "8px", border: "1px solid #dee2e6", fontSize: "11px", fontFamily: "monospace" }}>
+                                {item.testcase_name}
+                              </td>
+                              <td style={{ 
+                                padding: "8px", 
+                                border: "1px solid #dee2e6", 
+                                textAlign: "center",
+                                color: item.jita_status === "Succeeded" ? "#28a745" : item.jita_status === "Failed" ? "#dc3545" : "#666"
+                              }}>
+                                {item.jita_status}
+                              </td>
+                              <td style={{ 
+                                padding: "8px", 
+                                border: "1px solid #dee2e6", 
+                                textAlign: "center",
+                                color: item.tcms_status === "Passed" ? "#28a745" : item.tcms_status === "Failed" ? "#dc3545" : "#666"
+                              }}>
+                                {item.tcms_status}
+                              </td>
+                              <td style={{ 
+                                padding: "8px", 
+                                border: "1px solid #dee2e6", 
+                                textAlign: "center",
+                                color: qiColor(item.tcms_qi)
+                              }}>
+                                {item.tcms_qi != null ? `${item.tcms_qi.toFixed(1)}%` : "-"}
+                              </td>
+                              <td style={{ padding: "8px", border: "1px solid #dee2e6", fontSize: "11px" }}>
+                                {item.test_area || "-"}
+                              </td>
+                              <td style={{ padding: "8px", border: "1px solid #dee2e6", fontSize: "11px" }}>
+                                {item.owner || "-"}
+                              </td>
+                              <td style={{ padding: "8px", border: "1px solid #dee2e6", textAlign: "center" }}>
+                                {item.status_match ? (
+                                  <span style={{ color: "#28a745" }}>✓</span>
+                                ) : (
+                                  <span style={{ color: "#dc3545" }}>✗</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {jitaTcmsComparison.matched.length > 500 && (
+                        <p style={{ fontSize: "12px", color: "#666", marginTop: "10px" }}>
+                          Showing first 500 of {jitaTcmsComparison.matched.length} matched testcases
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p style={{ color: "#999", textAlign: "center", padding: "40px" }}>No matched testcases found</p>
+                  )}
+                </div>
+              )}
+
+              {/* Missing in Jita Tab */}
+              {comparisonActiveTab === "missing_jita" && (
+                <div>
+                  <p style={{ marginTop: 0, fontSize: "13px", color: "#666" }}>
+                    Testcases registered in TCMS but not triggered in Jita run
+                  </p>
+                  {jitaTcmsComparison.missing_in_jita.length > 0 ? (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ 
+                        width: "100%", 
+                        borderCollapse: "collapse", 
+                        fontSize: "12px",
+                        border: "1px solid #dee2e6"
+                      }}>
+                        <thead>
+                          <tr style={{ background: "#f8f9fa" }}>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "left", minWidth: "300px" }}>Testcase Name</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "center", width: "100px" }}>TCMS QI</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "center", width: "100px" }}>TCMS Status</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "left", width: "150px" }}>Test Area</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "center", width: "100px" }}>Last Run Date</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "center", width: "100px" }}>Deprecated</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {jitaTcmsComparison.missing_in_jita.slice(0, 500).map((item, idx) => (
+                            <tr key={idx} style={{ background: idx % 2 === 0 ? "white" : "#f8f9fa" }}>
+                              <td style={{ padding: "8px", border: "1px solid #dee2e6", fontSize: "11px", fontFamily: "monospace" }}>
+                                {item.testcase_name}
+                              </td>
+                              <td style={{ 
+                                padding: "8px", 
+                                border: "1px solid #dee2e6", 
+                                textAlign: "center",
+                                color: qiColor(item.tcms_qi)
+                              }}>
+                                {item.tcms_qi != null ? `${item.tcms_qi.toFixed(1)}%` : "-"}
+                              </td>
+                              <td style={{ 
+                                padding: "8px", 
+                                border: "1px solid #dee2e6", 
+                                textAlign: "center",
+                                color: item.tcms_status === "Passed" ? "#28a745" : item.tcms_status === "Failed" ? "#dc3545" : "#666"
+                              }}>
+                                {item.tcms_status}
+                              </td>
+                              <td style={{ padding: "8px", border: "1px solid #dee2e6", fontSize: "11px" }}>
+                                {item.test_area || "-"}
+                              </td>
+                              <td style={{ padding: "8px", border: "1px solid #dee2e6", textAlign: "center", fontSize: "11px" }}>
+                                {item.last_run_date || "-"}
+                              </td>
+                              <td style={{ padding: "8px", border: "1px solid #dee2e6", textAlign: "center" }}>
+                                {item.deprecated ? (
+                                  <span style={{ color: "#dc3545" }}>Yes</span>
+                                ) : (
+                                  <span style={{ color: "#28a745" }}>No</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {jitaTcmsComparison.missing_in_jita.length > 500 && (
+                        <p style={{ fontSize: "12px", color: "#666", marginTop: "10px" }}>
+                          Showing first 500 of {jitaTcmsComparison.missing_in_jita.length} testcases
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p style={{ color: "#999", textAlign: "center", padding: "40px" }}>All TCMS testcases are present in Jita run</p>
+                  )}
+                </div>
+              )}
+
+              {/* Missing in TCMS Tab */}
+              {comparisonActiveTab === "missing_tcms" && (
+                <div>
+                  <p style={{ marginTop: 0, fontSize: "13px", color: "#666" }}>
+                    Testcases triggered in Jita but not registered in TCMS
+                  </p>
+                  {jitaTcmsComparison.missing_in_tcms.length > 0 ? (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ 
+                        width: "100%", 
+                        borderCollapse: "collapse", 
+                        fontSize: "12px",
+                        border: "1px solid #dee2e6"
+                      }}>
+                        <thead>
+                          <tr style={{ background: "#f8f9fa" }}>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "left", minWidth: "300px" }}>Testcase Name</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "center", width: "120px" }}>Jita Status</th>
+                            <th style={{ padding: "10px", border: "1px solid #dee2e6", textAlign: "left", width: "200px" }}>Jita Task ID</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {jitaTcmsComparison.missing_in_tcms.slice(0, 500).map((item, idx) => (
+                            <tr key={idx} style={{ background: idx % 2 === 0 ? "white" : "#f8f9fa" }}>
+                              <td style={{ padding: "8px", border: "1px solid #dee2e6", fontSize: "11px", fontFamily: "monospace" }}>
+                                {item.testcase_name}
+                              </td>
+                              <td style={{ 
+                                padding: "8px", 
+                                border: "1px solid #dee2e6", 
+                                textAlign: "center",
+                                color: item.jita_status === "Succeeded" ? "#28a745" : item.jita_status === "Failed" ? "#dc3545" : "#666"
+                              }}>
+                                {item.jita_status}
+                              </td>
+                              <td style={{ padding: "8px", border: "1px solid #dee2e6", fontSize: "11px", fontFamily: "monospace" }}>
+                                {item.jita_task_id || "-"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {jitaTcmsComparison.missing_in_tcms.length > 500 && (
+                        <p style={{ fontSize: "12px", color: "#666", marginTop: "10px" }}>
+                          Showing first 500 of {jitaTcmsComparison.missing_in_tcms.length} testcases
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p style={{ color: "#999", textAlign: "center", padding: "40px" }}>All Jita testcases are registered in TCMS</p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
