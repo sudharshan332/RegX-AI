@@ -2303,7 +2303,7 @@ def fetch_qi_from_tcms(testcase_name, milestone="7.5.1"):
         float: QI value (operation_success_percentage) or None if not found/error
     """
     try:
-        # Construct payload based on the provided example
+        # Construct payload matching TCMS UI filters (no SYSTEST_LONGEVITY/LIMITED_RUNS exclusion)
         # Use more flexible matching - try exact name match first, then regex
         payload = [{
             "$match": {
@@ -2311,7 +2311,6 @@ def fetch_qi_from_tcms(testcase_name, milestone="7.5.1"):
                     {"target_milestone": milestone},
                     {"last_result": {"$elemMatch": {"pass_name": "overall"}}},
                     {"deleted": False},
-                    {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
                     {
                         "$or": [
                             {"test_case.name": testcase_name},  # Exact match first
@@ -3898,39 +3897,44 @@ def get_tcms_overall_qi():
     )
 
     try:
+        # Build base filter conditions
+        base_conditions = []
+        
         if is_master:
-            # Master: team-specific filters, feat_type=regression
-            filters = json.dumps({
-                "$and": [
-                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/", "$options": "i"}},
-                    {"release_name": {"$ne": milestone}},
-                    {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
-                    {"additional_data.team": f"{milestone}/{team_name}"},
-                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
-                    {"test_case.deprecated": False},
-                ]
-            })
+            # Master: team-specific filters matching TCMS UI, feat_type=regression
+            base_conditions = [
+                {"additional_data.team": f"{milestone}/{team_name}"},
+                {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
+                {"test_case.deprecated": False},
+            ]
             feat_type = "regression"
         else:
             # Release branch: team-specific filters, feat_type=regression
-            filters = json.dumps({
-                "$and": [
-                    {"additional_data.team": f"{milestone}/{team_name}"},
-                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
-                    {"test_case.deprecated": False},
-                ]
-            })
+            base_conditions = [
+                {"additional_data.team": f"{milestone}/{team_name}"},
+                {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
+                {"test_case.deprecated": False},
+            ]
             feat_type = "regression"
 
+        filters = json.dumps({"$and": base_conditions})
+
+        # TCMS API accepts date strings directly in YYYY-MM-DD format for time_filter
+        # When time_filter is a date string, pass it directly; otherwise use "all"
         params = {
             "aggregation_field": "target_package_type",
-            "time_filter": time_filter,
+            "time_filter": time_filter,  # Pass the date string directly (e.g., "2026-07-13" or "all")
             "target_milestone": milestone,
             "feat_type": feat_type,
             "filters": filters,
         }
+        
+        logger.info(f"[DEBUG] TCMS API request params: time_filter={time_filter}, milestone={milestone}, feat_type={feat_type}")
 
         url = f"{TCMS_SUMMARY_BASE}/milestone_all_test_cases/aggregate/metrics"
+        logger.info(f"[DEBUG] TCMS API URL: {url}")
+        logger.info(f"[DEBUG] TCMS API full params: {params}")
+        
         response = requests.get(
             url,
             params=params,
@@ -3995,6 +3999,424 @@ def get_tcms_overall_qi():
         return jsonify({"error": "TCMS API request timed out"}), 504
     except Exception as e:
         logger.error(f"Error fetching TCMS Overall QI: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------
+# TCMS Overview Endpoint (for verification UI)
+# ---------------------------------------------------
+@app.route("/mcp/regression/tcms-overview", methods=["GET"])
+@jwt_required
+def get_tcms_overview():
+    """
+    Fetch TCMS overview metrics and construct UI URL for verification.
+    
+    Query params:
+      - tag: JITA tester tag (e.g., "cdp_master_full_reg")
+      - task_ids: Comma-separated JITA task IDs (alternative to tag)
+      - team_name: Override team (optional, will be extracted from tag if not provided)
+      - branch_name: Override branch (optional, will be extracted from tasks if not provided)
+      - time_filter: Time filter for TCMS (default: "all")
+    
+    Returns: TCMS metrics + constructed TCMS UI URL for verification
+    """
+    start = time.time()
+    tag = request.args.get("tag")
+    task_ids_param = request.args.get("task_ids")
+    team_name = request.args.get("team_name")
+    branch_name = request.args.get("branch_name")
+    time_filter = request.args.get("time_filter", "all")
+    
+    # Parse task_ids if provided
+    task_ids = None
+    if task_ids_param:
+        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
+    
+    if not tag and not task_ids:
+        return jsonify({"error": "Either tag or task_ids is required"}), 400
+    
+    logger.info(f"[START] TCMS Overview | tag={tag} task_ids_count={len(task_ids) if task_ids else 0}")
+    
+    try:
+        # Extract team and branch if not provided
+        if not team_name or not branch_name:
+            if tag:
+                # Extract team from tag using TEAM_CONFIG
+                team_config = TEAM_CONFIG.get(tag, TEAM_CONFIG.get("default", {}))
+                if not team_name:
+                    team_name = team_config.get("team", "CDP")
+                
+                # Extract branch from tag or fetch from tasks
+                if not branch_name:
+                    tasks = fetch_regression_tasks(tag=tag, include_tag_extras=False)
+                    if tasks and len(tasks) > 0:
+                        branch_name = tasks[0].get("branch", "master")
+                    else:
+                        branch_name = team_config.get("default_branch", "master")
+            elif task_ids:
+                # Fetch tasks to get branch
+                tasks = fetch_regression_tasks(task_ids=task_ids, include_tag_extras=False)
+                if tasks and len(tasks) > 0:
+                    if not branch_name:
+                        branch_name = tasks[0].get("branch", "master")
+                    if not team_name:
+                        # Try to extract team from first task's tester_tags
+                        tester_tags = tasks[0].get("tester_tags", [])
+                        for tt in tester_tags:
+                            team_config = TEAM_CONFIG.get(tt, {})
+                            if team_config:
+                                team_name = team_config.get("team", "CDP")
+                                break
+                        if not team_name:
+                            team_name = "CDP"  # Default fallback
+                else:
+                    team_name = team_name or "CDP"
+                    branch_name = branch_name or "master"
+        
+        if not team_name or not branch_name:
+            return jsonify({"error": "Could not determine team_name or branch_name"}), 400
+        
+        milestone = _resolve_tcms_milestone(branch_name)
+        is_master = branch_name.lower() in ("master", "main")
+        
+        logger.info(f"TCMS Overview | team={team_name} branch={branch_name} milestone={milestone} is_master={is_master}")
+        
+        # Build base filter conditions (same as get_tcms_overall_qi)
+        base_conditions = [
+            {"additional_data.team": f"{milestone}/{team_name}"},
+            {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
+            {"test_case.deprecated": False},
+        ]
+        feat_type = "regression"
+        
+        filters = json.dumps({"$and": base_conditions})
+        
+        # Prepare TCMS API request
+        params = {
+            "aggregation_field": "target_package_type",
+            "time_filter": time_filter,
+            "target_milestone": milestone,
+            "feat_type": feat_type,
+            "filters": filters,
+        }
+        
+        url = f"{TCMS_SUMMARY_BASE}/milestone_all_test_cases/aggregate/metrics"
+        logger.info(f"[DEBUG] TCMS Overview API URL: {url}")
+        
+        response = requests.get(
+            url,
+            params=params,
+            headers={"Content-Type": "application/json"},
+            verify=False,
+            timeout=30,
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"TCMS Summary API returned {response.status_code}: {response.text[:500]}")
+            return jsonify({"error": f"TCMS API error: {response.status_code}"}), 502
+        
+        data = response.json()
+        if not data.get("success") or not data.get("data"):
+            logger.warning("TCMS Summary API returned no data")
+            return jsonify({
+                "qi_value": None,
+                "message": "No data returned from TCMS",
+                "team_name": team_name,
+                "branch_name": branch_name,
+                "milestone": milestone,
+                "time_filter": time_filter,
+                "tcms_ui_url": None,
+            })
+        
+        overall = data["data"][0]
+        qi_value = overall.get("average_total_op_success_percentage")
+        
+        # Construct TCMS UI URL (based on RegressionHome.jsx line 2828)
+        tcms_search = f"additional_data.team:{milestone}/{team_name}"
+        tcms_ui_url = (
+            f"https://tcms.eng.nutanix.com/#/testcases/milestone/{milestone}"
+            f"?search={tcms_search}&tab=package_type&pass=overall&type=Regression"
+        )
+        if time_filter and time_filter != "all":
+            tcms_ui_url += f"&timeFilter={time_filter}"
+        
+        logger.info(f"[END] TCMS Overview | qi={qi_value} | time={time.time() - start:.2f}s")
+        
+        return jsonify({
+            "qi_value": qi_value,
+            "team_name": team_name,
+            "branch_name": branch_name,
+            "milestone": milestone,
+            "time_filter": time_filter,
+            "total_tests": overall.get("total"),
+            "run": overall.get("run"),
+            "passed": overall.get("passed"),
+            "failed": overall.get("failed"),
+            "not_run": overall.get("not_run"),
+            "blocked": overall.get("blocked"),
+            "run_percentage": overall.get("run_percentage"),
+            "overall_effectiveness": overall.get("overall_effectiveness"),
+            "overall_stability": overall.get("overall_stability"),
+            "total_triaged": overall.get("total_triaged"),
+            "triage_percentage": overall.get("triage_percentage"),
+            "total_product_issues": overall.get("total_product_issues"),
+            "total_test_issues": overall.get("total_test_issues"),
+            "total_other_issues": overall.get("total_other_issues"),
+            "total_infra_issues": overall.get("total_infra_issues"),
+            "total_framework_issues": overall.get("total_framework_issues"),
+            "openBugs": overall.get("openBugs"),
+            "unique_tickets": overall.get("unique_tickets", []),
+            "execution_passed_percentage": overall.get("execution_passed_percentage"),
+            "execution_failed_percentage": overall.get("execution_failed_percentage"),
+            "tcms_ui_url": tcms_ui_url,
+        })
+    
+    except requests.exceptions.Timeout:
+        logger.error("TCMS Summary API request timed out")
+        return jsonify({"error": "TCMS API request timed out"}), 504
+    except Exception as e:
+        logger.error(f"Error fetching TCMS overview: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------
+# JITA vs TCMS Testcase Comparison Endpoint
+# ---------------------------------------------------
+@app.route("/mcp/regression/jita-tcms-comparison", methods=["POST"])
+@jwt_required
+def compare_jita_tcms_testcases():
+    """
+    Compare testcases between JITA run and TCMS registry.
+    
+    Request body:
+      - tag: JITA tester tag
+      - task_ids: Comma-separated JITA task IDs (alternative to tag)
+      - team_name: TCMS team name (optional, will be extracted if not provided)
+      - branch_name: Branch name (optional, will be extracted if not provided)
+    
+    Returns: Detailed comparison showing matched, missing_in_jita, missing_in_tcms
+    """
+    start = time.time()
+    
+    try:
+        body = request.get_json(force=True) or {}
+        tag = body.get("tag")
+        task_ids_param = body.get("task_ids")
+        team_name = body.get("team_name")
+        branch_name = body.get("branch_name")
+        
+        # Parse task_ids
+        task_ids = None
+        if task_ids_param:
+            if isinstance(task_ids_param, list):
+                task_ids = [str(tid).strip() for tid in task_ids_param if tid]
+            elif isinstance(task_ids_param, str):
+                task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
+        
+        if not tag and not task_ids:
+            return jsonify({"error": "Either tag or task_ids is required"}), 400
+        
+        logger.info(f"[START] JITA-TCMS Comparison | tag={tag} task_ids_count={len(task_ids) if task_ids else 0}")
+        
+        # Step 1: Fetch JITA test data
+        logger.info("Fetching JITA test data...")
+        if tag:
+            tasks = fetch_regression_tasks(tag=tag, include_tag_extras=False)
+        else:
+            tasks = fetch_regression_tasks(task_ids=task_ids, include_tag_extras=False)
+        
+        if not tasks:
+            return jsonify({"error": "No tasks found"}), 404
+        
+        # Extract team and branch if not provided
+        if not team_name or not branch_name:
+            if tag:
+                team_config = TEAM_CONFIG.get(tag, TEAM_CONFIG.get("default", {}))
+                if not team_name:
+                    team_name = team_config.get("team", "CDP")
+                if not branch_name:
+                    branch_name = tasks[0].get("branch", team_config.get("default_branch", "master"))
+            else:
+                if not branch_name:
+                    branch_name = tasks[0].get("branch", "master")
+                if not team_name:
+                    tester_tags = tasks[0].get("tester_tags", [])
+                    for tt in tester_tags:
+                        team_config = TEAM_CONFIG.get(tt, {})
+                        if team_config:
+                            team_name = team_config.get("team", "CDP")
+                            break
+                    if not team_name:
+                        team_name = "CDP"
+        
+        milestone = _resolve_tcms_milestone(branch_name)
+        logger.info(f"Comparison | team={team_name} branch={branch_name} milestone={milestone}")
+        
+        # Collect all task IDs
+        jita_task_ids = [task["_id"]["$oid"] for task in tasks]
+        
+        # Fetch test results from JITA
+        test_data = fetch_test_results_batch_with_pagination(jita_task_ids, timeout=120)
+        logger.info(f"Fetched {len(test_data)} test results from JITA")
+        
+        # Extract unique testcase names from JITA with metadata
+        jita_testcases = {}
+        for test in test_data:
+            test_name = test.get("test", {}).get("name", "")
+            if test_name:
+                if test_name not in jita_testcases:
+                    jita_testcases[test_name] = {
+                        "testcase_name": test_name,
+                        "jita_status": test.get("status", "Unknown"),
+                        "jita_task_id": test.get("task_id", ""),
+                    }
+        
+        logger.info(f"Extracted {len(jita_testcases)} unique testcases from JITA")
+        
+        # Step 2: Fetch TCMS testcases
+        logger.info("Fetching TCMS testcases...")
+        payload = [{
+            "$match": {
+                "$and": [
+                    {"target_milestone": milestone},
+                    {"additional_data.team": f"{milestone}/{team_name}"},
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
+                    {"test_case.deprecated": False},
+                    {"last_result": {"$elemMatch": {"pass_name": "overall"}}}
+                ]
+            }
+        }, {"$sort": {"name": 1}}, {"$skip": 0}, {"$limit": 5000}]
+        
+        response = requests.post(
+            f"{TCMS_BASE}/milestone_all_test_cases/aggregate",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            verify=False,
+            timeout=60
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"TCMS API error: HTTP {response.status_code}")
+            return jsonify({"error": f"TCMS API error: {response.status_code}"}), 502
+        
+        tcms_data = response.json()
+        if not tcms_data.get("success") or not tcms_data.get("data"):
+            logger.warning("TCMS API returned no data")
+            return jsonify({"error": "No TCMS data available"}), 404
+        
+        # Extract TCMS testcases with metadata
+        tcms_testcases = {}
+        for tc in tcms_data["data"]:
+            test_case = tc.get("test_case", {})
+            test_name = test_case.get("name", "")
+            if not test_name:
+                continue
+            
+            last_result = tc.get("last_result", [])
+            published = {}
+            status = "Unknown"
+            last_updated = ""
+            qi = None
+            
+            if last_result and len(last_result) > 0:
+                lr = last_result[0]
+                published = lr.get("published", {})
+                status = lr.get("status", "Unknown")
+                last_updated = lr.get("last_updated", "")
+                qi = published.get("operation_success_percentage")
+            
+            # Parse test area from test name (first 2-3 parts)
+            test_parts = test_name.split(".")
+            test_area = ".".join(test_parts[:min(3, len(test_parts))]) if test_parts else ""
+            
+            tcms_testcases[test_name] = {
+                "testcase_name": test_name,
+                "tcms_qi": qi if qi is not None else 0.0,
+                "tcms_status": status,
+                "test_area": test_area,
+                "deprecated": test_case.get("deprecated", False),
+                "last_run_date": last_updated[:10] if last_updated else "",
+                "owner": test_case.get("owner", "")
+            }
+        
+        logger.info(f"Extracted {len(tcms_testcases)} testcases from TCMS")
+        
+        # Step 3: Compare and categorize
+        jita_set = set(jita_testcases.keys())
+        tcms_set = set(tcms_testcases.keys())
+        
+        matched_set = jita_set & tcms_set
+        missing_in_jita_set = tcms_set - jita_set
+        missing_in_tcms_set = jita_set - tcms_set
+        
+        # Build comparison results
+        matched = []
+        for test_name in matched_set:
+            jita_info = jita_testcases[test_name]
+            tcms_info = tcms_testcases[test_name]
+            
+            status_match = jita_info["jita_status"] == tcms_info["tcms_status"]
+            
+            matched.append({
+                "testcase_name": test_name,
+                "jita_status": jita_info["jita_status"],
+                "tcms_status": tcms_info["tcms_status"],
+                "jita_qi": None,  # JITA doesn't have QI directly
+                "tcms_qi": tcms_info["tcms_qi"],
+                "qi_difference": "N/A",
+                "test_area": tcms_info["test_area"],
+                "owner": tcms_info["owner"],
+                "deprecated": tcms_info["deprecated"],
+                "status_match": status_match
+            })
+        
+        missing_in_jita = []
+        for test_name in missing_in_jita_set:
+            tcms_info = tcms_testcases[test_name]
+            missing_in_jita.append(tcms_info)
+        
+        missing_in_tcms = []
+        for test_name in missing_in_tcms_set:
+            jita_info = jita_testcases[test_name]
+            missing_in_tcms.append(jita_info)
+        
+        # Calculate match percentage
+        total_jita = len(jita_set)
+        total_tcms = len(tcms_set)
+        matched_count = len(matched_set)
+        
+        if total_jita > 0:
+            exact_match_percentage = round((matched_count / total_jita) * 100, 2)
+        else:
+            exact_match_percentage = 0.0
+        
+        summary = {
+            "total_jita": total_jita,
+            "total_tcms": total_tcms,
+            "matched_count": matched_count,
+            "missing_in_jita_count": len(missing_in_jita_set),
+            "missing_in_tcms_count": len(missing_in_tcms_set),
+            "exact_match_percentage": exact_match_percentage
+        }
+        
+        logger.info(f"[END] JITA-TCMS Comparison | matched={matched_count} missing_jita={len(missing_in_jita_set)} missing_tcms={len(missing_in_tcms_set)} | time={time.time() - start:.2f}s")
+        
+        return jsonify({
+            "success": True,
+            "missing_in_jita": missing_in_jita,
+            "missing_in_tcms": missing_in_tcms,
+            "matched": matched,
+            "summary": summary,
+            "team_name": team_name,
+            "branch_name": branch_name,
+            "milestone": milestone
+        })
+    
+    except requests.exceptions.Timeout:
+        logger.error("TCMS API request timed out")
+        return jsonify({"error": "TCMS API request timed out"}), 504
+    except Exception as e:
+        logger.error(f"Error in JITA-TCMS comparison: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -8965,10 +9387,9 @@ def _apply_testcase_tag_ops(testcase_oids, tags, branch, team, action="add"):
 def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip, limit):
     """Build the MongoDB aggregation pipeline payload for the TCMS POST API.
 
-    Master and release branches use different filter clauses:
-    - Master includes release_name exclusion and metadata tag exclusions.
-    - Release branches include tc_type filter for regression/smart_qual.
-    Both include a team-specific test_sets regex.
+    Master and release branches use the same filter clauses to match TCMS UI:
+    - Both use team-specific test_sets regex matching TCMS detail page filters
+    - No extra exclusions to ensure consistency with TCMS UI data
     """
     is_master = milestone == "master"
     team_test_set_regex = f"{test_set_regex}{team}/"
@@ -8980,9 +9401,6 @@ def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip,
                 "last_result": {"$elemMatch": {"pass_name": "overall"}},
                 "deleted": False,
             },
-            {"test_case.test_sets": {"$regex": test_set_regex, "$options": "i"}},
-            {"release_name": {"$ne": milestone}},
-            {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
             {"additional_data.team": f"{team_prefix}/{team}"},
             {"test_case.test_sets": {"$regex": team_test_set_regex, "$options": "i"}},
             {"test_case.deprecated": False},

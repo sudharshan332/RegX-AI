@@ -1,0 +1,309 @@
+{
+  "generated_time": "2026-07-25T16:16:42.856522",
+  "tag": "central_regression_physical_dry_run|July-23-2026",
+  "task_ids": [
+    "6a623aa6b5e4753daf5191c4",
+    "6a623aa3b5e4753da5e93aba",
+    "6a623aa2b5e4753dbc12cdd0",
+    "6a623aa1d24d822107db5b48",
+    "6a623a9f8e79ce054cc5e363",
+    "6a623a9e2bc0c4c247a405f4",
+    "6a623a98b5e4753daa2fd054",
+    "6a623a942bc0c4c25b40993b"
+  ],
+  "testcases": [
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___witness_lkm_encryption",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-957406",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node.RoboAddNodeToOneNodeTest.test_robo_add_node_to_one_node",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node.RoboAddNodeToOneNodeTest.test_robo_add_node_to_one_node___normal_witness",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node_with_io_integrity.RoboAddNodeWithIOIntegrityTest.test_robo_add_node_to_one_node_with_io_integrity",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-870090",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___offline_HDD_witness",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-957406",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node.RoboAddNodeToOneNodeTest.test_robo_add_node_to_one_node___normal",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node_with_io_integrity.RoboAddNodeWithIOIntegrityTest.test_robo_add_node_to_one_node_with_io_integrity___witness",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "SMOKE-717",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_combination",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-958055",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node_with_io_integrity.RoboAddNodeWithIOIntegrityTest.test_robo_two_to_three_node_with_io_integrity___witness_rpc_drc_stop",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-948418",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node_with_io_integrity.RoboAddNodeWithIOIntegrityTest.test_robo_two_to_three_node_with_io_integrity___witness_rpc_cassandra_stop",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-948418",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_background_encryption_robo_cluster",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-927585",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_ekm_to_pckm_conversion",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-845689",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_encryption_io_integrity_with_rekey",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-916334",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node.RoboAddNodeToTwoNodeTest.test_robo_add_node_to_two_node___witness_rpc",
+      "regression_owner": "Unknown",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-920149",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node_with_io_integrity.RoboAddNodeWithIOIntegrityTest.test_robo_two_to_three_to_four_node_with_io_integrity___witness_rpc",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-914487",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node_with_io_integrity.RoboAddNodeWithIOIntegrityTest.test_robo_two_to_three_node_with_io_integrity___witness_rpc",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-948418",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node_with_io_integrity.RoboAddNodeWithIOIntegrityTest.test_robo_from_one_to_four_node_with_io_integrity___witness_rpc",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-938673",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.curator.goldsuite_iointegrity.test_goldsuite.CuratorGoldSuiteTest.test_gold___disk_offline_and_node_removal",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-928188",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.tier_wise_storage_widget.test_tier_wise_widget.TierWiseWidget.test_tier_wise_storage_widget_on_instance_page",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.storage_policy.test_storage_policy.StoragePolicy.test_crud_on_storage_policy",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.storage_policy.test_storage_policy.StoragePolicy.test_create_modal_popup_element",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.storage_policy.test_storage_policy.StoragePolicy.test_create_error_messages",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.storage_policy.test_storage_policy.StoragePolicy.test_storage_object_view_cud",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-947802",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.storage_policy.test_storage_policy.StoragePolicy.test_sorting_filtering_on_list_view",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.recycle_bin_widget.test_recycle_bin_widget.RecycleBinWidget.test_recycle_bin_on_dashboard_page",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.recycle_bin_widget.test_recycle_bin_widget.RecycleBinWidget.test_recycle_bin_on_dashboard_page___disable_retention",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.recycle_bin_widget.test_recycle_bin_widget.RecycleBinWidget.test_recycle_bin_on_instance_page",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.recycle_bin_widget.test_recycle_bin_widget.RecycleBinWidget.test_recycle_bin_on_instance_page___disable_retention",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.recycle_bin_widget.test_recycle_bin_widget.RecycleBinWidget.test_recycle_bin_on_list_page",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.recycle_bin_widget.test_recycle_bin_widget.RecycleBinWidget.test_recycle_bin_on_summary_page",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.recycle_bin_widget.test_recycle_bin_widget.RecycleBinWidget.test_recycle_bin_on_summary_page___disable_retention",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.storage_policy.test_storage_policy.StoragePolicy.test_dsp",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944728",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.qos_policy.api.test_qos_policy_api.TestQOSPolicyApi.test_storage_qos_on_nutanix_vms___pcvm",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944188",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.licensing.test_cdp_licensing.LicensingTest~~~Day0.test_licensing",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-956544",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.stargate.licensing.test_cdp_licensing.LicensingTest~~~Day60.test_licensing",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-911369",
+      "jira_ticket": "",
+      "match_status": ""
+    }
+  ],
+  "triage_summary": {
+    "total_failed_warning_count": 35,
+    "triaged_count": 0,
+    "triage_genie_count": 0,
+    "total_triage_genie_count": 32,
+    "triage_completed_percent": 0.0,
+    "triage_genie_percent": 0,
+    "total_triage_genie_percent": 91.4,
+    "matched_count": 0,
+    "unmatched_count": 0,
+    "matched_percent": 0,
+    "unmatched_percent": 0
+  }
+}
