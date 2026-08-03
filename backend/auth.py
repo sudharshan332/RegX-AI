@@ -1,4 +1,5 @@
 import os
+import base64
 import logging
 import functools
 from datetime import datetime, timedelta, timezone
@@ -10,24 +11,50 @@ from flask import request, jsonify, g
 
 logger = logging.getLogger(__name__)
 
+
+def _persisted_secret_key():
+    """Load (or create) a stable JWT signing key under data/.
+
+    Keeps user sessions valid across backend restarts even when no SECRET_KEY
+    env var is set. Mirrors the persisted Fernet-key pattern in user_keys.py.
+    Set SECRET_KEY / REGX_SECRET_KEY to override.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(os.path.dirname(here), "data")
+    path = os.path.join(data_dir, "jwt_secret.key")
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                stored = fh.read().strip()
+            if stored:
+                return base64.urlsafe_b64decode(stored.encode("utf-8"))
+        os.makedirs(data_dir, exist_ok=True)
+        secret = os.urandom(32)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(base64.urlsafe_b64encode(secret).decode("utf-8"))
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        logger.info("Created stable JWT secret at %s", path)
+        return secret
+    except Exception as exc:
+        logger.warning(
+            "Could not persist JWT secret (%s). Using an in-memory random key; "
+            "sessions will not survive restart.",
+            exc,
+        )
+        return os.urandom(32)
+
+
 # ---------------------------------------------------------------------------
-# Secret key — stable in production, random fallback in dev
+# Secret key — env override, else a stable persisted key (survives restarts)
 # ---------------------------------------------------------------------------
 _secret_key = os.environ.get("SECRET_KEY") or os.environ.get("REGX_SECRET_KEY")
 if _secret_key:
     SECRET_KEY = _secret_key
 else:
-    _debug = os.environ.get("FLASK_DEBUG", "").lower()
-    _env = os.environ.get("FLASK_ENV", "").lower()
-    _is_dev = _debug in ("1", "true", "yes", "on") or _env in ("development", "dev")
-    if not _is_dev:
-        # In production without a key, generate a random one but warn loudly.
-        # This means tokens won't survive a restart — set SECRET_KEY for prod.
-        logger.warning(
-            "SECRET_KEY not set. Generating a random key — sessions will not "
-            "persist across restarts. Set SECRET_KEY env var for production."
-        )
-    SECRET_KEY = os.urandom(32)
+    SECRET_KEY = _persisted_secret_key()
 
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = int(os.environ.get("JWT_EXPIRY_HOURS", "24"))

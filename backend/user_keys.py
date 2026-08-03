@@ -23,6 +23,8 @@ ALLOWED_KEY_NAMES = (
     "cursor_api_key",
     "atlassian_jira_token",
     "atlassian_confluence_token",
+    "gerrit_http_password",
+    "sourcegraph_token",
 )
 
 _LOCK = threading.Lock()

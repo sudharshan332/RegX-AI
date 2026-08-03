@@ -6,6 +6,8 @@ const EMPTY_KEYS = {
   cursor_api_key: '',
   atlassian_jira_token: '',
   atlassian_confluence_token: '',
+  gerrit_http_password: '',
+  sourcegraph_token: '',
 };
 
 export default function KeyManagementPanel({ onClose }) {
@@ -20,6 +22,8 @@ export default function KeyManagementPanel({ onClose }) {
     cursor_api_key: false,
     atlassian_jira_token: false,
     atlassian_confluence_token: false,
+    gerrit_http_password: false,
+    sourcegraph_token: false,
   });
 
   useEffect(() => {
@@ -45,13 +49,13 @@ export default function KeyManagementPanel({ onClose }) {
     try {
       const keysToSave = {};
       Object.keys(keys).forEach((key) => {
-        const value = keys[key];
+        const value = (keys[key] || '').trim();
         if (value && !value.includes('****')) {
           keysToSave[key] = value;
         }
       });
       if (Object.keys(keysToSave).length === 0) {
-        setError('No keys to save. Please enter at least one API key.');
+        setError('No new keys to save. Enter a new value in any field, then click Save.');
         return;
       }
       await api.put('/mcp/regression/user-keys', keysToSave);
@@ -107,8 +111,8 @@ export default function KeyManagementPanel({ onClose }) {
 
   const hasChanges = () =>
     Object.keys(keys).some((key) => {
-      const value = keys[key];
-      const original = originalKeys[key];
+      const value = (keys[key] || '').trim();
+      const original = (originalKeys[key] || '').trim();
       return value && value !== original && !value.includes('****');
     });
 
@@ -199,6 +203,56 @@ export default function KeyManagementPanel({ onClose }) {
           </button>
         </div>
         <p className="help-text">Optional: For Confluence MCP server access (search, read pages)</p>
+      </div>
+
+      <div className="key-section">
+        <label htmlFor="gerrit-http-password">Gerrit HTTP Password</label>
+        <div className="input-with-toggle">
+          <input
+            id="gerrit-http-password"
+            type={showKeys.gerrit_http_password ? 'text' : 'password'}
+            value={keys.gerrit_http_password}
+            onChange={(e) => handleChange('gerrit_http_password', e.target.value)}
+            placeholder="Required for auto Create CR in Handover"
+            disabled={saving || validating}
+          />
+          <button
+            type="button"
+            className="toggle-visibility-btn"
+            onClick={() => toggleShowKey('gerrit_http_password')}
+            title={showKeys.gerrit_http_password ? 'Hide password' : 'Show password'}
+          >
+            {showKeys.gerrit_http_password ? '👁️' : '👁️‍🗨️'}
+          </button>
+        </div>
+        <p className="help-text">
+          Used for automatic Gerrit CR creation in Handover. Username is your logged-in email.
+        </p>
+      </div>
+
+      <div className="key-section">
+        <label htmlFor="sourcegraph-token">Sourcegraph Token</label>
+        <div className="input-with-toggle">
+          <input
+            id="sourcegraph-token"
+            type={showKeys.sourcegraph_token ? 'text' : 'password'}
+            value={keys.sourcegraph_token}
+            onChange={(e) => handleChange('sourcegraph_token', e.target.value)}
+            placeholder="Required for Suggest LST"
+            disabled={saving || validating}
+          />
+          <button
+            type="button"
+            className="toggle-visibility-btn"
+            onClick={() => toggleShowKey('sourcegraph_token')}
+            title={showKeys.sourcegraph_token ? 'Hide token' : 'Show token'}
+          >
+            {showKeys.sourcegraph_token ? '👁️' : '👁️‍🗨️'}
+          </button>
+        </div>
+        <p className="help-text">
+          Used by Handover Suggest LST to query Sourcegraph per user.
+        </p>
       </div>
 
       {validationResults && (

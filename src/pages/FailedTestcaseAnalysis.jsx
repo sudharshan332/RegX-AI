@@ -109,6 +109,8 @@ export default function FailedTestcaseAnalysis() {
   // Cursor AI deep analysis state
   const [cursorAiLoading, setCursorAiLoading] = useState({});
   const [cursorAiResults, setCursorAiResults] = useState({});
+  // Live progress while a streaming analysis runs: testId -> { status, text }
+  const [cursorAiStreaming, setCursorAiStreaming] = useState({});
   const [cursorAiDetailModal, setCursorAiDetailModal] = useState(null);
   const [cursorAiBatchJobId, setCursorAiBatchJobId] = useState(null);
   const [cursorAiBatchStatus, setCursorAiBatchStatus] = useState(null);
@@ -122,7 +124,7 @@ export default function FailedTestcaseAnalysis() {
   const [followUpHistoryByTestcase, setFollowUpHistoryByTestcase] = useState({});
   // Ask is the fast path (answer from existing analysis; minimal/no MCP).
   // Use Agent/Plan only when the user wants deeper re-investigation.
-  const [followUpMode, setFollowUpMode] = useState('ask');
+  const [followUpMode, setFollowUpMode] = useState('agent');
 
   // Retrigger state
   const [retriggerModalOpen, setRetriggerModalOpen] = useState(false);
@@ -637,31 +639,98 @@ export default function FailedTestcaseAnalysis() {
     const testId = result.testcase_id;
     if (!testId) return;
     setCursorAiLoading(prev => ({ ...prev, [testId]: true }));
+    setCursorAiStreaming(prev => ({ ...prev, [testId]: { status: 'Starting deep analysis…', text: '' } }));
+
+    let acc = '';
+    let finalHandled = false;
     try {
-      const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase`, {
-        testcase_name: result.testcase_name,
-        exception_summary: result.exception_summary,
-        exception: result.exception,
-        test_log_url: result.test_log_url,
-        jira_tickets: result.jira_tickets || [],
-        failure_stage: result.failure_stage,
+      const token = localStorage.getItem('regx_auth_token');
+      const response = await fetch(`${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase-stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          testcase_name: result.testcase_name,
+          exception_summary: result.exception_summary,
+          exception: result.exception,
+          test_log_url: result.test_log_url,
+          jira_tickets: result.jira_tickets || [],
+          failure_stage: result.failure_stage,
+        }),
       });
-      if (resp.data?.success) {
-        setCursorAiResults(prev => ({ ...prev, [testId]: resp.data.analysis }));
-        if (resp.data.session_id) {
-          setCursorAiSessions(prev => ({ ...prev, [testId]: resp.data.session_id }));
+
+      if (!response.ok || !response.body) {
+        const errData = await response.json().catch(() => ({}));
+        setCursorAiResults(prev => ({ ...prev, [testId]: { error: errData.error || `Request failed: ${response.status}` } }));
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let event;
+          try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+          if (event.type === 'status') {
+            setCursorAiStreaming(prev => ({
+              ...prev,
+              [testId]: { ...(prev[testId] || {}), status: event.text || '' },
+            }));
+          } else if (event.type === 'delta') {
+            acc += event.text || '';
+            setCursorAiStreaming(prev => ({
+              ...prev,
+              [testId]: { status: (prev[testId] && prev[testId].status) || 'Writing analysis…', text: acc },
+            }));
+          } else if (event.type === 'done') {
+            finalHandled = true;
+            setCursorAiResults(prev => ({
+              ...prev,
+              [testId]: {
+                ...(event.analysis || {}),
+                agave_task_id: result.agave_task_id || '',
+                test_log_url: result.test_log_url || (event.analysis || {}).test_log_url || '',
+                exception: result.exception || (event.analysis || {}).exception || '',
+                exception_summary: result.exception_summary || (event.analysis || {}).exception_summary || '',
+                current_branch: currentBranch || '',
+              },
+            }));
+            if (event.session_id) setCursorAiSessions(prev => ({ ...prev, [testId]: event.session_id }));
+            if (event.agent_id) setCursorAiAgentIds(prev => ({ ...prev, [testId]: event.agent_id }));
+          } else if (event.type === 'error') {
+            finalHandled = true;
+            setCursorAiResults(prev => ({ ...prev, [testId]: { error: event.message || 'Analysis failed' } }));
+          }
         }
-        if (resp.data.agent_id) {
-          setCursorAiAgentIds(prev => ({ ...prev, [testId]: resp.data.agent_id }));
-        }
-      } else {
-        setCursorAiResults(prev => ({ ...prev, [testId]: { error: resp.data?.error || 'Analysis failed' } }));
+      }
+
+      if (!finalHandled) {
+        setCursorAiResults(prev => ({
+          ...prev,
+          [testId]: prev[testId] || { error: 'Analysis ended before completing' },
+        }));
       }
     } catch (err) {
-      const msg = err.response?.data?.error || err.message || 'Cursor AI analysis failed';
+      const msg = err.message || 'Cursor AI analysis failed';
       setCursorAiResults(prev => ({ ...prev, [testId]: { error: msg } }));
     } finally {
       setCursorAiLoading(prev => ({ ...prev, [testId]: false }));
+      setCursorAiStreaming(prev => {
+        const next = { ...prev };
+        delete next[testId];
+        return next;
+      });
     }
   };
 
@@ -748,7 +817,11 @@ export default function FailedTestcaseAnalysis() {
     if (!sessionId) return;
 
     const question = followUpInput.trim();
-    const selectedMode = followUpMode;
+    const pendingDraft = cursorAiDetailModal.pending_ticket_draft || null;
+    // Auto-upgrade Ask → Agent for ticket/CR/tool work (incl. "yes" confirming a draft).
+    const confirmLike = /^(yes|y|ok|okay|confirm|proceed)\b/i.test(question.replace(/[*`_]/g, '').trim());
+    const needsTools = confirmLike || /\b(jira|eng-\d+|gerrit|glean|cr\b|ticket|create|file|fixed|status|handoff)\b/i.test(question);
+    const selectedMode = (followUpMode === 'ask' && needsTools) ? 'agent' : followUpMode;
     setFollowUpLoading(true);
     const testcaseId = cursorAiDetailModal._testcase_id;
     setFollowUpHistory(prev => {
@@ -761,20 +834,56 @@ export default function FailedTestcaseAnalysis() {
     setFollowUpInput('');
 
     try {
+      const ticketContext = {
+        testcase_name: cursorAiDetailModal.testcase_name || '',
+        testcase_id: cursorAiDetailModal._testcase_id || cursorAiDetailModal.testcase_id || '',
+        agave_task_id: cursorAiDetailModal.agave_task_id || '',
+        root_cause: String(cursorAiDetailModal.root_cause || ''),
+        classification: cursorAiDetailModal.classification || '',
+        suggested_fix: String(cursorAiDetailModal.suggested_fix || ''),
+        triage_report: String(cursorAiDetailModal.triage_report || ''),
+        related_components: cursorAiDetailModal.related_components || [],
+        jira_duplicates: cursorAiDetailModal.jira_duplicates || [],
+        test_log_url: cursorAiDetailModal.test_log_url || '',
+        exception: cursorAiDetailModal.exception || '',
+        exception_summary: cursorAiDetailModal.exception_summary || '',
+        confidence: cursorAiDetailModal.confidence || '',
+        current_branch: cursorAiDetailModal.current_branch || currentBranch || '',
+        nutest_branch: cursorAiDetailModal.nutest_branch || cursorAiDetailModal.gerrit_branch || '',
+        gerrit_branch: cursorAiDetailModal.gerrit_branch || '',
+        handoff_branch: cursorAiDetailModal.handoff_branch || '',
+        nos_branch: cursorAiDetailModal.nos_branch || '',
+        pending_ticket_draft: pendingDraft,
+        // Confirming a draft must create immediately (not re-prompt).
+        ...(confirmLike && pendingDraft ? { confirm: true } : {}),
+      };
       const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/follow-up`, {
         session_id: sessionId,
         question,
-        mode: followUpMode,
+        mode: selectedMode,
+        ticket_context: ticketContext,
         recovery_context: {
           testcase_name: cursorAiDetailModal.testcase_name || '',
+          testcase_id: cursorAiDetailModal._testcase_id || cursorAiDetailModal.testcase_id || '',
+          agave_task_id: cursorAiDetailModal.agave_task_id || '',
           agent_id: cursorAiDetailModal._agent_id || cursorAiAgentIds[testcaseId] || '',
-          // Lean payload only — full triage_report makes cold recovery very slow.
+          // Lean payload for cold recovery — ticket create uses ticket_context above.
           latest_analysis: {
             root_cause: String(cursorAiDetailModal.root_cause || '').slice(0, 1500),
             classification: cursorAiDetailModal.classification || '',
             failing_code: cursorAiDetailModal.failing_code || null,
             suggested_fix: String(cursorAiDetailModal.suggested_fix || '').slice(0, 800),
             confidence: cursorAiDetailModal.confidence || '',
+            triage_report: String(cursorAiDetailModal.triage_report || ''),
+            related_components: cursorAiDetailModal.related_components || [],
+            jira_duplicates: cursorAiDetailModal.jira_duplicates || [],
+            test_log_url: cursorAiDetailModal.test_log_url || '',
+            exception: cursorAiDetailModal.exception || '',
+            exception_summary: cursorAiDetailModal.exception_summary || '',
+            agave_task_id: cursorAiDetailModal.agave_task_id || '',
+            testcase_id: cursorAiDetailModal._testcase_id || cursorAiDetailModal.testcase_id || '',
+            pending_ticket_draft: pendingDraft,
+            current_branch: cursorAiDetailModal.current_branch || currentBranch || '',
           },
           prior_history: followUpHistory.slice(-6),
         },
@@ -818,7 +927,10 @@ export default function FailedTestcaseAnalysis() {
   };
 
   const getCursorAiStatusBadge = (testId) => {
-    if (cursorAiLoading[testId]) return <span className="badge cursor-ai-loading">Analyzing…</span>;
+    if (cursorAiLoading[testId]) {
+      const label = cursorAiStreaming[testId]?.status || 'Analyzing…';
+      return <span className="badge cursor-ai-loading" title={cursorAiStreaming[testId]?.text || ''}>{label}</span>;
+    }
     const res = cursorAiResults[testId];
     if (!res) return null;
     if (res.error) return <span className="badge cursor-ai-error" title={res.error}>Error</span>;
@@ -847,6 +959,10 @@ export default function FailedTestcaseAnalysis() {
         tabId,
         testcase_id: testId,
         testcase_name: result.testcase_name,
+        agave_task_id: result.agave_task_id || '',
+        test_log_url: result.test_log_url || '',
+        exception: result.exception || '',
+        exception_summary: result.exception_summary || '',
         analysis,
         session_id: sessionId,
       }];
@@ -1694,7 +1810,12 @@ export default function FailedTestcaseAnalysis() {
         return (
           <td key={colId} className="cursor-ai-cell">
             {isLoading ? (
-              <span className="cursor-ai-spinner">Analyzing…</span>
+              <span
+                className="cursor-ai-spinner"
+                title={cursorAiStreaming[result.testcase_id]?.text || 'Analyzing…'}
+              >
+                {cursorAiStreaming[result.testcase_id]?.status || 'Analyzing…'}
+              </span>
             ) : aiRes ? (
               aiRes.error ? (
                 <span className="cursor-ai-error-text" title={aiRes.error}>Failed</span>
@@ -1710,6 +1831,12 @@ export default function FailedTestcaseAnalysis() {
                         _session_id: cursorAiSessions[result.testcase_id] || null,
                         _agent_id: cursorAiAgentIds[result.testcase_id] || null,
                         ...aiRes,
+                        // Prefer run metadata from the failed-analysis row (aiRes may omit these).
+                        agave_task_id: result.agave_task_id || aiRes.agave_task_id || '',
+                        test_log_url: result.test_log_url || aiRes.test_log_url || '',
+                        exception: result.exception || aiRes.exception || '',
+                        exception_summary: result.exception_summary || aiRes.exception_summary || '',
+                        current_branch: currentBranch || aiRes.current_branch || '',
                       });
                       setFollowUpInput('');
                       setFollowUpHistory(followUpHistoryByTestcase[result.testcase_id] || []);
@@ -2106,12 +2233,19 @@ export default function FailedTestcaseAnalysis() {
                           type="button"
                           className="btn-inline-tab-action"
                           onClick={() => {
+                            const row = results.find(r => r.testcase_id === tab.testcase_id) || {};
+                            const analysis = cursorAiResults[tab.testcase_id] || tab.analysis || {};
                             setCursorAiDetailModal({
                               testcase_name: tab.testcase_name,
                               _testcase_id: tab.testcase_id,
                               _session_id: tabSessionId,
                               _agent_id: cursorAiAgentIds[tab.testcase_id] || null,
-                              ...(cursorAiResults[tab.testcase_id] || tab.analysis),
+                              ...analysis,
+                              agave_task_id: tab.agave_task_id || row.agave_task_id || analysis.agave_task_id || '',
+                              test_log_url: tab.test_log_url || row.test_log_url || analysis.test_log_url || '',
+                              exception: tab.exception || row.exception || analysis.exception || '',
+                              exception_summary: tab.exception_summary || row.exception_summary || analysis.exception_summary || '',
+                              current_branch: currentBranch || analysis.current_branch || '',
                             });
                             setFollowUpInput('');
                             setFollowUpHistory(followUpHistoryByTestcase[tab.testcase_id] || []);
@@ -2467,7 +2601,7 @@ export default function FailedTestcaseAnalysis() {
                   <input
                     type="text"
                     className="cursor-ai-followup-input"
-                    placeholder="Ask a follow-up (Ask mode is fastest)..."
+                    placeholder="Ask anything — create eng ticket, check ENG status/CR, Glean, create CR..."
                     value={followUpInput}
                     onChange={e => setFollowUpInput(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter' && !followUpLoading) handleFollowUp(); }}

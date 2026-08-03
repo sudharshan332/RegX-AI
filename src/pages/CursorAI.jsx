@@ -44,6 +44,14 @@ const SYNCABLE_SKILLS = [
   { id: 'gerrit-comment-resolver', label: 'gerrit-comment-resolver' },
 ];
 
+// Stable identity for the current run selection; used to cache the regression
+// context and only re-fetch when the tag / task_ids actually change.
+function scopeKeyOf(scope) {
+  if (!scope) return '';
+  const ids = Array.isArray(scope.taskIds) ? scope.taskIds.join(',') : '';
+  return `${scope.mode || ''}|${scope.tag || ''}|${ids}`;
+}
+
 export default function CursorAI() {
   const [mode, setMode] = useState('ask');
   const [model, setModel] = useState('claude-sonnet-4-5');
@@ -96,24 +104,58 @@ export default function CursorAI() {
     try {
       const scope = readRegressionScopeFromLocalStorage();
       const hasScope = scope.tag || (scope.taskIds && scope.taskIds.length);
+      const scopeKey = scopeKeyOf(scope);
       if (!hasScope) {
         setRegressionCtx(null);
-        return;
+        return null;
       }
-      const params = {};
+      const params = { include_failed_names: 'true', failed_limit: 80 };
       if (scope.taskIds && scope.taskIds.length) params.task_ids = scope.taskIds.join(',');
       else if (scope.tag) params.tag = scope.tag;
-      const { data } = await api.get(`${API_BASE_URL}/mcp/regression/qi-summary`, { params });
+      const { data } = await api.get(`${API_BASE_URL}/mcp/regression/qi-summary`, {
+        params,
+        timeout: 180000,
+      });
       const ts = data.test_summary || {};
+      const ss = data.status_summary || {};
+      const branches = data.branch_summary || {};
+      const failed = Array.isArray(data.failed_tests) ? data.failed_tests : [];
       const label = scope.tag || `${(scope.taskIds || []).length} task(s)`;
+      const scopeLine = scope.taskIds && scope.taskIds.length
+        ? `Scope — task_ids (${scope.taskIds.length}): ${scope.taskIds.join(', ')}`
+        : `Scope — tag: ${scope.tag}`;
+
+      const branchLines = Object.entries(branches)
+        .map(([b, s]) => `  - ${b}: tasks=${s.total_tasks || 0}, tests=${s.total_tests || 0}, failed=${s.failed_tests || 0}`)
+        .join('\n');
+
+      const failedLines = failed
+        .map((f) => `  - ${f.name}${f.branch ? ` [${f.branch}]` : ''}`)
+        .join('\n');
+      const failedTotal = ts.failed || 0;
+      const failedHeader = `Failed testcases (showing ${failed.length} of ${failedTotal}):`;
+      const failedMore = data.failed_tests_truncated && failedTotal > failed.length
+        ? `\n  ...and ${failedTotal - failed.length} more not listed here.`
+        : '';
+
       const ctxStr =
         `Regression run: ${label}\n` +
+        `${scopeLine}\n` +
+        `Total tasks: ${data.total_tasks || 0}\n` +
+        `Task status — testing: ${ss.testing || 0}, completed: ${ss.completed || 0}, ` +
+        `pending: ${ss.pending || 0}, with-failures: ${ss.failed || 0}\n` +
         `Test counts — total: ${ts.total || 0}, succeeded: ${ts.succeeded || 0}, ` +
         `failed: ${ts.failed || 0}, pending: ${ts.pending || 0}, running: ${ts.running || 0}, ` +
-        `warning: ${ts.warning || 0}, skipped: ${ts.skipped || 0}, killed: ${ts.killed || 0}`;
-      setRegressionCtx({ label, ctxStr });
+        `warning: ${ts.warning || 0}, skipped: ${ts.skipped || 0}, killed: ${ts.killed || 0}\n` +
+        (branchLines ? `Per-branch:\n${branchLines}\n` : '') +
+        (failed.length ? `${failedHeader}\n${failedLines}${failedMore}` : (failedTotal ? `${failedHeader}` : 'No failed testcases.'));
+
+      const ctx = { label, ctxStr, scopeKey };
+      setRegressionCtx(ctx);
+      return ctx;
     } catch (_) {
       setRegressionCtx(null);
+      return null;
     }
   }, []);
 
@@ -153,6 +195,15 @@ export default function CursorAI() {
     let assistantAdded = false;
     let acc = '';
 
+    // Use the cached context for the selected run; only re-fetch when the
+    // tag / task_ids changed since it was last loaded (avoids per-message latency).
+    let ctx = regressionCtx;
+    const currentScopeKey = scopeKeyOf(readRegressionScopeFromLocalStorage());
+    if (!ctx || ctx.scopeKey !== currentScopeKey) {
+      ctx = await loadRegressionContext();
+    }
+    const contextStr = ctx?.ctxStr || '';
+
     try {
       const token = localStorage.getItem('regx_auth_token');
       const response = await fetch(`${API_BASE}/chat-stream`, {
@@ -168,7 +219,7 @@ export default function CursorAI() {
           mcp_servers: activeServers,
           agent_id: chatAgentId || '',
           session_id: chatSessionId || '',
-          regression_context: regressionCtx?.ctxStr || '',
+          regression_context: contextStr,
         }),
       });
 

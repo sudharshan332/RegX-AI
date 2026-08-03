@@ -240,6 +240,76 @@
       "is_dummy": false,
       "created_at": "2026-07-29T11:37:07.383689",
       "last_triggered": null
+    },
+    {
+      "id": "1785738127286",
+      "name": "7.6.0.6 ESX",
+      "branch": "7.6.0.6",
+      "job_profiles": [
+        "6a5f3d5d8e79ce86b544b860",
+        "6a5f3e31d24d828ed80729e7",
+        "6a5f3e998e79cefe18076c8d",
+        "6a5f3edab5e475a0927496f3",
+        "6a5f3f1ab5e475a08178e099"
+      ],
+      "tag_name": "7.6.0.6 ESX_1785738127269",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "svc.teamchandra",
+      "is_dummy": false,
+      "created_at": "2026-08-03T11:52:07.286557",
+      "last_triggered": null
+    },
+    {
+      "id": "1785738665718",
+      "name": "7.6.0.6 AHV",
+      "branch": "7.6.0.6",
+      "job_profiles": [
+        "6a5f3f4d8e79ceaf492c9e5c",
+        "6a5f3fc62bc0c424ac086fc9",
+        "6a5f44808e79ce3f9402350d",
+        "6a5f44a82bc0c424b6cff893",
+        "6a5f44dcd24d828ed2a0e09b",
+        "6a5f450b8e79ce9da6c727ba",
+        "6a5f4548d24d828eeecbfb8d",
+        "6a5f4594d24d828ecf785f65",
+        "6a5f45cbb5e475a077c3381a",
+        "6a5f45fed24d828eeafc020e",
+        "6a5f46372bc0c424aa01da99",
+        "6a5f46768e79cef7513a548f",
+        "6a5f46b02bc0c4249af2e596",
+        "6a5f46fa2bc0c42499b64211",
+        "6a5f47272bc0c424a874b5cb",
+        "6a5f4e3c8e79ce0ed4f7b2af",
+        "6a5f4d662bc0c4249af2e799",
+        "6a5f3de82bc0c424a941d191"
+      ],
+      "tag_name": "7.6.0.6 AHV_1785738665704",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-08-03T12:01:05.718405",
+      "last_triggered": null
+    },
+    {
+      "id": "1785744593711",
+      "name": "7.6.0.6 External",
+      "branch": "7.6.0.6",
+      "job_profiles": [
+        "6a5f4ce62bc0c424b4a4f255",
+        "6a5f4d848e79ce5489d5ed06",
+        "6a5f4db82bc0c424a941d649",
+        "6a5f4e02d24d828ed6a283d3",
+        "6a5f4d2a2bc0c424b15b876f"
+      ],
+      "tag_name": "7.6.0.6 External_1785744593698",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-08-03T13:39:53.711890",
+      "last_triggered": null
     }
   ],
   "history": [

@@ -23,6 +23,12 @@ function resolveModelId(id) {
   return LEGACY_MODEL_ALIASES[raw] || raw;
 }
 const MODEL_ID = resolveModelId(process.env.CURSOR_MODEL_ID || "claude-sonnet-4-6");
+// Model for deep testcase analysis. The analysis workflow is tool-heavy (reads
+// skill docs, logs, source), so default to the faster Sonnet 4.5 to cut latency;
+// override with CURSOR_ANALYSIS_MODEL_ID (e.g. claude-sonnet-4-6 for max depth).
+const ANALYSIS_MODEL_ID = resolveModelId(
+  process.env.CURSOR_ANALYSIS_MODEL_ID || "claude-sonnet-4-5",
+);
 // Auto model for follow-up chat (ask mode). Override with CURSOR_FOLLOWUP_MODEL_ID.
 const FOLLOWUP_MODEL_ID = resolveModelId(
   process.env.CURSOR_FOLLOWUP_MODEL_ID || "auto-smart",
@@ -61,20 +67,37 @@ const ALL_MCP_SERVERS = {
   "gw-supportgpt": {
     url: "https://panacea-dev.eng.nutanix.com/mcp/supportgpt",
   },
+  "auto-handoff": {
+    url: process.env.AUTO_HANDOFF_MCP_URL || "http://10.40.224.6:9001/sse",
+  },
 };
 
-// Lean set for triage — fewer MCP round-trips than attaching every server.
+// Lean triage: code + logs. Deep: + product knowledge.
+// NOTE: auto-handoff is intentionally NOT in the default deep set. Its SSE
+// endpoint (internal IP) can hang for many seconds, which was adding large
+// latency to every deep analysis. It is attached only for the "handoff"
+// profile, i.e. when a request explicitly needs to create a CR / handoff.
 const TRIAGE_MCP_KEYS = ["gw-sourcegraph", "gw-jita"];
+const DEEP_MCP_KEYS = ["gw-sourcegraph", "gw-jita", "gw-glean"];
+const HANDOFF_MCP_KEYS = ["gw-sourcegraph", "gw-jita", "gw-glean", "auto-handoff"];
 
 /**
  * Build MCP servers with optional per-request Atlassian tokens.
  * @param {Object} atlassianTokens - { jira: string, confluence: string }
- * @param {"none"|"triage"|"full"} profile
+ * @param {"none"|"triage"|"deep"|"full"} profile
  */
 function buildMcpServers(atlassianTokens = {}, profile = MCP_PROFILE) {
   const selected = {};
   if (profile === "full") {
     Object.assign(selected, ALL_MCP_SERVERS);
+  } else if (profile === "handoff") {
+    for (const key of HANDOFF_MCP_KEYS) {
+      if (ALL_MCP_SERVERS[key]) selected[key] = ALL_MCP_SERVERS[key];
+    }
+  } else if (profile === "deep") {
+    for (const key of DEEP_MCP_KEYS) {
+      if (ALL_MCP_SERVERS[key]) selected[key] = ALL_MCP_SERVERS[key];
+    }
   } else if (profile !== "none") {
     for (const key of TRIAGE_MCP_KEYS) {
       if (ALL_MCP_SERVERS[key]) selected[key] = ALL_MCP_SERVERS[key];
@@ -99,7 +122,46 @@ function buildMcpServers(atlassianTokens = {}, profile = MCP_PROFILE) {
   return selected;
 }
 
-function buildFollowUpPrompt(question, mode) {
+/** True when follow-up needs live tools (Jira/Glean/CR/code), not ask-mode memory. */
+function needsToolFollowUp(question) {
+  const t = String(question || "").toLowerCase();
+  if (!t.trim()) return false;
+  return (
+    /\b(jira|eng-\d+|gerrit|glean|confluence|sourcegraph|cr\b|change request|handoff|duplicate)\b/.test(t)
+    || /\b(create|file|raise|submit|open)\b.{0,40}\b(ticket|cr|change)\b/.test(t)
+    || /\b(fixed|resolved|status|root cause|product knowledge|has it been)\b/.test(t)
+    || /\b(review|what('?s| is) the (issue|fix|cr))\b/.test(t)
+  );
+}
+
+function resolveFollowUpMode(mode, question) {
+  const requested = ["ask", "agent", "plan"].includes(String(mode).toLowerCase())
+    ? String(mode).toLowerCase()
+    : "ask";
+  if (requested === "ask" && needsToolFollowUp(question)) return "agent";
+  return requested;
+}
+
+/** True only when the user explicitly wants to create/update a CR or run a handoff/deprecation. */
+function needsHandoff(question) {
+  const t = String(question || "").toLowerCase();
+  if (!t.trim()) return false;
+  return (
+    /\b(handoff|hand off|deprecate|deprecation)\b/.test(t)
+    || /\b(create|file|raise|submit|open|push|update)\b.{0,40}\b(cr|change request|gerrit|change)\b/.test(t)
+  );
+}
+
+function resolveMcpProfile(mode, question) {
+  if (mode === "ask") return "none";
+  if (MCP_PROFILE === "full") return "full";
+  // Only pull in the (slow) auto-handoff MCP when the user actually wants a CR/handoff.
+  if (needsHandoff(question)) return "handoff";
+  if (needsToolFollowUp(question) || mode === "agent" || mode === "plan") return "deep";
+  return "triage";
+}
+
+function buildFollowUpPrompt(question, mode, crContext = null) {
   const selectedMode = ["ask", "agent", "plan"].includes(String(mode).toLowerCase())
     ? String(mode).toLowerCase()
     : "ask";
@@ -116,18 +178,38 @@ Rules:
 - Plain text only — no JSON wrapper.`;
   }
 
+  const cr = crContext && typeof crContext === "object" ? crContext : {};
+  const gerritBranch = String(cr.gerrit_branch || cr.handoff_branch || "").trim();
+  const handoffBranch = String(cr.handoff_branch || gerritBranch || "").trim();
+  let branchBlock = "";
+  if (gerritBranch) {
+    branchBlock = `
+CRITICAL BRANCH CONTEXT (from the failed JITA run — do NOT ignore):
+- Target Gerrit branch: ${gerritBranch}
+- Push ref MUST be: refs/for/${gerritBranch}
+- For auto_handoff / auto_deprecate use branch="${handoffBranch || gerritBranch}"
+- Do NOT ask the user which branch to use and do NOT default to master unless the run was on master.
+- Testcase: ${cr.testcase_name || "(from session)"}
+`;
+  }
+
   const modeInstruction = selectedMode === "plan"
-    ? "Operate in Plan mode: focus on approaches, trade-offs, and a proposed plan before execution."
-    : "Operate in Agent mode: provide execution-ready guidance. Use MCP tools only if needed for new evidence.";
+    ? "Operate in Plan mode: propose approaches and trade-offs. You may use read-only MCP tools for evidence."
+    : `Operate in Agent mode with FULL tool access. You MUST use MCP tools when the question needs live data:
+- **Atlassian/Jira**: read ENG ticket status, resolution, comments, linked issues; search duplicates.
+- **Glean (gw-glean)**: product knowledge, prior incidents, design docs, owner context.
+- **Sourcegraph (gw-sourcegraph)**: code, commits, fix CRs, failing file history (search on the target branch above).
+- **JITA (gw-jita)**: logs / task evidence when needed.
+- **auto-handoff / auto_deprecate**: create/preview Gerrit CRs for handoff/deprecation when the user asks to create a CR. ALWAYS pass the branch from CRITICAL BRANCH CONTEXT.
+Do not claim a ticket/CR was created unless a tool call succeeded. Prefer evidence over memory.
+Structure the answer clearly: Issue → Status/Fixed? → CR(s) → Glean/product context → Next actions.`;
 
   return `Follow-up question on the same testcase analysis:
 
 ${question}
-
+${branchBlock}
 Requested interaction mode: ${selectedMode}
 ${modeInstruction}
-
-Prefer answering from existing context. Use MCP tools only when the question needs new evidence.
 
 Respond ONLY with JSON:
 \`\`\`json
@@ -139,8 +221,11 @@ Respond ONLY with JSON:
   "confidence": "High | Medium | Low",
   "related_components": [],
   "jira_duplicates": [],
-  "follow_up_answer": "Direct answer to the follow-up question with evidence",
-  "triage_report": "Updated JIRA wiki report if applicable"
+  "follow_up_answer": "Direct answer with evidence from tools (ticket status, fix/CR, glean findings)",
+  "triage_report": "Updated JIRA wiki report if applicable",
+  "created_ticket": "ENG-XXXX if you created one, else empty",
+  "related_crs": ["Gerrit CR urls or change numbers if found/created"],
+  "cr_branch": "${gerritBranch || ""}"
 }
 \`\`\``;
 }
@@ -156,14 +241,20 @@ function compactRecoveryAnalysis(latestAnalysis = {}) {
   };
 }
 
-function tryResumeAgent(agentId, apiKey, modelId, mcpServers = {}) {
+// Agent.resume() returns Promise<Agent> — MUST be awaited, otherwise the
+// caller gets a Promise whose `.send` is undefined ("agent.send is not a function").
+async function tryResumeAgent(agentId, apiKey, modelId, mcpServers = {}) {
   if (!agentId) return null;
   try {
-    const agent = Agent.resume(String(agentId), {
+    const agent = await Agent.resume(String(agentId), {
       apiKey,
       model: { id: modelId },
       mcpServers,
     });
+    if (!agent || typeof agent.send !== "function") {
+      console.warn(`[session] Resume returned invalid agent for ${agentId}`);
+      return null;
+    }
     console.log(`[session] Resumed agent ${agentId}`);
     return agent;
   } catch (err) {
@@ -227,27 +318,29 @@ async function recoverSessionFromContext(
   const latestAnalysis = compactRecoveryAnalysis(recoveryContext.latest_analysis || {});
   const priorHistory = sanitizeRecoveryHistory(recoveryContext.prior_history || []);
   const priorAgentId = recoveryContext.agent_id || null;
+  const crContext = recoveryContext.cr_context || {
+    gerrit_branch: recoveryContext.gerrit_branch,
+    handoff_branch: recoveryContext.handoff_branch,
+    testcase_name: testcaseName,
+  };
 
   if (!testcaseName && !latestAnalysis?.root_cause && priorHistory.length === 0 && !priorAgentId) {
     return null;
   }
 
   const apiKey = userApiKey || DEFAULT_API_KEY;
-  const selectedMode = ["ask", "agent", "plan"].includes(String(mode).toLowerCase())
-    ? String(mode).toLowerCase()
-    : "ask";
-  // Ask recovery: no MCP. Agent/plan: lean triage MCPs only.
-  const mcpProfile = selectedMode === "ask" ? "none" : "triage";
+  const selectedMode = resolveFollowUpMode(mode, pendingQuestion || "");
+  const mcpProfile = resolveMcpProfile(selectedMode, pendingQuestion || "");
   const modelId = selectedMode === "ask" ? FOLLOWUP_MODEL_ID : MODEL_ID;
   const mcpServers = buildMcpServers(atlassianTokens, mcpProfile);
   const t0 = Date.now();
 
   // Fast path: resume durable Cursor agent (keeps full prior conversation).
   if (priorAgentId && pendingQuestion) {
-    const resumed = tryResumeAgent(priorAgentId, apiKey, modelId, mcpServers);
+    const resumed = await tryResumeAgent(priorAgentId, apiKey, modelId, mcpServers);
     if (resumed) {
       try {
-        const run = await resumed.send(buildFollowUpPrompt(pendingQuestion, selectedMode));
+        const run = await resumed.send(buildFollowUpPrompt(pendingQuestion, selectedMode, crContext));
         const result = await run.wait();
         const restored = {
           agent: resumed,
@@ -256,10 +349,12 @@ async function recoverSessionFromContext(
           created_at: Date.now(),
           last_used: Date.now(),
           answeredPending: true,
-          pendingResult: parseAgentResult(result.result || "", { preferFollowUp: true }),
+          pendingResult: parseAgentResult(result.result || "", {
+            preferFollowUp: selectedMode === "ask",
+          }),
         };
         sessions.set(sessionId, restored);
-        console.log(`[follow-up] resume+answer in ${Date.now() - t0}ms (mode=${selectedMode})`);
+        console.log(`[follow-up] resume+answer in ${Date.now() - t0}ms (mode=${selectedMode}, mcp=${mcpProfile})`);
         return restored;
       } catch (err) {
         console.warn(`[follow-up] resumed send failed: ${err.message}`);
@@ -276,7 +371,7 @@ async function recoverSessionFromContext(
 
   // One round-trip: restore lean context AND answer the pending question (if any).
   const questionBlock = pendingQuestion
-    ? `\n\nAnswer this follow-up now:\n${buildFollowUpPrompt(pendingQuestion, selectedMode)}`
+    ? `\n\nAnswer this follow-up now:\n${buildFollowUpPrompt(pendingQuestion, selectedMode, crContext)}`
     : "\n\nContext restored. Wait for the next question.";
 
   const bootstrapPrompt = `Continue a failed-testcase analysis. Do NOT re-triage from scratch.
@@ -349,7 +444,11 @@ app.post("/analyze-testcase", async (req, res) => {
     return res.status(500).json({ error: "CURSOR_API_KEY not configured on bridge" });
   }
 
-  const mcpServers = buildMcpServers(atlassian_tokens, MCP_PROFILE === "full" ? "full" : "triage");
+  // Initial deep analysis gets Glean + Sourcegraph + JITA (+ Atlassian when tokens present).
+  const mcpServers = buildMcpServers(
+    atlassian_tokens,
+    MCP_PROFILE === "full" ? "full" : "deep",
+  );
 
   const promptOpts = {
     testcaseName: testcase_name,
@@ -373,7 +472,7 @@ app.post("/analyze-testcase", async (req, res) => {
   try {
     const agent = await Agent.create({
       apiKey,
-      model: { id: MODEL_ID },
+      model: { id: ANALYSIS_MODEL_ID },
       mcpServers,
     });
 
@@ -403,6 +502,176 @@ app.post("/analyze-testcase", async (req, res) => {
   }
 });
 
+/** Human-friendly progress label for a tool_call event during deep analysis. */
+function toolStatusLabel(name, args) {
+  const n = String(name || "").toLowerCase();
+  let target = "";
+  if (args && typeof args === "object") {
+    target = args.path || args.file || args.query || args.pattern || args.url || "";
+    if (typeof target !== "string") target = "";
+    target = target.split("/").slice(-2).join("/").slice(0, 80);
+  }
+  if (n.includes("sourcegraph") || n.includes("read_file") || n.includes("read")) {
+    return target ? `Reading source: ${target}` : "Reading source code…";
+  }
+  if (n.includes("grep") || n.includes("search") || n.includes("sem")) {
+    return target ? `Searching: ${target}` : "Searching source…";
+  }
+  if (n.includes("jita") || n.includes("log")) return "Fetching test logs…";
+  if (n.includes("glean")) return "Searching product knowledge (Glean)…";
+  if (n.includes("atlassian") || n.includes("jira")) return "Checking Jira tickets…";
+  if (n.includes("handoff") || n.includes("gerrit") || n.includes("cr")) return "Working with CR/handoff…";
+  return name ? `Running ${name}…` : "Working…";
+}
+
+// ---------------------------------------------------------------------------
+// POST /analyze-testcase-stream
+// Same deep analysis as /analyze-testcase, but streams the agent's output as
+// it is produced (SSE). The UI shows progress within a couple of seconds
+// instead of waiting for the whole (multi-tool) triage to finish. Emits
+// {type:status,text} for tool activity, {type:delta,text} for the answer,
+// then {type:done, analysis, session_id, ...}.
+// ---------------------------------------------------------------------------
+app.post("/analyze-testcase-stream", async (req, res) => {
+  const {
+    testcase_name,
+    exception_summary,
+    exception,
+    steps_log,
+    nutest_test_log,
+    test_log_url,
+    jira_tickets,
+    failure_stage,
+    analysis_type = "failed",
+    cursor_api_key,
+    atlassian_tokens = {},
+  } = req.body || {};
+
+  if (!testcase_name) {
+    return res.status(400).json({ error: "testcase_name is required" });
+  }
+  const apiKey = cursor_api_key || DEFAULT_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: "CURSOR_API_KEY not configured on bridge" });
+  }
+
+  const mcpServers = buildMcpServers(
+    atlassian_tokens,
+    MCP_PROFILE === "full" ? "full" : "deep",
+  );
+
+  const promptOpts = {
+    testcaseName: testcase_name,
+    exceptionSummary: exception_summary,
+    exception,
+    stepsLog: steps_log,
+    nutestTestLog: nutest_test_log,
+    testLogUrl: test_log_url,
+    jiraTickets: jira_tickets || [],
+    failureStage: failure_stage,
+    sourcegraphRepo: NUTEST_SOURCEGRAPH,
+    skills: SKILLS,
+  };
+  const prompt = analysis_type === "skipped"
+    ? buildSkippedAnalysisPrompt(promptOpts)
+    : buildFailedAnalysisPrompt(promptOpts);
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+  const send = (obj) => {
+    try {
+      res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    } catch { /* client gone */ }
+  };
+
+  const t0 = Date.now();
+  const sessionId = generateSessionId();
+  let agent = null;
+
+  try {
+    agent = await Agent.create({
+      apiKey,
+      model: { id: ANALYSIS_MODEL_ID },
+      mcpServers,
+    });
+
+    const run = await agent.send(prompt);
+
+    let lastFull = "";
+    let firstTokenMs = null;
+    let lastStatus = "";
+    if (typeof run.supports !== "function" || run.supports("stream")) {
+      for await (const event of run.stream()) {
+        // Surface tool activity as progress so the user sees work within ~2s,
+        // long before the final JSON answer is produced.
+        if (event.type === "tool_call" && event.status === "running") {
+          const label = toolStatusLabel(event.name, event.args);
+          if (label && label !== lastStatus) {
+            lastStatus = label;
+            if (firstTokenMs === null) firstTokenMs = Date.now() - t0;
+            send({ type: "status", text: label });
+          }
+          continue;
+        }
+        if (event.type === "assistant" && event.message && Array.isArray(event.message.content)) {
+          let full = "";
+          for (const block of event.message.content) {
+            if (block.type === "text" && block.text) full += block.text;
+            else if (block.type === "tool_use" && block.name) {
+              const label = toolStatusLabel(block.name, block.input);
+              if (label && label !== lastStatus) {
+                lastStatus = label;
+                if (firstTokenMs === null) firstTokenMs = Date.now() - t0;
+                send({ type: "status", text: label });
+              }
+            }
+          }
+          if (full) {
+            const delta = full.startsWith(lastFull) ? full.slice(lastFull.length) : full;
+            lastFull = full;
+            if (delta) {
+              if (firstTokenMs === null) firstTokenMs = Date.now() - t0;
+              send({ type: "delta", text: delta });
+            }
+          }
+        }
+      }
+    }
+
+    const result = await run.wait();
+    const rawText = (result.result || lastFull || "").trim();
+    const analysis = parseAgentResult(rawText);
+
+    sessions.set(sessionId, {
+      agent,
+      agentId: agent.agentId,
+      testcase_name,
+      created_at: Date.now(),
+      last_used: Date.now(),
+    });
+
+    send({
+      type: "done",
+      analysis,
+      session_id: sessionId,
+      agent_id: agent.agentId || null,
+      elapsed_ms: Date.now() - t0,
+    });
+    res.end();
+    console.log(
+      `[analyze-testcase-stream] model=${ANALYSIS_MODEL_ID} firstToken=${firstTokenMs}ms total=${Date.now() - t0}ms`,
+    );
+  } catch (err) {
+    console.error("[analyze-testcase-stream] Agent error:", err.message);
+    send({ type: "error", message: err.message });
+    try { res.end(); } catch { /* noop */ }
+  }
+});
+
 // ---------------------------------------------------------------------------
 // POST /follow-up
 // Continue a previous analysis session with a follow-up question.
@@ -414,6 +683,7 @@ app.post("/follow-up", async (req, res) => {
     question,
     mode = "agent",
     recovery_context = {},
+    cr_context = null,
     cursor_api_key,
     atlassian_tokens = {},
   } = req.body;
@@ -422,9 +692,16 @@ app.post("/follow-up", async (req, res) => {
     return res.status(400).json({ error: "session_id and question are required" });
   }
 
-  const selectedMode = ["ask", "agent", "plan"].includes(String(mode).toLowerCase())
-    ? String(mode).toLowerCase()
-    : "ask";
+  const selectedMode = resolveFollowUpMode(mode, question);
+  const mcpProfile = resolveMcpProfile(selectedMode, question);
+  const apiKey = cursor_api_key || DEFAULT_API_KEY;
+  const resolvedCrContext = cr_context
+    || recovery_context.cr_context
+    || {
+      gerrit_branch: recovery_context.gerrit_branch,
+      handoff_branch: recovery_context.handoff_branch,
+      testcase_name: recovery_context.testcase_name,
+    };
 
   let session = sessions.get(session_id);
   if (!session) {
@@ -462,14 +739,31 @@ app.post("/follow-up", async (req, res) => {
   try {
     const t0 = Date.now();
     session.last_used = Date.now();
-    const followUpPrompt = buildFollowUpPrompt(question, selectedMode);
+
+    // Tool-heavy follow-ups: re-attach deep MCP servers (Glean/Jira/auto-handoff)
+    // onto the durable agent so Ask-mode sessions can still investigate live.
+    if (selectedMode !== "ask" && session.agentId && apiKey) {
+      const mcpServers = buildMcpServers(atlassian_tokens, mcpProfile);
+      const resumed = await tryResumeAgent(
+        session.agentId,
+        apiKey,
+        selectedMode === "ask" ? FOLLOWUP_MODEL_ID : MODEL_ID,
+        mcpServers,
+      );
+      if (resumed) {
+        session.agent = resumed;
+        session.agentId = resumed.agentId || session.agentId;
+      }
+    }
+
+    const followUpPrompt = buildFollowUpPrompt(question, selectedMode, resolvedCrContext);
     const run = await session.agent.send(followUpPrompt);
     const result = await run.wait();
 
     const analysis = parseAgentResult(result.result || "", {
       preferFollowUp: selectedMode === "ask",
     });
-    console.log(`[follow-up] live session answer in ${Date.now() - t0}ms (mode=${selectedMode})`);
+    console.log(`[follow-up] live session answer in ${Date.now() - t0}ms (mode=${selectedMode}, mcp=${mcpProfile})`);
     return res.json({
       success: true,
       session_id,
@@ -547,7 +841,7 @@ app.get("/status/:jobId", (req, res) => {
 // Batch processing — creates durable sessions per testcase for follow-ups
 // ---------------------------------------------------------------------------
 async function processBatch(job, testcases, apiKey, atlassianTokens = {}) {
-  const mcpServers = buildMcpServers(atlassianTokens, MCP_PROFILE === "full" ? "full" : "triage");
+  const mcpServers = buildMcpServers(atlassianTokens, MCP_PROFILE === "full" ? "full" : "deep");
 
   async function analyzeOne(tc) {
     const key = tc.testcase_id || tc.testcase_name;
@@ -572,7 +866,7 @@ async function processBatch(job, testcases, apiKey, atlassianTokens = {}) {
 
       const agent = await Agent.create({
         apiKey,
-        model: { id: MODEL_ID },
+        model: { id: ANALYSIS_MODEL_ID },
         mcpServers,
       });
       const run = await agent.send(prompt);
@@ -680,7 +974,7 @@ app.post("/chat", async (req, res) => {
 
   try {
     if (!agent && agent_id) {
-      agent = tryResumeAgent(agent_id, apiKey, FOLLOWUP_MODEL_ID, {});
+      agent = await tryResumeAgent(agent_id, apiKey, FOLLOWUP_MODEL_ID, {});
     }
     if (!agent) {
       agent = await Agent.create({
@@ -769,7 +1063,7 @@ app.post("/chat-stream", async (req, res) => {
 
   try {
     if (!agent && agent_id) {
-      agent = tryResumeAgent(agent_id, apiKey, modelId, {});
+      agent = await tryResumeAgent(agent_id, apiKey, modelId, {});
     }
     if (!agent) {
       agent = await Agent.create({
@@ -783,7 +1077,7 @@ app.post("/chat-stream", async (req, res) => {
     // Prepend live regression data on EVERY turn (created or resumed) so data
     // questions ("success count") are answered from real numbers, no MCP calls.
     const ctxBlock = regression_context
-      ? `Current regression run data (authoritative — use this for any counts/metrics; do NOT say data is unavailable):\n${String(regression_context).slice(0, 4000)}\n\n`
+      ? `Current regression run data (authoritative — use this for any counts/metrics and for questions about which tests are in the tag; do NOT say data is unavailable):\n${String(regression_context).slice(0, 16000)}\n\n`
       : "";
     const prompt = created && system_prompt
       ? `${String(system_prompt).slice(0, 2500)}\n\n${ctxBlock}---\nUser:\n${message}`
@@ -893,8 +1187,8 @@ app.post("/chat-warm", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[cursor-bridge] listening on :${PORT}`);
   console.log(`[cursor-bridge] nutest via Sourcegraph = ${NUTEST_SOURCEGRAPH}`);
-  console.log(`[cursor-bridge] MCP profile = ${MCP_PROFILE} (triage keys: ${TRIAGE_MCP_KEYS.join(", ")})`);
-  console.log(`[cursor-bridge] model = ${MODEL_ID}; follow-up model = ${FOLLOWUP_MODEL_ID}`);
+  console.log(`[cursor-bridge] MCP profile = ${MCP_PROFILE} (triage: ${TRIAGE_MCP_KEYS.join(", ")}; deep: ${DEEP_MCP_KEYS.join(", ")})`);
+  console.log(`[cursor-bridge] model = ${MODEL_ID}; analysis model = ${ANALYSIS_MODEL_ID}; follow-up model = ${FOLLOWUP_MODEL_ID}`);
   console.log(`[cursor-bridge] Default API key configured = ${!!DEFAULT_API_KEY}`);
   console.log(`[cursor-bridge] Per-request API keys = enabled`);
   console.log(`[cursor-bridge] batch concurrency = ${BATCH_CONCURRENCY}`);
