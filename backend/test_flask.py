@@ -9775,15 +9775,31 @@ def testcase_mgmt_fetch_data():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/mcp/regression/testcase-mgmt/testcases", methods=["GET"])
+@app.route("/mcp/regression/testcase-mgmt/testcases", methods=["GET", "POST"])
 @jwt_required
 def testcase_mgmt_get_testcases():
-    """Return testcases from local JSON with optional filters."""
-    branch = _normalize_tc_branch_key(request.args.get("branch", "master"))
-    team = request.args.get("team", "CDP")
-    tag_filter = request.args.get("tags", "")
-    name_filter = request.args.get("name", "").lower()
-    status_filter = request.args.get("status", "")
+    """Return testcases from local JSON with optional filters.
+    
+    Supports both GET and POST methods:
+    - GET: For small filters (URL parameters)
+    - POST: For large name filters (in request body to avoid URL length limits)
+    """
+    # Handle both GET and POST
+    if request.method == "POST":
+        body = request.get_json(force=True) or {}
+        branch = _normalize_tc_branch_key(body.get("branch", "master"))
+        team = body.get("team", "CDP")
+        tag_filter = body.get("tags", "")
+        name_filter = body.get("name", "").lower()
+        status_filter = body.get("status", "")
+        exact_match = body.get("exact_match", False)
+    else:
+        branch = _normalize_tc_branch_key(request.args.get("branch", "master"))
+        team = request.args.get("team", "CDP")
+        tag_filter = request.args.get("tags", "")
+        name_filter = request.args.get("name", "").lower()
+        status_filter = request.args.get("status", "")
+        exact_match = request.args.get("exact_match", "false").lower() in ("1", "true", "yes")
 
     data = _load_tc_data(branch, team)
     all_testcases = data.get("testcases", [])
@@ -9797,8 +9813,9 @@ def testcase_mgmt_get_testcases():
         ]
 
     if name_filter:
-        exact_match = request.args.get("exact_match", "false").lower() in ("1", "true", "yes")
-        name_terms = [t.strip() for t in name_filter.split(",") if t.strip()]
+        # Support comma, pipe, and newline as separators
+        name_filter_normalized = name_filter.replace("|", ",").replace("\n", ",")
+        name_terms = [t.strip() for t in name_filter_normalized.split(",") if t.strip()]
         if name_terms:
             if exact_match:
                 testcases = [tc for tc in testcases if tc.get("name", "").lower() in name_terms]
