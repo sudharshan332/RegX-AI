@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-07-24T11:13:04.654722Z",
+  "last_updated": "2026-08-11T09:11:14.138065Z",
   "branch": "7.6",
   "team": "CDP",
   "testcases": [
@@ -2417,9 +2417,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -2513,7 +2511,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fabc9"
     },
     {
       "oid": "69aae72547f66059707632c0",
@@ -2532,9 +2531,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -2632,7 +2629,8 @@
           "name": "TEST_RF2RF3",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fabfb"
     },
     {
       "oid": "69aae72547f66059707632bf",
@@ -2726,9 +2724,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -2827,7 +2823,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fac02"
     },
     {
       "oid": "69aae72547f66059707632c3",
@@ -5074,9 +5071,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -5178,7 +5173,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fac4a"
     },
     {
       "oid": "69aae72547f66059707632e4",
@@ -6723,9 +6719,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY"
       ],
@@ -6860,7 +6854,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fad27"
     },
     {
       "oid": "69aae72547f66059707632f8",
@@ -6878,9 +6873,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY"
       ],
@@ -7007,7 +7000,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fad26"
     },
     {
       "oid": "69aae72547f66059707632fa",
@@ -7026,9 +7020,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY"
       ],
@@ -7116,7 +7108,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fad25"
     },
     {
       "oid": "69aae72547f66059707632fe",
@@ -7247,9 +7240,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY"
       ],
@@ -7336,7 +7327,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fad2c"
     },
     {
       "oid": "69aae72547f66059707632fc",
@@ -7354,9 +7346,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY"
       ],
@@ -7443,7 +7433,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fad2d"
     },
     {
       "oid": "69aae72547f66059707632fd",
@@ -8282,9 +8273,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -8415,7 +8404,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faea1"
     },
     {
       "oid": "69aae72547f6605970763337",
@@ -9080,9 +9070,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -9143,7 +9131,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faef0"
     },
     {
       "oid": "69aae72547f6605970763353",
@@ -9163,9 +9152,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -9226,7 +9213,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faef4"
     },
     {
       "oid": "69aae72547f6605970763354",
@@ -9326,9 +9314,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -9425,7 +9411,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faef7"
     },
     {
       "oid": "69aae72547f6605970763355",
@@ -9445,9 +9432,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -9508,7 +9493,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faefd"
     },
     {
       "oid": "69aae72547f6605970763356",
@@ -9641,9 +9627,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -9704,7 +9688,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf03"
     },
     {
       "oid": "69aae72547f6605970763357",
@@ -9871,9 +9856,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/hades_critical_tests.lst",
@@ -10004,7 +9987,8 @@
           "type": "$NOS_CLUSTER",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf20"
     },
     {
       "oid": "69aae72547f660597076335d",
@@ -10545,9 +10529,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/hades_critical_tests.lst",
@@ -10679,7 +10661,8 @@
           "type": "$NOS_CLUSTER",
           "svm_gb_ram": 48
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf28"
     },
     {
       "oid": "69aae72547f6605970763362",
@@ -10698,7 +10681,9 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [],
+      "tags": [
+        "NESTED_QUALIFIED"
+      ],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/nvme_serviceability_ahv_tests.lst",
@@ -10759,7 +10744,8 @@
             "vsphere"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf31"
     },
     {
       "oid": "69aae72547f6605970763363",
@@ -10778,7 +10764,9 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [],
+      "tags": [
+        "NESTED_QUALIFIED"
+      ],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/nvme_serviceability_ahv_tests.lst",
@@ -10879,7 +10867,8 @@
             "vsphere"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf32"
     },
     {
       "oid": "69aae72547f6605970763364",
@@ -11010,7 +10999,7 @@
         "AOS_TAR"
       ],
       "tags": [
-        "CDP_Smart_Qual"
+        "NESTED_QUALIFIED"
       ],
       "metadata_tags": [],
       "test_sets": [
@@ -11153,7 +11142,8 @@
             "vsphere"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf39"
     },
     {
       "oid": "69aae72547f6605970763369",
@@ -11173,9 +11163,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/hades_critical_tests.lst",
@@ -11310,7 +11298,8 @@
           "type": "$NOS_CLUSTER",
           "svm_gb_ram": 48
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf3c"
     },
     {
       "oid": "69aae72547f6605970763367",
@@ -11330,7 +11319,7 @@
         "AOS_TAR"
       ],
       "tags": [
-        "CDP_Smart_Qual"
+        "NESTED_QUALIFIED"
       ],
       "metadata_tags": [],
       "test_sets": [
@@ -11468,7 +11457,8 @@
             "vsphere"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf3e"
     },
     {
       "oid": "69aae72547f6605970763368",
@@ -11486,9 +11476,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_hades.lst",
@@ -11616,7 +11604,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf45"
     },
     {
       "oid": "69aae72547f6605970763366",
@@ -11635,9 +11624,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/hades_critical_tests.lst",
@@ -11728,7 +11715,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf46"
     },
     {
       "oid": "69aae72547f660597076336a",
@@ -11747,9 +11735,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/hades_critical_tests.lst",
@@ -11840,7 +11826,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf4a"
     },
     {
       "oid": "69aae72547f660597076336c",
@@ -11859,9 +11846,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/hades_critical_tests.lst",
@@ -11957,7 +11942,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf49"
     },
     {
       "oid": "69aae72547f660597076336b",
@@ -11975,9 +11961,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_hades.lst",
@@ -12103,7 +12087,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf4b"
     },
     {
       "oid": "69aae72547f660597076336d",
@@ -12122,9 +12107,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -12207,7 +12190,8 @@
             ]
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf7c"
     },
     {
       "oid": "69aae72547f660597076336e",
@@ -12441,9 +12425,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -12531,7 +12513,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706faf81"
     },
     {
       "oid": "69aae72547f6605970763372",
@@ -13184,9 +13167,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_NOT_READY"
       ],
@@ -13313,7 +13294,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb09a"
     },
     {
       "oid": "69aae72547f6605970763379",
@@ -13404,9 +13386,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -13502,7 +13482,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb0a2"
     },
     {
       "oid": "69aae72547f660597076337a",
@@ -13591,9 +13572,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -13648,7 +13627,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb0a5"
     },
     {
       "oid": "69aae72547f6605970763380",
@@ -13928,9 +13908,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -14063,7 +14041,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb0aa"
     },
     {
       "oid": "69aae72547f6605970763382",
@@ -14402,9 +14381,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -14497,7 +14474,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb162"
     },
     {
       "oid": "69aae72547f6605970763386",
@@ -14586,9 +14564,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -14679,7 +14655,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb164"
     },
     {
       "oid": "69aae72547f6605970763388",
@@ -14697,9 +14674,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -14826,7 +14801,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb16c"
     },
     {
       "oid": "69aae72547f660597076338a",
@@ -15055,9 +15031,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -15185,7 +15159,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb177"
     },
     {
       "oid": "69aae72547f660597076338e",
@@ -15204,9 +15179,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -15299,7 +15272,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb18f"
     },
     {
       "oid": "69aae72547f660597076338f",
@@ -15318,9 +15292,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -15375,7 +15347,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb196"
     },
     {
       "oid": "69aae72547f6605970763398",
@@ -15464,9 +15437,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -15519,7 +15490,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb32f"
     },
     {
       "oid": "69aae72547f6605970763397",
@@ -15749,9 +15721,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -15804,7 +15774,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb3d5"
     },
     {
       "oid": "69aae72547f66059707633b7",
@@ -19022,9 +18993,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/all_nvme_support_tests.lst",
@@ -19112,7 +19081,8 @@
           "type": "$NOS_CLUSTER",
           "svm_gb_ram": 48
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb81d"
     },
     {
       "oid": "69aae72547f6605970763471",
@@ -19993,9 +19963,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/nvme_serviceability_ahv_tests.lst",
@@ -20088,7 +20056,8 @@
             "vsphere"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb888"
     },
     {
       "oid": "69aae72547f6605970763483",
@@ -20207,9 +20176,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/disk_v4_api_tests.lst",
@@ -20405,7 +20372,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb89a"
     },
     {
       "oid": "69aae72547f6605970763485",
@@ -20524,9 +20492,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/hades/disk_v4_api_tests.lst",
@@ -20643,7 +20609,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fb89d"
     },
     {
       "oid": "69aae72547f6605970763486",
@@ -23243,9 +23210,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY"
       ],
@@ -23357,7 +23322,8 @@
             "ahv"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fba22"
     },
     {
       "oid": "69aae72547f66059707634ec",
@@ -23909,9 +23875,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY"
       ],
@@ -24022,7 +23986,8 @@
             "ahv"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fba31"
     },
     {
       "oid": "69aae72547f66059707634f4",
@@ -25327,9 +25292,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY"
       ],
@@ -25441,7 +25404,8 @@
             "ahv"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fba59"
     },
     {
       "oid": "69aae72547f6605970763503",
@@ -26159,9 +26123,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -26218,7 +26180,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fba73"
     },
     {
       "oid": "69aae72547f660597076350a",
@@ -26687,9 +26650,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -26782,7 +26743,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fba7e"
     },
     {
       "oid": "69aae72547f6605970763510",
@@ -27576,9 +27538,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -27672,7 +27632,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fba88"
     },
     {
       "oid": "69aae72547f660597076351a",
@@ -28778,9 +28739,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -28832,7 +28791,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbaff"
     },
     {
       "oid": "69aae72547f6605970763528",
@@ -29510,9 +29470,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -29571,7 +29529,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbb5d"
     },
     {
       "oid": "69aae72547f660597076352d",
@@ -32157,9 +32116,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -32250,7 +32207,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 48
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbc7d"
     },
     {
       "oid": "69aae72547f660597076354c",
@@ -32838,9 +32796,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -32963,7 +32919,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 16
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbc8c"
     },
     {
       "oid": "69aae72547f6605970763553",
@@ -33157,9 +33114,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -33252,7 +33207,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbcb2"
     },
     {
       "oid": "69aae72547f6605970763556",
@@ -33388,9 +33344,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -33483,7 +33437,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbcb5"
     },
     {
       "oid": "69aae72547f6605970763557",
@@ -33501,9 +33456,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -33596,7 +33549,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbcb7"
     },
     {
       "oid": "69aae72547f6605970763558",
@@ -33883,9 +33837,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -33977,7 +33929,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbd18"
     },
     {
       "oid": "69aae72547f660597076355c",
@@ -33996,9 +33949,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -34130,7 +34081,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbda4"
     },
     {
       "oid": "69aae72547f6605970763560",
@@ -34149,9 +34101,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -34283,7 +34233,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbda5"
     },
     {
       "oid": "69aae72547f660597076355f",
@@ -34301,9 +34252,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -34394,7 +34343,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbda6"
     },
     {
       "oid": "69aae72547f6605970763562",
@@ -34413,9 +34363,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -34547,7 +34495,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbda8"
     },
     {
       "oid": "69aae72547f6605970763561",
@@ -34566,9 +34515,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -34700,7 +34647,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbda9"
     },
     {
       "oid": "69aae72547f6605970763565",
@@ -34719,9 +34667,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -34853,7 +34799,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbdac"
     },
     {
       "oid": "69aae72547f6605970763564",
@@ -34872,9 +34819,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -35006,7 +34951,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbdaa"
     },
     {
       "oid": "69aae72547f6605970763563",
@@ -35024,9 +34970,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -35116,7 +35060,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbde7"
     },
     {
       "oid": "69aae72547f6605970763566",
@@ -35136,9 +35081,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -35192,7 +35135,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbdf8"
     },
     {
       "oid": "69aae72547f6605970763567",
@@ -35211,9 +35155,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -35266,7 +35208,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbdfa"
     },
     {
       "oid": "69aae72547f660597076356a",
@@ -35582,9 +35525,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_compute_ahv_FEAT-14285.lst",
@@ -35639,7 +35580,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe37"
     },
     {
       "oid": "69aae72547f660597076356c",
@@ -35657,9 +35599,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_compute_ahv_FEAT-14285.lst",
@@ -35716,7 +35656,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe39"
     },
     {
       "oid": "69aae72547f660597076356f",
@@ -35814,9 +35755,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_compute_ahv_FEAT-14285.lst",
@@ -35878,7 +35817,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe3b"
     },
     {
       "oid": "69aae72547f6605970763576",
@@ -36340,9 +36280,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -36401,7 +36339,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe54"
     },
     {
       "oid": "69aae72547f6605970763579",
@@ -36419,9 +36358,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -36480,7 +36417,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe55"
     },
     {
       "oid": "69aae72547f660597076357a",
@@ -36498,9 +36436,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -36559,7 +36495,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe56"
     },
     {
       "oid": "69aae72547f660597076357c",
@@ -36577,9 +36514,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -36638,7 +36573,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe57"
     },
     {
       "oid": "69aae72547f660597076357d",
@@ -36656,9 +36592,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -36717,7 +36651,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe59"
     },
     {
       "oid": "69aae72547f660597076357e",
@@ -36735,9 +36670,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -36796,7 +36729,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe58"
     },
     {
       "oid": "69aae72547f6605970763581",
@@ -36814,9 +36748,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -36875,7 +36807,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe5b"
     },
     {
       "oid": "69aae72547f6605970763585",
@@ -36893,9 +36826,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -36954,7 +36885,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe5d"
     },
     {
       "oid": "69aae72547f6605970763583",
@@ -36972,9 +36904,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -37033,7 +36963,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe5e"
     },
     {
       "oid": "69aae72547f6605970763584",
@@ -37128,9 +37059,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -37189,7 +37118,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe60"
     },
     {
       "oid": "69aae72547f6605970763586",
@@ -37207,9 +37137,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -37268,7 +37196,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fbe61"
     },
     {
       "oid": "69aae72547f660597076358b",
@@ -38350,9 +38279,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -38404,7 +38331,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc065"
     },
     {
       "oid": "69aae72547f6605970763598",
@@ -38961,9 +38889,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -39052,7 +38978,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc21c"
     },
     {
       "oid": "69aae72547f66059707635af",
@@ -39070,9 +38997,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_data_intransit_encryption.lst",
@@ -39158,7 +39083,8 @@
             "ahv"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc22d"
     },
     {
       "oid": "69aae72547f66059707635b0",
@@ -40021,9 +39947,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -40115,7 +40039,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc271"
     },
     {
       "oid": "69aae72547f66059707635ba",
@@ -40425,9 +40350,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -40519,7 +40442,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc274"
     },
     {
       "oid": "69aae72547f66059707635bd",
@@ -41243,9 +41167,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -41367,7 +41289,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc372"
     },
     {
       "oid": "69aae72547f66059707635c6",
@@ -41385,9 +41308,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -41549,7 +41470,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc38d"
     },
     {
       "oid": "69aae72547f66059707635c7",
@@ -41567,9 +41489,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -41658,7 +41578,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc38e"
     },
     {
       "oid": "69aae72547f66059707635c8",
@@ -42757,9 +42678,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -42855,7 +42774,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc41d"
     },
     {
       "oid": "69aae72547f66059707635d3",
@@ -43165,9 +43085,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -43218,7 +43136,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc437"
     },
     {
       "oid": "69aae72547f66059707635d7",
@@ -43237,9 +43156,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -43358,7 +43275,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc438"
     },
     {
       "oid": "69aae72547f66059707635db",
@@ -43377,9 +43295,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -43461,7 +43377,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc439"
     },
     {
       "oid": "69aae72547f66059707635e0",
@@ -43481,9 +43398,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -43539,7 +43454,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc43a"
     },
     {
       "oid": "69aae72547f66059707635dc",
@@ -43558,9 +43474,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -43680,7 +43594,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc43b"
     },
     {
       "oid": "69aae72547f66059707635df",
@@ -43701,9 +43616,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -43833,7 +43746,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc43f"
     },
     {
       "oid": "69aae72547f66059707635dd",
@@ -43852,9 +43766,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -43938,7 +43850,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc43d"
     },
     {
       "oid": "69aae72547f66059707635de",
@@ -43957,9 +43870,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -44115,7 +44026,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc43e"
     },
     {
       "oid": "69aae72547f66059707635e3",
@@ -44134,9 +44046,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -44292,7 +44202,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc440"
     },
     {
       "oid": "69aae72547f66059707635e6",
@@ -44312,9 +44223,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -44517,7 +44426,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc442"
     },
     {
       "oid": "69aae72547f66059707635e4",
@@ -44536,9 +44446,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_aes_ec.lst",
@@ -44694,7 +44602,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc443"
     },
     {
       "oid": "69aae72547f66059707635eb",
@@ -45480,9 +45389,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -45538,7 +45445,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc4d0"
     },
     {
       "oid": "69aae72547f66059707635fc",
@@ -45630,9 +45538,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -45723,7 +45629,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc4d4"
     },
     {
       "oid": "69aae72547f6605970763601",
@@ -45742,9 +45649,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -45874,7 +45779,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc4ed"
     },
     {
       "oid": "69aae72547f6605970763602",
@@ -45893,9 +45799,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -45986,7 +45890,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc4ee"
     },
     {
       "oid": "69aae72547f6605970763603",
@@ -46005,9 +45910,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -46098,7 +46001,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc4f0"
     },
     {
       "oid": "69aae72547f6605970763604",
@@ -46117,9 +46021,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -46210,7 +46112,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc4f1"
     },
     {
       "oid": "69aae72547f6605970763605",
@@ -46477,9 +46380,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -46606,7 +46507,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc4fd"
     },
     {
       "oid": "69aae72547f6605970763609",
@@ -46625,9 +46527,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -46756,7 +46656,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc4fe"
     },
     {
       "oid": "69aae72547f660597076360b",
@@ -46774,9 +46675,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -46938,7 +46837,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc4ff"
     },
     {
       "oid": "69aae72547f660597076360f",
@@ -47206,9 +47106,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -47336,7 +47234,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc51d"
     },
     {
       "oid": "69aae72547f6605970763613",
@@ -47354,9 +47253,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -47446,7 +47343,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc51e"
     },
     {
       "oid": "69aae72547f6605970763615",
@@ -47464,9 +47362,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -47593,7 +47489,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc51f"
     },
     {
       "oid": "69aae72547f6605970763616",
@@ -47611,9 +47508,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -47705,7 +47600,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc529"
     },
     {
       "oid": "69aae72547f6605970763617",
@@ -47723,9 +47619,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -47814,7 +47708,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc52a"
     },
     {
       "oid": "69aae72547f6605970763618",
@@ -47832,9 +47727,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -47962,7 +47855,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc52b"
     },
     {
       "oid": "69aae72547f660597076361a",
@@ -47980,9 +47874,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -48109,7 +48001,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc535"
     },
     {
       "oid": "69aae72547f660597076361b",
@@ -48127,9 +48020,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -48256,7 +48147,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc536"
     },
     {
       "oid": "69aae72547f660597076361d",
@@ -48274,9 +48166,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -48440,7 +48330,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc538"
     },
     {
       "oid": "69aae72547f660597076361c",
@@ -48458,9 +48349,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -48551,7 +48440,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc542"
     },
     {
       "oid": "69aae72547f660597076361e",
@@ -48569,9 +48459,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -48623,7 +48511,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc544"
     },
     {
       "oid": "69aae72547f6605970763621",
@@ -48641,9 +48530,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -48695,7 +48582,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc545"
     },
     {
       "oid": "69aae72547f6605970763622",
@@ -48713,9 +48601,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -48803,7 +48689,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc546"
     },
     {
       "oid": "69aae72547f6605970763625",
@@ -48822,9 +48709,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -48881,7 +48766,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc558"
     },
     {
       "oid": "69aae72547f6605970763623",
@@ -48899,9 +48785,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -48953,7 +48837,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc559"
     },
     {
       "oid": "69aae72547f6605970763624",
@@ -48971,9 +48856,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -49025,7 +48908,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc55a"
     },
     {
       "oid": "69aae72547f6605970763626",
@@ -49043,9 +48927,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV"
@@ -49174,7 +49056,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc55b"
     },
     {
       "oid": "69aae72547f660597076362c",
@@ -49607,9 +49490,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -49662,7 +49543,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc5aa"
     },
     {
       "oid": "69aae72547f6605970763636",
@@ -50053,9 +49935,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -50149,7 +50029,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 48
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc5e1"
     },
     {
       "oid": "69aae72547f660597076363f",
@@ -50168,9 +50049,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -50261,7 +50140,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc5ff"
     },
     {
       "oid": "69aae72547f6605970763640",
@@ -50759,9 +50639,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -50853,7 +50731,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc624"
     },
     {
       "oid": "69aae72547f660597076364d",
@@ -50874,9 +50753,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -50936,7 +50813,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc66d"
     },
     {
       "oid": "69aae72547f660597076364a",
@@ -51141,7 +51019,7 @@
         "AOS_TAR"
       ],
       "tags": [
-        "CDP_Smart_Qual"
+        "NESTED_QUALIFIED"
       ],
       "metadata_tags": [
         "HYPERV",
@@ -51198,7 +51076,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc670"
     },
     {
       "oid": "69aae72547f660597076364e",
@@ -51361,9 +51240,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -51416,7 +51293,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc675"
     },
     {
       "oid": "69aae72547f6605970763652",
@@ -51435,9 +51313,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -51529,7 +51405,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc676"
     },
     {
       "oid": "69aae72547f6605970763655",
@@ -51549,9 +51426,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -51607,7 +51482,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc679"
     },
     {
       "oid": "69aae72547f6605970763656",
@@ -51953,9 +51829,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -52045,7 +51919,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc741"
     },
     {
       "oid": "69aae72547f6605970763661",
@@ -52065,9 +51940,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -52158,7 +52031,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc73f"
     },
     {
       "oid": "69aae72547f6605970763663",
@@ -52179,7 +52053,7 @@
         "AOS_TAR"
       ],
       "tags": [
-        "CDP_Smart_Qual"
+        "NESTED_QUALIFIED"
       ],
       "metadata_tags": [
         "LIMITED_RUNS"
@@ -52271,7 +52145,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc740"
     },
     {
       "oid": "69aae72547f6605970763665",
@@ -52291,7 +52166,9 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [],
+      "tags": [
+        "NESTED_QUALIFIED"
+      ],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -52344,7 +52221,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc742"
     },
     {
       "oid": "69aae72547f6605970763664",
@@ -52365,7 +52243,7 @@
         "AOS_TAR"
       ],
       "tags": [
-        "CDP_Smart_Qual"
+        "NESTED_QUALIFIED"
       ],
       "metadata_tags": [
         "LIMITED_RUNS"
@@ -52457,7 +52335,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc743"
     },
     {
       "oid": "69aae72547f6605970763667",
@@ -52477,7 +52356,7 @@
         "AOS_TAR"
       ],
       "tags": [
-        "CDP_Smart_Qual"
+        "NESTED_QUALIFIED"
       ],
       "metadata_tags": [
         "LIMITED_RUNS"
@@ -52568,7 +52447,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc754"
     },
     {
       "oid": "69aae72547f6605970763668",
@@ -52588,7 +52468,7 @@
         "AOS_TAR"
       ],
       "tags": [
-        "CDP_Smart_Qual"
+        "NESTED_QUALIFIED"
       ],
       "metadata_tags": [
         "LIMITED_RUNS"
@@ -52679,7 +52559,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc755"
     },
     {
       "oid": "69aae72547f6605970763669",
@@ -52698,9 +52579,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -52791,7 +52670,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc758"
     },
     {
       "oid": "69aae72547f660597076366a",
@@ -52811,7 +52691,7 @@
         "AOS_TAR"
       ],
       "tags": [
-        "CDP_Smart_Qual"
+        "NESTED_QUALIFIED"
       ],
       "metadata_tags": [
         "LIMITED_RUNS"
@@ -52902,7 +52782,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc759"
     },
     {
       "oid": "69aae72547f660597076366b",
@@ -52922,7 +52803,7 @@
         "AOS_TAR"
       ],
       "tags": [
-        "CDP_Smart_Qual"
+        "NESTED_QUALIFIED"
       ],
       "metadata_tags": [
         "LIMITED_RUNS"
@@ -53013,7 +52894,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc75a"
     },
     {
       "oid": "69aae72547f660597076366f",
@@ -53032,7 +52914,9 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [],
+      "tags": [
+        "NESTED_QUALIFIED"
+      ],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -53084,7 +52968,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc75b"
     },
     {
       "oid": "69aae72547f6605970763670",
@@ -53104,7 +52989,7 @@
         "AOS_TAR"
       ],
       "tags": [
-        "CDP_Smart_Qual"
+        "NESTED_QUALIFIED"
       ],
       "metadata_tags": [
         "LIMITED_RUNS"
@@ -53195,7 +53080,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc75c"
     },
     {
       "oid": "69aae72547f6605970763675",
@@ -53287,9 +53173,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -53383,7 +53267,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc76e"
     },
     {
       "oid": "69aae72547f6605970763678",
@@ -53659,9 +53544,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -53750,7 +53633,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc785"
     },
     {
       "oid": "69aae72547f660597076367c",
@@ -54131,9 +54015,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -54186,7 +54068,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc7a3"
     },
     {
       "oid": "69aae72547f6605970763682",
@@ -54315,9 +54198,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -54370,7 +54251,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc7a5"
     },
     {
       "oid": "69aae72547f6605970763685",
@@ -54674,9 +54556,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV"
@@ -54802,7 +54682,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc7d0"
     },
     {
       "oid": "69aae72547f660597076368c",
@@ -54821,9 +54702,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV"
@@ -54876,7 +54755,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc7d2"
     },
     {
       "oid": "69aae72547f660597076368d",
@@ -54894,9 +54774,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -54948,7 +54826,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc7dc"
     },
     {
       "oid": "69aae72547f660597076368e",
@@ -55786,9 +55665,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -55882,7 +55759,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc7fb"
     },
     {
       "oid": "69aae72547f660597076369b",
@@ -56049,9 +55927,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -56150,7 +56026,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc807"
     },
     {
       "oid": "69aae72547f660597076369d",
@@ -56168,9 +56045,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -56260,7 +56135,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc808"
     },
     {
       "oid": "69aae72547f660597076369f",
@@ -58338,9 +58214,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -58461,7 +58335,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc8c5"
     },
     {
       "oid": "69ab0dd547f6605970777b44",
@@ -58766,9 +58641,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -58860,7 +58733,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc900"
     },
     {
       "oid": "69aae72547f66059707636cc",
@@ -59023,9 +58897,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -59153,7 +59025,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc907"
     },
     {
       "oid": "69aae72547f66059707636d0",
@@ -59324,9 +59197,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -59379,7 +59250,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc913"
     },
     {
       "oid": "69aae72547f66059707636d4",
@@ -59467,9 +59339,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -59558,7 +59428,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc919"
     },
     {
       "oid": "69aae72547f66059707636d6",
@@ -59576,9 +59447,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -59673,7 +59542,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc92c"
     },
     {
       "oid": "69aae72547f66059707636d7",
@@ -59691,9 +59561,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -59787,7 +59655,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc92d"
     },
     {
       "oid": "69aae72547f66059707636d8",
@@ -59806,9 +59675,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -59861,7 +59728,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fc931"
     },
     {
       "oid": "69aae72547f66059707636d9",
@@ -60282,9 +60150,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -60375,7 +60241,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcaef"
     },
     {
       "oid": "69aae72547f66059707636e1",
@@ -60395,9 +60262,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -60451,7 +60316,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcaf4"
     },
     {
       "oid": "69b0193e633eddad84d25742",
@@ -61789,9 +61655,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_stargate.lst",
@@ -61876,7 +61740,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcb59"
     },
     {
       "oid": "69aae72547f66059707636e3",
@@ -61894,9 +61759,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_stargate.lst",
@@ -61941,7 +61804,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcb5a"
     },
     {
       "oid": "69aae72547f66059707636e5",
@@ -61959,9 +61823,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_stargate.lst",
@@ -62006,7 +61868,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcb5b"
     },
     {
       "oid": "69aae72547f66059707636e6",
@@ -62024,9 +61887,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_stargate.lst",
@@ -62071,7 +61932,8 @@
           },
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcb5c"
     },
     {
       "oid": "69aae72547f66059707636e7",
@@ -62089,9 +61951,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -62181,7 +62041,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcb66"
     },
     {
       "oid": "69aae72547f66059707636e8",
@@ -62199,9 +62060,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -62294,7 +62153,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcb77"
     },
     {
       "oid": "69aae72547f66059707636e9",
@@ -62807,9 +62667,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_stargate.lst",
@@ -62858,7 +62716,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcb9f"
     },
     {
       "oid": "69aae72547f66059707636ed",
@@ -62983,9 +62842,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -63078,7 +62935,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcbcf"
     },
     {
       "oid": "69aae72547f66059707636ee",
@@ -63097,9 +62955,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -63191,7 +63047,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcbd4"
     },
     {
       "oid": "69aae72547f66059707636f1",
@@ -64446,7 +64303,9 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [],
+      "tags": [
+        "NESTED_QUALIFIED"
+      ],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -64505,7 +64364,8 @@
             "ahv"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcd9f"
     },
     {
       "oid": "69aae72547f6605970763701",
@@ -64524,7 +64384,9 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [],
+      "tags": [
+        "NESTED_QUALIFIED"
+      ],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -64583,7 +64445,8 @@
             "ahv"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcda7"
     },
     {
       "oid": "69ab0dd547f6605970777b43",
@@ -64601,9 +64464,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -64716,7 +64577,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcdba"
     },
     {
       "oid": "69ab0dd547f6605970777b42",
@@ -64734,9 +64596,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -64849,7 +64709,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcdbd"
     },
     {
       "oid": "69ab0dd547f6605970777b45",
@@ -64867,9 +64728,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -64982,7 +64841,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcdbf"
     },
     {
       "oid": "69ab0dd547f6605970777b46",
@@ -65000,9 +64860,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -65115,7 +64973,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcdc1"
     },
     {
       "oid": "69ab0dd547f6605970777b47",
@@ -65133,9 +64992,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "ESX",
         "LIMITED_RUNS"
@@ -65215,7 +65072,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcdc2"
     },
     {
       "oid": "69b0193e633eddad84d25755",
@@ -65338,9 +65196,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -65453,7 +65309,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcdc5"
     },
     {
       "oid": "69ab0dd547f6605970777b4a",
@@ -65471,9 +65328,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -65586,7 +65441,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcdc8"
     },
     {
       "oid": "69ab0dd547f6605970777b49",
@@ -65604,9 +65460,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -65719,7 +65573,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcdcc"
     },
     {
       "oid": "69ab0dd547f6605970777b4b",
@@ -66498,9 +66353,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -66582,7 +66435,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fce10"
     },
     {
       "oid": "69aae72547f6605970763709",
@@ -68860,9 +68714,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -68955,7 +68807,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fce59"
     },
     {
       "oid": "69aae72547f6605970763721",
@@ -68973,9 +68826,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -69030,7 +68881,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fce5d"
     },
     {
       "oid": "69aae72547f6605970763724",
@@ -69048,9 +68900,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -69105,7 +68955,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fce5b"
     },
     {
       "oid": "69aae72547f6605970763723",
@@ -69123,9 +68974,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -69180,7 +69029,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fce5c"
     },
     {
       "oid": "69aae72547f6605970763725",
@@ -69198,9 +69048,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -69255,7 +69103,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fce5a"
     },
     {
       "oid": "69aae72547f6605970763722",
@@ -69343,9 +69192,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV"
@@ -69401,7 +69248,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fce6e"
     },
     {
       "oid": "69aae72547f6605970763728",
@@ -69933,9 +69781,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -70034,7 +69880,8 @@
           "name": "prism_element_3",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcea6"
     },
     {
       "oid": "69aae72547f660597076372b",
@@ -70467,9 +70314,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -70584,7 +70429,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fceaa"
     },
     {
       "oid": "69aae72547f6605970763731",
@@ -70602,9 +70448,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -70727,7 +70571,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fceab"
     },
     {
       "oid": "69aae72547f6605970763732",
@@ -71410,9 +71255,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -71479,7 +71322,8 @@
           "name": "prism_element_2",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcebc"
     },
     {
       "oid": "69aae72547f660597076373b",
@@ -71983,9 +71827,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -72100,7 +71942,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcefb"
     },
     {
       "oid": "69ab0dd547f6605970777b4c",
@@ -72119,9 +71962,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -72238,7 +72079,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcefd"
     },
     {
       "oid": "69ab0dd547f6605970777b4e",
@@ -72256,9 +72098,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -72372,7 +72212,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcefe"
     },
     {
       "oid": "69ab0dd547f6605970777b4f",
@@ -72390,9 +72231,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -72508,7 +72347,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fceff"
     },
     {
       "oid": "69ab0dd547f6605970777b50",
@@ -72526,9 +72366,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -72644,7 +72482,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf01"
     },
     {
       "oid": "69ab0dd547f6605970777b51",
@@ -72662,9 +72501,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -72776,7 +72613,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf05"
     },
     {
       "oid": "69ab0dd547f6605970777b52",
@@ -72794,9 +72632,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -72945,7 +72781,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf06"
     },
     {
       "oid": "69ab0dd547f6605970777b53",
@@ -72963,9 +72800,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -73114,7 +72949,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf07"
     },
     {
       "oid": "69ab0dd547f6605970777b54",
@@ -73132,9 +72968,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -73246,7 +73080,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf08"
     },
     {
       "oid": "69ab0dd547f6605970777b59",
@@ -73442,9 +73277,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -73556,7 +73389,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf0a"
     },
     {
       "oid": "69ab0dd547f6605970777b56",
@@ -73574,9 +73408,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -73688,7 +73520,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf0c"
     },
     {
       "oid": "69ab0dd547f6605970777b57",
@@ -73706,9 +73539,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -73820,7 +73651,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf0f"
     },
     {
       "oid": "69ab0dd547f6605970777b58",
@@ -73838,9 +73670,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -73952,7 +73782,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf11"
     },
     {
       "oid": "69ab0dd547f6605970777b5a",
@@ -73970,9 +73801,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -74084,7 +73913,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf10"
     },
     {
       "oid": "69ab0dd547f6605970777b5b",
@@ -74102,9 +73932,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -74216,7 +74044,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf13"
     },
     {
       "oid": "69ab0dd547f6605970777b5e",
@@ -74235,9 +74064,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -74391,7 +74218,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf14"
     },
     {
       "oid": "69ab0dd547f6605970777b5d",
@@ -74409,9 +74237,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -74523,7 +74349,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf15"
     },
     {
       "oid": "69ab0dd547f6605970777b5c",
@@ -74541,9 +74368,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -74655,7 +74480,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf16"
     },
     {
       "oid": "69aae72547f6605970763740",
@@ -74866,9 +74692,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -74981,7 +74805,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf1f"
     },
     {
       "oid": "69aae72547f6605970763741",
@@ -74999,9 +74824,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -75079,7 +74902,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf23"
     },
     {
       "oid": "69aae72547f6605970763742",
@@ -75193,9 +75017,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -75273,7 +75095,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf21"
     },
     {
       "oid": "69aae72547f6605970763745",
@@ -75485,9 +75308,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -75605,7 +75426,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf2f"
     },
     {
       "oid": "69aae72547f6605970763747",
@@ -75820,9 +75642,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -75904,7 +75724,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf3a"
     },
     {
       "oid": "69aae72547f6605970763748",
@@ -75922,9 +75743,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -76040,7 +75859,8 @@
             "host": "prism_element_2"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf3c"
     },
     {
       "oid": "69aae72547f660597076374e",
@@ -76059,9 +75879,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -76182,7 +76000,8 @@
             "host": "prism_element_2"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf3f"
     },
     {
       "oid": "69aae72547f660597076374c",
@@ -76200,9 +76019,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -76354,7 +76171,8 @@
             "host": "prism_element_2"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf3e"
     },
     {
       "oid": "69aae72547f660597076374a",
@@ -76469,9 +76287,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -76586,7 +76402,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf47"
     },
     {
       "oid": "69ab0dd547f6605970777b62",
@@ -76605,9 +76422,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -76722,7 +76537,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf45"
     },
     {
       "oid": "69ab0dd547f6605970777b63",
@@ -76741,9 +76557,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -76858,7 +76672,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf4a"
     },
     {
       "oid": "69ab0dd547f6605970777b64",
@@ -76877,9 +76692,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -77031,7 +76844,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf49"
     },
     {
       "oid": "69ab0dd547f6605970777b65",
@@ -77050,9 +76864,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -77115,7 +76927,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf4b"
     },
     {
       "oid": "69aae72547f660597076374b",
@@ -77133,9 +76946,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -77292,7 +77103,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf4d"
     },
     {
       "oid": "69aae72547f660597076374d",
@@ -77620,9 +77432,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -77738,7 +77548,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf50"
     },
     {
       "oid": "69aae72547f6605970763750",
@@ -77990,9 +77801,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -78147,7 +77956,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcf59"
     },
     {
       "oid": "69aae72547f6605970763753",
@@ -79402,9 +79212,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "ESX",
         "LIMITED_RUNS"
@@ -79457,7 +79265,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fcfb6"
     },
     {
       "oid": "69aae72547f6605970763763",
@@ -79947,9 +79756,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -80038,7 +79845,8 @@
             ]
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd052"
     },
     {
       "oid": "69aae72547f660597076376c",
@@ -80057,9 +79865,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -80114,7 +79920,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd054"
     },
     {
       "oid": "69aae72547f660597076376a",
@@ -80200,9 +80007,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -80254,7 +80059,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd05c"
     },
     {
       "oid": "69aae72547f6605970763771",
@@ -80341,9 +80147,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -80435,7 +80239,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd0b4"
     },
     {
       "oid": "69aae72547f660597076376f",
@@ -80453,9 +80258,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -80542,7 +80345,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd0b8"
     },
     {
       "oid": "69aae72547f6605970763773",
@@ -80840,9 +80644,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER",
         "AHV",
@@ -80894,7 +80696,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd0c6"
     },
     {
       "oid": "69aae72547f6605970763777",
@@ -84206,9 +84009,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "V4_API_VG"
@@ -84276,7 +84077,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd1a7"
     },
     {
       "oid": "69ab0dd547f6605970777b95",
@@ -84295,9 +84097,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "V4_API_VG"
@@ -84405,7 +84205,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd1a8"
     },
     {
       "oid": "69ab0dd547f6605970777b94",
@@ -85521,9 +85322,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "V4_API_VG"
@@ -85642,7 +85441,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd1c9"
     },
     {
       "oid": "69ab0dd547f6605970777bac",
@@ -98195,9 +97995,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "V4_API_VG"
@@ -98303,7 +98101,8 @@
             "host": "prism_element_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd45a"
     },
     {
       "oid": "69ab0dd547f6605970777c42",
@@ -99495,9 +99294,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -99588,7 +99385,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 16
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd508"
     },
     {
       "oid": "69aae72547f66059707637b0",
@@ -99932,9 +99730,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -100026,7 +99822,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 16
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd512"
     },
     {
       "oid": "69aae72547f66059707637b5",
@@ -100602,9 +100399,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -100700,7 +100495,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 24
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd51e"
     },
     {
       "oid": "69aae72547f66059707637ba",
@@ -100792,9 +100588,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -100887,7 +100681,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 24
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd521"
     },
     {
       "oid": "69aae72547f66059707637bd",
@@ -100907,9 +100702,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -101046,7 +100839,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 24
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd522"
     },
     {
       "oid": "69aae72547f66059707637bc",
@@ -101065,9 +100859,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -101160,7 +100952,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 24
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd524"
     },
     {
       "oid": "69aae72547f66059707637be",
@@ -101390,9 +101183,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_READY",
         "AHV",
@@ -101550,7 +101341,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd535"
     },
     {
       "oid": "69aae72547f66059707637c6",
@@ -102384,9 +102176,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_chakrdb.lst",
@@ -102469,7 +102259,8 @@
             "vsphere"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf6f47f66059706fd623"
     },
     {
       "oid": "69aae72547f66059707637cd",
@@ -103695,9 +103486,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AOS_AHV_SYNCREP_TAR"
       ],
@@ -103747,7 +103536,8 @@
             "ahv"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7047f66059706ffc86"
     },
     {
       "oid": "69aae72547f660597076391d",
@@ -104458,9 +104248,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV"
       ],
@@ -104544,7 +104332,8 @@
           "type": "$NOS_CLUSTER",
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7047f66059707035b0"
     },
     {
       "oid": "69aae72547f6605970763eec",
@@ -105132,9 +104921,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/ikat/secure_communication/secure_communication_envoy_zookeeper.lst",
@@ -105261,7 +105048,8 @@
             "ahv"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970729272"
     },
     {
       "oid": "69aae72547f660597076459e",
@@ -105279,9 +105067,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/ikat/secure_communication/secure_communication_envoy_zookeeper.lst",
@@ -105408,7 +105194,8 @@
             "ahv"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970729278"
     },
     {
       "oid": "69aae72547f66059707645a7",
@@ -105426,9 +105213,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "ESX"
       ],
@@ -105557,7 +105342,8 @@
             "vsphere"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970729373"
     },
     {
       "oid": "69aae72547f66059707645a8",
@@ -105575,9 +105361,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/ikat/secure_communication/secure_communication_envoy_zookeeper.lst",
@@ -105741,7 +105525,8 @@
             "vsphere"
           ]
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970729375"
     },
     {
       "oid": "69aae72547f66059707645a9",
@@ -106193,9 +105978,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_rbac.lst",
@@ -106291,7 +106074,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f660597072d529"
     },
     {
       "oid": "69ab0dd547f66059707792dd",
@@ -106310,9 +106094,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -106413,7 +106195,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f660597072d52b"
     },
     {
       "oid": "69ab0dd547f66059707792de",
@@ -106656,9 +106439,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_rbac.lst",
@@ -106788,7 +106569,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f660597072d87d"
     },
     {
       "oid": "69ab0dd547f66059707792ea",
@@ -106807,9 +106589,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -106910,7 +106690,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f660597072d87e"
     },
     {
       "oid": "69ab0dd547f66059707792e9",
@@ -110877,9 +110658,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_storage_summary_widget.lst",
@@ -110971,7 +110750,8 @@
             "host": "pe_cluster_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970730afb"
     },
     {
       "oid": "69ab0dd547f660597077968e",
@@ -111692,9 +111472,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/stargate/storage_policy/storage_policy_dsp.lst",
@@ -111874,7 +111652,8 @@
             "host": "pe_cluster_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970730dbc"
     },
     {
       "oid": "69ab0dd547f660597077969a",
@@ -111986,9 +111765,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_storage_policy.lst",
@@ -112082,7 +111859,8 @@
           "name": "pe_cluster_2",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970730dc1"
     },
     {
       "oid": "69ab0dd547f660597077969c",
@@ -113251,9 +113029,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_storage_summary_widget.lst",
@@ -113349,7 +113125,8 @@
             "host": "pe_cluster_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970730dd8"
     },
     {
       "oid": "69ab0dd547f66059707796a7",
@@ -114849,9 +114626,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_storage_summary_widget.lst",
@@ -114947,7 +114722,8 @@
             "host": "pe_cluster_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970730de9"
     },
     {
       "oid": "69ab0dd547f66059707796b5",
@@ -114965,9 +114741,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_storage_summary_widget.lst",
@@ -115063,7 +114837,8 @@
             "host": "pe_cluster_1"
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970730dea"
     },
     {
       "oid": "69ab0dd547f66059707796b6",
@@ -124028,9 +123803,7 @@
       "services": [
         "PC_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "V4_API_SC"
       ],
@@ -124139,7 +123912,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970732cf0"
     },
     {
       "oid": "69aae72547f66059707649c4",
@@ -124837,9 +124611,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "REG_HANDEDOVER"
       ],
@@ -124884,7 +124656,8 @@
             "cluster_min_nodes": 3
           }
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970732e03"
     },
     {
       "oid": "69aae72547f6605970764a15",
@@ -125962,9 +125735,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/mantle/hawkarmor.lst",
@@ -126004,7 +125775,8 @@
         {
           "cluster_min_nodes": 3
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970732e45"
     },
     {
       "oid": "69aae72547f6605970764a27",
@@ -126175,9 +125947,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [],
       "test_sets": [
         "test_sets/cdp/mantle/hawkarmor.lst",
@@ -126254,7 +126024,8 @@
         {
           "cluster_min_nodes": 3
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7147f6605970732e4a"
     },
     {
       "oid": "69aae72547f6605970764a2a",
@@ -130448,9 +130219,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -130541,7 +130310,8 @@
           },
           "type": "$PRISM_CENTRAL"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739c55"
     },
     {
       "oid": "69aae72547f6605970764bdf",
@@ -131138,9 +130908,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -131258,7 +131026,8 @@
           ],
           "name": "prism_element_2"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739c5f"
     },
     {
       "oid": "69aae72547f6605970764be5",
@@ -131621,10 +131390,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Regression_Qual",
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -131695,7 +131461,8 @@
           "name": "prism_element_2",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739c69"
     },
     {
       "oid": "69d01025888469df5d807b2a",
@@ -132077,9 +131844,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -132141,7 +131906,8 @@
           ],
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739c6d"
     },
     {
       "oid": "69aae72547f6605970764beb",
@@ -132159,9 +131925,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -132258,7 +132022,8 @@
           ],
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739c6f"
     },
     {
       "oid": "69aae72547f6605970764bee",
@@ -132276,9 +132041,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -132336,7 +132099,8 @@
           ],
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739c6e"
     },
     {
       "oid": "69aae72547f6605970764bed",
@@ -132354,9 +132118,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -132413,7 +132175,8 @@
           ],
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739c70"
     },
     {
       "oid": "69aae72547f6605970764bf0",
@@ -132431,9 +132194,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -132490,7 +132251,8 @@
           ],
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739c71"
     },
     {
       "oid": "69aae72547f6605970764bef",
@@ -132618,9 +132380,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -132682,7 +132442,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739c7f"
     },
     {
       "oid": "69aae72547f6605970764bf8",
@@ -133149,9 +132910,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -133282,7 +133041,8 @@
           ],
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739ca2"
     },
     {
       "oid": "69aae72547f6605970764bfe",
@@ -133300,9 +133060,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -133399,7 +133157,8 @@
           ],
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739ca6"
     },
     {
       "oid": "69aae72547f6605970764bff",
@@ -133417,9 +133176,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -133518,7 +133275,8 @@
           ],
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739ca5"
     },
     {
       "oid": "69aae72547f6605970764c01",
@@ -133841,9 +133599,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -133940,7 +133696,8 @@
           ],
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739cac"
     },
     {
       "oid": "69aae72547f6605970764c03",
@@ -133958,9 +133715,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "AHV",
         "ESX"
@@ -134097,7 +133852,8 @@
           ],
           "name": "prism_element_1"
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f6605970739cb1"
     },
     {
       "oid": "69aae72547f6605970764c06",
@@ -134789,9 +134545,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -134843,7 +134597,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f660597073fbd3"
     },
     {
       "oid": "69aae72547f6605970764e11",
@@ -134861,9 +134616,7 @@
       "services": [
         "AOS_TAR"
       ],
-      "tags": [
-        "CDP_Smart_Qual"
-      ],
+      "tags": [],
       "metadata_tags": [
         "LIMITED_RUNS"
       ],
@@ -134915,7 +134668,8 @@
           "name": "prism_element_1",
           "svm_gb_ram": 32
         }
-      ]
+      ],
+      "tcms_oid": "69aadf7247f660597073fbd9"
     }
   ]
 }

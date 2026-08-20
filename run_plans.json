@@ -56,7 +56,7 @@
       "schedule_date": null,
       "schedule_triggered": false,
       "created_at": "2026-05-22T03:12:02.418946",
-      "last_triggered": null,
+      "last_triggered": "2026-08-17T15:59:10.358971",
       "service_account": "",
       "is_dummy": false
     },
@@ -239,6 +239,219 @@
       "service_account": "",
       "is_dummy": false,
       "created_at": "2026-07-29T11:37:07.383689",
+      "last_triggered": null
+    },
+    {
+      "id": "1785505427183",
+      "name": "CDP_Regression_Master_Upgrade",
+      "branch": "master",
+      "job_profiles": [
+        "684d152b8e79ce43c69eddcb",
+        "684d15ecb5e475f67eb611e1",
+        "684d16272bc0c4b60574d75d",
+        "684d165eb5e475f6670c2bc5",
+        "684d1695b5e475f66e45784f",
+        "684d16d88e79ce43bc7f646a",
+        "684d1712d24d8251dcd95daf"
+      ],
+      "tag_name": "Upgrade_1785505426778",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-07-31T13:43:47.183650",
+      "last_triggered": "2026-08-02T19:34:56.474051"
+    },
+    {
+      "id": "1785848255944",
+      "name": "CDP_Regression_7.6.0.2_ESX",
+      "branch": "7.6.0.6",
+      "job_profiles": [
+        "6a5f3d5d8e79ce86b544b860",
+        "6a5f3e31d24d828ed80729e7",
+        "6a5f3e998e79cefe18076c8d",
+        "6a5f3edab5e475a0927496f3",
+        "6a5f3f1ab5e475a08178e099"
+      ],
+      "tag_name": "ESX_1785848255751",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "svc.teamchandra",
+      "is_dummy": false,
+      "created_at": "2026-08-04T12:57:35.944656",
+      "last_triggered": null
+    },
+    {
+      "id": "1785848357616",
+      "name": "CDP_Regression_7.6.0.2_AHV",
+      "branch": "7.6.0.6",
+      "job_profiles": [
+        "6a5f3de82bc0c424a941d191",
+        "6a5f3f4d8e79ceaf492c9e5c",
+        "6a5f3fc62bc0c424ac086fc9",
+        "6a5f44808e79ce3f9402350d",
+        "6a5f44a82bc0c424b6cff893",
+        "6a5f44dcd24d828ed2a0e09b",
+        "6a5f450b8e79ce9da6c727ba",
+        "6a5f4548d24d828eeecbfb8d",
+        "6a5f4594d24d828ecf785f65",
+        "6a5f45cbb5e475a077c3381a",
+        "6a5f45fed24d828eeafc020e",
+        "6a5f46372bc0c424aa01da99",
+        "6a5f46768e79cef7513a548f",
+        "6a5f46b02bc0c4249af2e596",
+        "6a5f46fa2bc0c42499b64211",
+        "6a5f47272bc0c424a874b5cb",
+        "6a5f4d662bc0c4249af2e799",
+        "6a5f4e3c8e79ce0ed4f7b2af"
+      ],
+      "tag_name": "AHV_1785848357053",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-08-04T12:59:17.616918",
+      "last_triggered": "2026-08-04T13:48:31.206918"
+    },
+    {
+      "id": "1785848414936",
+      "name": "CDP_Regression_7.6.0.2_External",
+      "branch": "7.6.0.6",
+      "job_profiles": [
+        "6a5f4ce62bc0c424b4a4f255",
+        "6a5f4d2a2bc0c424b15b876f",
+        "6a5f4d848e79ce5489d5ed06",
+        "6a5f4db82bc0c424a941d649",
+        "6a5f4e02d24d828ed6a283d3"
+      ],
+      "tag_name": "External_1785848414753",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-08-04T13:00:14.936515",
+      "last_triggered": "2026-08-04T13:48:43.480020"
+    },
+    {
+      "id": "1785848490085",
+      "name": "CDP_Regression_7.6.0.2_Upgrade",
+      "branch": "7.6.0.6",
+      "job_profiles": [
+        "6a708c2dd24d824839524f71",
+        "6a708cb4d24d8248343e3dc3",
+        "6a708d818e79ce1358f23486",
+        "6a708dafb5e475a1fe1b93e9",
+        "6a708ddb8e79ce134d85ab31"
+      ],
+      "tag_name": "Upgrade_1785848489907",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-08-04T13:01:30.085828",
+      "last_triggered": "2026-08-06T06:28:35.891276"
+    },
+    {
+      "id": "1785848528711",
+      "name": "CDP_Regression_7.6.0.2_Upgrade_ESX",
+      "branch": "7.6.0.6",
+      "job_profiles": [
+        "6a708b8e2bc0c4f2e910d3a6"
+      ],
+      "tag_name": "ESX_1785848528254",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "svc.teamchandra",
+      "is_dummy": false,
+      "created_at": "2026-08-04T13:02:08.711623",
+      "last_triggered": null
+    },
+    {
+      "id": "1785905671096",
+      "name": "CDP_Regression_7.6.0.2_AHV_2",
+      "branch": "7.6.0.6",
+      "job_profiles": [
+        "6a5f3de82bc0c424a941d191",
+        "6a5f3fc62bc0c424ac086fc9",
+        "6a5f44808e79ce3f9402350d",
+        "6a5f44dcd24d828ed2a0e09b",
+        "6a5f450b8e79ce9da6c727ba",
+        "6a5f45cbb5e475a077c3381a",
+        "6a5f45fed24d828eeafc020e",
+        "6a5f46372bc0c424aa01da99",
+        "6a5f46768e79cef7513a548f",
+        "6a5f46b02bc0c4249af2e596",
+        "6a5f46fa2bc0c42499b64211",
+        "6a5f47272bc0c424a874b5cb",
+        "6a5f4d662bc0c4249af2e799"
+      ],
+      "tag_name": "AHV_1785905670654",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-08-05T04:54:31.096746",
+      "last_triggered": "2026-08-05T04:55:25.543708"
+    },
+    {
+      "id": "1785906511163",
+      "name": "CDP_Regression_7.6.0.2_AHV_3",
+      "branch": "7.6.0.6",
+      "job_profiles": [
+        "6a5f4e3c8e79ce0ed4f7b2af",
+        "6a5f3f4d8e79ceaf492c9e5c",
+        "6a5f44a82bc0c424b6cff893",
+        "6a5f4594d24d828ecf785f65"
+      ],
+      "tag_name": "3_1785906510979",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-08-05T05:08:31.163711",
+      "last_triggered": "2026-08-05T05:28:12.114458"
+    },
+    {
+      "id": "1786555443785",
+      "name": "cdp_central_regression_physical",
+      "branch": "master",
+      "job_profiles": [
+        "6a634dffb5e475b3f467eb6a",
+        "6a2a3420b5e475473ffb5f5b",
+        "6a2a3430b5e475474870fd5a",
+        "6a2a342cb5e475474a0c0aca",
+        "6a2a3429b5e4754743c92dbd",
+        "6a2a34278e79ced015d2227c",
+        "6a2a3425b5e475474870fd55",
+        "6a2a34228e79cebab5538881"
+      ],
+      "tag_name": "physical_1786555442841",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-08-12T17:24:03.785564",
+      "last_triggered": null
+    },
+    {
+      "id": "1786555680670",
+      "name": "cdp_central_regression_nested",
+      "branch": "master",
+      "job_profiles": [
+        "6a2a3672b5e4754738da9ffa",
+        "6a2a3674d24d8258a812d0bc",
+        "6a2a3682d24d8258994a7dd9",
+        "6a2a367db5e4754742a4bcc1",
+        "6a2a367b8e79ced02f60001f",
+        "6a2a36792bc0c44295d6436b",
+        "6a2a3677b5e4754745db5411"
+      ],
+      "tag_name": "nested_1786555678817",
+      "schedule_date": null,
+      "schedule_triggered": false,
+      "service_account": "",
+      "is_dummy": false,
+      "created_at": "2026-08-12T17:28:00.670828",
       "last_triggered": null
     }
   ],
@@ -1401,6 +1614,161 @@
       ],
       "failed_jobs": [],
       "status": "success"
+    },
+    {
+      "id": "1785699296474",
+      "run_plan_id": "1785505427183",
+      "triggered_at": "2026-08-02T19:34:56.474080",
+      "triggered_by": "sudharshan.musali",
+      "task_ids": [
+        "6a6f9bdfd24d82c18b3ed4fa",
+        "6a6f9bdfd24d82c178ebbd72",
+        "6a6f9bdf2bc0c467baa01eb4",
+        "6a6f9bdf2bc0c467baa01eba",
+        "6a6f9bdfd24d82c178ebbd74",
+        "6a6f9be02bc0c467b8cf91e9",
+        "6a6f9be0d24d82c18c599ffc"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1785851311206",
+      "run_plan_id": "1785848357616",
+      "triggered_at": "2026-08-04T13:48:31.206938",
+      "triggered_by": "swapnil.wankhede",
+      "task_ids": [
+        "6a71eda7b5e475ee15ea49b8",
+        "6a71eda7d24d828e9ceb7054",
+        "6a71eda7d24d828e9403fd76",
+        "6a71eda7d24d828ea4f2bbde",
+        "6a71eda8b5e475ee11584e2d",
+        "6a71eda82bc0c439b8e1c917",
+        "6a71eda8b5e475ee1f05e130",
+        "6a71eda7b5e475ee0bbcce5f",
+        "6a71eda98e79ce64530cd87d",
+        "6a71eda9d24d828e8fff2035",
+        "6a71edaad24d828e91b65fcd",
+        "6a71edaa8e79ce603fc509ec",
+        "6a71eda9b5e475ee08b2c421",
+        "6a71edaad24d828e958a41aa",
+        "6a71edabd24d828ea05926fa",
+        "6a71edabd24d828e9333dd51",
+        "6a71eda82bc0c439cb63098b"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "6a5f4548d24d828eeecbfb8d",
+          "success": false,
+          "error": "Failed to trigger job: Unable to find branch_symlink for params {'nos_version': u'ganges-7.6.0.6-stable', 'build_type': u'opt'}. Response: {u'message': u'branch symlink for ganges-7.6.0.6-stable does not exist in the filer', u'success': False}"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1785851323480",
+      "run_plan_id": "1785848414936",
+      "triggered_at": "2026-08-04T13:48:43.480039",
+      "triggered_by": "swapnil.wankhede",
+      "task_ids": [
+        "6a71edba8e79ce13540d0c81",
+        "6a71edbb2bc0c439ada292df",
+        "6a71edbbb5e475ee0ee38e16",
+        "6a71edbbb5e475ee0ee38e0f"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "6a5f4d848e79ce5489d5ed06",
+          "success": false,
+          "error": "Failed to trigger job: Unable to find branch_symlink for params {'nos_version': u'ganges-7.6.0.6-stable', 'build_type': u'opt'}. Response: {u'message': u'branch symlink for ganges-7.6.0.6-stable does not exist in the filer', u'success': False}"
+        }
+      ],
+      "status": "partial"
+    },
+    {
+      "id": "1785905725543",
+      "run_plan_id": "1785905671096",
+      "triggered_at": "2026-08-05T04:55:25.543726",
+      "triggered_by": "swapnil.wankhede",
+      "task_ids": [
+        "6a72c23ad24d82bcecaf203a",
+        "6a72c23a2bc0c46d55b4bc75",
+        "6a72c23ad24d82bcf7b38c90",
+        "6a72c23a8e79ce134887e1b6",
+        "6a72c23a8e79ce7768d5d458",
+        "6a72c23bd24d82bd01123a85",
+        "6a72c23bd24d82bcf92857fe",
+        "6a72c23bb5e47521d0443789",
+        "6a72c23cb5e47521bb520377",
+        "6a72c23bb5e47521d4c75277",
+        "6a72c23cd24d82bcfe9b3bf6",
+        "6a72c23d2bc0c46d6196c856",
+        "6a72c23dd24d82bcfa79e1a2"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1785907692114",
+      "run_plan_id": "1785906511163",
+      "triggered_at": "2026-08-05T05:28:12.114492",
+      "triggered_by": "swapnil.wankhede",
+      "task_ids": [
+        "6a72c9e62bc0c46d5446f426",
+        "6a72c9e62bc0c46d697f1dbb",
+        "6a72c9e6b5e47521c924161d",
+        "6a72c9e78e79ce7c8e9ac66d"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1785997715891",
+      "run_plan_id": "1785848490085",
+      "triggered_at": "2026-08-06T06:28:35.891303",
+      "triggered_by": "swapnil.wankhede",
+      "task_ids": [
+        "6a7429938e79ce6a71fbcad8",
+        "6a7429938e79ce868d9ab005",
+        "6a742993b5e475e1172210f5",
+        "6a742993b5e475e1222018c3",
+        "6a742993b5e475e1172210f4"
+      ],
+      "failed_jobs": [],
+      "status": "success"
+    },
+    {
+      "id": "1786982350358",
+      "run_plan_id": "1779419522418",
+      "triggered_at": "2026-08-17T15:59:10.358993",
+      "triggered_by": "sudharshan.musali",
+      "task_ids": [
+        "6a832fc42bc0c405612f6064",
+        "6a832fc4d24d82497cb94d0c",
+        "6a832fc48e79ced60d473f67",
+        "6a832fc4d24d82498be9ed10",
+        "6a832fc48e79ced601bd8f25",
+        "6a832fc52bc0c40582773c4a",
+        "6a832fc6d24d82497f8bd6c7",
+        "6a832fc6b5e475dcfa64e9b8",
+        "6a832fc68e79ced6054754ba",
+        "6a832fc68e79ced6182d0dfd",
+        "6a832fc7b5e475dd03342e4e",
+        "6a832fc7d24d824972a459eb",
+        "6a832fc7b5e475dceaefaf27",
+        "6a832fc8d24d8249801912b1",
+        "6a832fc8d24d824990feca26",
+        "6a832fc8d24d824973619318",
+        "6a832fc82bc0c4056eb85e74"
+      ],
+      "failed_jobs": [
+        {
+          "job_id": "699cadcb2bc0c4ccb4b1dc89",
+          "success": false,
+          "error": "Failed to trigger job: Invalid clusters: auto_cluster_prod_shilpa_sattigeri_e92affaa83f0,auto_cluster_prod_shilpa_sattigeri_3617062a32d1"
+        }
+      ],
+      "status": "partial"
     }
   ]
 }
