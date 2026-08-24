@@ -25,10 +25,23 @@ from flask_cors import CORS
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from auth import LDAPAuth, create_jwt, decode_jwt, jwt_required
+from auth import (
+    LDAPAuth,
+    create_jwt,
+    decode_jwt,
+    jwt_required,
+    load_teams_config,
+    validate_team,
+    get_default_team,
+)
 from owner_triage_report import (
     build_owner_status_table,
     resolve_task_ids_from_payload,
+)
+from regression_owners import (
+    UNKNOWN_OWNER,
+    load_owner_mapping,
+    resolve_owner as resolve_regression_owner,
 )
 from tag_extra_task_ids import (
     append_extras_for_tag,
@@ -636,29 +649,7 @@ def delete_failed_analysis_results(tag):
     except Exception as e:
         logger.warning(f"Could not delete failed analysis cache for tag '{tag}': {e}")
 
-# Load regression owners mapping from CSV
-CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "regression_owners.csv")
-owner_mapping = {}
-
-def load_owner_mapping():
-    """Load test prefix to owner mapping from CSV"""
-    global owner_mapping
-    try:
-        if os.path.exists(CSV_PATH):
-            df = pd.read_csv(CSV_PATH, header=0)
-            # CSV format: "Test Area,Regression Owner"
-            for _, row in df.iterrows():
-                test_prefix = str(row.iloc[0]).strip()
-                owner = str(row.iloc[1]).strip() if len(row) > 1 else "Unknown"
-                if test_prefix and owner and test_prefix != "Test Area":  # Skip header row
-                    owner_mapping[test_prefix] = owner
-            logger.info(f"Loaded {len(owner_mapping)} owner mappings from CSV")
-        else:
-            logger.warning(f"CSV file not found at {CSV_PATH}")
-    except Exception as e:
-        logger.error(f"Error loading owner mapping: {e}")
-
-# Load owner mapping on startup
+# Load regression owners mapping from team-scoped data/<TEAM>/regression_owners.csv
 load_owner_mapping()
 
 # ======================================================
@@ -989,14 +980,28 @@ def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120, 
 # ======================================================
 # Auth Routes (no @jwt_required)
 # ======================================================
+@app.route("/mcp/regression/teams", methods=["GET"])
+def get_teams():
+    """Return available teams for the login dropdown (no auth required)."""
+    config = load_teams_config()
+    return jsonify({
+        "teams": config.get("teams", []),
+        "default_team": config.get("default_team") or get_default_team(),
+    })
+
+
 @app.route("/mcp/regression/auth/login", methods=["POST"])
 def auth_login():
     data = request.get_json(silent=True) or {}
     username = data.get("username", "").strip()
     password = data.get("password", "")
+    team = (data.get("team") or "").strip() or get_default_team()
 
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
+
+    if not validate_team(team):
+        return jsonify({"error": "Invalid team selected"}), 400
 
     ldap_auth = LDAPAuth()
     user_info = ldap_auth.authenticate(username, password)
@@ -1010,6 +1015,7 @@ def auth_login():
         user_info["username"],
         user_info.get("displayName", ""),
         user_info.get("email", ""),
+        team=team,
     )
     # Return a stable shape for FE (login LDAP keys + JWT-style aliases)
     username = user_info.get("username") or ""
@@ -1023,6 +1029,7 @@ def auth_login():
             "email": email,
             "sub": username,
             "name": display_name,
+            "team": team,
         },
     })
 
@@ -1034,6 +1041,7 @@ def auth_me():
     username = payload.get("sub") or payload.get("username") or ""
     display_name = payload.get("name") or payload.get("displayName") or username
     email = payload.get("email") or ""
+    team = payload.get("team") or get_default_team()
     return jsonify({
         "user": {
             "username": username,
@@ -1041,6 +1049,7 @@ def auth_me():
             "email": email,
             "sub": username,
             "name": display_name,
+            "team": team,
         },
     })
 
@@ -2133,17 +2142,6 @@ def get_branches_from_tag():
 
 
 # ---------------------------------------------------
-# Helper: Resolve Owner from Test Name
-# ---------------------------------------------------
-def resolve_owner(test_name):
-    """Resolve owner from test name using prefix mapping"""
-    for prefix, owner in owner_mapping.items():
-        if test_name.startswith(prefix):
-            return owner
-    return "Unknown"
-
-
-# ---------------------------------------------------
 # Helper: Fetch Test Results (POST API – batch)
 # NOTE: This function is deprecated. Use fetch_test_results_batch_with_pagination() instead.
 # Kept for backward compatibility but redirects to pagination version.
@@ -2177,7 +2175,7 @@ def calculate_bulk_issues_qi_impact(bulk_issues, test_data, tag=None):
     milestone = "7.5.1"  # Default milestone
     if tag:
         # Try to extract milestone from tag (e.g., "cdp_master_full_reg" -> "master", "7.5.1" -> "7.5.1")
-        milestone_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', tag)
+        milestone_match = re.search(r'(\d+(?:\.\d+)+)', tag)
         if milestone_match:
             milestone = milestone_match.group(1)
         elif "master" in tag.lower():
@@ -2685,8 +2683,8 @@ def get_triage_count():
         logger.info(f"[START] Triage Count | task_ids={len(task_ids)} tasks")
     
     try:
-        # Reload owner mapping in case it was updated
-        load_owner_mapping()
+        # Reload team-scoped owners from data/<TEAM>/regression_owners.csv
+        load_owner_mapping(team=getattr(g, "team", None))
 
         try:
             tasks = fetch_regression_tasks(tag=tag, task_ids=task_ids)
@@ -2806,7 +2804,7 @@ def get_triage_count():
             
             seen_tests.add(test_name)
             tickets = test.get("jira_tickets", [])
-            owner = resolve_owner(test_name)
+            owner = resolve_regression_owner(test_name)
             
             # Summary stats
             summary[owner]["Total Failed"] += 1
@@ -2900,7 +2898,7 @@ def owner_triage_report():
     tag = (body.get("tag") or "").strip() or None
 
     try:
-        load_owner_mapping()
+        load_owner_mapping(team=getattr(g, "team", None))
 
         task_ids, invalid_ids, resolve_err, source = resolve_task_ids_from_payload(
             task_ids=body.get("task_ids"),
@@ -2956,7 +2954,7 @@ def owner_triage_report():
                 "rows": [],
             }), 500
 
-        result = build_owner_status_table(test_data, resolve_owner)
+        result = build_owner_status_table(test_data, resolve_regression_owner)
         elapsed = round(time.time() - start, 2)
         logger.info(
             "[END] Owner triage report | time=%ss | owners=%s",
@@ -3101,7 +3099,7 @@ def _compute_triage_accuracy_payload(tag=None, task_ids=None, reload=False, skip
     if not tag and not task_ids:
         raise ValueError("Either tag or task_ids is required")
 
-    load_owner_mapping()
+    load_owner_mapping(team=getattr(g, "team", None))
     cache_tag = tag if tag else None
     # Snapshot extras for this tag (used in cache key + payload)
     try:
@@ -3211,7 +3209,7 @@ def _compute_triage_accuracy_payload(tag=None, task_ids=None, reload=False, skip
             else:
                 match_status = "N/A" if not jira_ticket and not triage_genie_ticket else ("" if not (jira_ticket and triage_genie_ticket) else "N/A")
 
-            regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
+            regression_owner = resolve_regression_owner(testcase_name) if testcase_name else "Unknown"
             return {
                 "testcase_name": testcase_name,
                 "regression_owner": regression_owner,
@@ -3852,13 +3850,13 @@ def _resolve_tcms_milestone(branch_name):
 
     Lookup order:
       1. Explicit entry in BRANCH_SHORT_NAME_MAP
-      2. Regex extraction of a version pattern like X.Y or X.Y.Z
+      2. Regex extraction of a dotted version (7.6, 7.5.1, 7.6.0.6, …)
       3. Fall back to the original branch_name unchanged
     """
     if branch_name in BRANCH_SHORT_NAME_MAP:
         return BRANCH_SHORT_NAME_MAP[branch_name]
 
-    version_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', branch_name)
+    version_match = re.search(r'(\d+(?:\.\d+)+)', branch_name)
     if version_match:
         return version_match.group(1)
 
@@ -6760,8 +6758,12 @@ def get_glean_headers():
     }
 
 
-def fetch_jira_ticket(ticket_id, token=None):
-    """Fetch Jira ticket details. Pass token when calling from worker threads."""
+def fetch_jira_ticket(ticket_id, token=None, fields=None):
+    """Fetch Jira ticket details. Pass token when calling from worker threads.
+
+    ``fields`` is an optional comma-separated Jira field list (e.g.
+    ``status,issuetype``). When omitted, Jira returns the full issue payload.
+    """
     try:
         jira_token = resolve_jira_token(token)
         if not jira_token:
@@ -6770,10 +6772,13 @@ def fetch_jira_ticket(ticket_id, token=None):
             )
             return None
 
+        issue_key = _normalize_jira_issue_key(ticket_id) or ticket_id
         headers = get_jira_headers(jira_token)
+        params = {"fields": fields} if fields else None
         resp = session.get(
-            f"{JIRA_BASE}/issue/{ticket_id}",
+            f"{JIRA_BASE}/issue/{issue_key}",
             headers=headers,
+            params=params,
             timeout=30,
             verify=False,
         )
@@ -7560,7 +7565,7 @@ def analyze_failed_testcases():
                             ai_summary = f"Error: {str(e)}"
                     
                     # Resolve regression owner
-                    regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
+                    regression_owner = resolve_regression_owner(testcase_name) if testcase_name else "Unknown"
                     
                     # Resolve agave_task_id for retrigger support
                     raw_atid = test_result.get("agave_task_id")
@@ -7768,7 +7773,7 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
                     logger.error(f"Error generating AI summary for {testcase_name}: {e}", exc_info=True)
                     ai_summary = f"Error: {str(e)}"
             
-            regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
+            regression_owner = resolve_regression_owner(testcase_name) if testcase_name else "Unknown"
 
             raw_atid = test_result.get("agave_task_id")
             if isinstance(raw_atid, dict) and "$oid" in raw_atid:
@@ -8716,11 +8721,9 @@ def retrigger_failed_testcases():
 
     Request body:
       tests: list of {testcase_id, testcase_name, agave_task_id}
-      overrides (all optional):
-        nos_commit, nos_branch, nos_gbn,
-        pc_commit, pc_branch, pc_gbn,
-        nutest_branch, nutest_commit,
-        patch_url, resource_pool, username
+      overrides (all optional): Jita rerun fields such as NOS/PC/image,
+        nutest/framework metadata, infra, tester_tags, label, priority,
+        skip_resource_spec_match, check_image_compatibility, retain_resources.
     """
     try:
         data = request.get_json() or {}
@@ -8738,15 +8741,23 @@ def retrigger_failed_testcases():
                 "code": "CREDENTIALS_EXPIRED"
             }), 401
 
-        # Group test names by agave_task_id (as {"name": ...} dicts for JITA)
+        # Group selected tests by agave_task_id. Jita prefers test_result_id
+        # (the failed-analysis testcase_id) so only the selected rows rerun.
         tests_by_task = {}
         for t in tests:
             atid = t.get("agave_task_id")
             if not atid:
                 continue
-            name = t.get("testcase_name", "")
+            name = (t.get("testcase_name") or t.get("name") or "").strip()
+            result_id = t.get("testcase_id") or t.get("test_result_id")
+            if not name and not result_id:
+                continue
+            entry = {}
             if name:
-                tests_by_task.setdefault(atid, []).append({"name": name})
+                entry["name"] = name
+            if result_id:
+                entry["test_result_id"] = result_id
+            tests_by_task.setdefault(atid, []).append(entry)
 
         if not tests_by_task:
             return jsonify({"error": "No valid agave_task_id found in selected tests"}), 400
@@ -8768,13 +8779,14 @@ def retrigger_failed_testcases():
                 # Build rerun payload from original task, apply overrides
                 payload = _build_rerun_payload(task_data, task_tests, overrides, current_username)
 
-                # POST to rerun endpoint (use data=json.dumps per JITA API)
+                # POST to rerun endpoint (raw JSON body, matching Jita UI)
                 rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
                 logger.info(f"[retrigger] POST {rerun_url} with {len(task_tests)} test(s): {task_tests}")
                 logger.info(f"[retrigger] Payload keys: {list(payload.keys())}")
                 resp = requests.post(
                     rerun_url,
                     data=json.dumps(payload),
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
                     auth=user_auth,
                     verify=False,
                     timeout=60
@@ -8831,91 +8843,303 @@ def retrigger_failed_testcases():
 
 def _build_rerun_payload(task_data, task_tests, overrides, username):
     """
-    Build a minimal rerun payload matching the JITA /rerun API contract.
-    task_tests is a list of {"name": "..."} dicts for the tests to rerun.
-    The JITA rerun API inherits most settings from the original task;
-    we only send tests, infra, and explicit user overrides.
-    """
-    # Infra from the original task's requested_hardware
-    requested_hw = task_data.get("requested_hardware", {})
-    infra = requested_hw.get("infra", [])
-    if overrides.get("resource_pool"):
-        infra = [{
-            "kind": "ON_PREM",
-            "type": "node_pool",
-            "entries": [overrides["resource_pool"]]
-        }]
+    Build a Jita /agave_tasks/{id}/rerun payload matching the official UI.
 
-    payload = {
-        "tests": task_tests,
-        "infra": infra,
+    Jita copies the original task and applies this body. Selected tests must
+    include test_result_id (and name) so only those rows are rerun. Remaining
+    fields are copied from the original task, then user overrides are applied.
+    """
+    import copy
+
+    overrides = overrides or {}
+    task_data = task_data or {}
+    TAG_TO_COMMIT = {
+        "Latest Smoke Passed": "$LATEST_SMOKE_PASSED",
+        "Latest DIAL Passed": "$LATEST_SMOKE_PASSED",
+        "latest_smoke_passed": "$LATEST_SMOKE_PASSED",
+        "$LATEST_SMOKE_PASSED": "$LATEST_SMOKE_PASSED",
     }
 
-    # --- NOS overrides ---
-    if overrides.get("nos_branch"):
-        payload["branch"] = overrides["nos_branch"]
-    if overrides.get("nos_commit"):
-        payload["commit_id"] = overrides["nos_commit"]
-    if overrides.get("nos_gbn"):
+    def _as_int(val):
         try:
-            payload["gbn"] = int(overrides["nos_gbn"])
-            payload["image_gbn"] = int(overrides["nos_gbn"])
+            if val is None or val == "":
+                return None
+            return int(val)
         except (ValueError, TypeError):
-            pass
-    if overrides.get("nos_tag"):
-        payload["tag"] = overrides["nos_tag"]
-    if overrides.get("nos_build_type"):
-        payload["build_type"] = overrides["nos_build_type"]
+            return None
 
-    # --- Nutest overrides ---
-    if overrides.get("nutest_branch"):
-        payload["nutest-py3-tests_branch"] = overrides["nutest_branch"]
-    if overrides.get("nutest_commit"):
-        payload["nutest-py3-tests_commit"] = overrides["nutest_commit"]
+    def _first(*vals):
+        for val in vals:
+            if val is not None and val != "":
+                return val
+        return None
 
-    # --- PC overrides (resource_manager_json) ---
-    pc_keys = ("pc_commit", "pc_branch", "pc_gbn", "pc_tag", "pc_build_type")
-    if any(overrides.get(k) for k in pc_keys):
+    def _bool_from_task(key, default):
+        if key in task_data and task_data.get(key) is not None:
+            return bool(task_data.get(key))
+        sched = task_data.get("scheduling_options") or {}
+        if isinstance(sched, dict) and key in sched and sched.get(key) is not None:
+            return bool(sched.get(key))
+        return default
+
+    tests = []
+    for item in task_tests or []:
+        if not isinstance(item, dict):
+            if item:
+                tests.append({"name": str(item)})
+            continue
+        entry = {}
+        name = item.get("name") or item.get("testcase_name")
+        result_id = item.get("test_result_id") or item.get("testcase_id")
+        if name:
+            entry["name"] = name
+        if result_id:
+            entry["test_result_id"] = result_id
+        if entry:
+            tests.append(entry)
+
+    requested_hw = task_data.get("requested_hardware") or {}
+    infra = requested_hw.get("infra") or task_data.get("infra") or []
+    # Keep the original task pool unless the user explicitly overrides it.
+    if overrides.get("override_pool") and overrides.get("resource_pool"):
+        entries = [e.strip() for e in str(overrides["resource_pool"]).split(",") if e.strip()]
+        if entries:
+            kind, itype = "ON_PREM", "node_pool"
+            if isinstance(infra, list) and infra and isinstance(infra[0], dict):
+                kind = infra[0].get("kind") or kind
+                itype = infra[0].get("type") or itype
+            infra = [{"kind": kind, "type": itype, "entries": entries}]
+
+    nos_commit = overrides.get("nos_commit")
+    if not nos_commit and overrides.get("nos_tag"):
+        nos_commit = TAG_TO_COMMIT.get(overrides["nos_tag"], overrides["nos_tag"])
+
+    branch = _first(overrides.get("nos_branch"), task_data.get("branch"))
+    commit_id = _first(nos_commit, task_data.get("commit_id"))
+    gbn = _first(_as_int(overrides.get("nos_gbn")), _as_int(task_data.get("gbn")), task_data.get("gbn"))
+
+    image_branch = _first(overrides.get("image_branch"), task_data.get("image_branch"), branch)
+    image_commit = _first(
+        overrides.get("image_commit"),
+        task_data.get("image_commit"),
+        commit_id if nos_commit else None,
+    )
+    image_gbn = _first(
+        _as_int(overrides.get("image_gbn")),
+        _as_int(task_data.get("image_gbn")),
+        gbn if overrides.get("nos_gbn") else None,
+        task_data.get("image_gbn"),
+    )
+
+    test_framework = task_data.get("test_framework") or "nutest-py3-tests"
+    fw_branch_key = "%s_branch" % test_framework
+    fw_commit_key = "%s_commit" % test_framework
+    tfm = copy.deepcopy(task_data.get("test_framework_metadata") or {})
+    if not isinstance(tfm, dict):
+        tfm = {}
+    test_meta = dict(tfm.get("test") or {})
+    fw_meta = dict(tfm.get("framework") or {})
+
+    nutest_branch = _first(
+        overrides.get("nutest_branch"),
+        overrides.get("framework_branch"),
+        task_data.get(fw_branch_key),
+        fw_meta.get("branch"),
+    )
+    nutest_commit = _first(
+        overrides.get("nutest_commit"),
+        overrides.get("framework_commit"),
+        task_data.get(fw_commit_key),
+        fw_meta.get("commit"),
+    )
+    test_branch = _first(overrides.get("test_branch"), test_meta.get("branch"), nutest_branch)
+    test_commit = _first(overrides.get("test_commit"), test_meta.get("commit"))
+
+    if nutest_branch:
+        fw_meta["branch"] = nutest_branch
+    if nutest_commit:
+        fw_meta["commit"] = nutest_commit
+    if test_branch:
+        test_meta["branch"] = test_branch
+    if test_commit:
+        test_meta["commit"] = test_commit
+    if overrides.get("patch_url"):
+        test_meta["patch_url"] = str(overrides["patch_url"]).strip()
+    if overrides.get("framework_patch_url"):
+        fw_meta["patch_url"] = str(overrides["framework_patch_url"]).strip()
+    tfm["test"] = test_meta
+    tfm["framework"] = fw_meta
+
+    label = overrides.get("label") or task_data.get("label") or ""
+    if label and not str(label).endswith("-rerun"):
+        label = "%s-rerun" % label
+
+    if overrides.get("tester_tags") not in (None, ""):
+        raw_tags = overrides.get("tester_tags")
+        if isinstance(raw_tags, list):
+            tester_tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()]
+        else:
+            tester_tags = [tag.strip() for tag in str(raw_tags).split(",") if tag.strip()]
+    else:
+        tester_tags = list(task_data.get("tester_tags") or [])
+    if overrides.get("patch_url"):
+        patch_tag = "patch_url__%s" % str(overrides["patch_url"]).strip()
+        if patch_tag not in tester_tags:
+            tester_tags.append(patch_tag)
+    if overrides.get("framework_patch_url"):
+        fw_tag = "framework_patch_url__%s" % str(overrides["framework_patch_url"]).strip()
+        if fw_tag not in tester_tags:
+            tester_tags.append(fw_tag)
+    if "jita3" not in tester_tags:
+        tester_tags.append("jita3")
+
+    if "skip_resource_spec_match" in overrides and overrides.get("skip_resource_spec_match") is not None:
+        skip_match = bool(overrides.get("skip_resource_spec_match"))
+    else:
+        skip_match = _bool_from_task("skip_resource_spec_match", False)
+
+    if "check_image_compatibility" in overrides and overrides.get("check_image_compatibility") is not None:
+        check_compat = bool(overrides.get("check_image_compatibility"))
+    else:
+        check_compat = _bool_from_task("check_image_compatibility", True)
+
+    priority = _first(_as_int(overrides.get("priority")), _as_int(task_data.get("priority")), 10)
+
+    # Jita rm_json_schema rejects extra build keys such as tag/build_type.
+    RM_BUILD_DISALLOWED = ("tag", "build_type")
+    RM_BUILD_STALE_ON_COMMIT = ("artifact_id", "nos_build_url", "pc_build_url")
+
+    def _sanitize_rm_build(build, drop_stale=False):
+        if not isinstance(build, dict):
+            return {}
+        drop = set(RM_BUILD_DISALLOWED)
+        if drop_stale:
+            drop.update(RM_BUILD_STALE_ON_COMMIT)
+        return {k: v for k, v in build.items() if k not in drop and v not in (None, "")}
+
+    def _ensure_product_build(rm, product):
+        spec = rm.get(product)
+        if not isinstance(spec, dict):
+            spec = {}
+            rm[product] = spec
+        build = spec.get("build")
+        if not isinstance(build, dict):
+            build = {}
+            spec["build"] = build
+        return spec, build
+
+    rm_json = copy.deepcopy(task_data.get("resource_manager_json") or {})
+    if not isinstance(rm_json, dict):
         rm_json = {}
-        pc_build = {}
-        if overrides.get("pc_commit"):
-            pc_build["commit_id"] = overrides["pc_commit"]
+
+    nos_overridden = any(overrides.get(k) for k in ("nos_branch", "nos_commit", "nos_gbn", "nos_tag"))
+    pc_overridden = any(overrides.get(k) for k in ("pc_commit", "pc_branch", "pc_gbn", "pc_tag"))
+
+    if nos_overridden:
+        nos_cluster, nos_build = _ensure_product_build(rm_json, "NOS_CLUSTER")
+        nos_build = _sanitize_rm_build(nos_build, drop_stale=True)
+        if overrides.get("nos_branch"):
+            nos_build["branch"] = overrides["nos_branch"]
+        if nos_commit and not str(nos_commit).startswith("$"):
+            nos_build["commit_id"] = nos_commit
+        elif nos_commit and str(nos_commit).startswith("$"):
+            nos_build.pop("commit_id", None)
+            nos_build.pop("gbn", None)
+        nos_gbn = _as_int(overrides.get("nos_gbn"))
+        if nos_gbn is not None:
+            nos_build["gbn"] = nos_gbn
+        nos_build.setdefault("component", "main")
+        nos_cluster["build"] = nos_build
+
+    if pc_overridden:
+        pc, pc_build = _ensure_product_build(rm_json, "PRISM_CENTRAL")
+        pc_build = _sanitize_rm_build(pc_build, drop_stale=True)
         if overrides.get("pc_branch"):
             pc_build["branch"] = overrides["pc_branch"]
-        if overrides.get("pc_gbn"):
-            try:
-                pc_build["gbn"] = int(overrides["pc_gbn"])
-            except (ValueError, TypeError):
-                pass
-        if overrides.get("pc_tag"):
-            pc_build["tag"] = overrides["pc_tag"]
-        if overrides.get("pc_build_type"):
-            pc_build["build_type"] = overrides["pc_build_type"]
-        if pc_build:
-            rm_json["PRISM_CENTRAL"] = {"build": pc_build}
-        payload["resource_manager_json"] = rm_json
+        pc_commit = overrides.get("pc_commit")
+        if not pc_commit and overrides.get("pc_tag"):
+            pc_commit = TAG_TO_COMMIT.get(overrides["pc_tag"])
+        if pc_commit and not str(pc_commit).startswith("$"):
+            pc_build["commit_id"] = pc_commit
+        elif pc_commit and str(pc_commit).startswith("$"):
+            pc_build.pop("commit_id", None)
+            pc_build.pop("gbn", None)
+        pc_gbn = _as_int(overrides.get("pc_gbn"))
+        if pc_gbn is not None:
+            pc_build["gbn"] = pc_gbn
+        pc_build.setdefault("component", "main")
+        pc["build"] = pc_build
 
-    # --- Patch URLs → tester_tags ---
-    tester_tags = list(task_data.get("tester_tags", []))
-    tags_changed = False
-    if overrides.get("patch_url"):
-        patch_url = overrides["patch_url"].strip()
-        if patch_url:
-            patch_tag = f"patch_url__{patch_url}"
-            if patch_tag not in tester_tags:
-                tester_tags.append(patch_tag)
-                tags_changed = True
-    if overrides.get("framework_patch_url"):
-        fw_url = overrides["framework_patch_url"].strip()
-        if fw_url:
-            fw_tag = f"framework_patch_url__{fw_url}"
-            if fw_tag not in tester_tags:
-                tester_tags.append(fw_tag)
-                tags_changed = True
-    if tags_changed:
+    # Always strip schema-illegal keys copied from the original task.
+    for product, spec in list(rm_json.items()):
+        if isinstance(spec, dict) and isinstance(spec.get("build"), dict):
+            spec["build"] = _sanitize_rm_build(spec["build"])
+
+    retain = copy.deepcopy(task_data.get("retain_resources_config"))
+    if overrides.get("retain_on_failure"):
+        duration = _as_int(overrides.get("retain_duration")) or 720
+        entity = overrides.get("retain_entity") or "CONTAINER"
+        retain = {
+            "criteria": {
+                "TEST_FAILURE": {
+                    "entity": entity,
+                    "type": "AFTER_EACH",
+                    "params": {
+                        "duration": duration,
+                        "exceptions": [],
+                        "states_to_track": ["Failed"],
+                    },
+                }
+            }
+        }
+
+    sdk_opts = copy.deepcopy(task_data.get("sdk_installation_options") or {})
+    if not isinstance(sdk_opts, dict):
+        sdk_opts = {}
+
+    payload = {
+        "tests": tests,
+        "infra": infra,
+        "username": username or task_data.get("created_by") or "",
+        "skip_resource_spec_match": bool(skip_match),
+        "check_image_compatibility": bool(check_compat),
+        "sdk_installation_options": sdk_opts,
+    }
+    if branch:
+        payload["branch"] = branch
+    if commit_id:
+        payload["commit_id"] = commit_id
+    gbn_int = _as_int(gbn)
+    if gbn_int is not None:
+        payload["gbn"] = gbn_int
+    if image_branch:
+        payload["image_branch"] = image_branch
+    if image_commit:
+        payload["image_commit"] = image_commit
+    image_gbn_int = _as_int(image_gbn)
+    if image_gbn_int is not None:
+        payload["image_gbn"] = image_gbn_int
+    if nutest_branch:
+        payload[fw_branch_key] = nutest_branch
+    if nutest_commit:
+        payload[fw_commit_key] = nutest_commit
+    if overrides.get("nos_build_type"):
+        payload["build_type"] = overrides["nos_build_type"]
+    if label:
+        payload["label"] = label
+    if tester_tags:
         payload["tester_tags"] = tester_tags
+    if rm_json:
+        payload["resource_manager_json"] = rm_json
+    if tfm.get("test") or tfm.get("framework"):
+        payload["test_framework_metadata"] = tfm
+    priority_int = _as_int(priority)
+    if priority_int is not None:
+        payload["priority"] = priority_int
+    if retain:
+        payload["retain_resources_config"] = retain
 
-    return payload
+    return {k: v for k, v in payload.items() if v is not None and v != ""}
 
 
 # ======================================================
@@ -8944,7 +9168,7 @@ def _normalize_tc_branch_key(branch):
         return "master"
     if b.startswith("ganges-") and b.endswith("-stable"):
         return b[len("ganges-"):-len("-stable")]
-    if re.match(r"^\d+\.\d+(\.\d+)?$", b):
+    if re.match(r"^\d+(?:\.\d+)+$", b):
         return b
     return b
 
@@ -8966,7 +9190,7 @@ def _resolve_branch_config(branch):
     if key == "master":
         return TESTCASE_MGMT_BRANCHES["master"]
 
-    if re.match(r"^\d+\.\d+(\.\d+)?$", key):
+    if re.match(r"^\d+(?:\.\d+)+$", key):
         return {
             "milestone": key,
             "team_prefix": key,
@@ -8989,7 +9213,7 @@ def _tcms_nutest_target_branch(branch):
     key = _normalize_tc_branch_key(branch)
     if key == "master":
         return "master"
-    if re.match(r"^\d+\.\d+(\.\d+)?$", key):
+    if re.match(r"^\d+(?:\.\d+)+$", key):
         return f"ganges-{key}-stable"
     b = (branch or "").strip()
     if b.startswith("ganges-") and b.endswith("-stable"):
@@ -9582,7 +9806,7 @@ def _tc_data_candidate_paths(branch, team):
     key = _normalize_tc_branch_key(branch)
     team = (team or "CDP").strip() or "CDP"
     paths = [_tc_data_file(key, team)]
-    if key != "master" and re.match(r"^\d+\.\d+(\.\d+)?$", key):
+    if key != "master" and re.match(r"^\d+(?:\.\d+)+$", key):
         legacy = os.path.join(
             TESTCASE_MGMT_DATA_DIR,
             f"testcase_management_ganges-{key}-stable_{team}.json".replace("/", "_"),
@@ -14238,16 +14462,14 @@ def get_jira_ticket_details():
         unique_ids = list(dict.fromkeys(ticket_ids))[:200]
 
         def _one(ticket_id):
-            jira_data = fetch_jira_ticket(ticket_id, token=jira_token)
-            if jira_data:
-                fields = jira_data.get("fields", {})
-                issue_type = fields.get("issuetype", {}).get("name", "Unknown")
-                return ticket_id, {
-                    "status": fields.get("status", {}).get("name", "Unknown"),
-                    "issue_type": issue_type,
-                    "bug_type": _categorize_bug_type_from_issuetype(issue_type),
-                }
-            return ticket_id, {"status": "N/A", "issue_type": "N/A", "bug_type": None}
+            try:
+                jira_data = fetch_jira_ticket(
+                    ticket_id, token=jira_token, fields="status,issuetype"
+                )
+                return ticket_id, _extract_jira_ticket_detail(jira_data)
+            except Exception as exc:
+                logger.warning("Error fetching JIRA details for %s: %s", ticket_id, exc)
+                return ticket_id, {"status": "N/A", "issue_type": "N/A", "bug_type": None}
 
         results = {}
         max_workers = min(10, len(unique_ids)) or 1
@@ -14291,9 +14513,10 @@ def ai_analyze_owner_tickets():
         for ticket_id in all_tickets:
             jira_data = fetch_jira_ticket(ticket_id)
             if jira_data:
-                fields = jira_data.get("fields", {})
-                status = fields.get("status", {}).get("name", "Unknown")
-                issue_type = fields.get("issuetype", {}).get("name", "Unknown")
+                fields = jira_data.get("fields") or {}
+                detail = _extract_jira_ticket_detail(jira_data)
+                status = detail["status"]
+                issue_type = detail["issue_type"]
                 summary = fields.get("summary", "")
                 description = (fields.get("description") or "")[:500]
                 priority = fields.get("priority", {}).get("name", "Unknown") if fields.get("priority") else "Unknown"
@@ -15452,6 +15675,47 @@ def parse_jita_url(url):
 # ======================================================
 # Jira Helper Functions (for Handover)
 # ======================================================
+_JIRA_ISSUE_KEY_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_]+-\d+)\b")
+
+
+def _normalize_jira_issue_key(ticket_id):
+    """Extract a Jira issue key (e.g. ENG-12345) from a raw ticket string or URL."""
+    if ticket_id is None:
+        return None
+    text = str(ticket_id).strip()
+    if not text:
+        return None
+    match = _JIRA_ISSUE_KEY_RE.search(text)
+    if not match:
+        return text
+    project, number = match.group(1).split("-", 1)
+    return "%s-%s" % (project.upper(), number)
+
+
+def _named_jira_field(value, default="Unknown"):
+    """Read ``name`` from a Jira field object that may be None, a dict, or a string."""
+    if not value:
+        return default
+    if isinstance(value, dict):
+        return (value.get("name") or default).strip() or default
+    text = str(value).strip()
+    return text or default
+
+
+def _extract_jira_ticket_detail(jira_data):
+    """Map a Jira issue payload to status / issue_type / categorized bug_type."""
+    if not jira_data:
+        return {"status": "N/A", "issue_type": "N/A", "bug_type": None}
+    fields = jira_data.get("fields") or {}
+    issue_type = _named_jira_field(fields.get("issuetype"))
+    status = _named_jira_field(fields.get("status"))
+    return {
+        "status": status,
+        "issue_type": issue_type,
+        "bug_type": _categorize_bug_type_from_issuetype(issue_type),
+    }
+
+
 def _categorize_bug_type_from_issuetype(issuetype):
     """Categorize bug type from Jira issuetype name."""
     if not issuetype:
@@ -15494,9 +15758,8 @@ def _fetch_ticket_issuetype(ticket):
             return None, "Forbidden"
         resp.raise_for_status()
         data = resp.json()
-        issuetype = (data.get("fields") or {}).get("issuetype", {})
-        name = (issuetype.get("name") or "").strip()
-        return name, None
+        name = _named_jira_field((data.get("fields") or {}).get("issuetype"), default="")
+        return name or None, None
     except requests.RequestException as e:
         err_msg = str(e) or "Failed to fetch Jira issue."
         if "resolve" in err_msg.lower() or "nodename" in err_msg.lower():
@@ -15957,8 +16220,7 @@ def validate_jira_ticket():
             return jsonify({"valid": False, "ticket": ticket, "issuetype": None, "error": "Forbidden"}), 200
         resp.raise_for_status()
         data = resp.json()
-        issuetype = (data.get("fields") or {}).get("issuetype", {})
-        name = (issuetype.get("name") or "").strip()
+        name = _named_jira_field((data.get("fields") or {}).get("issuetype"), default="")
         bug_type = _categorize_bug_type_from_issuetype(name)
         is_valid = bug_type == "Product Bug"
         return jsonify({

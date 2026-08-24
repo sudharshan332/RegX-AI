@@ -31,6 +31,7 @@ def _load_helpers():
         "datetime": __import__("datetime").datetime,
         "ThreadPoolExecutor": __import__("concurrent.futures").futures.ThreadPoolExecutor,
         "as_completed": __import__("concurrent.futures").futures.as_completed,
+        "_DOTTED_VERSION_RE": __import__("re").compile(r"\d+(?:\.\d+)+"),
         "logger": SimpleNamespace(
             warning=lambda *a, **k: None,
             info=lambda *a, **k: None,
@@ -91,10 +92,45 @@ class TestTargetBranch(unittest.TestCase):
         self.assertEqual(norm("7.6"), "7.6")
         self.assertEqual(norm("ganges-7.6-stable"), "7.6")
         self.assertEqual(norm("ganges-7.5-stable"), "7.5")
+        self.assertEqual(norm("ganges-7.6.0.6-stable"), "7.6.0.6")
+        self.assertEqual(norm("7.6.0.6"), "7.6.0.6")
         self.assertEqual(fn("master"), "master")
         self.assertEqual(fn("7.6"), "ganges-7.6-stable")
         self.assertEqual(fn("ganges-7.6-stable"), "ganges-7.6-stable")
         self.assertEqual(fn("7.5"), "ganges-7.5-stable")
+        self.assertEqual(fn("7.6.0.6"), "ganges-7.6.0.6-stable")
+        self.assertEqual(fn("ganges-7.6.0.6-stable"), "ganges-7.6.0.6-stable")
+        cfg = ns["_resolve_branch_config"]
+        ns["TESTCASE_MGMT_BRANCHES"] = {
+            "master": {"milestone": "master", "team_prefix": "master", "test_set_regex": "test_sets/milestones/master/"},
+            "ganges-7.6-stable": {"milestone": "7.6", "team_prefix": "7.6", "test_set_regex": "test_sets/milestones/7.6/"},
+            "ganges-7.5-stable": {"milestone": "7.5", "team_prefix": "7.5", "test_set_regex": "test_sets/milestones/7.5/"},
+        }
+        self.assertEqual(cfg("ganges-7.6-stable")["milestone"], "7.6")
+        self.assertEqual(cfg("ganges-7.6.0.6-stable")["milestone"], "7.6.0.6")
+        self.assertEqual(cfg("7.6.0.6")["milestone"], "7.6.0.6")
+
+
+class TestResolveTcmsMilestone(unittest.TestCase):
+    def test_ganges_patch_and_release_versions(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "test_flask.py")
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        start = src.index("BRANCH_SHORT_NAME_MAP = {")
+        end = src.index("# AI Endpoint for failure summary")
+        start_fn = src.index("def _resolve_tcms_milestone(")
+        end_fn = src.index("@app.route(\"/mcp/regression/tcms-overall-qi\"")
+        ns = {"re": __import__("re")}
+        exec(src[start:end], ns)  # noqa: S102
+        exec(src[start_fn:end_fn], ns)  # noqa: S102
+        fn = ns["_resolve_tcms_milestone"]
+        self.assertEqual(fn("ganges-7.6.0.6-stable"), "7.6.0.6")
+        self.assertEqual(fn("ganges-7.6-stable"), "7.6")
+        self.assertEqual(fn("ganges-7.5-stable"), "7.5")
+        self.assertEqual(fn("ganges-7.5.1-stable"), "7.5.1")
+        self.assertEqual(fn("master"), "master")
+        self.assertEqual(fn("7.6.0.6"), "7.6.0.6")
+        self.assertEqual(fn("ganges-7.3.0.98-stable"), "7.3.0.98")
 
 
 class TestApplyTagOps(unittest.TestCase):
@@ -381,6 +417,7 @@ class TestCacheLoadSave(unittest.TestCase):
                 warning=lambda *a, **k: None,
             ),
             "TESTCASE_MGMT_DATA_DIR": tmp,
+            "_DOTTED_VERSION_RE": __import__("re").compile(r"\d+(?:\.\d+)+"),
         }
         exec(chunk1, ns)  # noqa: S102
         exec(chunk2, ns)  # noqa: S102

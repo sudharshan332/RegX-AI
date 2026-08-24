@@ -67,7 +67,7 @@ const CUSTOM_BRANCHES_STORAGE_KEY = 'tc-mgmt-custom-branches';
 
 function toShortBranch(name) {
   if (name === 'master') return 'master';
-  const m = name.match(/^ganges-(\d+\.\d+(?:\.\d+)?)-stable$/);
+  const m = name.match(/^ganges-(\d+(?:\.\d+)+)-stable$/);
   return m ? m[1] : name;
 }
 

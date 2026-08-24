@@ -31,6 +31,17 @@ const JITA_RESULTS_URL = "https://jita.eng.nutanix.com/results?task_ids=";
 const JIRA_URL = "https://jira.nutanix.com/browse/";
 const OWNER_TRIAGE_REPORT_API = `${API_BASE_URL}/mcp/regression/owner-triage-report`;
 
+/** TCMS milestone from branch: ganges-7.6.0.6-stable → 7.6.0.6, ganges-7.6-stable → 7.6 */
+const resolveTcmsMilestone = (branch) => {
+  const raw = (branch || "").trim();
+  const lower = raw.toLowerCase();
+  if (lower === "master" || lower === "main") return "master";
+  const ganges = raw.match(/^ganges-(\d+(?:\.\d+)+)-stable$/i);
+  if (ganges) return ganges[1];
+  const m = raw.match(/(\d+(?:\.\d+)+)/);
+  return m ? m[1] : branch;
+};
+
 /** Collect JITA task IDs for the selected job only (scoped Full regression + rows). */
 const collectJitaTaskIdsFromPage = (rowList = []) => {
   const seen = new Set();
@@ -128,11 +139,11 @@ const resolveTriageAccuracyScope = (tagToUse, taskIdsToUse, tagState, globalIds 
 
 // Bug-type color code shared across the owner breakdown tiles and the donut graph.
 const BUG_TYPE_COLORS = {
-  "Product Bug": "#ef4444", // red
-  "Test Bug": "#f59e0b",    // orange
-  "Environment": "#3b82f6", // blue
-  "Flaky": "#a855f7",       // purple
-  "Other": "#9ca3af",       // grey
+  "Product Bug": "#c45c5c", // muted brick red
+  "Test Bug": "#c9954a",    // muted gold
+  "Environment": "#5b82b8", // muted slate blue
+  "Flaky": "#8b74a8",       // muted purple
+  "Other": "#8d939c",       // muted grey
 };
 
 // Classify a Jira issue type string into a bug category.
@@ -313,6 +324,7 @@ export default function RegressionHome() {
   const [loadingOwnerAi, setLoadingOwnerAi] = useState(false);
   const [ownerJiraDetails, setOwnerJiraDetails] = useState({});
   const [loadingJiraDetails, setLoadingJiraDetails] = useState(false);
+  const [jiraDetailsError, setJiraDetailsError] = useState(null);
 
   // TCMS Overview & Comparison
   const [tcmsOverviewData, setTcmsOverviewData] = useState(null);
@@ -668,15 +680,21 @@ export default function RegressionHome() {
     });
     if (allTickets.size === 0) return;
     setLoadingJiraDetails(true);
+    setJiraDetailsError(null);
     try {
       const resp = await api.post(`${API_BASE_URL}/mcp/regression/jira-ticket-details`, {
         ticket_ids: Array.from(allTickets)
       }, { timeout: 120000 });
       if (resp.data.success && resp.data.details) {
         setOwnerJiraDetails(resp.data.details);
+      } else {
+        setJiraDetailsError(resp.data.error || "Could not load Jira bug types");
       }
     } catch (err) {
       console.error("Error fetching JIRA details:", err);
+      setJiraDetailsError(
+        err.response?.data?.error || "Could not load Jira bug types"
+      );
     } finally {
       setLoadingJiraDetails(false);
     }
@@ -2931,12 +2949,7 @@ export default function RegressionHome() {
                         : val >= 80 ? "#28a745"
                         : val >= 50 ? "#fd7e14"
                         : "#dc3545";
-                      const milestone = (() => {
-                        const b = row.branch?.toLowerCase();
-                        if (b === "master" || b === "main") return "master";
-                        const m = row.branch?.match(/(\d+\.\d+(?:\.\d+)?)/);
-                        return m ? m[1] : row.branch;
-                      })();
+                      const milestone = resolveTcmsMilestone(row.branch);
                       const teamName = (() => {
                         if (!teamConfig) return "CDP";
                         const cfg = teamConfig[tag] || teamConfig["default"];
@@ -3014,12 +3027,7 @@ export default function RegressionHome() {
                         : val >= 80 ? "#28a745"
                         : val >= 50 ? "#fd7e14"
                         : "#dc3545";
-                      const milestone = (() => {
-                        const b = row.branch?.toLowerCase();
-                        if (b === "master" || b === "main") return "master";
-                        const m = row.branch?.match(/(\d+\.\d+(?:\.\d+)?)/);
-                        return m ? m[1] : row.branch;
-                      })();
+                      const milestone = resolveTcmsMilestone(row.branch);
                       const teamName = (() => {
                         if (!teamConfig) return "CDP";
                         const cfg = teamConfig[tag] || teamConfig["default"];
@@ -3379,10 +3387,16 @@ export default function RegressionHome() {
                         if (seenTickets.has(t)) return;
                         seenTickets.add(t);
                         const info = ownerJiraDetails[t];
-                        const bt = bugTypeOf(info) || "Other";
-                        bugTotals[bt] = (bugTotals[bt] || 0) + 1;
-                        bugTickets[bt].push(t);
-                        if (bt === "Other") {
+                        const bt = bugTypeOf(info);
+                        // Do not dump still-loading tickets into Other — that made
+                        // Bugs Overview look like every ticket was untyped.
+                        if (!info && (loadingJiraDetails || Object.keys(ownerJiraDetails).length === 0)) {
+                          return;
+                        }
+                        const label = bt || "Other";
+                        bugTotals[label] = (bugTotals[label] || 0) + 1;
+                        bugTickets[label].push(t);
+                        if (label === "Other") {
                           const it = info?.issue_type && info.issue_type !== "N/A"
                             ? info.issue_type
                             : "Not loaded / Unknown";
@@ -3391,6 +3405,7 @@ export default function RegressionHome() {
                       });
                     });
                     const totalBugs = seenTickets.size;
+                    const classifiedTotal = bugOrder.reduce((n, label) => n + (bugTotals[label] || 0), 0);
                     const otherTip = Object.keys(otherIssueTypes).length
                       ? "Other = non-bug Jira issue types: " +
                         Object.entries(otherIssueTypes).map(([k, v]) => `${k} (${v})`).join(", ")
@@ -3404,13 +3419,18 @@ export default function RegressionHome() {
                       {/* Bug-type summary: pie on the left, count-pill legend on the right.
                           Click a slice or a legend row to open that bug type in Jira. */}
                       <div className="rh-bug-summary">
-                        <BugPie segments={donutSegments} total={totalBugs} />
+                        <BugPie segments={donutSegments} total={classifiedTotal} />
                         <div className="rh-bug-summary-legend">
                           <div className="rh-bug-summary-head">
                             <span className="rh-bug-summary-title">Bugs Overview</span>
                             <span className="rh-bug-summary-total-pill">{totalBugs}</span>
                           </div>
                           <ul className="rh-bug-summary-list">
+                            {loadingJiraDetails && Object.values(bugTotals).every((n) => n === 0) && (
+                              <li className="rh-bug-summary-item" style={{ cursor: "default" }}>
+                                <span className="rh-bug-summary-name">Loading bug types…</span>
+                              </li>
+                            )}
                             {bugOrder.map((label) => (
                               bugTotals[label] > 0 ? (
                                 <li
@@ -3442,6 +3462,11 @@ export default function RegressionHome() {
                           {loadingJiraDetails && (
                             <span style={{ fontSize: "11px", color: "#6c757d", fontWeight: "normal", marginLeft: "10px" }}>
                               Loading JIRA details...
+                            </span>
+                          )}
+                          {jiraDetailsError && !loadingJiraDetails && (
+                            <span style={{ fontSize: "11px", color: "#b91c1c", fontWeight: "normal", marginLeft: "10px" }}>
+                              {jiraDetailsError}
                             </span>
                           )}
                         </h4>

@@ -279,24 +279,6 @@
   height: 10px;
 }
 
-/* Bug-type text pill on each ticket row (replaces the old N/A dash) */
-.rh-bugtype-pill {
-  flex: 0 0 auto;
-  font-size: 9px;
-  font-weight: 700;
-  color: #fff;
-  padding: 2px 7px;
-  border-radius: 10px;
-  white-space: nowrap;
-  min-width: 58px;
-  text-align: center;
-}
-
-.rh-bugtype-unknown {
-  background: #f3f4f6;
-  color: #9ca3af;
-}
-
 /* Owner tile header: name on the left, bug counts + ticket count on the right */
 .rh-owner-name {
   overflow: hidden;
