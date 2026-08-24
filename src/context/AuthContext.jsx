@@ -42,11 +42,13 @@ export function AuthProvider({ children }) {
       });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const login = useCallback(async (username, password) => {
-    const res = await axios.post(`${AUTH_API}/login`, { username, password });
+  const login = useCallback(async (username, password, team) => {
+    const res = await axios.post(`${AUTH_API}/login`, { username, password, team });
     const { token: newToken, user: newUser } = res.data;
     // LDAP login returns displayName/username (not name/sub) — normalize before state
     const normalized = normalizeAuthUser(newUser);
+    // Add team to normalized user
+    normalized.team = team;
     localStorage.setItem(TOKEN_KEY, newToken);
     setToken(newToken);
     setUser(normalized);

@@ -5,6 +5,14 @@ import './FailedTestcaseAnalysis.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/failed-analysis`;
 const JIRA_URL = 'https://jira.nutanix.com/browse/';
+const JITA_RESULTS_URL = 'https://jita.eng.nutanix.com/results';
+
+function jitaResultsUrl(taskIds) {
+  const ids = (Array.isArray(taskIds) ? taskIds : [taskIds]).filter(Boolean);
+  if (ids.length === 0) return '';
+  if (ids.length === 1) return `${JITA_RESULTS_URL}?task_ids=${ids[0]}`;
+  return `${JITA_RESULTS_URL}?task_ids=${ids.join(',')}&active_tab=1&merge_tests=true`;
+}
 
 const TEST_STATUS_OPTIONS = [
   { id: 'failed', label: 'Failed' },
@@ -134,10 +142,28 @@ export default function FailedTestcaseAnalysis() {
     nos: { branch: '', updateType: 'tag', buildType: '', tag: '', commitId: '', gbn: '' },
     updatePc: false,
     pc: { branch: '', updateType: 'tag', buildType: '', tag: '', commitId: '', gbn: '' },
+    updateImage: false,
+    image: { branch: '', commitId: '', gbn: '' },
     nutest_branch: '',
+    nutest_commit: '',
+    test_branch: '',
+    test_commit: '',
+    framework_branch: '',
+    framework_commit: '',
     patch_url: '',
     framework_patch_url: '',
+    overridePool: false,
     resource_pool: '',
+    label: '',
+    priority: '',
+    tester_tags: '',
+    overrideScheduling: false,
+    skip_resource_spec_match: false,
+    check_image_compatibility: true,
+    overrideRetain: false,
+    retain_on_failure: true,
+    retain_duration: '720',
+    retain_entity: 'CONTAINER',
   };
   const [retriggerOverrides, setRetriggerOverrides] = useState({ ...RETRIGGER_DEFAULTS });
   const [retriggerResults, setRetriggerResults] = useState(null);
@@ -993,10 +1019,20 @@ export default function FailedTestcaseAnalysis() {
     setRetriggerOverrides({ ...RETRIGGER_DEFAULTS,
       nos: { ...RETRIGGER_DEFAULTS.nos },
       pc: { ...RETRIGGER_DEFAULTS.pc },
+      image: { ...RETRIGGER_DEFAULTS.image },
     });
     setRetriggerResults(null);
     setRetriggerModalOpen(true);
   };
+
+  const selectedRetriggerRows = selectedRows
+    .map(id => results.find(r => r.testcase_id === id))
+    .filter(Boolean);
+  const selectedRetriggerTaskIds = [...new Set(selectedRetriggerRows.map(r => r.agave_task_id).filter(Boolean))];
+  const succeededRerunIds = (retriggerResults?.results || [])
+    .filter(r => r.success && r.rerun_task_id)
+    .map(r => r.rerun_task_id);
+  const retriggerResultsUrl = jitaResultsUrl(succeededRerunIds);
 
   const handleRetrigger = async () => {
     const selected = selectedRows.filter(Boolean);
@@ -1040,10 +1076,36 @@ export default function FailedTestcaseAnalysis() {
         if (p.buildType) overrides.pc_build_type = p.buildType.trim();
       }
     }
+    if (retriggerOverrides.updateImage) {
+      const im = retriggerOverrides.image;
+      if (im.branch) overrides.image_branch = im.branch.trim();
+      if (im.commitId) overrides.image_commit = im.commitId.trim();
+      if (im.gbn) overrides.image_gbn = im.gbn.trim();
+    }
     if (retriggerOverrides.nutest_branch) overrides.nutest_branch = retriggerOverrides.nutest_branch.trim();
+    if (retriggerOverrides.nutest_commit) overrides.nutest_commit = retriggerOverrides.nutest_commit.trim();
+    if (retriggerOverrides.test_branch) overrides.test_branch = retriggerOverrides.test_branch.trim();
+    if (retriggerOverrides.test_commit) overrides.test_commit = retriggerOverrides.test_commit.trim();
+    if (retriggerOverrides.framework_branch) overrides.framework_branch = retriggerOverrides.framework_branch.trim();
+    if (retriggerOverrides.framework_commit) overrides.framework_commit = retriggerOverrides.framework_commit.trim();
     if (retriggerOverrides.patch_url) overrides.patch_url = retriggerOverrides.patch_url.trim();
     if (retriggerOverrides.framework_patch_url) overrides.framework_patch_url = retriggerOverrides.framework_patch_url.trim();
-    if (retriggerOverrides.resource_pool) overrides.resource_pool = retriggerOverrides.resource_pool.trim();
+    if (retriggerOverrides.overridePool && retriggerOverrides.resource_pool.trim()) {
+      overrides.override_pool = true;
+      overrides.resource_pool = retriggerOverrides.resource_pool.trim();
+    }
+    if (retriggerOverrides.label) overrides.label = retriggerOverrides.label.trim();
+    if (retriggerOverrides.priority) overrides.priority = retriggerOverrides.priority.trim();
+    if (retriggerOverrides.tester_tags) overrides.tester_tags = retriggerOverrides.tester_tags.trim();
+    if (retriggerOverrides.overrideScheduling) {
+      overrides.skip_resource_spec_match = !!retriggerOverrides.skip_resource_spec_match;
+      overrides.check_image_compatibility = !!retriggerOverrides.check_image_compatibility;
+    }
+    if (retriggerOverrides.overrideRetain) {
+      overrides.retain_on_failure = !!retriggerOverrides.retain_on_failure;
+      if (retriggerOverrides.retain_duration) overrides.retain_duration = retriggerOverrides.retain_duration.trim();
+      if (retriggerOverrides.retain_entity) overrides.retain_entity = retriggerOverrides.retain_entity;
+    }
 
     setRetriggerLoading(true);
     setRetriggerResults(null);
@@ -2734,9 +2796,21 @@ export default function FailedTestcaseAnalysis() {
             </div>
             <div className="modal-body retrigger-modal-body">
               <p className="retrigger-summary">
-                <strong>{selectedRows.length}</strong> testcase(s) selected for re-trigger.
-                Leave fields blank to use original task defaults.
+                <strong>{selectedRetriggerRows.length}</strong> selected testcase(s) across{' '}
+                <strong>{selectedRetriggerTaskIds.length}</strong>{' '}
+                Jita task(s) will be re-triggered (one rerun per task).
+                Blank fields keep the original task values.
               </p>
+              <ul className="retrigger-selected-tests">
+                {selectedRetriggerRows.map(row => (
+                  <li key={row.testcase_id} title={row.testcase_name || row.testcase_id}>
+                    <span>{row.testcase_name || row.testcase_id}</span>
+                    {row.agave_task_id && (
+                      <span className="retrigger-selected-task">task {row.agave_task_id}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
 
               {/* Component Selection Checkboxes */}
               <div className="retrigger-component-select">
@@ -2751,6 +2825,11 @@ export default function FailedTestcaseAnalysis() {
                     <input type="checkbox" checked={retriggerOverrides.updatePc}
                       onChange={e => setRetriggerOverrides(prev => ({ ...prev, updatePc: e.target.checked }))} />
                     <span>Prism Central Build</span>
+                  </label>
+                  <label className="retrigger-check-label">
+                    <input type="checkbox" checked={retriggerOverrides.updateImage}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, updateImage: e.target.checked }))} />
+                    <span>Image Build</span>
                   </label>
                 </div>
               </div>
@@ -2902,37 +2981,192 @@ export default function FailedTestcaseAnalysis() {
                     )}
                   </div>
                 )}
+
+                {retriggerOverrides.updateImage && (
+                  <div className="retrigger-panel">
+                    <h4 className="retrigger-panel-title">Image Build</h4>
+                    <div className="retrigger-form-group">
+                      <label>Image Branch</label>
+                      <input type="text" placeholder="e.g. ganges-7.6.0.6-stable"
+                        value={retriggerOverrides.image.branch}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, image: { ...prev.image, branch: e.target.value }
+                        }))} />
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Image Commit</label>
+                      <input type="text" placeholder="e.g. fd96efb85c11..."
+                        value={retriggerOverrides.image.commitId}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, image: { ...prev.image, commitId: e.target.value }
+                        }))} />
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Image GBN</label>
+                      <input type="text" placeholder="e.g. 1786602592"
+                        value={retriggerOverrides.image.gbn}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, image: { ...prev.image, gbn: e.target.value }
+                        }))} />
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {/* Common fields */}
               <div className="retrigger-section">
-                <h4>Common Options</h4>
+                <h4>Test Framework</h4>
                 <div className="retrigger-fields">
                   <div className="retrigger-field">
-                    <label>Nutest Branch Name</label>
+                    <label>Nutest / Framework Branch</label>
                     <input type="text" placeholder="e.g. ganges-7.6-stable"
                       value={retriggerOverrides.nutest_branch}
                       onChange={e => setRetriggerOverrides(prev => ({ ...prev, nutest_branch: e.target.value }))} />
                   </div>
                   <div className="retrigger-field">
+                    <label>Nutest / Framework Commit</label>
+                    <input type="text" placeholder="nutest-py3-tests commit"
+                      value={retriggerOverrides.nutest_commit}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, nutest_commit: e.target.value }))} />
+                  </div>
+                  <div className="retrigger-field">
+                    <label>Test Branch</label>
+                    <input type="text" placeholder="test_framework_metadata.test.branch"
+                      value={retriggerOverrides.test_branch}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, test_branch: e.target.value }))} />
+                  </div>
+                  <div className="retrigger-field">
+                    <label>Test Commit</label>
+                    <input type="text" placeholder="test_framework_metadata.test.commit"
+                      value={retriggerOverrides.test_commit}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, test_commit: e.target.value }))} />
+                  </div>
+                  <div className="retrigger-field">
+                    <label>Framework Branch Override</label>
+                    <input type="text" placeholder="optional, defaults to nutest branch"
+                      value={retriggerOverrides.framework_branch}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, framework_branch: e.target.value }))} />
+                  </div>
+                  <div className="retrigger-field">
+                    <label>Framework Commit Override</label>
+                    <input type="text" placeholder="optional, defaults to nutest commit"
+                      value={retriggerOverrides.framework_commit}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, framework_commit: e.target.value }))} />
+                  </div>
+                  <div className="retrigger-field retrigger-field-wide">
                     <label>Test Patch URL</label>
                     <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
                       value={retriggerOverrides.patch_url}
                       onChange={e => setRetriggerOverrides(prev => ({ ...prev, patch_url: e.target.value }))} />
                   </div>
-                  <div className="retrigger-field">
+                  <div className="retrigger-field retrigger-field-wide">
                     <label>Framework Patch URL</label>
                     <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
                       value={retriggerOverrides.framework_patch_url}
                       onChange={e => setRetriggerOverrides(prev => ({ ...prev, framework_patch_url: e.target.value }))} />
                   </div>
+                </div>
+              </div>
+
+              <div className="retrigger-section">
+                <h4>Task / Infra Options</h4>
+                <div className="retrigger-fields">
                   <div className="retrigger-field">
-                    <label>Resource Pool</label>
-                    <input type="text" placeholder="e.g. Regression_cdp_special_config"
-                      value={retriggerOverrides.resource_pool}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, resource_pool: e.target.value }))} />
+                    <label>Label</label>
+                    <input type="text" placeholder="original label + -rerun"
+                      value={retriggerOverrides.label}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, label: e.target.value }))} />
+                  </div>
+                  <div className="retrigger-field">
+                    <label>Priority</label>
+                    <input type="text" placeholder="e.g. 10"
+                      value={retriggerOverrides.priority}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, priority: e.target.value }))} />
+                  </div>
+                  <div className="retrigger-field retrigger-field-wide">
+                    <label className="retrigger-check-label retrigger-override-toggle">
+                      <input type="checkbox" checked={retriggerOverrides.overridePool}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, overridePool: e.target.checked }))} />
+                      <span>Override resource pool</span>
+                    </label>
+                    {!retriggerOverrides.overridePool && (
+                      <p className="retrigger-pool-hint">Using each task&apos;s original / default pool.</p>
+                    )}
+                    {retriggerOverrides.overridePool && selectedRetriggerTaskIds.length > 1 && (
+                      <div className="retrigger-warning">
+                        Selected testcases belong to multiple Jita tasks.
+                        The pool you enter here overrides the default pool on every task.
+                      </div>
+                    )}
+                    {retriggerOverrides.overridePool && (
+                      <>
+                        <label>Resource Pool(s)</label>
+                        <input type="text" placeholder="comma-separated, e.g. Regression_cdp_special_config, CDP_regression_ESXi_Qual"
+                          value={retriggerOverrides.resource_pool}
+                          onChange={e => setRetriggerOverrides(prev => ({ ...prev, resource_pool: e.target.value }))} />
+                      </>
+                    )}
+                  </div>
+                  <div className="retrigger-field retrigger-field-wide">
+                    <label>Tester Tags</label>
+                    <textarea
+                      rows={2}
+                      placeholder="comma-separated tags; leave blank to keep original (jita3 is always added)"
+                      value={retriggerOverrides.tester_tags}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, tester_tags: e.target.value }))}
+                    />
                   </div>
                 </div>
+              </div>
+
+              <div className="retrigger-section">
+                <h4>Scheduling / Retain</h4>
+                <label className="retrigger-check-label retrigger-override-toggle">
+                  <input type="checkbox" checked={retriggerOverrides.overrideScheduling}
+                    onChange={e => setRetriggerOverrides(prev => ({ ...prev, overrideScheduling: e.target.checked }))} />
+                  <span>Override skip_resource_spec_match / check_image_compatibility</span>
+                </label>
+                {retriggerOverrides.overrideScheduling && (
+                  <div className="retrigger-component-checks retrigger-inline-checks">
+                    <label className="retrigger-check-label">
+                      <input type="checkbox" checked={retriggerOverrides.skip_resource_spec_match}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, skip_resource_spec_match: e.target.checked }))} />
+                      <span>skip_resource_spec_match</span>
+                    </label>
+                    <label className="retrigger-check-label">
+                      <input type="checkbox" checked={retriggerOverrides.check_image_compatibility}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, check_image_compatibility: e.target.checked }))} />
+                      <span>check_image_compatibility</span>
+                    </label>
+                  </div>
+                )}
+                <label className="retrigger-check-label retrigger-override-toggle">
+                  <input type="checkbox" checked={retriggerOverrides.overrideRetain}
+                    onChange={e => setRetriggerOverrides(prev => ({ ...prev, overrideRetain: e.target.checked }))} />
+                  <span>Override retain_resources_config</span>
+                </label>
+                {retriggerOverrides.overrideRetain && (
+                  <div className="retrigger-fields">
+                    <label className="retrigger-check-label">
+                      <input type="checkbox" checked={retriggerOverrides.retain_on_failure}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, retain_on_failure: e.target.checked }))} />
+                      <span>Retain on test failure</span>
+                    </label>
+                    <div className="retrigger-field">
+                      <label>Retain Duration (minutes)</label>
+                      <input type="text" placeholder="720"
+                        value={retriggerOverrides.retain_duration}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, retain_duration: e.target.value }))} />
+                    </div>
+                    <div className="retrigger-field">
+                      <label>Retain Entity</label>
+                      <select value={retriggerOverrides.retain_entity}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, retain_entity: e.target.value }))}>
+                        <option value="CONTAINER">CONTAINER</option>
+                        <option value="DEPLOYMENT">DEPLOYMENT</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {retriggerResults && (
@@ -2947,12 +3181,20 @@ export default function FailedTestcaseAnalysis() {
                           <span className="retrigger-stat retrigger-stat-fail">{retriggerResults.failed} failed</span>
                         )}
                       </div>
+                      {retriggerResultsUrl && (
+                        <div className="retrigger-merged-link">
+                          <a href={retriggerResultsUrl} target="_blank" rel="noopener noreferrer">
+                            {succeededRerunIds.length > 1 ? 'Open merged Jita results' : 'Open Jita results'}
+                          </a>
+                        </div>
+                      )}
                       {retriggerResults.results && retriggerResults.results.map((r, i) => (
                         <div key={i} className={`retrigger-result-row ${r.success ? 'retrigger-result-ok' : 'retrigger-result-fail'}`}>
-                          <span className="retrigger-result-task">Task: {r.agave_task_id}</span>
+                          <span className="retrigger-result-task">Source: {r.agave_task_id}</span>
                           {r.success ? (
                             <span className="retrigger-result-new-id">
-                              Rerun ID: <a href={`https://jita.eng.nutanix.com/api/v2/agave_tasks/${r.rerun_task_id}`} target="_blank" rel="noopener noreferrer">{r.rerun_task_id}</a>
+                              Rerun:{' '}
+                              <a href={jitaResultsUrl(r.rerun_task_id)} target="_blank" rel="noopener noreferrer">{r.rerun_task_id}</a>
                               {r.message && <span> — {r.message}</span>}
                             </span>
                           ) : (

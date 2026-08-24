@@ -1,5 +1,6 @@
 import os
 import base64
+import json
 import logging
 import functools
 from datetime import datetime, timedelta, timezone
@@ -58,6 +59,36 @@ else:
 
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = int(os.environ.get("JWT_EXPIRY_HOURS", "24"))
+
+
+# ---------------------------------------------------------------------------
+# Team Configuration
+# ---------------------------------------------------------------------------
+def load_teams_config():
+    """Load teams configuration from teams.json at the project root."""
+    # abspath so un-normalized import paths (e.g. backend/tests/../auth.py)
+    # still resolve to <repo>/teams.json rather than backend/tests/teams.json.
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    teams_file = os.path.join(project_root, "teams.json")
+    try:
+        with open(teams_file, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load teams.json: {e}")
+        return {"teams": [], "default_team": None}
+
+
+def validate_team(team_id):
+    """Check if team_id is valid"""
+    config = load_teams_config()
+    valid_ids = [t["id"] for t in config.get("teams", [])]
+    return team_id in valid_ids
+
+
+def get_default_team():
+    """Get the default team from configuration"""
+    config = load_teams_config()
+    return config.get("default_team") or "CDP_FT"
 
 
 # ---------------------------------------------------------------------------
@@ -135,11 +166,18 @@ class LDAPAuth:
 # ---------------------------------------------------------------------------
 # JWT helpers
 # ---------------------------------------------------------------------------
-def create_jwt(username, display_name="", email=""):
+def create_jwt(username, display_name="", email="", team=None):
+    """Create JWT with user info and team"""
+    if not team:
+        team = get_default_team()
+    if not validate_team(team):
+        team = get_default_team()
+    
     payload = {
         "sub": username,
         "name": display_name,
         "email": email,
+        "team": team,
         "iat": datetime.now(timezone.utc),
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
     }
@@ -165,6 +203,7 @@ def jwt_required(fn):
     """Decorator that enforces a valid JWT on the request.
 
     Sets ``g.current_user`` with the decoded payload on success.
+    Sets ``g.team`` with the team from the JWT payload.
     Returns 401 JSON on missing / invalid / expired token.
     """
 
@@ -180,6 +219,12 @@ def jwt_required(fn):
             return jsonify({"error": "Invalid or expired token"}), 401
 
         g.current_user = payload
+        g.team = payload.get("team", get_default_team())
+        
+        # Validate team
+        if not validate_team(g.team):
+            g.team = get_default_team()
+        
         return fn(*args, **kwargs)
 
     return wrapper
