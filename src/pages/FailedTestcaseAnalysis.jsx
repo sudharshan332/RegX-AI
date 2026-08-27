@@ -1,17 +1,75 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
 import { API_BASE_URL } from '../config';
+import { extractJitaTaskIds, buildJitaResultsUrls } from '../utils/jitaTaskIds';
 import './FailedTestcaseAnalysis.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/failed-analysis`;
+const NODE_POOL_SEARCH_URL = `${API_BASE_URL}/mcp/regression/dynamic-jp/search-node-pools`;
 const JIRA_URL = 'https://jira.nutanix.com/browse/';
-const JITA_RESULTS_URL = 'https://jita.eng.nutanix.com/results';
+const RESOURCE_MODE_OPTIONS = [
+  { value: 'node_pool', label: 'By Node Pool' },
+  { value: 'cluster', label: 'By Cluster Pool' },
+  { value: 'global_pool', label: 'By Global Pool' },
+  { value: 'name', label: 'By Name' },
+];
+const RESOURCE_TYPE_OPTIONS = [
+  { value: 'physical', label: 'Physical' },
+  { value: 'nested_2.0', label: 'NestedAHV 2.0' },
+  { value: 'nested_1.0', label: 'NestedAHV 1.0' },
+];
+const HYPERVISOR_OPTIONS = ['esx', 'kvm', 'hyperv', 'xen'];
+
+function normalizeJitaTaskId(id) {
+  if (!id) return '';
+  if (typeof id === 'object') return String(id.$oid || id._id || id.id || '');
+  return String(id).trim();
+}
 
 function jitaResultsUrl(taskIds) {
-  const ids = (Array.isArray(taskIds) ? taskIds : [taskIds]).filter(Boolean);
-  if (ids.length === 0) return '';
-  if (ids.length === 1) return `${JITA_RESULTS_URL}?task_ids=${ids[0]}`;
-  return `${JITA_RESULTS_URL}?task_ids=${ids.join(',')}&active_tab=1&merge_tests=true`;
+  const urls = buildJitaResultsUrls(
+    (Array.isArray(taskIds) ? taskIds : [taskIds]).map(normalizeJitaTaskId).filter(Boolean)
+  );
+  return urls[0] || '';
+}
+
+function jitaResultsUrls(taskIds) {
+  return buildJitaResultsUrls(
+    (Array.isArray(taskIds) ? taskIds : [taskIds]).map(normalizeJitaTaskId).filter(Boolean)
+  );
+}
+
+function copyTextToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+  return Promise.resolve();
+}
+
+const RETRIGGER_SMOKE_TAGS = [
+  'Latest Smoke Passed',
+  'Latest DIAL Passed',
+  'latest_smoke_passed',
+  '$LATEST_SMOKE_PASSED',
+];
+
+function applyCommitOrTag(overrides, raw, commitKey, tagKey) {
+  const value = (raw || '').trim();
+  if (!value) return;
+  const mapped = RETRIGGER_SMOKE_TAGS.find(t => t.toLowerCase() === value.toLowerCase());
+  if (mapped || value.startsWith('$')) {
+    overrides[tagKey] = mapped || value;
+  } else {
+    overrides[commitKey] = value;
+  }
 }
 
 const TEST_STATUS_OPTIONS = [
@@ -19,7 +77,33 @@ const TEST_STATUS_OPTIONS = [
   { id: 'skipped', label: 'Skipped' },
   { id: 'warning', label: 'Warning' },
   { id: 'killed', label: 'Killed' },
+  { id: 'pending', label: 'Pending' },
 ];
+
+const STATUS_OPTION_ALIASES = {
+  failed: ['failed', 'failure'],
+  skipped: ['skipped', 'skip'],
+  warning: ['warning', 'warn'],
+  killed: ['killed', 'terminated', 'cancelled'],
+  pending: ['pending', 'waiting', 'running', 'started'],
+};
+
+function optionIdForRawStatus(raw) {
+  const s = String(raw || '').toLowerCase();
+  if (!s || s === '(empty)') return null;
+  for (const opt of TEST_STATUS_OPTIONS) {
+    const aliases = STATUS_OPTION_ALIASES[opt.id] || [opt.id];
+    if (opt.id === s || aliases.includes(s)) return opt.id;
+  }
+  return null;
+}
+
+function formatStatusCountSummary(counts) {
+  return Object.entries(counts || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([status, n]) => `${n} ${status}`)
+    .join(', ');
+}
 
 const COLUMNS = [
   { id: 'testcase_name', label: 'Testcase Name', defaultVisible: true },
@@ -70,8 +154,9 @@ const STATUS_GROUP_MAP = {
   skipped: 'Skipped', skip: 'Skipped',
   warning: 'Warning', warn: 'Warning',
   killed: 'Killed', terminated: 'Killed', cancelled: 'Killed',
+  pending: 'Pending', waiting: 'Pending', running: 'Pending', started: 'Pending',
 };
-const ALL_STATUS_GROUPS = ['Failed', 'Skipped', 'Warning', 'Killed'];
+const ALL_STATUS_GROUPS = ['Failed', 'Skipped', 'Warning', 'Killed', 'Pending'];
 
 function normalizeStatusGroup(status) {
   return STATUS_GROUP_MAP[(status || '').toLowerCase()] || 'Failed';
@@ -88,6 +173,7 @@ export default function FailedTestcaseAnalysis() {
   const [results, setResults] = useState([]);
   const [filteredResults, setFilteredResults] = useState([]);
   const [error, setError] = useState(null);
+  const [statusMismatch, setStatusMismatch] = useState(null);
   const [visibleColumns, setVisibleColumns] = useState(getStoredVisibleColumns);
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [columnCheckboxes, setColumnCheckboxes] = useState(() => {
@@ -117,13 +203,10 @@ export default function FailedTestcaseAnalysis() {
   // Cursor AI deep analysis state
   const [cursorAiLoading, setCursorAiLoading] = useState({});
   const [cursorAiResults, setCursorAiResults] = useState({});
-  // Live progress while a streaming analysis runs: testId -> { status, text }
-  const [cursorAiStreaming, setCursorAiStreaming] = useState({});
   const [cursorAiDetailModal, setCursorAiDetailModal] = useState(null);
   const [cursorAiBatchJobId, setCursorAiBatchJobId] = useState(null);
   const [cursorAiBatchStatus, setCursorAiBatchStatus] = useState(null);
-  const [cursorAiSessions, setCursorAiSessions] = useState({}); // testId -> session_id
-  const [cursorAiAgentIds, setCursorAiAgentIds] = useState({}); // testId -> agent_id
+  const [cursorAiSessions, setCursorAiSessions] = useState({});
   const [cursorAiOpenTabs, setCursorAiOpenTabs] = useState([]);
   const [cursorAiMinimizedTabs, setCursorAiMinimizedTabs] = useState({});
   const [followUpInput, setFollowUpInput] = useState('');
@@ -132,41 +215,47 @@ export default function FailedTestcaseAnalysis() {
   const [followUpHistoryByTestcase, setFollowUpHistoryByTestcase] = useState({});
   // Ask is the fast path (answer from existing analysis; minimal/no MCP).
   // Use Agent/Plan only when the user wants deeper re-investigation.
-  const [followUpMode, setFollowUpMode] = useState('agent');
+  const [followUpMode, setFollowUpMode] = useState('ask');
 
   // Retrigger state
   const [retriggerModalOpen, setRetriggerModalOpen] = useState(false);
   const [retriggerLoading, setRetriggerLoading] = useState(false);
   const RETRIGGER_DEFAULTS = {
     updateNos: false,
-    nos: { branch: '', updateType: 'tag', buildType: '', tag: '', commitId: '', gbn: '' },
+    nos: { branch: '', commitId: '', gbn: '' },
     updatePc: false,
-    pc: { branch: '', updateType: 'tag', buildType: '', tag: '', commitId: '', gbn: '' },
+    pc: { branch: '', commitId: '', gbn: '', buildUrl: '', qcow2Url: '' },
     updateImage: false,
     image: { branch: '', commitId: '', gbn: '' },
+    updateFramework: false,
     nutest_branch: '',
-    nutest_commit: '',
-    test_branch: '',
-    test_commit: '',
-    framework_branch: '',
-    framework_commit: '',
     patch_url: '',
     framework_patch_url: '',
     overridePool: false,
     resource_pool: '',
+    updateResource: false,
+    overrideResource: false,
+    resources_mode: 'node_pool',
+    resource_type: 'physical',
+    hypervisor: '',
+    node_pools: [],
+    match_resource_spec: true,
     label: '',
     priority: '',
     tester_tags: '',
     overrideScheduling: false,
     skip_resource_spec_match: false,
     check_image_compatibility: true,
-    overrideRetain: false,
-    retain_on_failure: true,
-    retain_duration: '720',
-    retain_entity: 'CONTAINER',
   };
   const [retriggerOverrides, setRetriggerOverrides] = useState({ ...RETRIGGER_DEFAULTS });
   const [retriggerResults, setRetriggerResults] = useState(null);
+  const [retriggerCopied, setRetriggerCopied] = useState('');
+  const [retriggerResourcePreview, setRetriggerResourcePreview] = useState({ loading: false, tasks: [] });
+  const [nodePoolSearch, setNodePoolSearch] = useState('');
+  const [nodePoolResults, setNodePoolResults] = useState([]);
+  const [nodePoolLoading, setNodePoolLoading] = useState(false);
+  const nodePoolDebounce = useRef(null);
+  const nodePoolReqId = useRef(0);
 
   // Per-row AI summary state
   const [aiSummaryLoading, setAiSummaryLoading] = useState({});
@@ -297,13 +386,11 @@ export default function FailedTestcaseAnalysis() {
       const cursorAi = data.cursor_ai || {};
       setCursorAiResults(cursorAi.results || {});
       setCursorAiSessions(cursorAi.sessions || {});
-      setCursorAiAgentIds(cursorAi.agent_ids || {});
       setFollowUpHistoryByTestcase(cursorAi.follow_up_history_by_testcase || {});
     } catch (_) {
       setResults([]);
       setCursorAiResults({});
       setCursorAiSessions({});
-      setCursorAiAgentIds({});
       setFollowUpHistoryByTestcase({});
     } finally {
       setLoading(false);
@@ -329,10 +416,9 @@ export default function FailedTestcaseAnalysis() {
     saveResultsForTag(analysisTag, results, currentBranch, {
       results: cursorAiResults,
       sessions: cursorAiSessions,
-      agent_ids: cursorAiAgentIds,
       follow_up_history_by_testcase: followUpHistoryByTestcase,
     });
-  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, cursorAiAgentIds, followUpHistoryByTestcase, saveResultsForTag]);
+  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, followUpHistoryByTestcase, saveResultsForTag]);
 
   const buildIncludeParam = useCallback((cols) => {
     const include = new Set(['basic', 'exception_summary', 'intermittent']);
@@ -343,19 +429,32 @@ export default function FailedTestcaseAnalysis() {
     return Array.from(include).join(',');
   }, []);
 
-  const handleAnalyze = async () => {
-    if (!tag.trim() && !taskIds.trim()) {
+  const handleAnalyze = async (statusOverride = null) => {
+    const statuses = (Array.isArray(statusOverride) && statusOverride.length)
+      ? statusOverride
+      : selectedStatuses;
+    const parsedTaskIds = inputMode === 'task_ids' ? extractJitaTaskIds(taskIds) : [];
+    if (inputMode === 'task_ids') {
+      if (!parsedTaskIds.length) {
+        alert('Please provide valid JITA task IDs (24-char hex) or a JITA results URL');
+        return;
+      }
+    } else if (!tag.trim()) {
       alert('Please provide either a tag or task IDs');
       return;
     }
-    if (selectedStatuses.length === 0) {
+    if (statuses.length === 0) {
       alert('Please select at least one test status');
       return;
+    }
+    if (Array.isArray(statusOverride) && statusOverride.length) {
+      setSelectedStatuses(statusOverride);
     }
     setAnalyzing(true);
     setStreamPhase('preparing');
     setTotalExpected(0);
     setError(null);
+    setStatusMismatch(null);
     setResults([]);
     setFilteredResults([]);
     setFilterOwner('');
@@ -375,9 +474,10 @@ export default function FailedTestcaseAnalysis() {
           current_branch: '',
         });
       } catch (_) {}
+    } else if (inputMode === 'task_ids' && parsedTaskIds.length) {
+      searchParams.set('task_ids', parsedTaskIds.join(','));
     }
-    else if (inputMode === 'task_ids' && taskIds.trim()) searchParams.set('task_ids', taskIds.trim());
-    searchParams.set('statuses', selectedStatuses.join(','));
+    searchParams.set('statuses', statuses.join(','));
     const url = `${API_BASE}/analyze-stream?${searchParams.toString()}`;
 
     const collectedRows = [];
@@ -419,7 +519,28 @@ export default function FailedTestcaseAnalysis() {
                 if (event.total === 0) {
                   setAnalyzing(false);
                   setStreamPhase('');
-                  alert('No testcases found for the given criteria and selected statuses.');
+                  const counts = event.status_counts || {};
+                  const summary = formatStatusCountSummary(counts);
+                  const optionIds = [...new Set(
+                    Object.keys(counts).map(optionIdForRawStatus).filter(Boolean)
+                  )];
+                  if ((event.fetched_total || 0) > 0 && summary) {
+                    setStatusMismatch({
+                      counts,
+                      optionIds,
+                      fetchedTotal: event.fetched_total,
+                      taskCount: event.task_count,
+                    });
+                    setError(
+                      `No testcases matched the selected status filter. ` +
+                      `Fetched ${event.fetched_total} result(s)` +
+                      (event.task_count ? ` from ${event.task_count} task(s)` : '') +
+                      `: ${summary}. Select those statuses and analyze again.`
+                    );
+                  } else {
+                    setStatusMismatch(null);
+                    setError('No testcases found for the given criteria and selected statuses.');
+                  }
                 }
               } else if (event.type === 'row' && event.result) {
                 collectedRows.push(event.result);
@@ -665,98 +786,28 @@ export default function FailedTestcaseAnalysis() {
     const testId = result.testcase_id;
     if (!testId) return;
     setCursorAiLoading(prev => ({ ...prev, [testId]: true }));
-    setCursorAiStreaming(prev => ({ ...prev, [testId]: { status: 'Starting deep analysis…', text: '' } }));
-
-    let acc = '';
-    let finalHandled = false;
     try {
-      const token = localStorage.getItem('regx_auth_token');
-      const response = await fetch(`${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase-stream`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          testcase_name: result.testcase_name,
-          exception_summary: result.exception_summary,
-          exception: result.exception,
-          test_log_url: result.test_log_url,
-          jira_tickets: result.jira_tickets || [],
-          failure_stage: result.failure_stage,
-        }),
+      const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase`, {
+        testcase_name: result.testcase_name,
+        exception_summary: result.exception_summary,
+        exception: result.exception,
+        test_log_url: result.test_log_url,
+        jira_tickets: result.jira_tickets || [],
+        failure_stage: result.failure_stage,
       });
-
-      if (!response.ok || !response.body) {
-        const errData = await response.json().catch(() => ({}));
-        setCursorAiResults(prev => ({ ...prev, [testId]: { error: errData.error || `Request failed: ${response.status}` } }));
-        return;
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          let event;
-          try { event = JSON.parse(line.slice(6)); } catch { continue; }
-
-          if (event.type === 'status') {
-            setCursorAiStreaming(prev => ({
-              ...prev,
-              [testId]: { ...(prev[testId] || {}), status: event.text || '' },
-            }));
-          } else if (event.type === 'delta') {
-            acc += event.text || '';
-            setCursorAiStreaming(prev => ({
-              ...prev,
-              [testId]: { status: (prev[testId] && prev[testId].status) || 'Writing analysis…', text: acc },
-            }));
-          } else if (event.type === 'done') {
-            finalHandled = true;
-            setCursorAiResults(prev => ({
-              ...prev,
-              [testId]: {
-                ...(event.analysis || {}),
-                agave_task_id: result.agave_task_id || '',
-                test_log_url: result.test_log_url || (event.analysis || {}).test_log_url || '',
-                exception: result.exception || (event.analysis || {}).exception || '',
-                exception_summary: result.exception_summary || (event.analysis || {}).exception_summary || '',
-                current_branch: currentBranch || '',
-              },
-            }));
-            if (event.session_id) setCursorAiSessions(prev => ({ ...prev, [testId]: event.session_id }));
-            if (event.agent_id) setCursorAiAgentIds(prev => ({ ...prev, [testId]: event.agent_id }));
-          } else if (event.type === 'error') {
-            finalHandled = true;
-            setCursorAiResults(prev => ({ ...prev, [testId]: { error: event.message || 'Analysis failed' } }));
-          }
+      if (resp.data?.success) {
+        setCursorAiResults(prev => ({ ...prev, [testId]: resp.data.analysis }));
+        if (resp.data.session_id) {
+          setCursorAiSessions(prev => ({ ...prev, [testId]: resp.data.session_id }));
         }
-      }
-
-      if (!finalHandled) {
-        setCursorAiResults(prev => ({
-          ...prev,
-          [testId]: prev[testId] || { error: 'Analysis ended before completing' },
-        }));
+      } else {
+        setCursorAiResults(prev => ({ ...prev, [testId]: { error: resp.data?.error || 'Analysis failed' } }));
       }
     } catch (err) {
-      const msg = err.message || 'Cursor AI analysis failed';
+      const msg = err.response?.data?.error || err.message || 'Cursor AI analysis failed';
       setCursorAiResults(prev => ({ ...prev, [testId]: { error: msg } }));
     } finally {
       setCursorAiLoading(prev => ({ ...prev, [testId]: false }));
-      setCursorAiStreaming(prev => {
-        const next = { ...prev };
-        delete next[testId];
-        return next;
-      });
     }
   };
 
@@ -812,9 +863,6 @@ export default function FailedTestcaseAnalysis() {
               if (val.session_id) {
                 setCursorAiSessions(prev => ({ ...prev, [key]: val.session_id }));
               }
-              if (val.agent_id) {
-                setCursorAiAgentIds(prev => ({ ...prev, [key]: val.agent_id }));
-              }
               setCursorAiLoading(prev => ({ ...prev, [key]: false }));
             } else {
               setCursorAiResults(prev => ({ ...prev, [key]: { error: val.error || 'Failed' } }));
@@ -843,11 +891,7 @@ export default function FailedTestcaseAnalysis() {
     if (!sessionId) return;
 
     const question = followUpInput.trim();
-    const pendingDraft = cursorAiDetailModal.pending_ticket_draft || null;
-    // Auto-upgrade Ask → Agent for ticket/CR/tool work (incl. "yes" confirming a draft).
-    const confirmLike = /^(yes|y|ok|okay|confirm|proceed)\b/i.test(question.replace(/[*`_]/g, '').trim());
-    const needsTools = confirmLike || /\b(jira|eng-\d+|gerrit|glean|cr\b|ticket|create|file|fixed|status|handoff)\b/i.test(question);
-    const selectedMode = (followUpMode === 'ask' && needsTools) ? 'agent' : followUpMode;
+    const selectedMode = followUpMode;
     setFollowUpLoading(true);
     const testcaseId = cursorAiDetailModal._testcase_id;
     setFollowUpHistory(prev => {
@@ -860,65 +904,27 @@ export default function FailedTestcaseAnalysis() {
     setFollowUpInput('');
 
     try {
-      const ticketContext = {
-        testcase_name: cursorAiDetailModal.testcase_name || '',
-        testcase_id: cursorAiDetailModal._testcase_id || cursorAiDetailModal.testcase_id || '',
-        agave_task_id: cursorAiDetailModal.agave_task_id || '',
-        root_cause: String(cursorAiDetailModal.root_cause || ''),
-        classification: cursorAiDetailModal.classification || '',
-        suggested_fix: String(cursorAiDetailModal.suggested_fix || ''),
-        triage_report: String(cursorAiDetailModal.triage_report || ''),
-        related_components: cursorAiDetailModal.related_components || [],
-        jira_duplicates: cursorAiDetailModal.jira_duplicates || [],
-        test_log_url: cursorAiDetailModal.test_log_url || '',
-        exception: cursorAiDetailModal.exception || '',
-        exception_summary: cursorAiDetailModal.exception_summary || '',
-        confidence: cursorAiDetailModal.confidence || '',
-        current_branch: cursorAiDetailModal.current_branch || currentBranch || '',
-        nutest_branch: cursorAiDetailModal.nutest_branch || cursorAiDetailModal.gerrit_branch || '',
-        gerrit_branch: cursorAiDetailModal.gerrit_branch || '',
-        handoff_branch: cursorAiDetailModal.handoff_branch || '',
-        nos_branch: cursorAiDetailModal.nos_branch || '',
-        pending_ticket_draft: pendingDraft,
-        // Confirming a draft must create immediately (not re-prompt).
-        ...(confirmLike && pendingDraft ? { confirm: true } : {}),
-      };
       const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/follow-up`, {
         session_id: sessionId,
         question,
-        mode: selectedMode,
-        ticket_context: ticketContext,
+        mode: followUpMode,
         recovery_context: {
           testcase_name: cursorAiDetailModal.testcase_name || '',
-          testcase_id: cursorAiDetailModal._testcase_id || cursorAiDetailModal.testcase_id || '',
-          agave_task_id: cursorAiDetailModal.agave_task_id || '',
-          agent_id: cursorAiDetailModal._agent_id || cursorAiAgentIds[testcaseId] || '',
-          // Lean payload for cold recovery — ticket create uses ticket_context above.
           latest_analysis: {
-            root_cause: String(cursorAiDetailModal.root_cause || '').slice(0, 1500),
+            root_cause: cursorAiDetailModal.root_cause || '',
             classification: cursorAiDetailModal.classification || '',
             failing_code: cursorAiDetailModal.failing_code || null,
-            suggested_fix: String(cursorAiDetailModal.suggested_fix || '').slice(0, 800),
+            suggested_fix: cursorAiDetailModal.suggested_fix || '',
             confidence: cursorAiDetailModal.confidence || '',
-            triage_report: String(cursorAiDetailModal.triage_report || ''),
             related_components: cursorAiDetailModal.related_components || [],
             jira_duplicates: cursorAiDetailModal.jira_duplicates || [],
-            test_log_url: cursorAiDetailModal.test_log_url || '',
-            exception: cursorAiDetailModal.exception || '',
-            exception_summary: cursorAiDetailModal.exception_summary || '',
-            agave_task_id: cursorAiDetailModal.agave_task_id || '',
-            testcase_id: cursorAiDetailModal._testcase_id || cursorAiDetailModal.testcase_id || '',
-            pending_ticket_draft: pendingDraft,
-            current_branch: cursorAiDetailModal.current_branch || currentBranch || '',
+            triage_report: cursorAiDetailModal.triage_report || '',
           },
-          prior_history: followUpHistory.slice(-6),
+          prior_history: followUpHistory.slice(-20),
         },
       });
       if (resp.data?.success) {
         const analysis = resp.data.analysis;
-        if (resp.data.agent_id && testcaseId) {
-          setCursorAiAgentIds(prev => ({ ...prev, [testcaseId]: resp.data.agent_id }));
-        }
         setFollowUpHistory(prev => {
           const next = [...prev, { role: 'assistant', data: analysis, mode: selectedMode }];
           if (testcaseId) {
@@ -929,7 +935,6 @@ export default function FailedTestcaseAnalysis() {
         setCursorAiDetailModal(prev => ({
           ...prev,
           ...analysis,
-          _agent_id: resp.data.agent_id || prev._agent_id,
           follow_up_answer: analysis.follow_up_answer,
         }));
         if (cursorAiDetailModal._testcase_id) {
@@ -953,10 +958,7 @@ export default function FailedTestcaseAnalysis() {
   };
 
   const getCursorAiStatusBadge = (testId) => {
-    if (cursorAiLoading[testId]) {
-      const label = cursorAiStreaming[testId]?.status || 'Analyzing…';
-      return <span className="badge cursor-ai-loading" title={cursorAiStreaming[testId]?.text || ''}>{label}</span>;
-    }
+    if (cursorAiLoading[testId]) return <span className="badge cursor-ai-loading">Analyzing…</span>;
     const res = cursorAiResults[testId];
     if (!res) return null;
     if (res.error) return <span className="badge cursor-ai-error" title={res.error}>Error</span>;
@@ -985,10 +987,6 @@ export default function FailedTestcaseAnalysis() {
         tabId,
         testcase_id: testId,
         testcase_name: result.testcase_name,
-        agave_task_id: result.agave_task_id || '',
-        test_log_url: result.test_log_url || '',
-        exception: result.exception || '',
-        exception_summary: result.exception_summary || '',
         analysis,
         session_id: sessionId,
       }];
@@ -1020,20 +1018,106 @@ export default function FailedTestcaseAnalysis() {
       nos: { ...RETRIGGER_DEFAULTS.nos },
       pc: { ...RETRIGGER_DEFAULTS.pc },
       image: { ...RETRIGGER_DEFAULTS.image },
+      node_pools: [],
     });
+    setNodePoolSearch('');
+    setNodePoolResults([]);
+    setNodePoolLoading(false);
     setRetriggerResults(null);
+    setRetriggerCopied('');
     setRetriggerModalOpen(true);
+    const taskIds = [...new Set(
+      selectedRows
+        .map(id => results.find(r => r.testcase_id === id))
+        .filter(Boolean)
+        .map(r => r.agave_task_id)
+        .filter(Boolean)
+    )];
+    setRetriggerResourcePreview({ loading: true, tasks: [] });
+    api.post(`${API_BASE}/retrigger-preview`, { task_ids: taskIds })
+      .then((resp) => {
+        const tasks = resp.data?.tasks || [];
+        setRetriggerResourcePreview({ loading: false, tasks });
+        const first = tasks[0] || {};
+        setRetriggerOverrides(prev => ({
+          ...prev,
+          nos: { ...prev.nos, branch: first.nos_branch || prev.nos.branch },
+          resources_mode: first.resources_mode || prev.resources_mode,
+          resource_type: first.resource_type_key || prev.resource_type,
+          hypervisor: first.hypervisor || prev.hypervisor,
+          node_pools: Array.isArray(first.node_pools) ? [...first.node_pools] : [],
+          match_resource_spec: first.match_resource_spec !== false,
+        }));
+      })
+      .catch(() => {
+        setRetriggerResourcePreview({ loading: false, tasks: [] });
+      });
+  };
+
+  const updateResourceOverride = (patch) => {
+    setRetriggerOverrides(prev => ({ ...prev, overrideResource: true, ...patch }));
+  };
+
+  const handleSearchRetriggerNodePools = (query) => {
+    setNodePoolSearch(query);
+    if (nodePoolDebounce.current) clearTimeout(nodePoolDebounce.current);
+    if (!query || query.length < 2) {
+      setNodePoolResults([]);
+      setNodePoolLoading(false);
+      return;
+    }
+    setNodePoolLoading(true);
+    nodePoolDebounce.current = setTimeout(async () => {
+      const reqId = ++nodePoolReqId.current;
+      try {
+        const response = await api.post(NODE_POOL_SEARCH_URL, { query });
+        if (reqId === nodePoolReqId.current) {
+          setNodePoolResults(Array.isArray(response.data?.pools) ? response.data.pools : []);
+        }
+      } catch (_) {
+        if (reqId === nodePoolReqId.current) setNodePoolResults([]);
+      } finally {
+        if (reqId === nodePoolReqId.current) setNodePoolLoading(false);
+      }
+    }, 300);
+  };
+
+  const addRetriggerNodePool = (pool) => {
+    const name = String(pool || '').trim();
+    if (!name) return;
+    const current = retriggerOverrides.node_pools || [];
+    updateResourceOverride({
+      node_pools: current.includes(name) ? current : [...current, name],
+    });
+    setNodePoolSearch('');
+    setNodePoolResults([]);
+  };
+
+  const removeRetriggerNodePool = (pool) => {
+    updateResourceOverride({
+      node_pools: (retriggerOverrides.node_pools || []).filter(p => p !== pool),
+    });
   };
 
   const selectedRetriggerRows = selectedRows
     .map(id => results.find(r => r.testcase_id === id))
     .filter(Boolean);
   const selectedRetriggerTaskIds = [...new Set(selectedRetriggerRows.map(r => r.agave_task_id).filter(Boolean))];
-  const succeededRerunIds = (retriggerResults?.results || [])
-    .filter(r => r.success && r.rerun_task_id)
-    .map(r => r.rerun_task_id);
-  const retriggerResultsUrl = jitaResultsUrl(succeededRerunIds);
-
+  const succeededRerunIds = (retriggerResults?.rerun_task_ids?.length
+    ? retriggerResults.rerun_task_ids
+    : (retriggerResults?.results || [])
+        .filter(r => r.success && r.rerun_task_id)
+        .map(r => r.rerun_task_id)
+  ).map(normalizeJitaTaskId).filter(Boolean);
+  const retriggerResultUrls = jitaResultsUrls(succeededRerunIds);
+  const pcBuildChanged = retriggerOverrides.updatePc && (
+    !!(retriggerOverrides.pc.commitId || '').trim() ||
+    !!(retriggerOverrides.pc.gbn || '').trim()
+  );
+  const pcBuildUrlsMissing = pcBuildChanged && (
+    !(retriggerOverrides.pc.buildUrl || '').trim() ||
+    !(retriggerOverrides.pc.qcow2Url || '').trim()
+  );
   const handleRetrigger = async () => {
     const selected = selectedRows.filter(Boolean);
     if (selected.length === 0) return;
@@ -1056,25 +1140,16 @@ export default function FailedTestcaseAnalysis() {
     const overrides = {};
     if (retriggerOverrides.updateNos) {
       const n = retriggerOverrides.nos;
-      if (n.branch) overrides.nos_branch = n.branch.trim();
-      if (n.updateType === 'commit') {
-        if (n.commitId) overrides.nos_commit = n.commitId.trim();
-        if (n.gbn) overrides.nos_gbn = n.gbn.trim();
-      } else if (n.updateType === 'tag') {
-        if (n.tag) overrides.nos_tag = n.tag.trim();
-        if (n.buildType) overrides.nos_build_type = n.buildType.trim();
-      }
+      applyCommitOrTag(overrides, n.commitId, 'nos_commit', 'nos_tag');
+      if (n.gbn) overrides.nos_gbn = n.gbn.trim();
     }
     if (retriggerOverrides.updatePc) {
       const p = retriggerOverrides.pc;
       if (p.branch) overrides.pc_branch = p.branch.trim();
-      if (p.updateType === 'commit') {
-        if (p.commitId) overrides.pc_commit = p.commitId.trim();
-        if (p.gbn) overrides.pc_gbn = p.gbn.trim();
-      } else if (p.updateType === 'tag') {
-        if (p.tag) overrides.pc_tag = p.tag.trim();
-        if (p.buildType) overrides.pc_build_type = p.buildType.trim();
-      }
+      applyCommitOrTag(overrides, p.commitId, 'pc_commit', 'pc_tag');
+      if (p.gbn) overrides.pc_gbn = p.gbn.trim();
+      if (p.buildUrl) overrides.pc_build_url = p.buildUrl.trim();
+      if (p.qcow2Url) overrides.pc_build_url_qcow2 = p.qcow2Url.trim();
     }
     if (retriggerOverrides.updateImage) {
       const im = retriggerOverrides.image;
@@ -1082,33 +1157,43 @@ export default function FailedTestcaseAnalysis() {
       if (im.commitId) overrides.image_commit = im.commitId.trim();
       if (im.gbn) overrides.image_gbn = im.gbn.trim();
     }
-    if (retriggerOverrides.nutest_branch) overrides.nutest_branch = retriggerOverrides.nutest_branch.trim();
-    if (retriggerOverrides.nutest_commit) overrides.nutest_commit = retriggerOverrides.nutest_commit.trim();
-    if (retriggerOverrides.test_branch) overrides.test_branch = retriggerOverrides.test_branch.trim();
-    if (retriggerOverrides.test_commit) overrides.test_commit = retriggerOverrides.test_commit.trim();
-    if (retriggerOverrides.framework_branch) overrides.framework_branch = retriggerOverrides.framework_branch.trim();
-    if (retriggerOverrides.framework_commit) overrides.framework_commit = retriggerOverrides.framework_commit.trim();
-    if (retriggerOverrides.patch_url) overrides.patch_url = retriggerOverrides.patch_url.trim();
-    if (retriggerOverrides.framework_patch_url) overrides.framework_patch_url = retriggerOverrides.framework_patch_url.trim();
-    if (retriggerOverrides.overridePool && retriggerOverrides.resource_pool.trim()) {
+    if (retriggerOverrides.updateFramework) {
+      if (retriggerOverrides.nutest_branch) {
+        const branch = retriggerOverrides.nutest_branch.trim();
+        overrides.nutest_branch = branch;
+        overrides.test_branch = branch;
+      }
+      if (retriggerOverrides.patch_url) overrides.patch_url = retriggerOverrides.patch_url.trim();
+      if (retriggerOverrides.framework_patch_url) overrides.framework_patch_url = retriggerOverrides.framework_patch_url.trim();
+    }
+    if (retriggerOverrides.updateResource) {
+      overrides.override_resource_config = true;
+      overrides.resources_mode = retriggerOverrides.resources_mode;
+      overrides.resource_type = retriggerOverrides.resource_type;
+      overrides.node_pools = retriggerOverrides.node_pools;
+      overrides.hypervisor = (retriggerOverrides.hypervisor || '').trim();
+      overrides.match_resource_spec = !!retriggerOverrides.match_resource_spec;
+    } else if (retriggerOverrides.overridePool && retriggerOverrides.resource_pool.trim()) {
       overrides.override_pool = true;
       overrides.resource_pool = retriggerOverrides.resource_pool.trim();
     }
-    if (retriggerOverrides.label) overrides.label = retriggerOverrides.label.trim();
-    if (retriggerOverrides.priority) overrides.priority = retriggerOverrides.priority.trim();
-    if (retriggerOverrides.tester_tags) overrides.tester_tags = retriggerOverrides.tester_tags.trim();
+    if ((retriggerOverrides.label || '').trim()) {
+      overrides.label = retriggerOverrides.label.trim();
+    }
+    if ((retriggerOverrides.priority || '').trim()) {
+      overrides.priority = retriggerOverrides.priority.trim();
+    }
+    if ((retriggerOverrides.tester_tags || '').trim()) {
+      overrides.tester_tags = retriggerOverrides.tester_tags.trim();
+    }
     if (retriggerOverrides.overrideScheduling) {
       overrides.skip_resource_spec_match = !!retriggerOverrides.skip_resource_spec_match;
       overrides.check_image_compatibility = !!retriggerOverrides.check_image_compatibility;
     }
-    if (retriggerOverrides.overrideRetain) {
-      overrides.retain_on_failure = !!retriggerOverrides.retain_on_failure;
-      if (retriggerOverrides.retain_duration) overrides.retain_duration = retriggerOverrides.retain_duration.trim();
-      if (retriggerOverrides.retain_entity) overrides.retain_entity = retriggerOverrides.retain_entity;
-    }
 
     setRetriggerLoading(true);
     setRetriggerResults(null);
+    setRetriggerCopied('');
 
     try {
       const resp = await api.post(`${API_BASE}/retrigger`, {
@@ -1613,6 +1698,7 @@ export default function FailedTestcaseAnalysis() {
           : s === 'skipped' || s === 'skip' ? 'badge-skipped'
           : s === 'warning' || s === 'warn' ? 'badge-warning'
           : s === 'killed' || s === 'terminated' || s === 'cancelled' ? 'badge-killed'
+          : s === 'pending' || s === 'waiting' || s === 'running' || s === 'started' ? 'badge-pending'
           : 'badge-failed';
         return <td key={colId}><span className={`badge ${badgeCls}`}>{statusLabel}</span></td>;
       }
@@ -1872,12 +1958,7 @@ export default function FailedTestcaseAnalysis() {
         return (
           <td key={colId} className="cursor-ai-cell">
             {isLoading ? (
-              <span
-                className="cursor-ai-spinner"
-                title={cursorAiStreaming[result.testcase_id]?.text || 'Analyzing…'}
-              >
-                {cursorAiStreaming[result.testcase_id]?.status || 'Analyzing…'}
-              </span>
+              <span className="cursor-ai-spinner">Analyzing…</span>
             ) : aiRes ? (
               aiRes.error ? (
                 <span className="cursor-ai-error-text" title={aiRes.error}>Failed</span>
@@ -1891,18 +1972,11 @@ export default function FailedTestcaseAnalysis() {
                         testcase_name: result.testcase_name,
                         _testcase_id: result.testcase_id,
                         _session_id: cursorAiSessions[result.testcase_id] || null,
-                        _agent_id: cursorAiAgentIds[result.testcase_id] || null,
                         ...aiRes,
-                        // Prefer run metadata from the failed-analysis row (aiRes may omit these).
-                        agave_task_id: result.agave_task_id || aiRes.agave_task_id || '',
-                        test_log_url: result.test_log_url || aiRes.test_log_url || '',
-                        exception: result.exception || aiRes.exception || '',
-                        exception_summary: result.exception_summary || aiRes.exception_summary || '',
-                        current_branch: currentBranch || aiRes.current_branch || '',
                       });
                       setFollowUpInput('');
                       setFollowUpHistory(followUpHistoryByTestcase[result.testcase_id] || []);
-                      setFollowUpMode('ask');
+                      setFollowUpMode('agent');
                     }}
                   >
                     {getCursorAiStatusBadge(result.testcase_id)} View
@@ -2217,8 +2291,13 @@ export default function FailedTestcaseAnalysis() {
           </div>
         ) : (
           <div className="form-group">
-            <label>Task IDs (comma-separated) <span className="required">*</span></label>
-            <textarea value={taskIds} onChange={e => setTaskIds(e.target.value)} placeholder="e.g., 697aeae32bc0c49968d713f7" rows={3} />
+            <label>Task IDs (comma or newline separated, or JITA URL) <span className="required">*</span></label>
+            <textarea
+              value={taskIds}
+              onChange={e => setTaskIds(e.target.value)}
+              placeholder="Paste 24-char JITA task IDs (comma or newline separated) or a JITA results URL"
+              rows={3}
+            />
           </div>
         )}
         <div className="form-group status-filter-group">
@@ -2238,7 +2317,22 @@ export default function FailedTestcaseAnalysis() {
         </div>
       </div>
 
-      {error && <div className="error-message"><strong>Error:</strong> {error}</div>}
+      {error && (
+        <div className="error-message">
+          <strong>Error:</strong> {error}
+          {statusMismatch?.optionIds?.length > 0 && (
+            <div className="error-message-actions">
+              <button
+                type="button"
+                className="btn-analyze-found-statuses"
+                onClick={() => handleAnalyze(statusMismatch.optionIds)}
+              >
+                Analyze found statuses ({statusMismatch.optionIds.join(', ')})
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {loading && !analyzing && (
         <div className="loading">
           <div className="spinner" />
@@ -2295,23 +2389,15 @@ export default function FailedTestcaseAnalysis() {
                           type="button"
                           className="btn-inline-tab-action"
                           onClick={() => {
-                            const row = results.find(r => r.testcase_id === tab.testcase_id) || {};
-                            const analysis = cursorAiResults[tab.testcase_id] || tab.analysis || {};
                             setCursorAiDetailModal({
                               testcase_name: tab.testcase_name,
                               _testcase_id: tab.testcase_id,
                               _session_id: tabSessionId,
-                              _agent_id: cursorAiAgentIds[tab.testcase_id] || null,
-                              ...analysis,
-                              agave_task_id: tab.agave_task_id || row.agave_task_id || analysis.agave_task_id || '',
-                              test_log_url: tab.test_log_url || row.test_log_url || analysis.test_log_url || '',
-                              exception: tab.exception || row.exception || analysis.exception || '',
-                              exception_summary: tab.exception_summary || row.exception_summary || analysis.exception_summary || '',
-                              current_branch: currentBranch || analysis.current_branch || '',
+                              ...(cursorAiResults[tab.testcase_id] || tab.analysis),
                             });
                             setFollowUpInput('');
                             setFollowUpHistory(followUpHistoryByTestcase[tab.testcase_id] || []);
-                            setFollowUpMode('ask');
+                            setFollowUpMode('agent');
                           }}
                         >
                           Open Full
@@ -2663,7 +2749,7 @@ export default function FailedTestcaseAnalysis() {
                   <input
                     type="text"
                     className="cursor-ai-followup-input"
-                    placeholder="Ask anything — create eng ticket, check ENG status/CR, Glean, create CR..."
+                    placeholder="Ask a follow-up (Ask mode is fastest)..."
                     value={followUpInput}
                     onChange={e => setFollowUpInput(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter' && !followUpLoading) handleFollowUp(); }}
@@ -2799,7 +2885,7 @@ export default function FailedTestcaseAnalysis() {
                 <strong>{selectedRetriggerRows.length}</strong> selected testcase(s) across{' '}
                 <strong>{selectedRetriggerTaskIds.length}</strong>{' '}
                 Jita task(s) will be re-triggered (one rerun per task).
-                Blank fields keep the original task values.
+                Blank fields keep the original values.
               </p>
               <ul className="retrigger-selected-tests">
                 {selectedRetriggerRows.map(row => (
@@ -2812,7 +2898,6 @@ export default function FailedTestcaseAnalysis() {
                 ))}
               </ul>
 
-              {/* Component Selection Checkboxes */}
               <div className="retrigger-component-select">
                 <span className="retrigger-component-label">Select Components to Override</span>
                 <div className="retrigger-component-checks">
@@ -2831,153 +2916,100 @@ export default function FailedTestcaseAnalysis() {
                       onChange={e => setRetriggerOverrides(prev => ({ ...prev, updateImage: e.target.checked }))} />
                     <span>Image Build</span>
                   </label>
+                  <label className="retrigger-check-label">
+                    <input type="checkbox" checked={retriggerOverrides.updateFramework}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, updateFramework: e.target.checked }))} />
+                    <span>Nutest / Framework Branch</span>
+                  </label>
+                  <label className="retrigger-check-label">
+                    <input type="checkbox" checked={retriggerOverrides.updateResource}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, updateResource: e.target.checked }))} />
+                    <span>Resource Requirement Configuration</span>
+                  </label>
                 </div>
               </div>
 
-              {/* Side-by-side NOS / PC panels */}
+              {(retriggerOverrides.updateNos || retriggerOverrides.updatePc || retriggerOverrides.updateImage) && (
               <div className="retrigger-panels">
                 {retriggerOverrides.updateNos && (
                   <div className="retrigger-panel">
                     <h4 className="retrigger-panel-title">NOS Build</h4>
+                    <p className="retrigger-pool-hint">NOS branch is taken from the original Jita task and cannot be changed. Commit and GBN are passed through if you enter them.</p>
                     <div className="retrigger-form-group">
-                      <label>Branch</label>
-                      <input type="text" placeholder="e.g. ganges-7.6-stable"
+                      <label>NOS Branch</label>
+                      <input type="text" readOnly disabled
+                        className="retrigger-readonly"
+                        placeholder="from original Jita task"
                         value={retriggerOverrides.nos.branch}
+                      />
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Commit ID</label>
+                      <input type="text" placeholder="commit id, or Latest Smoke Passed"
+                        value={retriggerOverrides.nos.commitId}
                         onChange={e => setRetriggerOverrides(prev => ({
-                          ...prev, nos: { ...prev.nos, branch: e.target.value }
+                          ...prev, nos: { ...prev.nos, commitId: e.target.value }
                         }))} />
                     </div>
                     <div className="retrigger-form-group">
-                      <label>Update Type</label>
-                      <div className="retrigger-radio-group">
-                        <label><input type="radio" value="tag"
-                          checked={retriggerOverrides.nos.updateType === 'tag'}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, nos: { ...prev.nos, updateType: e.target.value }
-                          }))} /> By Tag</label>
-                        <label><input type="radio" value="commit"
-                          checked={retriggerOverrides.nos.updateType === 'commit'}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, nos: { ...prev.nos, updateType: e.target.value }
-                          }))} /> By Commit</label>
-                      </div>
-                    </div>
-                    <div className="retrigger-form-group">
-                      <label>Build Type</label>
-                      <select value={retriggerOverrides.nos.buildType}
+                      <label>GBN</label>
+                      <input type="text" placeholder="optional; leave blank to keep original"
+                        value={retriggerOverrides.nos.gbn}
                         onChange={e => setRetriggerOverrides(prev => ({
-                          ...prev, nos: { ...prev.nos, buildType: e.target.value }
-                        }))}>
-                        <option value="">-- Select Build Type --</option>
-                        <option value="release">release</option>
-                        <option value="opt">opt</option>
-                      </select>
+                          ...prev, nos: { ...prev.nos, gbn: e.target.value }
+                        }))} />
                     </div>
-                    {retriggerOverrides.nos.updateType === 'tag' && (
-                      <div className="retrigger-form-group">
-                        <label>Tag</label>
-                        <select value={retriggerOverrides.nos.tag}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, nos: { ...prev.nos, tag: e.target.value }
-                          }))}>
-                          <option value="">-- Select Tag --</option>
-                          <option value="Latest Smoke Passed">Latest Smoke Passed</option>
-                          <option value="Latest DIAL Passed">Latest DIAL Passed</option>
-                        </select>
-                      </div>
-                    )}
-                    {retriggerOverrides.nos.updateType === 'commit' && (
-                      <>
-                        <div className="retrigger-form-group">
-                          <label>Commit ID</label>
-                          <input type="text" placeholder="e.g. b8b1696d55a4..."
-                            value={retriggerOverrides.nos.commitId}
-                            onChange={e => setRetriggerOverrides(prev => ({
-                              ...prev, nos: { ...prev.nos, commitId: e.target.value }
-                            }))} />
-                        </div>
-                        <div className="retrigger-form-group">
-                          <label>GBN</label>
-                          <input type="text" placeholder="e.g. 1779293625"
-                            value={retriggerOverrides.nos.gbn}
-                            onChange={e => setRetriggerOverrides(prev => ({
-                              ...prev, nos: { ...prev.nos, gbn: e.target.value }
-                            }))} />
-                        </div>
-                      </>
-                    )}
                   </div>
                 )}
 
                 {retriggerOverrides.updatePc && (
                   <div className="retrigger-panel">
                     <h4 className="retrigger-panel-title">Prism Central Build</h4>
+                    <p className="retrigger-pool-hint">Build Url and Build QCOW2 URL are required when changing PC commit or GBN.</p>
                     <div className="retrigger-form-group">
-                      <label>Branch</label>
-                      <input type="text" placeholder="e.g. master"
+                      <label>PC Branch</label>
+                      <input type="text" placeholder="e.g. ganges-7.6.0.6-stable-pc"
                         value={retriggerOverrides.pc.branch}
                         onChange={e => setRetriggerOverrides(prev => ({
                           ...prev, pc: { ...prev.pc, branch: e.target.value }
                         }))} />
                     </div>
                     <div className="retrigger-form-group">
-                      <label>Update Type</label>
-                      <div className="retrigger-radio-group">
-                        <label><input type="radio" value="tag"
-                          checked={retriggerOverrides.pc.updateType === 'tag'}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, pc: { ...prev.pc, updateType: e.target.value }
-                          }))} /> By Tag</label>
-                        <label><input type="radio" value="commit"
-                          checked={retriggerOverrides.pc.updateType === 'commit'}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, pc: { ...prev.pc, updateType: e.target.value }
-                          }))} /> By Commit</label>
-                      </div>
+                      <label>Commit ID</label>
+                      <input type="text" placeholder="commit id, or Latest Smoke Passed"
+                        value={retriggerOverrides.pc.commitId}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, pc: { ...prev.pc, commitId: e.target.value }
+                        }))} />
                     </div>
                     <div className="retrigger-form-group">
-                      <label>Build Type</label>
-                      <select value={retriggerOverrides.pc.buildType}
+                      <label>GBN</label>
+                      <input type="text" placeholder="optional; leave blank to keep original"
+                        value={retriggerOverrides.pc.gbn}
                         onChange={e => setRetriggerOverrides(prev => ({
-                          ...prev, pc: { ...prev.pc, buildType: e.target.value }
-                        }))}>
-                        <option value="">-- Select Build Type --</option>
-                        <option value="release">release</option>
-                        <option value="opt">opt</option>
-                      </select>
+                          ...prev, pc: { ...prev.pc, gbn: e.target.value }
+                        }))} />
                     </div>
-                    {retriggerOverrides.pc.updateType === 'tag' && (
-                      <div className="retrigger-form-group">
-                        <label>Tag</label>
-                        <select value={retriggerOverrides.pc.tag}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, pc: { ...prev.pc, tag: e.target.value }
-                          }))}>
-                          <option value="">-- Select Tag --</option>
-                          <option value="Latest Smoke Passed">Latest Smoke Passed</option>
-                          <option value="Latest DIAL Passed">Latest DIAL Passed</option>
-                        </select>
-                      </div>
-                    )}
-                    {retriggerOverrides.pc.updateType === 'commit' && (
-                      <>
-                        <div className="retrigger-form-group">
-                          <label>Commit ID</label>
-                          <input type="text" placeholder="e.g. 49326d5419bb..."
-                            value={retriggerOverrides.pc.commitId}
-                            onChange={e => setRetriggerOverrides(prev => ({
-                              ...prev, pc: { ...prev.pc, commitId: e.target.value }
-                            }))} />
-                        </div>
-                        <div className="retrigger-form-group">
-                          <label>GBN</label>
-                          <input type="text" placeholder="e.g. 1779293332"
-                            value={retriggerOverrides.pc.gbn}
-                            onChange={e => setRetriggerOverrides(prev => ({
-                              ...prev, pc: { ...prev.pc, gbn: e.target.value }
-                            }))} />
-                        </div>
-                      </>
+                    <div className="retrigger-form-group">
+                      <label>Build Url {pcBuildChanged && <span className="retrigger-required">*</span>}</label>
+                      <input type="text" placeholder="http://vendor.dyn.nutanix.com/.../opt/"
+                        value={retriggerOverrides.pc.buildUrl}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, pc: { ...prev.pc, buildUrl: e.target.value }
+                        }))} />
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Build QCOW2 URL {pcBuildChanged && <span className="retrigger-required">*</span>}</label>
+                      <input type="text" placeholder="http://vendor.dyn.nutanix.com/.../publish_pc_image_internal/"
+                        value={retriggerOverrides.pc.qcow2Url}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, pc: { ...prev.pc, qcow2Url: e.target.value }
+                        }))} />
+                    </div>
+                    {pcBuildUrlsMissing && (
+                      <p className="retrigger-pool-hint retrigger-url-required-hint">
+                        Enter both Build Url and Build QCOW2 URL for the new PC GBN (same fields as the Jita rerun form).
+                      </p>
                     )}
                   </div>
                 )}
@@ -2985,6 +3017,7 @@ export default function FailedTestcaseAnalysis() {
                 {retriggerOverrides.updateImage && (
                   <div className="retrigger-panel">
                     <h4 className="retrigger-panel-title">Image Build</h4>
+                    <p className="retrigger-pool-hint">If the original JP used the same branch for NOS and image (Jita default), leave this unchecked so image stays a copy of NOS.</p>
                     <div className="retrigger-form-group">
                       <label>Image Branch</label>
                       <input type="text" placeholder="e.g. ganges-7.6.0.6-stable"
@@ -3003,7 +3036,7 @@ export default function FailedTestcaseAnalysis() {
                     </div>
                     <div className="retrigger-form-group">
                       <label>Image GBN</label>
-                      <input type="text" placeholder="e.g. 1786602592"
+                      <input type="text" placeholder="optional; leave blank to keep original"
                         value={retriggerOverrides.image.gbn}
                         onChange={e => setRetriggerOverrides(prev => ({
                           ...prev, image: { ...prev.image, gbn: e.target.value }
@@ -3012,60 +3045,154 @@ export default function FailedTestcaseAnalysis() {
                   </div>
                 )}
               </div>
+              )}
 
-              <div className="retrigger-section">
-                <h4>Test Framework</h4>
-                <div className="retrigger-fields">
-                  <div className="retrigger-field">
-                    <label>Nutest / Framework Branch</label>
-                    <input type="text" placeholder="e.g. ganges-7.6-stable"
-                      value={retriggerOverrides.nutest_branch}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, nutest_branch: e.target.value }))} />
-                  </div>
-                  <div className="retrigger-field">
-                    <label>Nutest / Framework Commit</label>
-                    <input type="text" placeholder="nutest-py3-tests commit"
-                      value={retriggerOverrides.nutest_commit}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, nutest_commit: e.target.value }))} />
-                  </div>
-                  <div className="retrigger-field">
-                    <label>Test Branch</label>
-                    <input type="text" placeholder="test_framework_metadata.test.branch"
-                      value={retriggerOverrides.test_branch}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, test_branch: e.target.value }))} />
-                  </div>
-                  <div className="retrigger-field">
-                    <label>Test Commit</label>
-                    <input type="text" placeholder="test_framework_metadata.test.commit"
-                      value={retriggerOverrides.test_commit}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, test_commit: e.target.value }))} />
-                  </div>
-                  <div className="retrigger-field">
-                    <label>Framework Branch Override</label>
-                    <input type="text" placeholder="optional, defaults to nutest branch"
-                      value={retriggerOverrides.framework_branch}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, framework_branch: e.target.value }))} />
-                  </div>
-                  <div className="retrigger-field">
-                    <label>Framework Commit Override</label>
-                    <input type="text" placeholder="optional, defaults to nutest commit"
-                      value={retriggerOverrides.framework_commit}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, framework_commit: e.target.value }))} />
-                  </div>
-                  <div className="retrigger-field retrigger-field-wide">
-                    <label>Test Patch URL</label>
-                    <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
-                      value={retriggerOverrides.patch_url}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, patch_url: e.target.value }))} />
-                  </div>
-                  <div className="retrigger-field retrigger-field-wide">
-                    <label>Framework Patch URL</label>
-                    <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
-                      value={retriggerOverrides.framework_patch_url}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, framework_patch_url: e.target.value }))} />
+              {retriggerOverrides.updateFramework && (
+                <div className="retrigger-section">
+                  <h4>Nutest / Framework Branch</h4>
+                  <p className="retrigger-pool-hint">
+                    Framework and Nutest-py3-tests commits are left empty so Jita picks the latest on this branch.
+                  </p>
+                  <div className="retrigger-fields">
+                    <div className="retrigger-field">
+                      <label>Branch</label>
+                      <input type="text" placeholder="e.g. ganges-7.6-stable"
+                        value={retriggerOverrides.nutest_branch}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, nutest_branch: e.target.value }))} />
+                    </div>
+                    <div className="retrigger-field retrigger-field-wide">
+                      <label>Test Patch URL</label>
+                      <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
+                        value={retriggerOverrides.patch_url}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, patch_url: e.target.value }))} />
+                    </div>
+                    <div className="retrigger-field retrigger-field-wide">
+                      <label>Framework Patch URL</label>
+                      <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
+                        value={retriggerOverrides.framework_patch_url}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, framework_patch_url: e.target.value }))} />
+                    </div>
                   </div>
                 </div>
+              )}
+
+              {retriggerOverrides.updateResource && (
+              <div className="retrigger-section">
+                <h4>Resource Requirement Configuration</h4>
+                <p className="retrigger-pool-hint">
+                  Pre-filled from the original Jita task. Edit these the same way you would on Jita; the rerun uses the values shown here.
+                </p>
+                {retriggerResourcePreview.loading && (
+                  <p className="retrigger-pool-hint">Loading Jita resource config…</p>
+                )}
+                {!retriggerResourcePreview.loading && retriggerResourcePreview.tasks.length === 0 && (
+                  <p className="retrigger-pool-hint">Could not load Jita resource config. Edits you make here still apply to the rerun.</p>
+                )}
+                {selectedRetriggerTaskIds.length > 1 && (
+                  <div className="retrigger-warning">
+                    Selected testcases belong to multiple Jita tasks. These resource values apply to every rerun.
+                  </div>
+                )}
+                <div className="retrigger-resource-card">
+                  <div className="retrigger-resource-grid">
+                    <div className="retrigger-form-group">
+                      <label>Resources</label>
+                      <select
+                        value={retriggerOverrides.resources_mode}
+                        onChange={e => updateResourceOverride({ resources_mode: e.target.value })}
+                      >
+                        {RESOURCE_MODE_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Resource Type</label>
+                      <select
+                        value={retriggerOverrides.resource_type}
+                        onChange={e => updateResourceOverride({ resource_type: e.target.value })}
+                      >
+                        {RESOURCE_TYPE_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Hypervisor</label>
+                      <select
+                        value={retriggerOverrides.hypervisor}
+                        onChange={e => updateResourceOverride({ hypervisor: e.target.value })}
+                      >
+                        <option value="">Keep original</option>
+                        {[...new Set([...HYPERVISOR_OPTIONS, retriggerOverrides.hypervisor].filter(Boolean))].map(h => (
+                          <option key={h} value={h}>{h}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label className="retrigger-check-label">
+                        <input
+                          type="checkbox"
+                          checked={!!retriggerOverrides.match_resource_spec}
+                          onChange={e => updateResourceOverride({ match_resource_spec: e.target.checked })}
+                        />
+                        <span>Match Resources to Resource Spec</span>
+                      </label>
+                    </div>
+                  </div>
+                  {retriggerOverrides.resources_mode !== 'global_pool' && (
+                    <div className="retrigger-form-group">
+                      <label>{retriggerOverrides.resources_mode === 'node_pool' ? 'Node Pools' : 'Clusters / Names'}</label>
+                      <input
+                        type="text"
+                        value={nodePoolSearch}
+                        onChange={e => handleSearchRetriggerNodePools(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            addRetriggerNodePool(nodePoolSearch);
+                          }
+                        }}
+                        placeholder="Type to search or press Enter to add"
+                      />
+                      {nodePoolLoading && <p className="retrigger-pool-hint">Searching…</p>}
+                      {nodePoolSearch.length >= 2 && !nodePoolLoading && nodePoolResults.length === 0 && (
+                        <p className="retrigger-pool-hint">No matches. Press Enter to add &quot;{nodePoolSearch}&quot;.</p>
+                      )}
+                      {nodePoolResults.length > 0 && (
+                        <div className="retrigger-pool-results">
+                          {nodePoolResults.map(pool => {
+                            const selected = retriggerOverrides.node_pools.includes(pool);
+                            return (
+                              <button
+                                key={pool}
+                                type="button"
+                                className={`retrigger-pool-result${selected ? ' selected' : ''}`}
+                                onClick={() => addRetriggerNodePool(pool)}
+                              >
+                                {pool}
+                                {selected ? ' (selected)' : ''}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <div className="retrigger-pool-tags">
+                        {retriggerOverrides.node_pools.length === 0 && (
+                          <span className="retrigger-pool-hint">None selected</span>
+                        )}
+                        {retriggerOverrides.node_pools.map(pool => (
+                          <span key={pool} className="retrigger-pool-tag retrigger-pool-tag-edit">
+                            {pool}
+                            <button type="button" onClick={() => removeRetriggerNodePool(pool)} title="Remove">&times;</button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
+              )}
 
               <div className="retrigger-section">
                 <h4>Task / Infra Options</h4>
@@ -3083,34 +3210,10 @@ export default function FailedTestcaseAnalysis() {
                       onChange={e => setRetriggerOverrides(prev => ({ ...prev, priority: e.target.value }))} />
                   </div>
                   <div className="retrigger-field retrigger-field-wide">
-                    <label className="retrigger-check-label retrigger-override-toggle">
-                      <input type="checkbox" checked={retriggerOverrides.overridePool}
-                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, overridePool: e.target.checked }))} />
-                      <span>Override resource pool</span>
-                    </label>
-                    {!retriggerOverrides.overridePool && (
-                      <p className="retrigger-pool-hint">Using each task&apos;s original / default pool.</p>
-                    )}
-                    {retriggerOverrides.overridePool && selectedRetriggerTaskIds.length > 1 && (
-                      <div className="retrigger-warning">
-                        Selected testcases belong to multiple Jita tasks.
-                        The pool you enter here overrides the default pool on every task.
-                      </div>
-                    )}
-                    {retriggerOverrides.overridePool && (
-                      <>
-                        <label>Resource Pool(s)</label>
-                        <input type="text" placeholder="comma-separated, e.g. Regression_cdp_special_config, CDP_regression_ESXi_Qual"
-                          value={retriggerOverrides.resource_pool}
-                          onChange={e => setRetriggerOverrides(prev => ({ ...prev, resource_pool: e.target.value }))} />
-                      </>
-                    )}
-                  </div>
-                  <div className="retrigger-field retrigger-field-wide">
                     <label>Tester Tags</label>
                     <textarea
                       rows={2}
-                      placeholder="comma-separated tags; leave blank to keep original (jita3 is always added)"
+                      placeholder="comma-separated tags; jita3 is always added"
                       value={retriggerOverrides.tester_tags}
                       onChange={e => setRetriggerOverrides(prev => ({ ...prev, tester_tags: e.target.value }))}
                     />
@@ -3119,54 +3222,34 @@ export default function FailedTestcaseAnalysis() {
               </div>
 
               <div className="retrigger-section">
-                <h4>Scheduling / Retain</h4>
-                <label className="retrigger-check-label retrigger-override-toggle">
-                  <input type="checkbox" checked={retriggerOverrides.overrideScheduling}
-                    onChange={e => setRetriggerOverrides(prev => ({ ...prev, overrideScheduling: e.target.checked }))} />
-                  <span>Override skip_resource_spec_match / check_image_compatibility</span>
-                </label>
-                {retriggerOverrides.overrideScheduling && (
-                  <div className="retrigger-component-checks retrigger-inline-checks">
-                    <label className="retrigger-check-label">
-                      <input type="checkbox" checked={retriggerOverrides.skip_resource_spec_match}
-                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, skip_resource_spec_match: e.target.checked }))} />
-                      <span>skip_resource_spec_match</span>
+                <h4>Scheduling</h4>
+                <div className="retrigger-fields">
+                  <div className="retrigger-field retrigger-field-wide">
+                    <label className="retrigger-check-label retrigger-override-toggle">
+                      <input type="checkbox" checked={retriggerOverrides.overrideScheduling}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, overrideScheduling: e.target.checked }))} />
+                      <span>Override skip_resource_spec_match / check_image_compatibility</span>
                     </label>
-                    <label className="retrigger-check-label">
-                      <input type="checkbox" checked={retriggerOverrides.check_image_compatibility}
-                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, check_image_compatibility: e.target.checked }))} />
-                      <span>check_image_compatibility</span>
-                    </label>
+                    {retriggerOverrides.overrideScheduling && (
+                      <div className="retrigger-inline-checks">
+                        <label className="retrigger-check-label">
+                          <input type="checkbox" checked={retriggerOverrides.skip_resource_spec_match}
+                            onChange={e => setRetriggerOverrides(prev => ({
+                              ...prev, skip_resource_spec_match: e.target.checked
+                            }))} />
+                          <span>skip_resource_spec_match</span>
+                        </label>
+                        <label className="retrigger-check-label">
+                          <input type="checkbox" checked={retriggerOverrides.check_image_compatibility}
+                            onChange={e => setRetriggerOverrides(prev => ({
+                              ...prev, check_image_compatibility: e.target.checked
+                            }))} />
+                          <span>check_image_compatibility</span>
+                        </label>
+                      </div>
+                    )}
                   </div>
-                )}
-                <label className="retrigger-check-label retrigger-override-toggle">
-                  <input type="checkbox" checked={retriggerOverrides.overrideRetain}
-                    onChange={e => setRetriggerOverrides(prev => ({ ...prev, overrideRetain: e.target.checked }))} />
-                  <span>Override retain_resources_config</span>
-                </label>
-                {retriggerOverrides.overrideRetain && (
-                  <div className="retrigger-fields">
-                    <label className="retrigger-check-label">
-                      <input type="checkbox" checked={retriggerOverrides.retain_on_failure}
-                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, retain_on_failure: e.target.checked }))} />
-                      <span>Retain on test failure</span>
-                    </label>
-                    <div className="retrigger-field">
-                      <label>Retain Duration (minutes)</label>
-                      <input type="text" placeholder="720"
-                        value={retriggerOverrides.retain_duration}
-                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, retain_duration: e.target.value }))} />
-                    </div>
-                    <div className="retrigger-field">
-                      <label>Retain Entity</label>
-                      <select value={retriggerOverrides.retain_entity}
-                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, retain_entity: e.target.value }))}>
-                        <option value="CONTAINER">CONTAINER</option>
-                        <option value="DEPLOYMENT">DEPLOYMENT</option>
-                      </select>
-                    </div>
-                  </div>
-                )}
+                </div>
               </div>
 
               {retriggerResults && (
@@ -3181,11 +3264,60 @@ export default function FailedTestcaseAnalysis() {
                           <span className="retrigger-stat retrigger-stat-fail">{retriggerResults.failed} failed</span>
                         )}
                       </div>
-                      {retriggerResultsUrl && (
+                      {succeededRerunIds.length > 0 && (
                         <div className="retrigger-merged-link">
-                          <a href={retriggerResultsUrl} target="_blank" rel="noopener noreferrer">
-                            {succeededRerunIds.length > 1 ? 'Open merged Jita results' : 'Open Jita results'}
-                          </a>
+                          <div className="retrigger-merged-link-label">
+                            New Jita task IDs ({succeededRerunIds.length})
+                          </div>
+                          <div className="retrigger-id-list">
+                            {succeededRerunIds.map((id) => (
+                              <a key={id} href={jitaResultsUrl(id)} target="_blank" rel="noopener noreferrer">{id}</a>
+                            ))}
+                          </div>
+                          <div className="retrigger-merged-link-row">
+                            <button
+                              type="button"
+                              className="retrigger-copy-link"
+                              onClick={() => {
+                                copyTextToClipboard(succeededRerunIds.join(',')).then(() => {
+                                  setRetriggerCopied('ids');
+                                  setTimeout(() => setRetriggerCopied(''), 2000);
+                                }).catch(() => {});
+                              }}
+                            >
+                              {retriggerCopied === 'ids' ? 'Copied IDs' : 'Copy IDs'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {retriggerResultUrls.length > 0 && (
+                        <div className="retrigger-merged-link">
+                          <div className="retrigger-merged-link-label">
+                            {retriggerResultUrls.length > 1
+                              ? `Jita links (${retriggerResultUrls.length} parts — URL too long for one GET)`
+                              : succeededRerunIds.length > 1
+                                ? `Single Jita link for all ${succeededRerunIds.length} new tasks`
+                                : 'Jita link for the new task'}
+                          </div>
+                          {retriggerResultUrls.map((url, i) => (
+                            <div key={url} className="retrigger-merged-link-row">
+                              <a href={url} target="_blank" rel="noopener noreferrer">
+                                {retriggerResultUrls.length > 1 ? `Part ${i + 1}: ${url}` : url}
+                              </a>
+                              <button
+                                type="button"
+                                className="retrigger-copy-link"
+                                onClick={() => {
+                                  copyTextToClipboard(url).then(() => {
+                                    setRetriggerCopied(`link-${i}`);
+                                    setTimeout(() => setRetriggerCopied(''), 2000);
+                                  }).catch(() => {});
+                                }}
+                              >
+                                {retriggerCopied === `link-${i}` ? 'Copied' : 'Copy'}
+                              </button>
+                            </div>
+                          ))}
                         </div>
                       )}
                       {retriggerResults.results && retriggerResults.results.map((r, i) => (
@@ -3195,6 +3327,12 @@ export default function FailedTestcaseAnalysis() {
                             <span className="retrigger-result-new-id">
                               Rerun:{' '}
                               <a href={jitaResultsUrl(r.rerun_task_id)} target="_blank" rel="noopener noreferrer">{r.rerun_task_id}</a>
+                              {r.triggered_as && (
+                                <span className="retrigger-triggered-as"> as {r.triggered_as}</span>
+                              )}
+                              {r.job_profile_name && (
+                                <span className="retrigger-jp-name"> ({r.job_profile_name})</span>
+                              )}
                               {r.message && <span> — {r.message}</span>}
                             </span>
                           ) : (
@@ -3211,7 +3349,7 @@ export default function FailedTestcaseAnalysis() {
               <button
                 type="button"
                 className="btn-primary btn-retrigger-submit"
-                disabled={retriggerLoading}
+                disabled={retriggerLoading || pcBuildUrlsMissing}
                 onClick={handleRetrigger}
               >
                 {retriggerLoading ? 'Re-triggering…' : 'Re-trigger'}

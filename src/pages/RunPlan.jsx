@@ -632,7 +632,6 @@ export default function RunPlan() {
       payload.tester_tags_to_remove = tagsToRemove;
     }
     if (batchUpdateData.updateAdditionalTags) payload.run_tests_with_additional_tags = batchUpdateData.additionalTags;
-
     return payload;
   };
 
@@ -643,6 +642,10 @@ export default function RunPlan() {
       : selectedRunPlan ? [selectedRunPlan] : [];
 
     if (targets.length === 0) return;
+    if (!batchUpdateData.updateNosCluster && !batchUpdateData.updatePrismCentral && !batchUpdateData.nutestBranch && !batchUpdateData.patchUrl && !batchUpdateData.frameworkPatchUrl && !batchUpdateData.testerTagsAction && !batchUpdateData.updateAdditionalTags) {
+      alert('Select at least one field to update (component, branch/patch, tags).');
+      return;
+    }
 
     const totalJPs = targets.reduce((s, rp) => s + (rp.job_profiles?.length || 0), 0);
     const label = isBulk

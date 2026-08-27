@@ -4,10 +4,11 @@ import { API_BASE_URL } from "./config";
 import AiMarkdown from "./components/AiMarkdown";
 import TriageGenieCoverageModal from "./components/TriageGenieCoverageModal";
 import {
-  buildJitaResultsUrl,
+  buildJitaResultsUrls,
   extractJitaTaskIds,
   mergeJitaTaskIds,
   normalizeJitaTaskId,
+  normalizeJitaTaskIdList,
 } from "./utils/jitaTaskIds";
 import { shouldRefetchOwnerJiraDetails } from "./utils/dashboardRefreshAfterAppend";
 import {
@@ -4878,32 +4879,65 @@ function deriveStatus(statuses) {
 }
 
 function renderTaskButton(taskIds, buttonName) {
-  if (!taskIds || taskIds.length === 0) return "-";
+  const ids = normalizeJitaTaskIdList(taskIds);
+  if (!ids.length) return "-";
 
-  const url = buildJitaResultsUrl(taskIds);
-  if (!url) return "-";
+  const urls = buildJitaResultsUrls(ids);
+  if (!urls.length) return "-";
   const isFullRegression = buttonName === "Regression_Run_Tasks";
+  const dataAttrs = isFullRegression
+    ? { "data-regression-run-tasks": "1", "data-task-ids": ids.join(",") }
+    : {};
+  const btnStyle = {
+    display: "inline-block",
+    padding: "6px 12px",
+    background: "#007bff",
+    color: "white",
+    textDecoration: "none",
+    borderRadius: "4px",
+    fontSize: "13px",
+  };
+
+  if (urls.length === 1) {
+    return (
+      <a
+        href={urls[0]}
+        target="_blank"
+        rel="noreferrer"
+        className="task-btn"
+        title={urls[0]}
+        {...dataAttrs}
+        style={btnStyle}
+      >
+        {buttonName}
+      </a>
+    );
+  }
 
   return (
-    <a
-      href={url}
-      target="_blank"
-      rel="noreferrer"
-      className="task-btn"
-      title={url}
-      {...(isFullRegression ? { "data-regression-run-tasks": "1" } : {})}
-      style={{
-        display: "inline-block",
-        padding: "6px 12px",
-        background: "#007bff",
-        color: "white",
-        textDecoration: "none",
-        borderRadius: "4px",
-        fontSize: "13px"
-      }}
+    <span
+      {...dataAttrs}
+      style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: "4px" }}
     >
-      {buttonName}
-    </a>
+      <span style={{ ...btnStyle, cursor: "default" }}>
+        {buttonName} ({ids.length})
+      </span>
+      <span style={{ display: "flex", flexWrap: "wrap", gap: "4px", justifyContent: "center" }}>
+        {urls.map((url, i) => (
+          <a
+            key={`${i}-${url.slice(-12)}`}
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="task-btn"
+            title={`JITA part ${i + 1} of ${urls.length} (URL length limit)`}
+            style={{ ...btnStyle, padding: "4px 8px", fontSize: "11px", background: "#2563eb" }}
+          >
+            JITA {i + 1}/{urls.length}
+          </a>
+        ))}
+      </span>
+    </span>
   );
 }
 

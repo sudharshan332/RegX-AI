@@ -5,6 +5,8 @@
 
 export const JITA_RESULTS_BASE = "https://jita.eng.nutanix.com/results?task_ids=";
 export const JITA_TASK_ID_RE = /^[0-9a-fA-F]{24}$/;
+/** Apache on jita.eng rejects GET URLs over ~8190 bytes (414 Request-URI Too Long). */
+export const JITA_SAFE_GET_URL_LEN = 7800;
 
 /** Normalize OID for uniqueness (JITA ObjectIds are hex; case must not create dupes). */
 export function normalizeJitaTaskId(id) {
@@ -79,6 +81,33 @@ export function buildJitaResultsUrl(taskIds = []) {
   return `${JITA_RESULTS_BASE}${ids.join(",")}&active_tab=1&merge_tests=true`;
 }
 
+function chunkIdsForGetUrl(taskIds, buildUrl, maxLen = JITA_SAFE_GET_URL_LEN) {
+  const ids = normalizeJitaTaskIdList(taskIds);
+  if (!ids.length) return [];
+  const chunks = [];
+  let current = [];
+  ids.forEach((id) => {
+    const trial = current.concat(id);
+    const url = buildUrl(trial);
+    if (current.length && url && url.length > maxLen) {
+      chunks.push(current);
+      current = [id];
+    } else {
+      current = trial;
+    }
+  });
+  if (current.length) chunks.push(current);
+  return chunks.map((chunk) => buildUrl(chunk)).filter(Boolean);
+}
+
+/**
+ * JITA /results is GET-only. Split IDs so each URL stays under Apache's limit.
+ * One chunk when the list is small; several part links for a full regression.
+ */
+export function buildJitaResultsUrls(taskIds = []) {
+  return chunkIdsForGetUrl(taskIds, (ids) => buildJitaResultsUrl(ids));
+}
+
 /**
  * Same URL as JITA Tests → "View in Triage Genie" for a results task set.
  * http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=<ids>
@@ -87,6 +116,10 @@ export function buildViewInTriageGenieUrl(taskIds = []) {
   const ids = normalizeJitaTaskIdList(taskIds);
   if (ids.length === 0) return null;
   return `http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=${ids.join(",")}`;
+}
+
+export function buildViewInTriageGenieUrls(taskIds = []) {
+  return chunkIdsForGetUrl(taskIds, (ids) => buildViewInTriageGenieUrl(ids));
 }
 
 /**

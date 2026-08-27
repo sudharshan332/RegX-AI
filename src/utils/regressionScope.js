@@ -41,9 +41,22 @@ export function readFullRegressionTaskIdsFromDom() {
       }
     });
   };
+  const pushNode = (el) => {
+    const dataIds = el.getAttribute('data-task-ids') || '';
+    if (dataIds) {
+      extractJitaTaskIds(dataIds).forEach((id) => {
+        if (!seen.has(id)) {
+          seen.add(id);
+          out.push(id);
+        }
+      });
+      return;
+    }
+    pushHref(el.getAttribute('href'));
+  };
   document
-    .querySelectorAll('a[data-regression-run-tasks="1"]')
-    .forEach((a) => pushHref(a.getAttribute('href')));
+    .querySelectorAll('[data-regression-run-tasks="1"]')
+    .forEach((el) => pushNode(el));
   // Fallback: link text / title still named Regression_Run_Tasks
   if (out.length === 0) {
     document.querySelectorAll('a[href*="task_ids="]').forEach((a) => {

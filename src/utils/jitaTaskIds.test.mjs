@@ -4,6 +4,7 @@
 import {
   extractJitaTaskIds,
   buildJitaResultsUrl,
+  buildJitaResultsUrls,
   buildViewInTriageGenieUrl,
   mergeJitaTaskIds,
   normalizeJitaTaskId,
@@ -40,6 +41,11 @@ assert(
 );
 
 assert(
+  JSON.stringify(extractJitaTaskIds(`${A}\n${B}\n${C}`)) === JSON.stringify([A, B, C]),
+  "newline-separated IDs"
+);
+
+assert(
   JSON.stringify(extractJitaTaskIds(`${A}${B}`)) === JSON.stringify([]),
   "adjacent 48-hex without separator → no false split"
 );
@@ -60,6 +66,24 @@ assert(
 );
 assert(buildJitaResultsUrl([]) === null, "empty → null");
 assert(buildJitaResultsUrl(["nope"]) === null, "invalid → null");
+
+const smallUrls = buildJitaResultsUrls([A, B]);
+assert(smallUrls.length === 1, "small list is one JITA URL");
+assert(smallUrls[0] === built, "single chunk matches buildJitaResultsUrl");
+
+const many = [];
+for (let i = 0; i < 400; i += 1) {
+  many.push(`b${i.toString(16).padStart(23, "0")}`);
+}
+const chunked = buildJitaResultsUrls(many);
+assert(chunked.length > 1, "400 IDs split into multiple JITA URLs");
+assert(
+  chunked.every((u) => u.length <= 7800),
+  "each JITA chunk stays under Apache GET limit"
+);
+const fromChunks = chunked.flatMap((u) => extractJitaTaskIds(u));
+assert(fromChunks.length === 400, `chunks cover all IDs, got ${fromChunks.length}`);
+assert(fromChunks[0] === many[0] && fromChunks[399] === many[399], "chunk order preserved");
 
 const { merged } = mergeJitaTaskIds([A], `https://jita.eng.nutanix.com/results?task_ids=${B},${A}`);
 const round = extractJitaTaskIds(buildJitaResultsUrl(merged));

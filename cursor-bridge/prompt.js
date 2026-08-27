@@ -81,11 +81,6 @@ ${fileList}
 
 Prefer speed: gather enough evidence for a confident root cause, then stop.
 
-Also use available MCP tools when helpful:
-- **gw-glean** for product knowledge / prior incidents related to the failure signature
-- **Atlassian** (when configured) to read linked ENG tickets, status, and whether a fix/CR already exists
-- **gw-sourcegraph** for code + Gerrit-related evidence
-
 ### Step 2 — Execute the skill with this input
 
 The triage mode is **Archived Logs Mode**. The log directory URL is:

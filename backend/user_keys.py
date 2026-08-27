@@ -228,3 +228,130 @@ def reset_fernet_cache_for_tests():
     """Test helper: clear cached Fernet instance."""
     global _FERNET
     _FERNET = None
+
+
+# ---------------------------------------------------------------------------
+# Persisted login-credential store
+# ---------------------------------------------------------------------------
+# The user's LDAP password (captured at login) is cached in-memory in the app
+# for downstream JITA basic-auth calls, so entities they create are attributed
+# to them (created_by = user) instead of the shared service account. That cache
+# is lost on every backend restart. This encrypted, on-disk store lets the
+# in-memory cache be rehydrated after a restart so attribution stays reliable.
+#
+# Stored in a SEPARATE file from API keys, encrypted with the same stable
+# Fernet key, with a TTL so stale passwords expire.
+import time as _time  # local alias; avoids touching module-level imports
+
+_LOGIN_LOCK = threading.Lock()
+
+
+def _login_store_path() -> str:
+    override = (os.environ.get("REGX_LOGIN_CREDS_FILE") or "").strip()
+    if override:
+        parent = os.path.dirname(override)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        return override
+    return os.path.join(_data_dir(), "user_login_creds.json")
+
+
+def _login_ttl_seconds() -> int:
+    try:
+        return int(os.environ.get("JWT_EXPIRY_HOURS", "24")) * 3600
+    except (TypeError, ValueError):
+        return 24 * 3600
+
+
+def _load_login_raw() -> Dict[str, Any]:
+    path = _login_store_path()
+    if not os.path.isfile(path):
+        return {"users": {}}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict) or not isinstance(data.get("users"), dict):
+            return {"users": {}}
+        return data
+    except Exception as exc:
+        logger.error("Failed to load login-creds store: %s", exc)
+        return {"users": {}}
+
+
+def _save_login_raw(data: Dict[str, Any]) -> None:
+    path = _login_store_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def store_login_credential(username: str, password: str) -> None:
+    """Persist an encrypted LDAP password + expiry for ``username``."""
+    if not username or not password:
+        return
+    uname = str(username).strip().lower()
+    with _LOGIN_LOCK:
+        _fernet()  # ensure cipher ready
+        data = _load_login_raw()
+        users = data.setdefault("users", {})
+        users[uname] = {
+            "password": _encrypt(password),
+            "expires_at": _time.time() + _login_ttl_seconds(),
+        }
+        try:
+            _save_login_raw(data)
+        except Exception as exc:
+            logger.warning("Could not persist login credential for %s: %s", uname, exc)
+
+
+def get_login_credential(username: str) -> Optional[str]:
+    """Return the decrypted LDAP password for ``username``, or None if missing/expired."""
+    if not username:
+        return None
+    uname = str(username).strip().lower()
+    with _LOGIN_LOCK:
+        data = _load_login_raw()
+        entry = (data.get("users") or {}).get(uname)
+        if not isinstance(entry, dict):
+            return None
+        try:
+            if float(entry.get("expires_at", 0)) <= _time.time():
+                # Expired — drop it.
+                users = data.get("users") or {}
+                users.pop(uname, None)
+                try:
+                    _save_login_raw(data)
+                except Exception:
+                    pass
+                return None
+        except (TypeError, ValueError):
+            return None
+        enc = entry.get("password")
+        if not enc:
+            return None
+        try:
+            return _decrypt(enc)
+        except Exception as exc:
+            logger.warning("Failed to decrypt login credential for %s: %s", uname, exc)
+            return None
+
+
+def clear_login_credential(username: str) -> None:
+    """Remove any persisted credential for ``username`` (e.g. on logout)."""
+    if not username:
+        return
+    uname = str(username).strip().lower()
+    with _LOGIN_LOCK:
+        data = _load_login_raw()
+        users = data.get("users") or {}
+        if uname in users:
+            users.pop(uname, None)
+            try:
+                _save_login_raw(data)
+            except Exception:
+                pass
