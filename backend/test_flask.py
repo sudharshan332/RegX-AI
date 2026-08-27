@@ -10,9 +10,6 @@ import glob
 import re
 import random
 import smtplib
-import shutil
-import subprocess
-import tempfile
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -59,6 +56,9 @@ from user_keys import (
     get_user_key,
     get_user_keys_masked,
     upsert_user_keys,
+    store_login_credential,
+    get_login_credential,
+    clear_login_credential,
 )
 
 # ======================================================
@@ -102,6 +102,62 @@ def _get_user_credentials(username):
             return (username, entry["password"])
         _credential_cache.pop(username, None)
         return None
+
+
+# Corporate email domain used to construct a personal email from a sAMAccountName
+# when LDAP did not return a `mail` attribute (JWT `email` is then empty).
+CORP_EMAIL_DOMAIN = os.getenv("CORP_EMAIL_DOMAIN", "nutanix.com").strip().lstrip("@") or "nutanix.com"
+
+
+def _personal_identity_from_jwt():
+    """Resolve the personal login of the user who accessed the tool from the JWT.
+
+    Returns ``(email, username)`` for the logged-in human. Entities the tool
+    creates in JITA are authenticated as a shared service account, so JITA
+    stamps ``created_by`` = svc account. To keep the *manager/owner* attributed
+    to the real person, we record their identity in the JP's ``emails``/``user``
+    fields (the same place the delete-ownership logic reads the human requester
+    for service-account-created entities).
+
+    Falls back to ``<username>@CORP_EMAIL_DOMAIN`` when LDAP had no ``mail`` so a
+    personal identity is always stamped instead of leaving only the svc account.
+    """
+    payload = getattr(g, "current_user", None)
+    if not isinstance(payload, dict):
+        return "", ""
+    raw_username = (payload.get("sub") or payload.get("username") or "").strip()
+    email = (payload.get("email") or "").strip()
+    if not email and raw_username and "@" not in raw_username:
+        email = f"{raw_username}@{CORP_EMAIL_DOMAIN}"
+    elif not email and "@" in raw_username:
+        email = raw_username
+    # JITA's owner/"Created by" uses the bare sAMAccountName (firstname.lastname),
+    # never an email — strip any domain so `username` matches that pattern.
+    username = raw_username.split("@")[0] if raw_username else ""
+    return email, username
+
+
+def _current_user_jita_auth():
+    """Return the logged-in user's cached LDAP ``(username, password)`` for JITA
+    basic auth, or ``None`` if unavailable.
+
+    JITA attributes ``created_by`` to whoever authenticates the POST. When we
+    have the user's cached credentials (captured at login), creating entities as
+    the user makes JITA's native ``created_by`` = the real person instead of the
+    shared service account. Returns ``None`` when the cache is empty/expired
+    (e.g. token still valid but backend restarted), so callers can fall back to
+    the service account and never fail the operation.
+    """
+    payload = getattr(g, "current_user", None)
+    if not isinstance(payload, dict):
+        return None
+    username = (payload.get("sub") or payload.get("username") or "").strip()
+    if not username:
+        return None
+    creds = _get_user_credentials(username)
+    if creds:
+        return creds  # (username, password)
+    return None
 
 
 # ======================================================
@@ -2304,7 +2360,9 @@ def fetch_qi_from_tcms(testcase_name, milestone="7.5.1"):
         float: QI value (operation_success_percentage) or None if not found/error
     """
     try:
-        # Construct payload matching TCMS UI filters (no SYSTEST_LONGEVITY/LIMITED_RUNS exclusion)
+        # Match TCMS UI per-testcase lookup (no SYSTEST_LONGEVITY/LIMITED_RUNS exclusion).
+        # Those tags belong on overall-QI aggregates only; excluding them here makes
+        # TCMS miss the test, fall back to JITA failed-status 0, and inflate QI impact.
         # Use more flexible matching - try exact name match first, then regex
         payload = [{
             "$match": {
@@ -3661,17 +3719,7 @@ def get_qi_summary():
     
     if not tag and not task_ids:
         return jsonify({"error": "Either tag or task_ids is required"}), 400
-
-    # Opt-in: also return the names of failed testcases (cheap — reuses the
-    # test results already fetched below). Used by the Cursor AI chat context.
-    include_failed_names = request.args.get("include_failed_names", "").strip().lower() in ("1", "true", "yes")
-    try:
-        failed_names_limit = int(request.args.get("failed_limit", "100"))
-    except (TypeError, ValueError):
-        failed_names_limit = 100
-    failed_names_limit = max(1, min(failed_names_limit, 500))
-    failed_tests = []
-
+    
     if tag:
         logger.info(f"[START] QI Summary | tag={tag}")
     else:
@@ -3772,16 +3820,6 @@ def get_qi_summary():
                         task_test_counts["Succeeded"] += 1
                     elif status_lower == "failed" or status_lower == "failure":
                         task_test_counts["Failed"] += 1
-                        if include_failed_names and len(failed_tests) < failed_names_limit:
-                            _tf = test_result.get("test", {})
-                            if isinstance(_tf, dict):
-                                _tn = _tf.get("name", "")
-                            elif isinstance(_tf, str):
-                                _tn = _tf
-                            else:
-                                _tn = ""
-                            if _tn:
-                                failed_tests.append({"name": _tn, "branch": branch})
                     elif status_lower == "pending" or status_lower == "waiting":
                         task_test_counts["Pending"] += 1
                     elif status_lower == "warning" or status_lower == "warn":
@@ -3854,10 +3892,6 @@ def get_qi_summary():
             summary["branch_summary"][branch]["total_tests"] += task_test_counts["total"]
             summary["branch_summary"][branch]["failed_tests"] += task_test_counts["Failed"]
         
-        if include_failed_names:
-            summary["failed_tests"] = failed_tests
-            summary["failed_tests_truncated"] = summary["test_summary"]["failed"] > len(failed_tests)
-
         logger.info(f"[END] QI Summary | time={time.time() - start:.2f}s")
         logger.info(f"Test Summary: {summary['test_summary']}")
         
@@ -3877,7 +3911,12 @@ def _resolve_tcms_milestone(branch_name):
 
     Lookup order:
       1. Explicit entry in BRANCH_SHORT_NAME_MAP
-      2. Regex extraction of a dotted version (7.6, 7.5.1, 7.6.0.6, …)
+      2. Regex extraction of the FULL version token (any number of dotted
+         segments, e.g. ``7.6`` → ``7.6``, ``7.5.1`` → ``7.5.1``,
+         ``7.6.0.6`` → ``7.6.0.6``). The previous pattern capped the match at
+         three segments, so a branch like ``ganges-7.6.0.6-stable`` was
+         truncated to the invalid milestone ``7.6.0`` (which TCMS has no data
+         for), causing Current/Overall QI to render blank.
       3. Fall back to the original branch_name unchanged
     """
     if branch_name in BRANCH_SHORT_NAME_MAP:
@@ -3922,44 +3961,39 @@ def get_tcms_overall_qi():
     )
 
     try:
-        # Build base filter conditions
-        base_conditions = []
-        
         if is_master:
-            # Master: team-specific filters matching TCMS UI, feat_type=regression
-            base_conditions = [
-                {"additional_data.team": f"{milestone}/{team_name}"},
-                {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
-                {"test_case.deprecated": False},
-            ]
+            # Master: team-specific filters, feat_type=regression
+            filters = json.dumps({
+                "$and": [
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/", "$options": "i"}},
+                    {"release_name": {"$ne": milestone}},
+                    {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
+                    {"additional_data.team": f"{milestone}/{team_name}"},
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
+                    {"test_case.deprecated": False},
+                ]
+            })
             feat_type = "regression"
         else:
             # Release branch: team-specific filters, feat_type=regression
-            base_conditions = [
-                {"additional_data.team": f"{milestone}/{team_name}"},
-                {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
-                {"test_case.deprecated": False},
-            ]
+            filters = json.dumps({
+                "$and": [
+                    {"additional_data.team": f"{milestone}/{team_name}"},
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
+                    {"test_case.deprecated": False},
+                ]
+            })
             feat_type = "regression"
 
-        filters = json.dumps({"$and": base_conditions})
-
-        # TCMS API accepts date strings directly in YYYY-MM-DD format for time_filter
-        # When time_filter is a date string, pass it directly; otherwise use "all"
         params = {
             "aggregation_field": "target_package_type",
-            "time_filter": time_filter,  # Pass the date string directly (e.g., "2026-07-13" or "all")
+            "time_filter": time_filter,
             "target_milestone": milestone,
             "feat_type": feat_type,
             "filters": filters,
         }
-        
-        logger.info(f"[DEBUG] TCMS API request params: time_filter={time_filter}, milestone={milestone}, feat_type={feat_type}")
 
         url = f"{TCMS_SUMMARY_BASE}/milestone_all_test_cases/aggregate/metrics"
-        logger.info(f"[DEBUG] TCMS API URL: {url}")
-        logger.info(f"[DEBUG] TCMS API full params: {params}")
-        
         response = requests.get(
             url,
             params=params,
@@ -4024,424 +4058,6 @@ def get_tcms_overall_qi():
         return jsonify({"error": "TCMS API request timed out"}), 504
     except Exception as e:
         logger.error(f"Error fetching TCMS Overall QI: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-
-# ---------------------------------------------------
-# TCMS Overview Endpoint (for verification UI)
-# ---------------------------------------------------
-@app.route("/mcp/regression/tcms-overview", methods=["GET"])
-@jwt_required
-def get_tcms_overview():
-    """
-    Fetch TCMS overview metrics and construct UI URL for verification.
-    
-    Query params:
-      - tag: JITA tester tag (e.g., "cdp_master_full_reg")
-      - task_ids: Comma-separated JITA task IDs (alternative to tag)
-      - team_name: Override team (optional, will be extracted from tag if not provided)
-      - branch_name: Override branch (optional, will be extracted from tasks if not provided)
-      - time_filter: Time filter for TCMS (default: "all")
-    
-    Returns: TCMS metrics + constructed TCMS UI URL for verification
-    """
-    start = time.time()
-    tag = request.args.get("tag")
-    task_ids_param = request.args.get("task_ids")
-    team_name = request.args.get("team_name")
-    branch_name = request.args.get("branch_name")
-    time_filter = request.args.get("time_filter", "all")
-    
-    # Parse task_ids if provided
-    task_ids = None
-    if task_ids_param:
-        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
-    
-    if not tag and not task_ids:
-        return jsonify({"error": "Either tag or task_ids is required"}), 400
-    
-    logger.info(f"[START] TCMS Overview | tag={tag} task_ids_count={len(task_ids) if task_ids else 0}")
-    
-    try:
-        # Extract team and branch if not provided
-        if not team_name or not branch_name:
-            if tag:
-                # Extract team from tag using TEAM_CONFIG
-                team_config = TEAM_CONFIG.get(tag, TEAM_CONFIG.get("default", {}))
-                if not team_name:
-                    team_name = team_config.get("team", "CDP")
-                
-                # Extract branch from tag or fetch from tasks
-                if not branch_name:
-                    tasks = fetch_regression_tasks(tag=tag, include_tag_extras=False)
-                    if tasks and len(tasks) > 0:
-                        branch_name = tasks[0].get("branch", "master")
-                    else:
-                        branch_name = team_config.get("default_branch", "master")
-            elif task_ids:
-                # Fetch tasks to get branch
-                tasks = fetch_regression_tasks(task_ids=task_ids, include_tag_extras=False)
-                if tasks and len(tasks) > 0:
-                    if not branch_name:
-                        branch_name = tasks[0].get("branch", "master")
-                    if not team_name:
-                        # Try to extract team from first task's tester_tags
-                        tester_tags = tasks[0].get("tester_tags", [])
-                        for tt in tester_tags:
-                            team_config = TEAM_CONFIG.get(tt, {})
-                            if team_config:
-                                team_name = team_config.get("team", "CDP")
-                                break
-                        if not team_name:
-                            team_name = "CDP"  # Default fallback
-                else:
-                    team_name = team_name or "CDP"
-                    branch_name = branch_name or "master"
-        
-        if not team_name or not branch_name:
-            return jsonify({"error": "Could not determine team_name or branch_name"}), 400
-        
-        milestone = _resolve_tcms_milestone(branch_name)
-        is_master = branch_name.lower() in ("master", "main")
-        
-        logger.info(f"TCMS Overview | team={team_name} branch={branch_name} milestone={milestone} is_master={is_master}")
-        
-        # Build base filter conditions (same as get_tcms_overall_qi)
-        base_conditions = [
-            {"additional_data.team": f"{milestone}/{team_name}"},
-            {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
-            {"test_case.deprecated": False},
-        ]
-        feat_type = "regression"
-        
-        filters = json.dumps({"$and": base_conditions})
-        
-        # Prepare TCMS API request
-        params = {
-            "aggregation_field": "target_package_type",
-            "time_filter": time_filter,
-            "target_milestone": milestone,
-            "feat_type": feat_type,
-            "filters": filters,
-        }
-        
-        url = f"{TCMS_SUMMARY_BASE}/milestone_all_test_cases/aggregate/metrics"
-        logger.info(f"[DEBUG] TCMS Overview API URL: {url}")
-        
-        response = requests.get(
-            url,
-            params=params,
-            headers={"Content-Type": "application/json"},
-            verify=False,
-            timeout=30,
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"TCMS Summary API returned {response.status_code}: {response.text[:500]}")
-            return jsonify({"error": f"TCMS API error: {response.status_code}"}), 502
-        
-        data = response.json()
-        if not data.get("success") or not data.get("data"):
-            logger.warning("TCMS Summary API returned no data")
-            return jsonify({
-                "qi_value": None,
-                "message": "No data returned from TCMS",
-                "team_name": team_name,
-                "branch_name": branch_name,
-                "milestone": milestone,
-                "time_filter": time_filter,
-                "tcms_ui_url": None,
-            })
-        
-        overall = data["data"][0]
-        qi_value = overall.get("average_total_op_success_percentage")
-        
-        # Construct TCMS UI URL (based on RegressionHome.jsx line 2828)
-        tcms_search = f"additional_data.team:{milestone}/{team_name}"
-        tcms_ui_url = (
-            f"https://tcms.eng.nutanix.com/#/testcases/milestone/{milestone}"
-            f"?search={tcms_search}&tab=package_type&pass=overall&type=Regression"
-        )
-        if time_filter and time_filter != "all":
-            tcms_ui_url += f"&timeFilter={time_filter}"
-        
-        logger.info(f"[END] TCMS Overview | qi={qi_value} | time={time.time() - start:.2f}s")
-        
-        return jsonify({
-            "qi_value": qi_value,
-            "team_name": team_name,
-            "branch_name": branch_name,
-            "milestone": milestone,
-            "time_filter": time_filter,
-            "total_tests": overall.get("total"),
-            "run": overall.get("run"),
-            "passed": overall.get("passed"),
-            "failed": overall.get("failed"),
-            "not_run": overall.get("not_run"),
-            "blocked": overall.get("blocked"),
-            "run_percentage": overall.get("run_percentage"),
-            "overall_effectiveness": overall.get("overall_effectiveness"),
-            "overall_stability": overall.get("overall_stability"),
-            "total_triaged": overall.get("total_triaged"),
-            "triage_percentage": overall.get("triage_percentage"),
-            "total_product_issues": overall.get("total_product_issues"),
-            "total_test_issues": overall.get("total_test_issues"),
-            "total_other_issues": overall.get("total_other_issues"),
-            "total_infra_issues": overall.get("total_infra_issues"),
-            "total_framework_issues": overall.get("total_framework_issues"),
-            "openBugs": overall.get("openBugs"),
-            "unique_tickets": overall.get("unique_tickets", []),
-            "execution_passed_percentage": overall.get("execution_passed_percentage"),
-            "execution_failed_percentage": overall.get("execution_failed_percentage"),
-            "tcms_ui_url": tcms_ui_url,
-        })
-    
-    except requests.exceptions.Timeout:
-        logger.error("TCMS Summary API request timed out")
-        return jsonify({"error": "TCMS API request timed out"}), 504
-    except Exception as e:
-        logger.error(f"Error fetching TCMS overview: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-
-# ---------------------------------------------------
-# JITA vs TCMS Testcase Comparison Endpoint
-# ---------------------------------------------------
-@app.route("/mcp/regression/jita-tcms-comparison", methods=["POST"])
-@jwt_required
-def compare_jita_tcms_testcases():
-    """
-    Compare testcases between JITA run and TCMS registry.
-    
-    Request body:
-      - tag: JITA tester tag
-      - task_ids: Comma-separated JITA task IDs (alternative to tag)
-      - team_name: TCMS team name (optional, will be extracted if not provided)
-      - branch_name: Branch name (optional, will be extracted if not provided)
-    
-    Returns: Detailed comparison showing matched, missing_in_jita, missing_in_tcms
-    """
-    start = time.time()
-    
-    try:
-        body = request.get_json(force=True) or {}
-        tag = body.get("tag")
-        task_ids_param = body.get("task_ids")
-        team_name = body.get("team_name")
-        branch_name = body.get("branch_name")
-        
-        # Parse task_ids
-        task_ids = None
-        if task_ids_param:
-            if isinstance(task_ids_param, list):
-                task_ids = [str(tid).strip() for tid in task_ids_param if tid]
-            elif isinstance(task_ids_param, str):
-                task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
-        
-        if not tag and not task_ids:
-            return jsonify({"error": "Either tag or task_ids is required"}), 400
-        
-        logger.info(f"[START] JITA-TCMS Comparison | tag={tag} task_ids_count={len(task_ids) if task_ids else 0}")
-        
-        # Step 1: Fetch JITA test data
-        logger.info("Fetching JITA test data...")
-        if tag:
-            tasks = fetch_regression_tasks(tag=tag, include_tag_extras=False)
-        else:
-            tasks = fetch_regression_tasks(task_ids=task_ids, include_tag_extras=False)
-        
-        if not tasks:
-            return jsonify({"error": "No tasks found"}), 404
-        
-        # Extract team and branch if not provided
-        if not team_name or not branch_name:
-            if tag:
-                team_config = TEAM_CONFIG.get(tag, TEAM_CONFIG.get("default", {}))
-                if not team_name:
-                    team_name = team_config.get("team", "CDP")
-                if not branch_name:
-                    branch_name = tasks[0].get("branch", team_config.get("default_branch", "master"))
-            else:
-                if not branch_name:
-                    branch_name = tasks[0].get("branch", "master")
-                if not team_name:
-                    tester_tags = tasks[0].get("tester_tags", [])
-                    for tt in tester_tags:
-                        team_config = TEAM_CONFIG.get(tt, {})
-                        if team_config:
-                            team_name = team_config.get("team", "CDP")
-                            break
-                    if not team_name:
-                        team_name = "CDP"
-        
-        milestone = _resolve_tcms_milestone(branch_name)
-        logger.info(f"Comparison | team={team_name} branch={branch_name} milestone={milestone}")
-        
-        # Collect all task IDs
-        jita_task_ids = [task["_id"]["$oid"] for task in tasks]
-        
-        # Fetch test results from JITA
-        test_data = fetch_test_results_batch_with_pagination(jita_task_ids, timeout=120)
-        logger.info(f"Fetched {len(test_data)} test results from JITA")
-        
-        # Extract unique testcase names from JITA with metadata
-        jita_testcases = {}
-        for test in test_data:
-            test_name = test.get("test", {}).get("name", "")
-            if test_name:
-                if test_name not in jita_testcases:
-                    jita_testcases[test_name] = {
-                        "testcase_name": test_name,
-                        "jita_status": test.get("status", "Unknown"),
-                        "jita_task_id": test.get("task_id", ""),
-                    }
-        
-        logger.info(f"Extracted {len(jita_testcases)} unique testcases from JITA")
-        
-        # Step 2: Fetch TCMS testcases
-        logger.info("Fetching TCMS testcases...")
-        payload = [{
-            "$match": {
-                "$and": [
-                    {"target_milestone": milestone},
-                    {"additional_data.team": f"{milestone}/{team_name}"},
-                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
-                    {"test_case.deprecated": False},
-                    {"last_result": {"$elemMatch": {"pass_name": "overall"}}}
-                ]
-            }
-        }, {"$sort": {"name": 1}}, {"$skip": 0}, {"$limit": 5000}]
-        
-        response = requests.post(
-            f"{TCMS_BASE}/milestone_all_test_cases/aggregate",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            verify=False,
-            timeout=60
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"TCMS API error: HTTP {response.status_code}")
-            return jsonify({"error": f"TCMS API error: {response.status_code}"}), 502
-        
-        tcms_data = response.json()
-        if not tcms_data.get("success") or not tcms_data.get("data"):
-            logger.warning("TCMS API returned no data")
-            return jsonify({"error": "No TCMS data available"}), 404
-        
-        # Extract TCMS testcases with metadata
-        tcms_testcases = {}
-        for tc in tcms_data["data"]:
-            test_case = tc.get("test_case", {})
-            test_name = test_case.get("name", "")
-            if not test_name:
-                continue
-            
-            last_result = tc.get("last_result", [])
-            published = {}
-            status = "Unknown"
-            last_updated = ""
-            qi = None
-            
-            if last_result and len(last_result) > 0:
-                lr = last_result[0]
-                published = lr.get("published", {})
-                status = lr.get("status", "Unknown")
-                last_updated = lr.get("last_updated", "")
-                qi = published.get("operation_success_percentage")
-            
-            # Parse test area from test name (first 2-3 parts)
-            test_parts = test_name.split(".")
-            test_area = ".".join(test_parts[:min(3, len(test_parts))]) if test_parts else ""
-            
-            tcms_testcases[test_name] = {
-                "testcase_name": test_name,
-                "tcms_qi": qi if qi is not None else 0.0,
-                "tcms_status": status,
-                "test_area": test_area,
-                "deprecated": test_case.get("deprecated", False),
-                "last_run_date": last_updated[:10] if last_updated else "",
-                "owner": test_case.get("owner", "")
-            }
-        
-        logger.info(f"Extracted {len(tcms_testcases)} testcases from TCMS")
-        
-        # Step 3: Compare and categorize
-        jita_set = set(jita_testcases.keys())
-        tcms_set = set(tcms_testcases.keys())
-        
-        matched_set = jita_set & tcms_set
-        missing_in_jita_set = tcms_set - jita_set
-        missing_in_tcms_set = jita_set - tcms_set
-        
-        # Build comparison results
-        matched = []
-        for test_name in matched_set:
-            jita_info = jita_testcases[test_name]
-            tcms_info = tcms_testcases[test_name]
-            
-            status_match = jita_info["jita_status"] == tcms_info["tcms_status"]
-            
-            matched.append({
-                "testcase_name": test_name,
-                "jita_status": jita_info["jita_status"],
-                "tcms_status": tcms_info["tcms_status"],
-                "jita_qi": None,  # JITA doesn't have QI directly
-                "tcms_qi": tcms_info["tcms_qi"],
-                "qi_difference": "N/A",
-                "test_area": tcms_info["test_area"],
-                "owner": tcms_info["owner"],
-                "deprecated": tcms_info["deprecated"],
-                "status_match": status_match
-            })
-        
-        missing_in_jita = []
-        for test_name in missing_in_jita_set:
-            tcms_info = tcms_testcases[test_name]
-            missing_in_jita.append(tcms_info)
-        
-        missing_in_tcms = []
-        for test_name in missing_in_tcms_set:
-            jita_info = jita_testcases[test_name]
-            missing_in_tcms.append(jita_info)
-        
-        # Calculate match percentage
-        total_jita = len(jita_set)
-        total_tcms = len(tcms_set)
-        matched_count = len(matched_set)
-        
-        if total_jita > 0:
-            exact_match_percentage = round((matched_count / total_jita) * 100, 2)
-        else:
-            exact_match_percentage = 0.0
-        
-        summary = {
-            "total_jita": total_jita,
-            "total_tcms": total_tcms,
-            "matched_count": matched_count,
-            "missing_in_jita_count": len(missing_in_jita_set),
-            "missing_in_tcms_count": len(missing_in_tcms_set),
-            "exact_match_percentage": exact_match_percentage
-        }
-        
-        logger.info(f"[END] JITA-TCMS Comparison | matched={matched_count} missing_jita={len(missing_in_jita_set)} missing_tcms={len(missing_in_tcms_set)} | time={time.time() - start:.2f}s")
-        
-        return jsonify({
-            "success": True,
-            "missing_in_jita": missing_in_jita,
-            "missing_in_tcms": missing_in_tcms,
-            "matched": matched,
-            "summary": summary,
-            "team_name": team_name,
-            "branch_name": branch_name,
-            "milestone": milestone
-        })
-    
-    except requests.exceptions.Timeout:
-        logger.error("TCMS API request timed out")
-        return jsonify({"error": "TCMS API request timed out"}), 504
-    except Exception as e:
-        logger.error(f"Error in JITA-TCMS comparison: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -5767,7 +5383,6 @@ def batch_update_job_profiles(run_plan_id):
         
         updated_count = 0
         failed_updates = []
-        
         def update_single_job(job_id):
             try:
                 # Fetch existing profile (use service account for fetching)
@@ -5989,7 +5604,7 @@ def batch_update_job_profiles(run_plan_id):
                         new_additional_tags = []
                     updated_profile["run_tests_with_additional_tags"] = new_additional_tags
                     logger.info(f"Overwriting run_tests_with_additional_tags for {job_id}: {new_additional_tags}")
-                
+
                 # Ensure JSON serializable (following reference script pattern)
                 serializable_payload = {}
                 for k, v in updated_profile.items():
@@ -6817,1635 +6432,6 @@ def fetch_jira_ticket(ticket_id, token=None, fields=None):
     except Exception as e:
         logger.warning(f"Error fetching Jira ticket {ticket_id}: {e}")
         return None
-
-
-def is_create_eng_ticket_intent(text):
-    """True when the user asks to create/file an ENG/Jira ticket."""
-    t = re.sub(r"\s+", " ", (text or "").strip().lower())
-    if not t:
-        return False
-    # Common typos from chat input
-    t = (
-        t.replace("creaet", "create")
-        .replace("ticet", "ticket")
-        .replace("tiket", "ticket")
-    )
-    # Viewing an existing key is not create ("open ticket ENG-123")
-    if re.search(r"\b(open|show|view|get)\b.{0,24}\b[a-z][a-z0-9]+-\d+\b", t):
-        if not re.search(r"\b(create|file|raise|submit)\b", t):
-            return False
-    # Require an explicit create/file verb near ticket/eng/jira
-    return bool(
-        re.search(
-            r"\b(create|file|raise|submit)\b.{0,40}\b(eng\s+)?(jira\s+)?ticket\b"
-            r"|\b(create|file|raise|submit)\b.{0,20}\beng\b"
-            r"|\bnew\s+(eng\s+)?(jira\s+)?ticket\b"
-            r"|\b(create|file)\s+eng\b",
-            t,
-        )
-    )
-
-
-def is_create_cr_intent(text):
-    """True when the user asks to create/file a Gerrit CR / change request."""
-    t = re.sub(r"\s+", " ", (text or "").strip().lower())
-    if not t:
-        return False
-    return bool(
-        re.search(
-            r"\b(create|file|raise|submit|open|push)\b.{0,40}\b(cr|change request|gerrit)\b"
-            r"|\b(create|file|raise)\b.{0,20}\bhandoff\b"
-            r"|\bcr\s+for\s+(the\s+)?fix\b",
-            t,
-        )
-    )
-
-
-# Branches accepted by auto_handoff / auto_deprecate MCP tools.
-_HANDOFF_ALLOWED_BRANCHES = ("master", "ganges-7.6-stable", "ganges-7.6-stable-pc")
-
-
-def _infer_gerrit_target_branch(ticket_ctx):
-    """
-    Infer the Gerrit / handoff branch from the failed JITA run.
-
-    Prefer nutest-py3-tests branch (where test-code CRs land), then NOS branch /
-    current_branch. Maps release aliases onto the handoff-allowed set when possible.
-
-    Returns dict:
-      gerrit_branch  – branch for refs/for/<branch> (best effort, may be raw)
-      handoff_branch – one of master / ganges-7.6-stable / ganges-7.6-stable-pc, or ""
-      raw_branch     – original string from context
-      source         – which field was used
-    """
-    ctx = ticket_ctx or {}
-    candidates = [
-        ("nutest_branch", ctx.get("nutest_branch")),
-        ("nutest-py3-tests_branch", ctx.get("nutest-py3-tests_branch")),
-        ("gerrit_branch", ctx.get("gerrit_branch")),
-        ("cr_branch", ctx.get("cr_branch")),
-        ("nos_branch", ctx.get("nos_branch")),
-        ("current_branch", ctx.get("current_branch")),
-        ("branch", ctx.get("branch")),
-    ]
-    raw = ""
-    source = ""
-    for key, val in candidates:
-        val = str(val or "").strip()
-        if val:
-            raw = val
-            source = key
-            break
-
-    service = str(ctx.get("service") or "").strip().lower()
-    package = str(ctx.get("package_type") or ctx.get("metadata_services") or "").strip().lower()
-    blob = " ".join([raw, service, package, str(ctx.get("label") or "")]).lower()
-    is_pc = bool(
-        re.search(r"(^|[^a-z])pc([^a-z]|$)|-pc\b|prism[_\s-]?central|pc_tar|pc-tar", blob)
-        or service in {"pc", "prism_central", "prism-central"}
-    )
-
-    low = raw.lower().strip()
-    gerrit_branch = raw or "master"
-    handoff_branch = ""
-
-    if not low or low in {"master", "main"}:
-        gerrit_branch = "master"
-        handoff_branch = "master"
-    elif low == "ganges-7.6-stable-pc" or (is_pc and ("7.6" in low or "ganges" in low)):
-        gerrit_branch = "ganges-7.6-stable-pc"
-        handoff_branch = "ganges-7.6-stable-pc"
-    elif low == "ganges-7.6-stable" or re.search(r"\b7\.6\b", low) or "ganges" in low:
-        gerrit_branch = "ganges-7.6-stable"
-        handoff_branch = "ganges-7.6-stable"
-    elif low in _HANDOFF_ALLOWED_BRANCHES:
-        gerrit_branch = low
-        handoff_branch = low
-    else:
-        # Unknown/older branch: keep raw for git push; handoff only if exact match.
-        gerrit_branch = raw
-        handoff_branch = raw if raw in _HANDOFF_ALLOWED_BRANCHES else ""
-
-    return {
-        "gerrit_branch": gerrit_branch,
-        "handoff_branch": handoff_branch,
-        "raw_branch": raw or gerrit_branch,
-        "source": source or "default",
-        "is_pc": is_pc,
-    }
-
-
-def format_cr_branch_system_hint(ticket_ctx, branch_info=None):
-    """Build the [System] block injected into create-CR follow-ups."""
-    ctx = ticket_ctx or {}
-    info = branch_info or _infer_gerrit_target_branch(ctx)
-    testcase = (ctx.get("testcase_name") or "").strip()
-    gerrit_branch = info.get("gerrit_branch") or "master"
-    handoff_branch = info.get("handoff_branch") or ""
-    lines = [
-        "[System] CR branch context from this failed run — do NOT ask the user and "
-        "do NOT default to master unless the run was on master.",
-        f"- Failed-run / target branch: `{gerrit_branch}` (source: {info.get('source')}, raw: {info.get('raw_branch')})",
-        f"- Gerrit push ref MUST be: `refs/for/{gerrit_branch}`",
-    ]
-    if testcase:
-        lines.append(f"- Testcase: `{testcase}`")
-    if ctx.get("created_ticket") or ctx.get("jira_duplicates"):
-        tickets = []
-        if ctx.get("created_ticket"):
-            tickets.append(str(ctx["created_ticket"]))
-        for t in ctx.get("jira_duplicates") or []:
-            if t and str(t) not in tickets:
-                tickets.append(str(t))
-        if tickets:
-            lines.append(f"- Related ENG ticket(s): {', '.join(tickets[:5])}")
-    if handoff_branch:
-        lines.append(
-            f"- For auto_handoff / auto_deprecate, pass `branch=\"{handoff_branch}\"` "
-            f"(allowed: master | ganges-7.6-stable | ganges-7.6-stable-pc)."
-        )
-        lines.append(
-            "- Prefer: validate with action=auto first, show the user the result, "
-            "then only execute start/complete/approve after they confirm."
-        )
-    else:
-        lines.append(
-            f"- Branch `{gerrit_branch}` is not in the auto_handoff allow-list. "
-            f"For a code-fix CR, prepare the change against `{gerrit_branch}` and "
-            f"push to `refs/for/{gerrit_branch}`. Do not force master."
-        )
-    lines.append(
-        "- Do NOT claim a CR was created unless a tool call (auto_handoff/auto_deprecate) "
-        "or push succeeded. Include the CR URL when available."
-    )
-    return "\n".join(lines)
-
-
-def is_investigate_ticket_intent(text):
-    """True when user asks about ENG ticket status / fix / linked CR."""
-    t = re.sub(r"\s+", " ", (text or "").strip().lower())
-    if not t:
-        return False
-    has_ticket_ref = bool(re.search(r"\beng-\d+\b", t) or re.search(r"\b(ticket|jira|eng)\b", t))
-    asks_status = bool(
-        re.search(
-            r"\b(status|fixed|resolved|fix|cr|change request|gerrit|what('?s| is) "
-            r"(the )?(issue|problem)|has it been|duplicate)\b",
-            t,
-        )
-    )
-    return has_ticket_ref and asks_status
-
-
-def extract_eng_ticket_keys(text, extra=None):
-    """Extract ENG-#### keys from free text and optional lists."""
-    keys = []
-    for m in re.finditer(r"\b([A-Z][A-Z0-9]+-\d+)\b", text or "", flags=re.I):
-        key = m.group(1).upper()
-        if key not in keys:
-            keys.append(key)
-    for item in extra or []:
-        if isinstance(item, str) and re.match(r"^[A-Z][A-Z0-9]+-\d+$", item.strip().upper()):
-            key = item.strip().upper()
-            if key not in keys:
-                keys.append(key)
-    return keys
-
-
-def investigate_eng_ticket(ticket_key, token=None):
-    """
-    Fetch ENG ticket status, resolution, and linked Gerrit CRs via Jira REST.
-
-    Returns dict suitable for follow-up answers (ok/error + fields).
-    """
-    key = (ticket_key or "").strip().upper()
-    if not key or not re.match(r"^[A-Z][A-Z0-9]+-\d+$", key):
-        return {"ok": False, "error": "Invalid ticket key", "key": key}
-
-    jira_token = resolve_jira_token(token)
-    if not jira_token:
-        return {
-            "ok": False,
-            "key": key,
-            "error": (
-                "Jira token not available. Open User Settings → API Keys and add "
-                "your Atlassian Jira Personal Token."
-            ),
-        }
-
-    headers = get_jira_headers(jira_token)
-    try:
-        resp = session.get(
-            f"{JIRA_BASE}/issue/{key}",
-            headers=headers,
-            params={
-                "fields": (
-                    "summary,status,resolution,issuetype,assignee,components,"
-                    "labels,updated,created,description,comment,fixVersions,versions"
-                ),
-            },
-            timeout=30,
-            verify=False,
-        )
-        if resp.status_code != 200:
-            return {
-                "ok": False,
-                "key": key,
-                "error": f"Jira fetch failed ({resp.status_code}): {(resp.text or '')[:400]}",
-            }
-
-        data = resp.json() or {}
-        fields = data.get("fields") or {}
-        status = ((fields.get("status") or {}).get("name") or "").strip()
-        resolution = ((fields.get("resolution") or {}).get("name") or "").strip()
-        issue_type = ((fields.get("issuetype") or {}).get("name") or "").strip()
-        summary = (fields.get("summary") or "").strip()
-        assignee = ((fields.get("assignee") or {}).get("displayName") or "").strip()
-        components = [
-            (c.get("name") or "").strip()
-            for c in (fields.get("components") or [])
-            if (c.get("name") or "").strip()
-        ]
-        labels = fields.get("labels") or []
-        description = (fields.get("description") or "") or ""
-        if len(description) > 2500:
-            description = description[:2500] + "…"
-
-        # Linked Gerrit CRs via Jira development / stash integration
-        crs = []
-        issue_id = data.get("id") or ""
-        if issue_id:
-            try:
-                dev_resp = session.get(
-                    "https://jira.nutanix.com/rest/dev-status/latest/issue/detail",
-                    headers=headers,
-                    params={
-                        "issueId": issue_id,
-                        "applicationType": "stash",
-                        "dataType": "pullrequest",
-                    },
-                    timeout=30,
-                    verify=False,
-                )
-                if dev_resp.status_code == 200:
-                    for detail in (dev_resp.json() or {}).get("detail") or []:
-                        for pr in detail.get("pullRequests") or []:
-                            crs.append({
-                                "id": pr.get("id") or "",
-                                "name": pr.get("name") or "",
-                                "status": pr.get("status") or "",
-                                "url": pr.get("url") or "",
-                            })
-            except Exception as dev_err:
-                logger.warning("Dev-status fetch failed for %s: %s", key, dev_err)
-
-        # Also scrape remote links for Gerrit URLs
-        try:
-            rl_resp = session.get(
-                f"{JIRA_BASE}/issue/{key}/remotelink",
-                headers=headers,
-                timeout=20,
-                verify=False,
-            )
-            if rl_resp.status_code == 200:
-                for link in rl_resp.json() or []:
-                    obj = link.get("object") or {}
-                    url = (obj.get("url") or "").strip()
-                    title = (obj.get("title") or "").strip()
-                    if url and ("gerrit" in url.lower() or "nugerrit" in url.lower()):
-                        if not any(c.get("url") == url for c in crs):
-                            crs.append({
-                                "id": title or url.rsplit("/", 1)[-1],
-                                "name": title,
-                                "status": "",
-                                "url": url,
-                            })
-        except Exception as rl_err:
-            logger.warning("Remote-link fetch failed for %s: %s", key, rl_err)
-
-        status_l = status.lower()
-        resolution_l = resolution.lower()
-        is_fixed = (
-            resolution_l in {"fixed", "done", "resolved", "completed"}
-            or status_l in {"resolved", "closed", "done", "fixed"}
-        )
-        is_open = status_l in {
-            "open", "in progress", "reopened", "need info", "pending review",
-            "pending merge", "to do", "selected for development",
-        }
-
-        return {
-            "ok": True,
-            "key": key,
-            "url": f"https://jira.nutanix.com/browse/{key}",
-            "summary": summary,
-            "status": status,
-            "resolution": resolution or None,
-            "issue_type": issue_type,
-            "assignee": assignee or None,
-            "components": components,
-            "labels": labels,
-            "description": description,
-            "is_fixed": is_fixed,
-            "is_open": is_open,
-            "crs": crs,
-            "updated": fields.get("updated"),
-            "created": fields.get("created"),
-        }
-    except Exception as e:
-        logger.error("investigate_eng_ticket(%s) failed: %s", key, e, exc_info=True)
-        return {"ok": False, "key": key, "error": str(e)}
-
-
-def format_eng_investigation_answer(info, glean_snippets=None):
-    """Render investigate_eng_ticket result as markdown for follow_up_answer."""
-    if not info or not info.get("ok"):
-        return f"Could not investigate ticket: {(info or {}).get('error') or 'unknown error'}"
-
-    lines = [
-        f"### [{info['key']}]({info['url']}) — ticket investigation",
-        "",
-        f"**Summary:** {info.get('summary') or 'N/A'}",
-        f"**Type:** {info.get('issue_type') or 'N/A'}",
-        f"**Status:** {info.get('status') or 'N/A'}"
-        + (f" (resolution: {info['resolution']})" if info.get("resolution") else ""),
-        f"**Fixed?** {'Yes' if info.get('is_fixed') else ('No — still open' if info.get('is_open') else 'Unclear from status')}",
-    ]
-    if info.get("assignee"):
-        lines.append(f"**Assignee:** {info['assignee']}")
-    if info.get("components"):
-        lines.append(f"**Components:** {', '.join(info['components'])}")
-
-    crs = info.get("crs") or []
-    lines.append("")
-    lines.append("#### Linked CR(s)")
-    if crs:
-        for cr in crs:
-            label = cr.get("id") or cr.get("name") or "CR"
-            url = cr.get("url") or ""
-            status = cr.get("status") or ""
-            if url:
-                lines.append(f"- [{label}]({url})" + (f" — {status}" if status else ""))
-            else:
-                lines.append(f"- {label}" + (f" — {status}" if status else ""))
-    else:
-        lines.append("- No Gerrit CR linked in Jira development/remote links.")
-
-    if info.get("description"):
-        lines.extend(["", "#### Issue description (trimmed)", "```", info["description"][:1200], "```"])
-
-    if glean_snippets:
-        lines.extend(["", "#### Glean / product knowledge"])
-        for snip in glean_snippets[:5]:
-            lines.append(f"- {snip}")
-
-    return "\n".join(lines)
-
-
-def _issue_type_from_classification(classification):
-    """
-    Deep-analysis ENG creates use issue type Test (matches real ENG test bugs).
-    Bug type requires extra fields (Impact, Bug Found With, Hypervisor Specific) we
-    do not fill — so only return Bug when the user explicitly asks for it.
-    """
-    cls = (classification or "").strip().lower()
-    if cls in {"bug", "product bug"} or cls == "bug issue":
-        return "Bug"
-    return "Test"
-
-
-# Known ENG Primary Component parents (customfield_15160 cascading select).
-_ENG_PRIMARY_COMPONENT_ALIASES = (
-    (re.compile(r"\bstargate\b", re.I), "Stargate"),
-    (re.compile(r"\bcurator\b", re.I), "Curator"),
-    (re.compile(r"\bcassandra\b", re.I), "Cassandra"),
-    (re.compile(r"\bcerebro\b", re.I), "Cerebro"),
-    (re.compile(r"\bhades\b", re.I), "Hades"),
-    (re.compile(r"\bcastor\b", re.I), "Castor"),
-    (re.compile(r"\binsights?\b", re.I), "Insights"),
-    (re.compile(r"\bprism\b|\bpc\b|manageability", re.I), "Prism"),
-    (re.compile(r"\bexternal[_\s]?storage\b|\bblockstore\b|\bnvmf\b", re.I), "External Storage"),
-    (re.compile(r"\bandur\b", re.I), "Anduril"),
-    (re.compile(r"\bmagneto\b", re.I), "Magneto"),
-    (re.compile(r"\bcanvas\b", re.I), "Canvas"),
-)
-
-# ENG Test Type (customfield_18062) — only these four options are valid.
-_ENG_TEST_TYPE_CANDIDATES = (
-    "Test Bug",
-    "Product Bug",
-    "New Test",
-    "Test Task",
-)
-_ENG_TEST_TYPE_ALIASES = {
-    "nutest": "Test Bug",
-    "nu test": "Test Bug",
-    "pytest": "Test Bug",
-    "automation": "Test Bug",
-    "system test": "Test Bug",
-    "functional": "Test Bug",
-    "regression": "Test Bug",
-    "integration": "Test Bug",
-    "test": "Test Bug",
-    "testbug": "Test Bug",
-    "test bug": "Test Bug",
-    "product": "Product Bug",
-    "product bug": "Product Bug",
-    "product issue": "Product Bug",
-    "new test": "New Test",
-    "test task": "Test Task",
-}
-
-# Observed valid ENG "Regression?" options (customfield_13260). Plain "Yes" is invalid.
-_ENG_REGRESSION_YES = "Yes-build-to-build"
-_ENG_REGRESSION_NO = "No"
-
-# Cache: (issue_type) -> createmeta field map
-_eng_createmeta_cache = {}
-_eng_createmeta_lock = threading.Lock()
-
-
-def _build_eng_ticket_summary(ticket_ctx):
-    explicit = (ticket_ctx.get("summary") or "").strip()
-    if explicit:
-        return explicit[:255]
-    testcase = (ticket_ctx.get("testcase_name") or "").strip()
-    root = re.sub(r"\s+", " ", (ticket_ctx.get("root_cause") or "").strip())
-    short_root = root[:140] if root else "Failed testcase triage"
-    short_tc = testcase.split(".")[-1] if testcase else "testcase"
-    return f"{short_tc} — {short_root}"[:255]
-
-
-def _oid_str(value):
-    if isinstance(value, dict) and value.get("$oid"):
-        return str(value["$oid"]).strip()
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def _parse_jita_log_url_parts(test_log_url):
-    """
-    Parse task/result ids + lab/infra from a JITA test_log_url.
-    Supports both API proxy URLs and raw /logs/<task>/<result>/ paths.
-    """
-    url = (test_log_url or "").strip()
-    out = {"task_id": "", "result_dir": "", "lab": "phx1", "infra": "nutest", "raw_path": ""}
-    if not url:
-        return out
-    m = re.search(r"[?&]lab=([^&]+)", url, flags=re.I)
-    if m:
-        out["lab"] = m.group(1)
-    m = re.search(r"[?&]infra=([^&]+)", url, flags=re.I)
-    if m:
-        out["infra"] = m.group(1)
-    m = re.search(r"(?:[?&]url=)?(/logs/([a-f0-9]{24})/([a-f0-9]{24}))", url, flags=re.I)
-    if not m:
-        m = re.search(r"/logs/([a-f0-9]{24})/([a-f0-9]{24})", url, flags=re.I)
-        if m:
-            out["task_id"] = m.group(1)
-            out["result_dir"] = m.group(2)
-            out["raw_path"] = f"/logs/{m.group(1)}/{m.group(2)}"
-            return out
-        return out
-    out["raw_path"] = m.group(1)
-    out["task_id"] = m.group(2)
-    out["result_dir"] = m.group(3)
-    return out
-
-
-def _jita_api_log_url(path_under_logs, lab="phx1", infra="nutest"):
-    path = (path_under_logs or "").strip()
-    if not path.startswith("/"):
-        path = "/" + path
-    return (
-        f"https://jita.eng.nutanix.com/api/v2/log?log_type=test_log"
-        f"&url={path}&lab={lab}&infra={infra}"
-    )
-
-
-def _build_eng_ticket_links(ticket_ctx):
-    """Build Triage-Genie-style Jita / Log / Triage Genie / Triage Genie JSON links."""
-    testcase = (ticket_ctx.get("testcase_name") or "").strip()
-    test_log_url = (ticket_ctx.get("test_log_url") or "").strip()
-    task_id = (
-        _oid_str(ticket_ctx.get("agave_task_id"))
-        or _oid_str(ticket_ctx.get("task_id"))
-        or ""
-    )
-    result_id = (
-        _oid_str(ticket_ctx.get("testcase_id"))
-        or _oid_str(ticket_ctx.get("test_result_id"))
-        or ""
-    )
-    parts = _parse_jita_log_url_parts(test_log_url)
-    if not task_id:
-        task_id = parts.get("task_id") or ""
-    lab = parts.get("lab") or "phx1"
-    infra = parts.get("infra") or "nutest"
-    raw_path = parts.get("raw_path") or ""
-    if not raw_path and task_id and parts.get("result_dir"):
-        raw_path = f"/logs/{task_id}/{parts['result_dir']}"
-    if not raw_path and task_id and result_id:
-        # Fallback: some runs use result id as log dir.
-        raw_path = f"/logs/{task_id}/{result_id}"
-
-    log_link = ""
-    if test_log_url and "log_type=test_log" in test_log_url:
-        log_link = test_log_url
-    elif raw_path:
-        log_link = _jita_api_log_url(raw_path, lab=lab, infra=infra)
-    elif test_log_url:
-        log_link = test_log_url
-
-    jita_link = ""
-    if task_id:
-        jita_link = (
-            f"https://jita.eng.nutanix.com/results?task_ids={task_id}"
-            f"&active_tab=2&merge_tests=false"
-        )
-
-    tg_link = ""
-    if result_id:
-        tg_link = f"http://triage-genie.eng.nutanix.com/review/{result_id}"
-    elif task_id:
-        tg_link = f"http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids={task_id}"
-
-    tg_json_link = ""
-    tc_path = convert_testcase_name_to_path(testcase)
-    if raw_path and tc_path:
-        tg_json_link = _jita_api_log_url(
-            f"{raw_path.rstrip('/')}/{tc_path}/normalized_logs/triage_genie.json",
-            lab=lab,
-            infra=infra,
-        )
-
-    return {
-        "jita": jita_link,
-        "log": log_link,
-        "triage_genie": tg_link,
-        "triage_genie_json": tg_json_link,
-        "task_id": task_id,
-        "result_id": result_id,
-        "raw_path": raw_path,
-        "lab": lab,
-        "infra": infra,
-    }
-
-
-def _extract_steps_from_steps_log(steps_log, limit=40):
-    """Pull unique STEP descriptions from steps.log as a Test Steps fallback."""
-    if not steps_log:
-        return ""
-    steps = []
-    seen = set()
-    for line in str(steps_log).splitlines():
-        m = re.search(r"\bSTEP\b.*?\(T[SB]\)\s+(.*)$", line)
-        if not m:
-            continue
-        text = m.group(1).strip().strip("-").strip()
-        if not text or set(text) <= {"-", "="} or text in seen:
-            continue
-        seen.add(text)
-        steps.append(text)
-        if len(steps) >= limit:
-            break
-    return "\n".join(steps)
-
-
-def _fetch_last_pass_info(testcase_name, branch="", timeout=12):
-    """Best-effort last successful run for Regression line (may be unavailable)."""
-    testcase_name = (testcase_name or "").strip()
-    if not testcase_name:
-        return {}
-    branch = (branch or "").strip()
-    raw_query = {"test": testcase_name, "status": "Succeeded"}
-    if branch:
-        raw_query["branch"] = branch
-    try:
-        resp = session.post(
-            f"{JITA_BASE}/reports/agave_test_results",
-            json={
-                "raw_query": raw_query,
-                "only": "_id,test,status,start_time,end_time,branch",
-                "start": 0,
-                "limit": 1,
-                "sort": "-start_time",
-                "merge": True,
-            },
-            timeout=timeout,
-        )
-        if resp.status_code != 200:
-            return {}
-        rows = (resp.json() or {}).get("data") or []
-        if not rows:
-            return {}
-        row = rows[0]
-        ts = row.get("start_time") or row.get("end_time")
-        when = ""
-        if isinstance(ts, dict) and "$date" in ts:
-            when = datetime.utcfromtimestamp(ts["$date"] / 1000).strftime("%Y-%m-%dT%H:%M:%S")
-        elif isinstance(ts, (int, float)):
-            # seconds or ms
-            val = float(ts)
-            if val > 1e12:
-                val = val / 1000.0
-            when = datetime.utcfromtimestamp(val).strftime("%Y-%m-%dT%H:%M:%S")
-        elif isinstance(ts, str):
-            when = ts
-        return {
-            "branch": (row.get("branch") or branch or "").strip(),
-            "at": when,
-        }
-    except Exception as e:
-        logger.debug("last-pass lookup failed for %s: %s", testcase_name, e)
-        return {}
-
-
-def _enrich_eng_ticket_context(ticket_ctx):
-    """
-    Fill NOS/PC commits, exception/traceback, log URL, and links from JITA so the
-    ENG description matches Triage Genie style for this specific test run.
-    """
-    ctx = dict(ticket_ctx or {})
-    testcase = (ctx.get("testcase_name") or "").strip()
-    result_id = _oid_str(ctx.get("testcase_id") or ctx.get("test_result_id"))
-    task_id = _oid_str(ctx.get("agave_task_id") or ctx.get("task_id"))
-
-    detailed = {}
-    if result_id:
-        detailed = fetch_detailed_test_result(result_id) or {}
-        if detailed:
-            if not testcase:
-                test_obj = detailed.get("test") or {}
-                testcase = (test_obj.get("name") if isinstance(test_obj, dict) else "") or ""
-                ctx["testcase_name"] = testcase
-            if not task_id:
-                task_id = _oid_str(detailed.get("agave_task_id"))
-                if task_id:
-                    ctx["agave_task_id"] = task_id
-            if not (ctx.get("test_log_url") or "").strip() and detailed.get("test_log_url"):
-                ctx["test_log_url"] = detailed.get("test_log_url")
-            if not (ctx.get("exception") or "").strip() and detailed.get("exception"):
-                ctx["exception"] = detailed.get("exception")
-            if not (ctx.get("exception_summary") or "").strip() and detailed.get("exception_summary"):
-                ctx["exception_summary"] = detailed.get("exception_summary")
-            if not (ctx.get("nos_branch") or "").strip() and detailed.get("branch"):
-                ctx["nos_branch"] = detailed.get("branch")
-            if not (ctx.get("nos_commit") or "").strip() and detailed.get("commit_id"):
-                ctx["nos_commit"] = detailed.get("commit_id")
-            if not (ctx.get("nos_gbn") or ctx.get("gbn")) and detailed.get("gbn") is not None:
-                ctx["nos_gbn"] = detailed.get("gbn")
-
-    if task_id and (
-        not ctx.get("nos_commit")
-        or not ctx.get("pc_commit")
-        or not ctx.get("nos_branch")
-        or not ctx.get("pc_branch")
-        or not ctx.get("nutest_branch")
-        or not ctx.get("nutest-py3-tests_branch")
-    ):
-        try:
-            task = fetch_agave_task(task_id) or {}
-        except Exception as e:
-            logger.debug("fetch_agave_task(%s) failed: %s", task_id, e)
-            task = {}
-        if task:
-            ctx.setdefault("nos_branch", task.get("branch") or "")
-            ctx.setdefault("nos_commit", task.get("commit_id") or "")
-            if task.get("gbn") is not None:
-                ctx.setdefault("nos_gbn", task.get("gbn"))
-            ctx.setdefault("pc_branch", task.get("image_branch") or task.get("branch") or "")
-            ctx.setdefault("pc_commit", task.get("image_commit") or task.get("commit_id") or "")
-            if task.get("image_gbn") is not None:
-                ctx.setdefault("pc_gbn", task.get("image_gbn"))
-            elif task.get("gbn") is not None:
-                ctx.setdefault("pc_gbn", task.get("gbn"))
-            # Test-repo branch is the one Gerrit CRs for nutest fixes should target.
-            if task.get("nutest-py3-tests_branch"):
-                ctx.setdefault("nutest_branch", task.get("nutest-py3-tests_branch"))
-                ctx.setdefault("nutest-py3-tests_branch", task.get("nutest-py3-tests_branch"))
-            if task.get("service"):
-                ctx.setdefault("service", task.get("service"))
-            if task.get("label"):
-                ctx.setdefault("label", task.get("label"))
-            if task.get("package_type"):
-                ctx.setdefault("package_type", task.get("package_type"))
-
-    # Default PC from NOS when PC fields still blank.
-    if not (ctx.get("pc_branch") or "").strip():
-        ctx["pc_branch"] = ctx.get("nos_branch") or ctx.get("current_branch") or "master"
-    if not (ctx.get("pc_commit") or "").strip():
-        ctx["pc_commit"] = ctx.get("nos_commit") or ""
-    if ctx.get("pc_gbn") is None and ctx.get("nos_gbn") is not None:
-        ctx["pc_gbn"] = ctx.get("nos_gbn")
-    if not (ctx.get("nos_branch") or "").strip():
-        ctx["nos_branch"] = ctx.get("current_branch") or ctx.get("branch") or "master"
-
-    # Failed-with one-liner
-    if not (ctx.get("failed_with") or "").strip():
-        ctx["failed_with"] = (
-            (ctx.get("root_cause") or "").strip()
-            or (ctx.get("exception_summary") or "").strip()
-            or (ctx.get("ai_summary") or "").strip()
-        )
-
-    # Test steps: explicit > steps.log STEP lines
-    if not (ctx.get("test_steps") or "").strip():
-        links = _build_eng_ticket_links(ctx)
-        tc_path = convert_testcase_name_to_path(testcase)
-        steps_text = ""
-        if links.get("raw_path") and tc_path:
-            steps_url = _jita_api_log_url(
-                f"{links['raw_path'].rstrip('/')}/{tc_path}/steps.log",
-                lab=links.get("lab") or "phx1",
-                infra=links.get("infra") or "nutest",
-            )
-            steps_text = _extract_steps_from_steps_log(
-                fetch_log_from_url(steps_url, timeout=20)
-            )
-        if steps_text:
-            ctx["test_steps"] = steps_text
-
-    # Last pass (best-effort; skip quietly on timeout)
-    if not ctx.get("last_pass_at"):
-        lp = _fetch_last_pass_info(
-            testcase,
-            branch=(ctx.get("nos_branch") or ctx.get("current_branch") or ""),
-        )
-        if lp.get("at"):
-            ctx["last_pass_at"] = lp["at"]
-            ctx["last_pass_branch"] = lp.get("branch") or ctx.get("nos_branch") or "master"
-
-    ctx["_eng_links"] = _build_eng_ticket_links(ctx)
-    branch_info = _infer_gerrit_target_branch(ctx)
-    ctx["gerrit_branch"] = branch_info.get("gerrit_branch")
-    ctx["handoff_branch"] = branch_info.get("handoff_branch")
-    ctx["cr_branch"] = branch_info.get("gerrit_branch")
-    ctx["_branch_info"] = branch_info
-    return ctx
-
-
-def _build_eng_ticket_description(ticket_ctx):
-    """
-    Build ENG description in Triage Genie style:
-
-      Test case *name*
-      Failed with:
-      ...
-      NOS:*branch* commit (gbn)
-      PC :*branch* commit (gbn)
-      Regression: *Yes-build-to-build*, Last pass on branch *master*, at *ts*
-      Links: [Jita|...] | [Log|...] | [Triage Genie|...] | [Triage Genie JSON|...]
-      Test Steps: {noformat}...{noformat}
-      Traceback: {code}...{code}
-    """
-    ctx = ticket_ctx or {}
-    testcase = (ctx.get("testcase_name") or "").strip()
-    failed_with = re.sub(r"\s+", " ", (ctx.get("failed_with") or ctx.get("root_cause") or "").strip())
-    if len(failed_with) > 600:
-        failed_with = failed_with[:597].rstrip() + "..."
-
-    nos_branch = (ctx.get("nos_branch") or ctx.get("current_branch") or ctx.get("branch") or "master").strip()
-    nos_commit = (ctx.get("nos_commit") or "").strip()
-    nos_gbn = ctx.get("nos_gbn") if ctx.get("nos_gbn") is not None else ctx.get("gbn")
-    pc_branch = (ctx.get("pc_branch") or nos_branch).strip()
-    pc_commit = (ctx.get("pc_commit") or nos_commit).strip()
-    pc_gbn = ctx.get("pc_gbn") if ctx.get("pc_gbn") is not None else nos_gbn
-
-    regression = (ctx.get("regression") or _ENG_REGRESSION_YES).strip() or _ENG_REGRESSION_YES
-    last_pass_branch = (ctx.get("last_pass_branch") or nos_branch).strip()
-    last_pass_at = (ctx.get("last_pass_at") or "").strip()
-
-    links = ctx.get("_eng_links") or _build_eng_ticket_links(ctx)
-    link_bits = []
-    if links.get("jita"):
-        link_bits.append(f"[Jita|{links['jita']}]")
-    if links.get("log"):
-        link_bits.append(f"[Log|{links['log']}]")
-    if links.get("triage_genie"):
-        link_bits.append(f"[Triage Genie|{links['triage_genie']}]")
-    if links.get("triage_genie_json"):
-        link_bits.append(f"[Triage Genie JSON|{links['triage_genie_json']}]")
-
-    lines = []
-    if testcase:
-        lines.append(f"Test case *{testcase}*")
-    else:
-        lines.append("Test case *unknown*")
-    lines.append("Failed with:")
-    lines.append(failed_with or "See traceback / deep analysis below.")
-    lines.append("")
-    nos_line = f"NOS:*{nos_branch}*"
-    if nos_commit:
-        nos_line += f" {nos_commit}"
-    if nos_gbn not in (None, ""):
-        nos_line += f" ({nos_gbn})"
-    pc_line = f"PC :*{pc_branch}*"
-    if pc_commit:
-        pc_line += f" {pc_commit}"
-    if pc_gbn not in (None, ""):
-        pc_line += f" ({pc_gbn})"
-    lines.append(nos_line)
-    lines.append(pc_line)
-
-    reg_line = f"Regression: *{regression}*"
-    if last_pass_at:
-        reg_line += f", Last pass on branch *{last_pass_branch}*, at *{last_pass_at}*"
-    lines.append(reg_line)
-
-    if link_bits:
-        lines.append("Links: " + " | ".join(link_bits))
-    lines.append("")
-
-    test_steps = (ctx.get("test_steps") or "").strip()
-    if test_steps:
-        lines.append("Test Steps:")
-        lines.append("{noformat}")
-        lines.append(test_steps[:6000])
-        lines.append("{noformat}")
-        lines.append("")
-
-    expected = (ctx.get("expected_results") or "").strip()
-    if expected:
-        lines.append(f"Expected results - {expected}")
-        lines.append("")
-
-    traceback = (ctx.get("exception") or ctx.get("traceback") or "").strip()
-    if traceback:
-        lines.append("Traceback:")
-        lines.append("{code}")
-        lines.append(traceback[:12000])
-        lines.append("{code}")
-        lines.append("")
-
-    # Keep deep-analysis extras after the TG-style block (does not replace it).
-    extras = []
-    report = (ctx.get("triage_report") or "").strip()
-    if report and "Failed with:" not in report[:80]:
-        extras.append("h3. RegX-AI Deep Analysis\n" + report[:8000])
-    fix = (ctx.get("suggested_fix") or "").strip()
-    if fix:
-        extras.append("h3. Suggested Fix\n" + fix[:3000])
-    related = []
-    for c in ctx.get("related_components") or []:
-        name = (c if isinstance(c, str) else str(c)).strip()
-        if name and name not in related:
-            related.append(name)
-    # related components are appended later by create_eng_jira_ticket too; skip here
-
-    body = "\n".join(lines).rstrip()
-    if extras:
-        body = body + "\n\n----\n" + "\n\n".join(extras)
-    body = body + "\n\n----\n_Created via RegX-AI Cursor Deep Analysis_"
-    return body
-
-
-def _infer_primary_component(ticket_ctx):
-    """Infer ENG Primary Component parent from analysis / testcase path."""
-    explicit = (ticket_ctx.get("primary_component") or "").strip()
-    if explicit:
-        return explicit
-    haystacks = []
-    for c in ticket_ctx.get("related_components") or []:
-        haystacks.append(str(c))
-    for c in ticket_ctx.get("components") or []:
-        haystacks.append(str(c))
-    haystacks.append(ticket_ctx.get("testcase_name") or "")
-    haystacks.append(ticket_ctx.get("root_cause") or "")
-    haystacks.append(ticket_ctx.get("triage_report") or "")
-    blob = " ".join(haystacks)
-    for pattern, name in _ENG_PRIMARY_COMPONENT_ALIASES:
-        if pattern.search(blob):
-            return name
-    # Path heuristic: cdp.<service>....
-    tc = (ticket_ctx.get("testcase_name") or "").strip().lower()
-    parts = tc.split(".")
-    if len(parts) >= 2 and parts[0] == "cdp":
-        svc = parts[1].replace("_", " ").title()
-        # Prefer known alias casing
-        for _, name in _ENG_PRIMARY_COMPONENT_ALIASES:
-            if name.lower() == svc.lower() or name.lower().replace(" ", "_") == parts[1]:
-                return name
-        return svc
-    return ""
-
-
-def resolve_sourcegraph_token(explicit_token=None):
-    """Resolve Sourcegraph token from request/user settings/env."""
-    tok = (explicit_token or "").strip()
-    if tok and "****" not in tok:
-        return tok
-    username = _current_username()
-    if username:
-        saved = (get_user_key(username, "sourcegraph_token") or "").strip()
-        if saved:
-            return saved
-    return (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
-
-
-def _infer_affects_version(ticket_ctx):
-    """Infer Affects Version as a valid ENG Jira version name (not git branch)."""
-    for key in ("affects_version", "version", "nos_version", "current_branch", "branch"):
-        raw = (ticket_ctx.get(key) or "").strip()
-        if not raw:
-            continue
-        low = raw.lower()
-        if "master" in low:
-            return "master"
-        # Branch ganges-7.6-stable → Jira version "7.6" (not the branch name)
-        m = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", raw)
-        if m:
-            return m.group(1)
-        if "ganges" in low:
-            return "7.6"
-    blob = " ".join([
-        str(ticket_ctx.get("triage_report") or ""),
-        str(ticket_ctx.get("root_cause") or ""),
-    ])
-    if re.search(r"\bmaster\b", blob, flags=re.I):
-        return "master"
-    m = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", blob)
-    if m:
-        return m.group(1)
-    return "master"
-
-
-def _infer_test_type(ticket_ctx):
-    """Map to a valid ENG Test Type option (never NuTest — not a Jira option)."""
-    explicit = (ticket_ctx.get("test_type") or "").strip()
-    if explicit:
-        mapped = _ENG_TEST_TYPE_ALIASES.get(explicit.lower())
-        if mapped:
-            return mapped
-        if explicit in _ENG_TEST_TYPE_CANDIDATES:
-            return explicit
-        # Unknown string — fall through to classification-based default
-    cls = (ticket_ctx.get("classification") or "").strip().lower()
-    if "product" in cls:
-        return "Product Bug"
-    return "Test Bug"
-
-
-def _infer_regression_flag(ticket_ctx):
-    """ENG Regression? options are e.g. No / Yes-build-to-build (not plain Yes)."""
-    explicit = ticket_ctx.get("regression")
-    if isinstance(explicit, bool):
-        return _ENG_REGRESSION_YES if explicit else _ENG_REGRESSION_NO
-    if isinstance(explicit, str) and explicit.strip():
-        val = explicit.strip()
-        low = val.lower()
-        if low in {"no", "n", "false", "0"}:
-            return _ENG_REGRESSION_NO
-        if low in {"yes", "y", "true", "1"} or low.startswith("yes"):
-            # Preserve already-valid option strings
-            if val in (_ENG_REGRESSION_YES, "Yes-release-to-release", "Yes-build-to-build"):
-                return val if val != "Yes" else _ENG_REGRESSION_YES
-            if "release" in low:
-                return "Yes-release-to-release"
-            return _ENG_REGRESSION_YES
-        return val
-    # Deep analysis in RegX is almost always a regression failure.
-    return _ENG_REGRESSION_YES
-
-
-def _fetch_eng_createmeta_fields(issue_type="Test", token=None):
-    """
-    Fetch/cached ENG createmeta fields (allowedValues for versions + custom fields).
-
-    Nutanix Jira returns 404 for the legacy
-    /issue/createmeta?projectKeys=...&expand=projects.issuetypes.fields API.
-    Use the per-issuetype endpoint instead:
-      GET /issue/createmeta/ENG/issuetypes
-      GET /issue/createmeta/ENG/issuetypes/{id}
-    """
-    issue_type = (issue_type or "Test").strip() or "Test"
-    with _eng_createmeta_lock:
-        cached = _eng_createmeta_cache.get(issue_type)
-        if cached:
-            return cached
-
-    jira_token = resolve_jira_token(token)
-    if not jira_token:
-        return {}
-
-    headers = get_jira_headers(jira_token)
-    try:
-        types_resp = session.get(
-            f"{JIRA_BASE}/issue/createmeta/ENG/issuetypes",
-            headers=headers,
-            timeout=45,
-            verify=False,
-        )
-        if types_resp.status_code != 200:
-            logger.warning(
-                "ENG createmeta issuetypes failed (%s): %s",
-                types_resp.status_code,
-                (types_resp.text or "")[:300],
-            )
-            return {}
-        type_id = None
-        for itype in (types_resp.json() or {}).get("values") or []:
-            if (itype.get("name") or "").strip().lower() == issue_type.lower():
-                type_id = itype.get("id")
-                break
-        if not type_id:
-            logger.warning("ENG createmeta: issuetype %r not found", issue_type)
-            return {}
-
-        fields_resp = session.get(
-            f"{JIRA_BASE}/issue/createmeta/ENG/issuetypes/{type_id}",
-            headers=headers,
-            timeout=60,
-            verify=False,
-        )
-        if fields_resp.status_code != 200:
-            logger.warning(
-                "ENG createmeta fields failed (%s): %s",
-                fields_resp.status_code,
-                (fields_resp.text or "")[:300],
-            )
-            return {}
-
-        # New API returns a list of field descriptors under "values".
-        fields = {}
-        for field in (fields_resp.json() or {}).get("values") or []:
-            fid = field.get("fieldId") or field.get("key")
-            if fid:
-                fields[fid] = field
-
-        with _eng_createmeta_lock:
-            _eng_createmeta_cache[issue_type] = fields
-        return fields
-    except Exception as e:
-        logger.warning("ENG createmeta error: %s", e)
-        return {}
-
-
-def _allowed_option_values(field_meta):
-    """Return list of {id, value/name, children?} from createmeta field."""
-    out = []
-    for opt in (field_meta or {}).get("allowedValues") or []:
-        entry = {
-            "id": opt.get("id"),
-            "value": opt.get("value") or opt.get("name") or "",
-            "name": opt.get("name") or opt.get("value") or "",
-            "children": [
-                {
-                    "id": c.get("id"),
-                    "value": c.get("value") or c.get("name") or "",
-                    "name": c.get("name") or c.get("value") or "",
-                }
-                for c in (opt.get("children") or [])
-            ],
-        }
-        if entry["value"] or entry["name"]:
-            out.append(entry)
-    return out
-
-
-def _pick_allowed_option(preferred, options, fallbacks=None):
-    """Pick best matching allowed option value string (case-insensitive)."""
-    candidates = []
-    if preferred:
-        candidates.append(str(preferred).strip())
-    for fb in fallbacks or []:
-        if fb and str(fb).strip() not in candidates:
-            candidates.append(str(fb).strip())
-    if not options:
-        return candidates[0] if candidates else ""
-
-    by_lower = {}
-    for opt in options:
-        key = (opt.get("value") or opt.get("name") or "").strip()
-        if key:
-            by_lower[key.lower()] = key
-
-    for cand in candidates:
-        hit = by_lower.get(cand.lower())
-        if hit:
-            return hit
-    # Substring / startswith soft match
-    for cand in candidates:
-        cl = cand.lower()
-        for low, orig in by_lower.items():
-            if cl in low or low in cl or low.startswith(cl) or cl.startswith(low):
-                return orig
-    # Last resort: first allowed option
-    first = (options[0].get("value") or options[0].get("name") or "").strip()
-    return first
-
-
-def _pick_cascading_primary_component(preferred, options, context_blob=""):
-    """
-    Build ENG Primary Component payload: {"value": Parent, "child": {"value": Child}}.
-    Cascading select rejects parent-only on some Jira configs; real ENG tickets always set child.
-    """
-    parent = _pick_allowed_option(
-        preferred,
-        options,
-        fallbacks=["Stargate", "Curator", "Cassandra"],
-    )
-    if not parent:
-        return None
-
-    parent_opt = None
-    for opt in options or []:
-        key = (opt.get("value") or opt.get("name") or "").strip()
-        if key.lower() == parent.lower():
-            parent_opt = opt
-            break
-    children = (parent_opt or {}).get("children") or []
-    if not children:
-        return {"value": parent}
-
-    child_names = [
-        (c.get("value") or c.get("name") or "").strip()
-        for c in children
-        if (c.get("value") or c.get("name"))
-    ]
-    blob = (context_blob or "").lower()
-    picked_child = ""
-    # Prefer a child whose token appears in testcase/root-cause text.
-    for name in child_names:
-        token = name.lower().replace(parent.lower(), "").strip("-_ ")
-        if token and len(token) >= 3 and token.replace(" ", "") in blob.replace(" ", "").replace("_", ""):
-            picked_child = name
-            break
-    if not picked_child:
-        other = next((n for n in child_names if n.lower().endswith("-other") or n.lower() == "other"), "")
-        picked_child = other or child_names[0]
-    return {"value": parent, "child": {"value": picked_child}}
-
-
-def _pick_allowed_version(preferred, version_options):
-    """Pick a valid ENG version name from createmeta versions list."""
-    names = []
-    for opt in version_options or []:
-        n = (opt.get("name") or opt.get("value") or "").strip()
-        if n:
-            names.append(n)
-    if not names:
-        # Safe defaults used by existing ENG tickets
-        return preferred if preferred in {"master", "Triage", "7.6", "7.5.1"} else "master"
-
-    by_lower = {n.lower(): n for n in names}
-    prefs = []
-    if preferred:
-        prefs.append(preferred)
-        # Map branch-like → release number
-        m = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", preferred)
-        if m:
-            prefs.append(m.group(1))
-        if "master" in preferred.lower():
-            prefs.append("master")
-        if "7.6" in preferred or "ganges" in preferred.lower():
-            prefs.extend(["7.6", "master"])
-    prefs.extend(["master", "7.6", "7.5.1"])
-
-    for p in prefs:
-        hit = by_lower.get(p.lower())
-        if hit:
-            return hit
-    for p in prefs:
-        pl = p.lower()
-        for low, orig in by_lower.items():
-            if pl in low or low.startswith(pl):
-                return orig
-    return by_lower.get("master") or names[0]
-
-
-def is_confirm_eng_ticket_intent(text):
-    """User confirming a pending ENG ticket draft (yes / create with overrides)."""
-    t = re.sub(r"[*`_]", "", (text or "").strip().lower())
-    t = re.sub(r"\s+", " ", t)
-    if not t:
-        return False
-    if re.match(r"^(yes|y|ok|okay|confirm|proceed|go ahead|create it|looks good|lgtm)\b", t):
-        return True
-    # Field override reply while a draft is pending
-    return bool(
-        re.search(
-            r"\b(primary component|affects version|fix version|test case|test type|regression)\s*[:=]",
-            t,
-            flags=re.I,
-        )
-    )
-
-
-def parse_eng_ticket_field_overrides(text):
-    """Parse 'Primary Component: Stargate' style overrides from user reply."""
-    overrides = {}
-    if not text:
-        return overrides
-    patterns = {
-        "primary_component": r"primary\s*component\s*[:=]\s*([^\n,;]+)",
-        "affects_version": r"affects\s*version(?:/s)?\s*[:=]\s*([^\n,;]+)",
-        "fix_version": r"fix\s*version(?:/s)?\s*[:=]\s*([^\n,;]+)",
-        "testcase_name": r"test\s*case(?:\s*name)?\s*[:=]\s*([^\n,;]+)",
-        "test_type": r"test\s*type\s*[:=]\s*([^\n,;]+)",
-        "regression": r"regression\??\s*[:=]\s*([^\n,;]+)",
-        "issue_type": r"issue\s*type\s*[:=]\s*([^\n,;]+)",
-        "summary": r"summary\s*[:=]\s*([^\n]+)",
-    }
-    for key, pat in patterns.items():
-        m = re.search(pat, text, flags=re.I)
-        if m:
-            overrides[key] = m.group(1).strip().strip("\"'")
-    return overrides
-
-
-def build_eng_ticket_draft(ticket_ctx):
-    """
-    Infer ENG-required fields from deep-analysis context.
-
-    Returns draft dict with proposed values + missing list for user confirmation.
-    """
-    ctx = dict(ticket_ctx or {})
-    testcase = (ctx.get("testcase_name") or "").strip()
-    primary = _infer_primary_component(ctx)
-    affects = _infer_affects_version(ctx)
-    fix_version = (ctx.get("fix_version") or "Triage").strip() or "Triage"
-    test_type = _infer_test_type(ctx)
-    regression = _infer_regression_flag(ctx)
-    issue_type = (ctx.get("issue_type") or "").strip() or _issue_type_from_classification(
-        ctx.get("classification")
-    )
-    summary = _build_eng_ticket_summary(ctx)
-
-    draft = {
-        "summary": summary,
-        "issue_type": issue_type,
-        "testcase_name": testcase,
-        "primary_component": primary,
-        "affects_version": affects,
-        "fix_version": fix_version,
-        "test_type": test_type,
-        "regression": regression,
-        "inferred_from_analysis": True,
-    }
-
-    missing = []
-    if not testcase:
-        missing.append("testcase_name")
-    if not primary:
-        missing.append("primary_component")
-    if not affects:
-        missing.append("affects_version")
-    if not test_type:
-        missing.append("test_type")
-
-    draft["missing"] = missing
-    # Confirmation only when inference could not fill required ENG fields.
-    draft["needs_confirmation"] = bool(missing)
-    return draft
-
-
-def format_eng_ticket_draft_prompt(draft):
-    """Ask the user to confirm inferred ENG fields before create."""
-    lines = [
-        "ENG requires a few fields before I can create the ticket. "
-        "I inferred these from the analysis — reply **yes** to create, or override any field:",
-        "",
-        f"- **Summary:** {draft.get('summary')}",
-        f"- **Issue Type:** {draft.get('issue_type')}",
-        f"- **Primary Component:** {draft.get('primary_component') or '❓ needed (e.g. Stargate)'}",
-        f"- **Test Case Name:** {draft.get('testcase_name') or '❓ needed'}",
-        f"- **Affects Version/s:** {draft.get('affects_version') or '❓ needed (e.g. master)'}",
-        f"- **Fix Version/s:** {draft.get('fix_version') or 'Triage'}",
-        f"- **Test Type:** {draft.get('test_type') or '❓ needed (e.g. Test Bug)'}",
-        f"- **Regression?:** {draft.get('regression') or 'Yes-build-to-build'}",
-        "",
-        "Example override:",
-        "`yes; Primary Component: Stargate; Affects Version: master; Test Type: Test Bug`",
-    ]
-    if draft.get("missing"):
-        lines.insert(
-            1,
-            "**Still missing (please provide):** " + ", ".join(draft["missing"]),
-        )
-        lines.insert(2, "")
-    return "\n".join(lines)
-
-
-def create_eng_jira_ticket(ticket_ctx, token=None, require_confirm=False):
-    """
-    Create an ENG Jira issue from deep-analysis context.
-
-    Infers required ENG fields from the chat/analysis and creates immediately
-    on simple asks like "create eng ticket". Only prompts the user when a
-    required field cannot be inferred (or require_confirm=True).
-
-    Returns dict:
-      - ok + key/url on success
-      - needs_user_input + draft + follow_up_answer when user input needed
-      - ok False + error on hard failure
-    """
-    ctx = dict(ticket_ctx or {})
-    draft = build_eng_ticket_draft(ctx)
-
-    # Auto-create when analysis has enough data. Ask only if something is missing
-    # (or caller explicitly wants confirmation).
-    if draft.get("missing") or (require_confirm and not ctx.get("confirm")):
-        return {
-            "ok": False,
-            "needs_user_input": True,
-            "draft": draft,
-            "follow_up_answer": format_eng_ticket_draft_prompt(draft),
-            "error": (
-                "Missing required ENG fields: " + ", ".join(draft["missing"])
-                if draft.get("missing")
-                else "ENG required fields need confirmation before create"
-            ),
-        }
-
-    jira_token = resolve_jira_token(token)
-    if not jira_token:
-        return {
-            "ok": False,
-            "error": (
-                "Jira token not available. Open User Settings → API Keys and add "
-                "your Atlassian Jira Personal Token."
-            ),
-        }
-
-    summary = draft["summary"]
-    issue_type = draft["issue_type"]
-    testcase = draft["testcase_name"]
-    primary = draft["primary_component"]
-    affects = draft["affects_version"]
-    fix_version = draft["fix_version"]
-    test_type = draft["test_type"]
-    regression = draft["regression"]
-
-    # Enrich with JITA run metadata (NOS/PC/commits/links/steps/traceback) so the
-    # description matches Triage Genie for this specific testcase run.
-    ctx["regression"] = regression
-    try:
-        ctx = _enrich_eng_ticket_context(ctx)
-    except Exception as enrich_err:
-        logger.warning("ENG ticket context enrich failed: %s", enrich_err)
-    description = _build_eng_ticket_description(ctx)
-    if ctx.get("testcase_name") and not testcase:
-        testcase = ctx["testcase_name"]
-        draft["testcase_name"] = testcase
-
-
-    # Resolve against live ENG createmeta so values are valid option/version names.
-    meta = _fetch_eng_createmeta_fields(issue_type, token=jira_token)
-    primary_payload = {"value": primary}
-    if meta:
-        pc_opts = _allowed_option_values(meta.get("customfield_15160"))
-        context_blob = " ".join([
-            str(testcase or ""),
-            str(ctx.get("root_cause") or ""),
-            str(ctx.get("triage_report") or ""),
-            " ".join(str(c) for c in (ctx.get("related_components") or [])),
-        ])
-        cascaded = _pick_cascading_primary_component(primary, pc_opts, context_blob)
-        if cascaded:
-            primary_payload = cascaded
-            primary = cascaded.get("value") or primary
-        else:
-            primary = _pick_allowed_option(
-                primary, pc_opts, fallbacks=["Stargate", "Curator", "Cassandra"]
-            ) or primary
-            primary_payload = {"value": primary}
-        regression = _pick_allowed_option(
-            regression,
-            _allowed_option_values(meta.get("customfield_13260")),
-            fallbacks=[_ENG_REGRESSION_YES, _ENG_REGRESSION_NO, "Yes-build-to-build", "No"],
-        ) or regression
-        # Normalize aliases like NuTest → Test Bug before matching allowed values.
-        test_type = _infer_test_type({**ctx, "test_type": test_type})
-        test_type = _pick_allowed_option(
-            test_type,
-            _allowed_option_values(meta.get("customfield_18062")),
-            fallbacks=list(_ENG_TEST_TYPE_CANDIDATES),
-        ) or test_type
-        affects = _pick_allowed_version(
-            affects, _allowed_option_values(meta.get("versions"))
-        ) or affects
-        fix_version = _pick_allowed_version(
-            fix_version, _allowed_option_values(meta.get("fixVersions"))
-        ) or fix_version
-        draft.update({
-            "primary_component": primary,
-            "regression": regression,
-            "test_type": test_type,
-            "affects_version": affects,
-            "fix_version": fix_version,
-        })
-    else:
-        # Createmeta unavailable — still never send invalid NuTest.
-        test_type = _infer_test_type({**ctx, "test_type": test_type})
-        draft["test_type"] = test_type
-        primary_payload = {"value": primary}
-
-    related = []
-    for c in ctx.get("related_components") or []:
-        name = (c if isinstance(c, str) else str(c)).strip()
-        if name and name not in related:
-            related.append(name)
-    if related:
-        description = (
-            description.rstrip()
-            + "\n\nh3. Related Components (from analysis)\n"
-            + ", ".join(related)
-        )
-
-    labels = ["ai-qa-triage", "regx-ai"]
-    for lab in ctx.get("labels") or []:
-        lab = str(lab).strip()
-        if lab and lab not in labels:
-            labels.append(lab)
-
-    environment = (ctx.get("test_log_url") or ctx.get("environment") or "").strip()
-
-    fields = {
-        "project": {"key": "ENG"},
-        "summary": summary,
-        "issuetype": {"name": issue_type},
-        "description": description,
-        "labels": labels,
-        "versions": [{"name": affects}],
-        "fixVersions": [{"name": fix_version}],
-        "customfield_15160": primary_payload,  # Primary Component (cascading)
-        "customfield_13260": {"value": regression},  # Regression?
-        "customfield_18060": [testcase[:255]],  # Test Case Name
-        "customfield_18062": {"value": test_type},  # Test Type
-    }
-    if environment:
-        fields["environment"] = environment
-
-    headers = get_jira_headers(jira_token)
-
-    def _post_create(payload_fields):
-        return session.post(
-            f"{JIRA_BASE}/issue",
-            headers=headers,
-            json={"fields": payload_fields},
-            timeout=60,
-            verify=False,
-        )
-
-    try:
-        resp = _post_create(fields)
-
-        # Auto-heal invalid required option/version values (no user yes-loop).
-        if resp.status_code >= 400:
-            err_json = {}
-            try:
-                err_json = resp.json() or {}
-            except Exception:
-                err_json = {}
-            errors = err_json.get("errors") or {}
-            retry_fields = dict(fields)
-            changed = False
-
-            if "customfield_18062" in errors:
-                for candidate in _ENG_TEST_TYPE_CANDIDATES:
-                    if candidate == retry_fields.get("customfield_18062", {}).get("value"):
-                        continue
-                    trial = dict(retry_fields)
-                    trial["customfield_18062"] = {"value": candidate}
-                    trial_resp = _post_create(trial)
-                    if trial_resp.status_code in (200, 201):
-                        resp = trial_resp
-                        test_type = candidate
-                        retry_fields = trial
-                        changed = False
-                        break
-                    resp = trial_resp
-                    err_json = {}
-                    try:
-                        err_json = trial_resp.json() or {}
-                    except Exception:
-                        pass
-                    errors = err_json.get("errors") or {}
-                    if "customfield_18062" not in errors:
-                        retry_fields = trial
-                        changed = True
-                        break
-
-            if resp.status_code >= 400 and "customfield_13260" in errors:
-                for candidate in (_ENG_REGRESSION_YES, _ENG_REGRESSION_NO, "Yes-release-to-release"):
-                    trial = dict(retry_fields)
-                    trial["customfield_13260"] = {"value": candidate}
-                    trial_resp = _post_create(trial)
-                    if trial_resp.status_code in (200, 201):
-                        resp = trial_resp
-                        regression = candidate
-                        retry_fields = trial
-                        break
-                    resp = trial_resp
-
-            if resp.status_code >= 400 and "versions" in (errors or {}):
-                for candidate in ("master", "7.6", "7.5.1", "Triage"):
-                    trial = dict(retry_fields)
-                    trial["versions"] = [{"name": candidate}]
-                    trial_resp = _post_create(trial)
-                    if trial_resp.status_code in (200, 201):
-                        resp = trial_resp
-                        affects = candidate
-                        retry_fields = trial
-                        break
-                    resp = trial_resp
-
-            if resp.status_code >= 400 and "fixVersions" in (errors or {}):
-                for candidate in ("Triage", "master", "7.6"):
-                    trial = dict(retry_fields)
-                    trial["fixVersions"] = [{"name": candidate}]
-                    trial_resp = _post_create(trial)
-                    if trial_resp.status_code in (200, 201):
-                        resp = trial_resp
-                        fix_version = candidate
-                        retry_fields = trial
-                        break
-                    resp = trial_resp
-
-            fields = retry_fields
-            if changed and resp.status_code >= 400:
-                resp = _post_create(fields)
-
-        # Strip only non-required invalid fields (e.g. bad optional labels).
-        if resp.status_code >= 400:
-            err_json = {}
-            try:
-                err_json = resp.json() or {}
-            except Exception:
-                err_json = {}
-            errors = err_json.get("errors") or {}
-            optional_bad = [k for k in errors if k in {"components", "environment", "labels", "customfield_10011"}]
-            if optional_bad:
-                logger.warning(
-                    "ENG ticket create optional field rejected %s — retrying without them",
-                    optional_bad,
-                )
-                retry_fields = dict(fields)
-                for k in optional_bad:
-                    retry_fields.pop(k, None)
-                resp = _post_create(retry_fields)
-
-        if resp.status_code not in (200, 201):
-            err_body = ""
-            try:
-                err_body = json.dumps(resp.json())[:800]
-            except Exception:
-                err_body = (resp.text or "")[:800]
-            return {
-                "ok": False,
-                "error": f"Jira create failed ({resp.status_code}): {err_body}",
-            }
-
-        draft.update({
-            "primary_component": primary,
-            "regression": regression,
-            "test_type": test_type,
-            "affects_version": affects,
-            "fix_version": fix_version,
-        })
-
-        data = resp.json() or {}
-        key = data.get("key") or ""
-        if not key:
-            return {"ok": False, "error": "Jira create returned no issue key"}
-
-        url = f"https://jira.nutanix.com/browse/{key}"
-        duplicates_linked = []
-        for dup in ctx.get("jira_duplicates") or []:
-            dup_key = str(dup).strip().upper()
-            if not dup_key or not re.match(r"^[A-Z][A-Z0-9]+-\d+$", dup_key):
-                continue
-            try:
-                link_resp = session.post(
-                    f"{JIRA_BASE}/issueLink",
-                    headers=headers,
-                    json={
-                        "type": {"name": "Duplicate"},
-                        "inwardIssue": {"key": key},
-                        "outwardIssue": {"key": dup_key},
-                    },
-                    timeout=30,
-                    verify=False,
-                )
-                if link_resp.status_code in (200, 201):
-                    duplicates_linked.append(dup_key)
-            except Exception as link_err:
-                logger.warning("Failed linking %s as duplicate of %s: %s", key, dup_key, link_err)
-
-        return {
-            "ok": True,
-            "key": key,
-            "url": url,
-            "summary": summary,
-            "issue_type": issue_type,
-            "draft": {**draft, "test_type": test_type},
-            "duplicates_linked": duplicates_linked,
-        }
-    except Exception as e:
-        logger.error("Error creating ENG Jira ticket: %s", e, exc_info=True)
-        return {"ok": False, "error": str(e)}
 
 
 def search_glean(query_text):
@@ -9307,6 +7293,24 @@ def analyze_failed_testcases():
         return jsonify({"error": str(e)}), 500
 
 
+def _normalize_test_status(status):
+    """Lowercased JITA test status string. Dicts (rare) use name/status."""
+    if isinstance(status, dict):
+        status = status.get("name") or status.get("status") or ""
+    try:
+        return str(status or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _count_test_statuses(results):
+    counts = {}
+    for tr in results or []:
+        key = _normalize_test_status(tr.get("status")) or "(empty)"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None):
     """Generator that yields SSE events: progress, start, then one 'row' per result, then 'done' or 'error'."""
     if status_set is None:
@@ -9316,7 +7320,15 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
 
         tasks = fetch_regression_tasks(tag=tag, task_ids=task_ids)
         if not tasks:
-            yield json.dumps({"type": "start", "total": 0, "current_branch": "", "tag": tag})
+            yield json.dumps({
+                "type": "start",
+                "total": 0,
+                "current_branch": "",
+                "tag": tag,
+                "status_counts": {},
+                "fetched_total": 0,
+                "task_count": 0,
+            })
             yield json.dumps({"type": "done"})
             return
         collected_task_ids = [task["_id"]["$oid"] for task in tasks]
@@ -9324,10 +7336,19 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
         yield json.dumps({"type": "progress", "phase": "fetching_results"})
 
         all_results = fetch_test_results_batch_with_pagination(collected_task_ids)
+        status_counts = _count_test_statuses(all_results)
         failed_results = [
             tr for tr in all_results
-            if tr.get("status", "").lower() in status_set
+            if _normalize_test_status(tr.get("status")) in status_set
         ]
+        logger.info(
+            "Failed analysis: tasks=%s fetched=%s matched=%s status_counts=%s filter=%s",
+            len(collected_task_ids),
+            len(all_results),
+            len(failed_results),
+            status_counts,
+            sorted(status_set),
+        )
         current_branch = (tasks[0].get("branch") or "") if tasks else ""
 
         # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
@@ -9347,7 +7368,10 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
             "type": "start",
             "total": len(failed_results),
             "current_branch": current_branch,
-            "tag": tag or None
+            "tag": tag or None,
+            "status_counts": status_counts,
+            "fetched_total": len(all_results),
+            "task_count": len(collected_task_ids),
         })
 
         for test_result in failed_results:
@@ -9480,10 +7504,10 @@ def analyze_failed_testcases_stream():
     include_set = {x.strip().lower() for x in include_param.split(",") if x.strip()} if include_param else set()
     if not include_set:
         include_set = {"basic", "exception_summary", "intermittent"}
-    task_ids = None
-    if task_ids_param:
-        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
+    task_ids = normalize_task_id_list(task_ids_param) if task_ids_param else None
     if not tag and not task_ids:
+        if task_ids_param:
+            return jsonify({"error": "No valid 24-char JITA task IDs provided"}), 400
         return jsonify({"error": "Either tag or task_ids is required"}), 400
 
     statuses_param = request.args.get("statuses", "")
@@ -9492,6 +7516,7 @@ def analyze_failed_testcases_stream():
         "skipped": ("skipped", "skip"),
         "warning": ("warning", "warn"),
         "killed": ("killed", "terminated", "cancelled"),
+        "pending": ("pending", "waiting", "running", "started"),
     }
     if statuses_param:
         requested = {s.strip().lower() for s in statuses_param.split(",") if s.strip()}
@@ -10367,6 +8392,241 @@ def save_saved_tag_results(tag_name):
 # Re-trigger failed testcases via Jita agave_tasks rerun API
 # ======================================================
 
+def _query_jita_commits(raw_query, auth):
+    """Return commit documents from Jita matching raw_query, or []."""
+    if not raw_query or not auth:
+        return []
+    try:
+        resp = requests.get(
+            "%s/commits" % JITA_BASE,
+            params={
+                "raw_query": json.dumps(raw_query),
+                "limit": 10,
+                "sort": "-date_added",
+            },
+            headers={"Accept": "application/json"},
+            auth=auth,
+            verify=False,
+            timeout=20,
+        )
+        body = resp.json() if resp.content else {}
+        if not resp.ok or not body.get("success", True):
+            logger.warning("[retrigger] commits lookup HTTP %s: %s", resp.status_code, str(body)[:300])
+            return []
+        data = body.get("data") or []
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        logger.warning("[retrigger] commits lookup failed: %s", exc)
+        return []
+
+
+def _lookup_jita_commit(commit_id, gbn=None, preferred_branch=None, auth=None):
+    """
+    Resolve a NOS commit in Jita.
+
+    Rerun validation requires branch + commit_id + gbn to match a Jita Commit
+    document. A new commit is often on a different branch than the original
+    task, so we look the commit up and return that document (branch/gbn).
+    """
+    commit_id = (commit_id or "").strip()
+    if not commit_id or commit_id.startswith("$"):
+        return None
+
+    gbn_int = None
+    if gbn not in (None, ""):
+        try:
+            gbn_int = int(gbn)
+        except (ValueError, TypeError):
+            gbn_int = None
+
+    query = {"commit_id": commit_id}
+    if gbn_int is not None:
+        query["gbn"] = gbn_int
+    records = _query_jita_commits(query, auth)
+    if not records and gbn_int is not None:
+        records = _query_jita_commits({"commit_id": commit_id}, auth)
+    if not records:
+        return None
+
+    if preferred_branch:
+        for rec in records:
+            if rec.get("branch") == preferred_branch:
+                if gbn_int is None or rec.get("gbn") == gbn_int:
+                    return rec
+    if gbn_int is not None:
+        for rec in records:
+            if rec.get("gbn") == gbn_int:
+                return rec
+    return records[0]
+
+
+def _resolve_nos_commit_override(overrides, auth, original_branch=None):
+    """Fill nos_branch (and gbn if missing) from Jita so rerun validation passes."""
+    if not overrides or overrides.get("nos_branch"):
+        return overrides
+    nos_commit = (overrides.get("nos_commit") or "").strip()
+    if not nos_commit or nos_commit.startswith("$") or overrides.get("nos_tag"):
+        return overrides
+    rec = _lookup_jita_commit(
+        nos_commit,
+        gbn=overrides.get("nos_gbn"),
+        preferred_branch=original_branch,
+        auth=auth,
+    )
+    if not rec:
+        logger.warning(
+            "[retrigger] NOS commit %s gbn=%s not found in Jita commits",
+            nos_commit, overrides.get("nos_gbn"),
+        )
+        return overrides
+    if rec.get("branch"):
+        overrides["nos_branch"] = rec["branch"]
+        logger.info("[retrigger] resolved NOS branch %s from commit %s", rec["branch"], nos_commit)
+    if not overrides.get("nos_gbn") and rec.get("gbn") not in (None, ""):
+        overrides["nos_gbn"] = rec["gbn"]
+    return overrides
+
+
+def _fetch_job_profile_name(jp_id, auth=None):
+    """Look up a Jita job profile name by id. Empty string on failure."""
+    if not jp_id:
+        return ""
+    try:
+        resp = requests.get(
+            f"{JITA_BASE}/job_profiles/{jp_id}",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            auth=auth or JITA_SVC_AUTH,
+            verify=False,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            logger.warning("[retrigger] JP lookup HTTP %s for %s", resp.status_code, jp_id)
+            return ""
+        data = resp.json().get("data") or {}
+        return str(data.get("name") or "").strip()
+    except Exception as exc:
+        logger.warning("[retrigger] JP lookup failed for %s: %s", jp_id, exc)
+        return ""
+
+
+def _summarize_jita_resource_config(task_data):
+    """Human-readable Resource Requirement Configuration from a Jita task."""
+    task_data = task_data or {}
+    hw = task_data.get("requested_hardware") if isinstance(task_data.get("requested_hardware"), dict) else {}
+    infra = hw.get("infra") if isinstance(hw.get("infra"), list) else task_data.get("infra")
+    if not isinstance(infra, list):
+        infra = []
+    first = infra[0] if infra and isinstance(infra[0], dict) else {}
+    itype = str(first.get("type") or "").strip().lower()
+    if itype == "node_pool":
+        resources = "By Node Pool"
+    elif itype in ("cluster", "cluster_pool"):
+        resources = "By Cluster Pool"
+    elif itype in ("physical", "nested", "nested_1"):
+        resources = "By Global Pool"
+    elif itype in ("name", "cluster_name"):
+        resources = "By Name"
+    else:
+        resources = "By Node Pool" if first.get("entries") else (itype or "Unknown")
+
+    nested = hw.get("nested_params") if isinstance(hw.get("nested_params"), dict) else {}
+    if nested.get("is_nested") or nested.get("version"):
+        ver = str(nested.get("version") or "")
+        resource_type = "NestedAHV 2.0" if ver.startswith("2") else "NestedAHV 1.0"
+    else:
+        resource_type = "Physical"
+
+    pools = [str(e).strip() for e in (first.get("entries") or []) if str(e).strip()]
+    skip_match = task_data.get("skip_resource_spec_match")
+    if skip_match is None:
+        sched = task_data.get("scheduling_options") or {}
+        skip_match = sched.get("skip_resource_spec_match") if isinstance(sched, dict) else False
+
+    if resource_type == "NestedAHV 2.0":
+        resource_type_key = "nested_2.0"
+    elif resource_type == "NestedAHV 1.0":
+        resource_type_key = "nested_1.0"
+    else:
+        resource_type_key = "physical"
+    if itype == "node_pool":
+        resources_mode = "node_pool"
+    elif itype in ("cluster", "cluster_pool"):
+        resources_mode = "cluster"
+    elif itype in ("name", "cluster_name"):
+        resources_mode = "name"
+    elif itype in ("physical", "nested", "nested_1"):
+        resources_mode = "global_pool"
+    else:
+        resources_mode = "node_pool" if pools else "global_pool"
+
+    return {
+        "resources": resources,
+        "resources_mode": resources_mode,
+        "resource_type": resource_type,
+        "resource_type_key": resource_type_key,
+        "node_pools": pools,
+        "match_resource_spec": not bool(skip_match),
+        "hypervisor": hw.get("hypervisor") or task_data.get("hypervisor") or "",
+        "nos_branch": task_data.get("branch") or "",
+    }
+
+
+RETAIN_DURATION_72H_MIN = 72 * 60  # Jita retain duration is minutes
+
+
+def _ensure_retain_duration(retain, duration=RETAIN_DURATION_72H_MIN):
+    """Keep original retain entity/options; set duration to 72 hours."""
+    import copy
+    retain = copy.deepcopy(retain) if isinstance(retain, dict) else {}
+    criteria = retain.get("criteria")
+    if not isinstance(criteria, dict):
+        criteria = {}
+    tf = criteria.get("TEST_FAILURE")
+    if not isinstance(tf, dict):
+        tf = {
+            "entity": "CONTAINER",
+            "type": "AFTER_EACH",
+            "params": {
+                "duration": duration,
+                "exceptions": [],
+                "states_to_track": ["Failed"],
+            },
+        }
+    else:
+        params = tf.get("params") if isinstance(tf.get("params"), dict) else {}
+        params["duration"] = duration
+        tf["params"] = params
+    criteria["TEST_FAILURE"] = tf
+    retain["criteria"] = criteria
+    return retain
+
+
+@app.route("/mcp/regression/failed-analysis/retrigger-preview", methods=["POST"])
+@jwt_required
+def retrigger_preview_resource_config():
+    """Return Jita Resource Requirement Configuration for selected tasks."""
+    data = request.get_json() or {}
+    task_ids = data.get("task_ids") or []
+    if isinstance(task_ids, str):
+        task_ids = [task_ids]
+    seen = []
+    for raw in task_ids:
+        tid = str(raw or "").strip()
+        if tid and tid not in seen:
+            seen.append(tid)
+    previews = []
+    for tid in seen[:8]:
+        try:
+            task_data = fetch_agave_task(tid) or {}
+        except Exception as exc:
+            logger.warning("[retrigger-preview] fetch failed for %s: %s", tid, exc)
+            task_data = {}
+        summary = _summarize_jita_resource_config(task_data)
+        summary["task_id"] = tid
+        previews.append(summary)
+    return jsonify({"success": True, "tasks": previews})
+
+
 @app.route("/mcp/regression/failed-analysis/retrigger", methods=["POST"])
 @jwt_required
 def retrigger_failed_testcases():
@@ -10418,9 +8678,14 @@ def retrigger_failed_testcases():
         if not tests_by_task:
             return jsonify({"error": "No valid agave_task_id found in selected tests"}), 400
 
+        import copy
+        base_overrides = copy.deepcopy(overrides) if isinstance(overrides, dict) else {}
+        jp_name_cache = {}
         rerun_results = []
 
         for task_id, task_tests in tests_by_task.items():
+            jp_name = ""
+            trigger_username = current_username
             try:
                 # Fetch original task details
                 task_data = fetch_agave_task(task_id)
@@ -10432,8 +8697,25 @@ def retrigger_failed_testcases():
                     })
                     continue
 
-                # Build rerun payload from original task, apply overrides
-                payload = _build_rerun_payload(task_data, task_tests, overrides, current_username)
+                # Isolate each task: mixed AHV/ESX selections must not share
+                # resolved NOS branch or a single Jita account.
+                task_overrides = copy.deepcopy(base_overrides)
+                jp_name = _resolve_rerun_jp_name(
+                    task_data,
+                    fetch_name=lambda jid: _fetch_job_profile_name(jid, JITA_SVC_AUTH),
+                    cache=jp_name_cache,
+                )
+                task_auth, trigger_username = _select_rerun_auth(
+                    jp_name, user_auth, current_username,
+                )
+                logger.info(
+                    "[retrigger] task %s jp=%r account=%s tests=%s",
+                    task_id, jp_name, trigger_username, len(task_tests),
+                )
+
+                # Pass UI overrides through as entered. Do not look up commits
+                # or branches from the Jita commits API.
+                payload = _build_rerun_payload(task_data, task_tests, task_overrides, trigger_username)
 
                 # POST to rerun endpoint (raw JSON body, matching Jita UI)
                 rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
@@ -10443,7 +8725,7 @@ def retrigger_failed_testcases():
                     rerun_url,
                     data=json.dumps(payload),
                     headers={"Content-Type": "application/json", "Accept": "application/json"},
-                    auth=user_auth,
+                    auth=task_auth,
                     verify=False,
                     timeout=60
                 )
@@ -10460,10 +8742,14 @@ def retrigger_failed_testcases():
                     new_id = resp_data.get("_id")
                     if isinstance(new_id, dict) and "$oid" in new_id:
                         new_id = new_id["$oid"]
+                    if new_id is not None:
+                        new_id = str(new_id)
                     rerun_results.append({
                         "agave_task_id": task_id,
                         "success": True,
                         "rerun_task_id": new_id,
+                        "job_profile_name": jp_name,
+                        "triggered_as": trigger_username,
                         "message": resp_data.get("message", ""),
                     })
                 else:
@@ -10472,6 +8758,8 @@ def retrigger_failed_testcases():
                     rerun_results.append({
                         "agave_task_id": task_id,
                         "success": False,
+                        "job_profile_name": jp_name,
+                        "triggered_as": trigger_username,
                         "error": error_msg
                     })
             except Exception as e:
@@ -10479,22 +8767,191 @@ def retrigger_failed_testcases():
                 rerun_results.append({
                     "agave_task_id": task_id,
                     "success": False,
+                    "job_profile_name": jp_name,
+                    "triggered_as": trigger_username,
                     "error": str(e)
                 })
 
         succeeded = [r for r in rerun_results if r.get("success")]
         failed = [r for r in rerun_results if not r.get("success")]
+        rerun_task_ids = [
+            str(r["rerun_task_id"]) for r in succeeded if r.get("rerun_task_id")
+        ]
+        def _jita_results_urls(ids):
+            """Split so each GET stays under Apache's ~8KB Request-URI limit."""
+            prefix = "https://jita.eng.nutanix.com/results?task_ids="
+            suffix = "&active_tab=1&merge_tests=true"
+            max_len = 7800
+            out, current = [], []
+            for tid in ids:
+                trial = current + [str(tid)]
+                url = prefix + ",".join(trial) + (suffix if len(trial) > 1 else "")
+                if current and len(url) > max_len:
+                    out.append(prefix + ",".join(current) + (suffix if len(current) > 1 else ""))
+                    current = [str(tid)]
+                else:
+                    current = trial
+            if current:
+                out.append(prefix + ",".join(current) + (suffix if len(current) > 1 else ""))
+            return out
+        jita_results_urls = _jita_results_urls(rerun_task_ids) if rerun_task_ids else []
+        jita_results_url = jita_results_urls[0] if jita_results_urls else ""
         return jsonify({
             "success": len(failed) == 0,
             "total": len(rerun_results),
             "succeeded": len(succeeded),
             "failed": len(failed),
+            "rerun_task_ids": rerun_task_ids,
+            "jita_results_url": jita_results_url,
+            "jita_results_urls": jita_results_urls,
             "results": rerun_results,
         })
 
     except Exception as e:
         logger.error(f"[retrigger] Unhandled error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+def _rewrite_url_for_new_build(url, old_gbn=None, new_gbn=None, old_commit=None, new_commit=None):
+    """Keep the original NOS/image URL shape (tar.gz vs opt) for a new GBN/commit."""
+    if not url:
+        return url
+    out = str(url)
+    old_gbn_s = "" if old_gbn in (None, "") else str(old_gbn)
+    new_gbn_s = "" if new_gbn in (None, "") else str(new_gbn)
+    if old_gbn_s and new_gbn_s and old_gbn_s != new_gbn_s and old_gbn_s in out:
+        out = out.replace(old_gbn_s, new_gbn_s)
+    old_c = str(old_commit or "").strip()
+    new_c = str(new_commit or "").strip()
+    if old_c and new_c and old_c != new_c:
+        if old_c in out:
+            out = out.replace(old_c, new_c)
+        elif len(old_c) >= 7 and len(new_c) >= 7 and old_c[:7] in out:
+            out = out.replace(old_c[:7], new_c[:7])
+    return out
+
+
+def _original_imaging_options(task_data):
+    """NOS/hypervisor URLs Jita stored on the original task (from the JP)."""
+    import copy
+    task_data = task_data or {}
+    hw = task_data.get("requested_hardware") or {}
+    raw = hw.get("imaging_options") if isinstance(hw, dict) else None
+    if not isinstance(raw, dict):
+        raw = task_data.get("imaging_options")
+    if not isinstance(raw, dict):
+        return {}
+    return copy.deepcopy(raw)
+
+
+def _original_build_type(task_data, nos_url=""):
+    """Build type the original JP/task used (release tar vs opt)."""
+    task_data = task_data or {}
+    for key in ("build_type", "nos_build_type"):
+        val = task_data.get(key)
+        if val not in (None, ""):
+            return str(val).strip()
+    bs = task_data.get("build_selection") or {}
+    if isinstance(bs, dict) and bs.get("build_type"):
+        return str(bs.get("build_type")).strip()
+    url = str(nos_url or "").lower()
+    if ".tar.gz" in url:
+        return "release"
+    if "/opt/" in url or url.rstrip("/").endswith("/opt"):
+        return "opt"
+    return ""
+
+
+def _original_requested_hardware(task_data):
+    """Deep-copy Jita requested_hardware so Resource Requirement Configuration matches."""
+    import copy
+    hw = (task_data or {}).get("requested_hardware")
+    if not isinstance(hw, dict):
+        return {}
+    return copy.deepcopy(hw)
+
+
+def _normalize_override_pools(overrides):
+    raw = (overrides or {}).get("node_pools")
+    if raw in (None, ""):
+        raw = (overrides or {}).get("resource_pool")
+    if isinstance(raw, (list, tuple)):
+        return [str(e).strip() for e in raw if str(e).strip()]
+    return [e.strip() for e in str(raw or "").split(",") if e.strip()]
+
+
+def _apply_resource_requirement_overrides(requested_hw, infra, overrides):
+    """Apply Jita Resource Requirement Configuration edits onto copied hardware."""
+    import copy
+    requested_hw = copy.deepcopy(requested_hw) if isinstance(requested_hw, dict) else {}
+    infra = copy.deepcopy(infra) if isinstance(infra, list) else []
+    if not (overrides or {}).get("override_resource_config"):
+        return requested_hw, infra
+
+    mode = str(overrides.get("resources_mode") or "").strip().lower()
+    res_type = str(overrides.get("resource_type") or "").strip().lower()
+    pools = _normalize_override_pools(overrides)
+    existing = infra[0] if infra and isinstance(infra[0], dict) else {}
+    params = existing.get("params") if isinstance(existing.get("params"), dict) else None
+
+    if mode == "global_pool":
+        if res_type in ("nested_1.0", "nested_1"):
+            itype = "nested_1"
+        elif res_type in ("physical",):
+            itype = "physical"
+        else:
+            itype = "nested"
+        infra = [{
+            "type": itype,
+            "kind": "PRIVATE_CLOUD",
+            "params": params or {"category": "general"},
+        }]
+    elif mode in ("node_pool", "cluster", "name"):
+        itype = "node_pool" if mode == "node_pool" else ("cluster" if mode == "cluster" else "name")
+        entry = {
+            "kind": existing.get("kind") or "ON_PREM",
+            "type": itype,
+            "entries": pools,
+        }
+        if params:
+            entry["params"] = params
+        rest = copy.deepcopy(infra[1:]) if len(infra) > 1 else []
+        infra = [entry] + rest
+
+    if res_type == "physical":
+        requested_hw.pop("nested_params", None)
+    elif res_type in ("nested_2.0", "nested", "nested_2"):
+        requested_hw["nested_params"] = {"version": "2.0", "is_nested": True}
+    elif res_type in ("nested_1.0", "nested_1"):
+        requested_hw["nested_params"] = {"version": "1.0", "is_nested": True}
+
+    hyp = str(overrides.get("hypervisor") or "").strip()
+    if hyp:
+        requested_hw["hypervisor"] = hyp
+    return requested_hw, infra
+
+
+def _original_nested_params(task_data):
+    """Pass through nested_params from the original Jita task. Do not infer.
+
+    Nested AHV 2.0 vs physical is already on the source task. Guessing from the
+    JP name would attach nested_params to physical reruns.
+    """
+    import copy
+    task_data = task_data or {}
+    hw = task_data.get("requested_hardware") or {}
+    raw = hw.get("nested_params") if isinstance(hw, dict) else None
+    if not isinstance(raw, dict):
+        raw = task_data.get("nested_params")
+    if not isinstance(raw, dict):
+        return {}
+    out = {
+        k: v for k, v in copy.deepcopy(raw).items()
+        if v not in (None, "")
+    }
+    if not out.get("is_nested") and not out.get("version"):
+        return {}
+    return out
 
 
 def _build_rerun_payload(task_data, task_tests, overrides, username):
@@ -10554,17 +9011,28 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         if entry:
             tests.append(entry)
 
-    requested_hw = task_data.get("requested_hardware") or {}
-    infra = requested_hw.get("infra") or task_data.get("infra") or []
+    requested_hw = _original_requested_hardware(task_data)
+    infra = requested_hw.get("infra")
+    if not isinstance(infra, list) or not infra:
+        infra = copy.deepcopy(task_data.get("infra") or [])
+    if not isinstance(infra, list):
+        infra = []
+    else:
+        infra = copy.deepcopy(infra)
     # Keep the original task pool unless the user explicitly overrides it.
+    # Only replace entries so kind/type/params (By Node Pool, Physical, etc.) stay Jita's.
     if overrides.get("override_pool") and overrides.get("resource_pool"):
         entries = [e.strip() for e in str(overrides["resource_pool"]).split(",") if e.strip()]
         if entries:
-            kind, itype = "ON_PREM", "node_pool"
-            if isinstance(infra, list) and infra and isinstance(infra[0], dict):
-                kind = infra[0].get("kind") or kind
-                itype = infra[0].get("type") or itype
-            infra = [{"kind": kind, "type": itype, "entries": entries}]
+            if infra and isinstance(infra[0], dict):
+                updated = copy.deepcopy(infra[0])
+                updated["entries"] = entries
+                updated.setdefault("kind", "ON_PREM")
+                updated.setdefault("type", "node_pool")
+                infra = [updated] + copy.deepcopy(infra[1:])
+            else:
+                infra = [{"kind": "ON_PREM", "type": "node_pool", "entries": entries}]
+    requested_hw, infra = _apply_resource_requirement_overrides(requested_hw, infra, overrides)
 
     nos_commit = overrides.get("nos_commit")
     if not nos_commit and overrides.get("nos_tag"):
@@ -10574,18 +9042,47 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
     commit_id = _first(nos_commit, task_data.get("commit_id"))
     gbn = _first(_as_int(overrides.get("nos_gbn")), _as_int(task_data.get("gbn")), task_data.get("gbn"))
 
-    image_branch = _first(overrides.get("image_branch"), task_data.get("image_branch"), branch)
-    image_commit = _first(
-        overrides.get("image_commit"),
-        task_data.get("image_commit"),
-        commit_id if nos_commit else None,
-    )
-    image_gbn = _first(
-        _as_int(overrides.get("image_gbn")),
-        _as_int(task_data.get("image_gbn")),
-        gbn if overrides.get("nos_gbn") else None,
-        task_data.get("image_gbn"),
-    )
+    orig_nos_branch = str(task_data.get("branch") or "").strip()
+    orig_image_branch = str(task_data.get("image_branch") or "").strip()
+    orig_nos_commit = str(task_data.get("commit_id") or "").strip()
+    orig_image_commit = str(task_data.get("image_commit") or "").strip()
+    # Jita default: image is a copy of NOS when branches match, when the original
+    # image commit already equalled NOS, or when image fields were left unset.
+    if orig_image_branch and orig_nos_branch:
+        image_follows_nos = orig_image_branch == orig_nos_branch
+    elif orig_image_commit and orig_nos_commit:
+        image_follows_nos = orig_image_commit == orig_nos_commit
+    else:
+        image_follows_nos = not orig_image_branch and not orig_image_commit
+
+    if overrides.get("image_branch"):
+        image_branch = overrides.get("image_branch")
+    elif image_follows_nos:
+        image_branch = branch
+    else:
+        image_branch = _first(task_data.get("image_branch"), branch)
+
+    if overrides.get("image_commit"):
+        image_commit = overrides.get("image_commit")
+    elif image_follows_nos:
+        # Unchecked Image Build: use the new NOS commit, not the previous image commit.
+        image_commit = commit_id
+    else:
+        image_commit = _first(
+            task_data.get("image_commit"),
+            commit_id if nos_commit else None,
+        )
+
+    if overrides.get("image_gbn") not in (None, ""):
+        image_gbn = _as_int(overrides.get("image_gbn"))
+    elif image_follows_nos:
+        image_gbn = gbn
+    else:
+        image_gbn = _first(
+            _as_int(task_data.get("image_gbn")),
+            gbn if overrides.get("nos_gbn") else None,
+            task_data.get("image_gbn"),
+        )
 
     test_framework = task_data.get("test_framework") or "nutest-py3-tests"
     fw_branch_key = "%s_branch" % test_framework
@@ -10602,21 +9099,23 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         task_data.get(fw_branch_key),
         fw_meta.get("branch"),
     )
-    nutest_commit = _first(
-        overrides.get("nutest_commit"),
-        overrides.get("framework_commit"),
-        task_data.get(fw_commit_key),
-        fw_meta.get("commit"),
+    # Leave nutest/framework commits empty unless the user typed them so Jita
+    # picks the latest on the branch instead of pinning the original SHAs.
+    nutest_commit = (
+        str(overrides.get("nutest_commit") or overrides.get("framework_commit") or "").strip()
+        or None
     )
     test_branch = _first(overrides.get("test_branch"), test_meta.get("branch"), nutest_branch)
-    test_commit = _first(overrides.get("test_commit"), test_meta.get("commit"))
+    test_commit = str(overrides.get("test_commit") or "").strip() or None
 
     if nutest_branch:
         fw_meta["branch"] = nutest_branch
+    fw_meta.pop("commit", None)
     if nutest_commit:
         fw_meta["commit"] = nutest_commit
     if test_branch:
         test_meta["branch"] = test_branch
+    test_meta.pop("commit", None)
     if test_commit:
         test_meta["commit"] = test_commit
     if overrides.get("patch_url"):
@@ -10649,7 +9148,9 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
     if "jita3" not in tester_tags:
         tester_tags.append("jita3")
 
-    if "skip_resource_spec_match" in overrides and overrides.get("skip_resource_spec_match") is not None:
+    if "match_resource_spec" in overrides and overrides.get("match_resource_spec") is not None:
+        skip_match = not bool(overrides.get("match_resource_spec"))
+    elif "skip_resource_spec_match" in overrides and overrides.get("skip_resource_spec_match") is not None:
         skip_match = bool(overrides.get("skip_resource_spec_match"))
     else:
         skip_match = _bool_from_task("skip_resource_spec_match", False)
@@ -10689,7 +9190,10 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         rm_json = {}
 
     nos_overridden = any(overrides.get(k) for k in ("nos_branch", "nos_commit", "nos_gbn", "nos_tag"))
-    pc_overridden = any(overrides.get(k) for k in ("pc_commit", "pc_branch", "pc_gbn", "pc_tag"))
+    pc_overridden = any(overrides.get(k) for k in (
+        "pc_commit", "pc_branch", "pc_gbn", "pc_tag",
+        "pc_build_url", "pc_build_url_qcow2",
+    ))
 
     if nos_overridden:
         nos_cluster, nos_build = _ensure_product_build(rm_json, "NOS_CLUSTER")
@@ -10723,6 +9227,13 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         pc_gbn = _as_int(overrides.get("pc_gbn"))
         if pc_gbn is not None:
             pc_build["gbn"] = pc_gbn
+        # Jita PC tab: Build Url -> nos_build_url, Build QCOW2 URL -> pc_build_url.
+        pc_build_url = str(overrides.get("pc_build_url") or "").strip()
+        if pc_build_url:
+            pc_build["nos_build_url"] = pc_build_url
+        pc_qcow2_url = str(overrides.get("pc_build_url_qcow2") or "").strip()
+        if pc_qcow2_url:
+            pc_build["pc_build_url"] = pc_qcow2_url
         pc_build.setdefault("component", "main")
         pc["build"] = pc_build
 
@@ -10731,23 +9242,7 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         if isinstance(spec, dict) and isinstance(spec.get("build"), dict):
             spec["build"] = _sanitize_rm_build(spec["build"])
 
-    retain = copy.deepcopy(task_data.get("retain_resources_config"))
-    if overrides.get("retain_on_failure"):
-        duration = _as_int(overrides.get("retain_duration")) or 720
-        entity = overrides.get("retain_entity") or "CONTAINER"
-        retain = {
-            "criteria": {
-                "TEST_FAILURE": {
-                    "entity": entity,
-                    "type": "AFTER_EACH",
-                    "params": {
-                        "duration": duration,
-                        "exceptions": [],
-                        "states_to_track": ["Failed"],
-                    },
-                }
-            }
-        }
+    retain = _ensure_retain_duration(task_data.get("retain_resources_config"), RETAIN_DURATION_72H_MIN)
 
     sdk_opts = copy.deepcopy(task_data.get("sdk_installation_options") or {})
     if not isinstance(sdk_opts, dict):
@@ -10781,6 +9276,62 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         payload[fw_commit_key] = nutest_commit
     if overrides.get("nos_build_type"):
         payload["build_type"] = overrides["nos_build_type"]
+    else:
+        orig_build_type = _original_build_type(task_data)
+        if orig_build_type:
+            payload["build_type"] = orig_build_type
+    orig_image_build_type = task_data.get("image_build_type")
+    if orig_image_build_type not in (None, ""):
+        payload["image_build_type"] = orig_image_build_type
+
+    imaging_options = _original_imaging_options(task_data)
+    orig_nos_url = str(imaging_options.get("nos_url") or "").strip()
+    orig_hyp_url = str(imaging_options.get("hypervisor_url") or "").strip()
+    if orig_nos_url or orig_hyp_url:
+        orig_gbn = task_data.get("gbn")
+        orig_commit = task_data.get("commit_id")
+        orig_image_commit = task_data.get("image_commit")
+        orig_image_gbn = task_data.get("image_gbn")
+        if orig_nos_url:
+            imaging_options["nos_url"] = _rewrite_url_for_new_build(
+                orig_nos_url, orig_gbn, gbn, orig_commit, commit_id,
+            )
+        if orig_hyp_url:
+            imaging_options["hypervisor_url"] = _rewrite_url_for_new_build(
+                orig_hyp_url,
+                orig_image_gbn if orig_image_gbn not in (None, "") else orig_gbn,
+                image_gbn if image_gbn not in (None, "") else gbn,
+                orig_image_commit or orig_commit,
+                image_commit or commit_id,
+            )
+        if not payload.get("build_type"):
+            inferred = _original_build_type(task_data, orig_nos_url)
+            if inferred:
+                payload["build_type"] = inferred
+        payload["imaging_options"] = imaging_options
+    if overrides.get("override_resource_config"):
+        nested_params = requested_hw.get("nested_params") if isinstance(requested_hw.get("nested_params"), dict) else {}
+    else:
+        nested_params = _original_nested_params(task_data)
+    if nested_params:
+        payload["nested_params"] = nested_params
+    elif overrides.get("override_resource_config"):
+        payload.pop("nested_params", None)
+    if requested_hw or infra:
+        if not requested_hw:
+            requested_hw = {}
+        requested_hw["infra"] = infra
+        if payload.get("imaging_options"):
+            requested_hw["imaging_options"] = payload["imaging_options"]
+        if nested_params:
+            requested_hw["nested_params"] = nested_params
+        payload["requested_hardware"] = requested_hw
+        hypervisor = requested_hw.get("hypervisor") or task_data.get("hypervisor")
+        if hypervisor:
+            payload["hypervisor"] = hypervisor
+        hypervisor_version = requested_hw.get("hypervisor_version") or task_data.get("hypervisor_version")
+        if hypervisor_version:
+            payload["hypervisor_version"] = hypervisor_version
     if label:
         payload["label"] = label
     if tester_tags:
@@ -10796,6 +9347,106 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         payload["retain_resources_config"] = retain
 
     return {k: v for k, v in payload.items() if v is not None and v != ""}
+
+
+def _task_job_profile_id(task_data):
+    if not isinstance(task_data, dict):
+        return ""
+    jp = task_data.get("job_profile")
+    if isinstance(jp, dict):
+        oid = jp.get("$oid") or jp.get("_id") or jp.get("id")
+        if isinstance(oid, dict):
+            oid = oid.get("$oid")
+        return str(oid or "").strip()
+    if isinstance(jp, str):
+        return jp.strip()
+    return ""
+
+
+def _jp_name_from_agave_task(task_data):
+    """JP name from a fetched agave task: explicit name, then label without -(N)."""
+    if not isinstance(task_data, dict):
+        return ""
+    name = str(task_data.get("job_profile_name") or "").strip()
+    if name:
+        return name
+    jp = task_data.get("job_profile")
+    if isinstance(jp, dict):
+        name = str(jp.get("name") or "").strip()
+        if name:
+            return name
+    label = str(task_data.get("label") or "").strip()
+    if label:
+        import re
+        stripped = re.sub(r"-\(\d+\)$", "", label).strip()
+        return stripped or label
+    return ""
+
+
+def _last_hypervisor_in_jp_name(jp_name):
+    """Return 'esx' or 'ahv' from the last AHV/ESX/ESXi token in the JP name.
+
+    Names like AHVorESX_special_config_AOS-tar_(AHV) mention both; the suffix wins.
+    """
+    import re
+    last = None
+    for match in re.finditer(r"AHV|ESXi?", str(jp_name or ""), flags=re.IGNORECASE):
+        last = match.group(0)
+    if not last:
+        return None
+    return "esx" if last.lower().startswith("esx") else "ahv"
+
+
+def _is_esx_job_profile(jp_name):
+    return _last_hypervisor_in_jp_name(jp_name) == "esx"
+
+
+def _rerun_trigger_account(jp_name):
+    """ESX job profiles run as svc.teamchandra; others use the caller's LDAP account."""
+    if _is_esx_job_profile(jp_name):
+        return "svc.teamchandra"
+    return None
+
+
+def _select_rerun_auth(jp_name, user_auth, current_username, service_accounts=None):
+    """Pick Jita auth for one task. AHV and ESX tasks in the same batch stay independent."""
+    svc_name = _rerun_trigger_account(jp_name)
+    accounts = service_accounts if service_accounts is not None else RUN_PLAN_SERVICE_ACCOUNTS
+    if svc_name and svc_name in accounts:
+        return accounts[svc_name], svc_name
+    return user_auth, current_username
+
+
+def _resolve_rerun_jp_name(task_data, fetch_name=None, cache=None):
+    """
+    Resolve the real JP name for account selection.
+
+    Prefer job_profile_name / job_profile.name. If the task only has a JP id,
+    fetch the name (cached per batch) so a generic AHV label cannot hide an
+    ESX JP, and an ESX leftover label cannot steal an AHV rerun.
+    Label is the last fallback.
+    """
+    if not isinstance(task_data, dict):
+        return ""
+    name = str(task_data.get("job_profile_name") or "").strip()
+    if name:
+        return name
+    jp = task_data.get("job_profile")
+    if isinstance(jp, dict):
+        name = str(jp.get("name") or "").strip()
+        if name:
+            return name
+    jp_id = _task_job_profile_id(task_data)
+    if jp_id and fetch_name:
+        if cache is not None and jp_id in cache:
+            fetched = cache[jp_id]
+        else:
+            fetched = str(fetch_name(jp_id) or "").strip()
+            if cache is not None:
+                cache[jp_id] = fetched
+        if fetched:
+            return fetched
+    return _jp_name_from_agave_task(task_data)
 
 
 # ======================================================
@@ -11267,9 +9918,10 @@ def _apply_testcase_tag_ops(testcase_oids, tags, branch, team, action="add"):
 def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip, limit):
     """Build the MongoDB aggregation pipeline payload for the TCMS POST API.
 
-    Master and release branches use the same filter clauses to match TCMS UI:
-    - Both use team-specific test_sets regex matching TCMS detail page filters
-    - No extra exclusions to ensure consistency with TCMS UI data
+    Master and release branches use different filter clauses:
+    - Master includes release_name exclusion and metadata tag exclusions.
+    - Release branches include tc_type filter for regression/smart_qual.
+    Both include a team-specific test_sets regex.
     """
     is_master = milestone == "master"
     team_test_set_regex = f"{test_set_regex}{team}/"
@@ -11281,6 +9933,9 @@ def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip,
                 "last_result": {"$elemMatch": {"pass_name": "overall"}},
                 "deleted": False,
             },
+            {"test_case.test_sets": {"$regex": test_set_regex, "$options": "i"}},
+            {"release_name": {"$ne": milestone}},
+            {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
             {"additional_data.team": f"{team_prefix}/{team}"},
             {"test_case.test_sets": {"$regex": team_test_set_regex, "$options": "i"}},
             {"test_case.deprecated": False},
@@ -12760,7 +11415,13 @@ def _framework_args_value_to_dict(val):
             parsed = json.loads(s)
             return dict(parsed) if isinstance(parsed, dict) else {}
         except (json.JSONDecodeError, TypeError, ValueError):
-            return {}
+            # Some payloads arrive as python-literal dict strings with single quotes.
+            try:
+                import ast
+                parsed = ast.literal_eval(s)
+                return dict(parsed) if isinstance(parsed, dict) else {}
+            except (SyntaxError, ValueError, TypeError):
+                return {}
     return {}
 
 
@@ -12864,6 +11525,404 @@ def _ensure_test_args_on_test_set_payload(ts_payload, default_value="{}", custom
     # JITA UI "Test Args" panel renders from args_map (dict, not JSON string).
     ts_payload["args_map"] = dict(existing)
     return ts_payload
+
+
+def _manage_ts_safe_copy_dict(value):
+    """Return a plain dict copy for mapping values; fallback to {} for non-dicts."""
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _manage_ts_stringify_value(value):
+    """Stable stringify for comparing values that may be nested types."""
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def _manage_ts_extract_test_args(ts_doc):
+    """Use JITA Test Args (args_map). Fall back to string fields only if args_map is empty."""
+    primary = _test_args_value_to_dict(ts_doc.get("args_map") if isinstance(ts_doc, dict) else None)
+    if primary:
+        return primary
+    merged = {}
+    for field in ("test_args", "testArgs"):
+        for key, val in _test_args_value_to_dict(ts_doc.get(field) if isinstance(ts_doc, dict) else None).items():
+            if key not in merged:
+                merged[key] = val
+    return merged
+
+
+def _manage_ts_extract_framework_args(ts_doc):
+    """Use JITA Test Framework Options (agave_options). Fall back to strings if empty."""
+    primary = _framework_args_value_to_dict(ts_doc.get("agave_options") if isinstance(ts_doc, dict) else None)
+    if primary:
+        return primary
+    merged = {}
+    for field in ("framework_args", "frameworkArgs"):
+        for key, val in _framework_args_value_to_dict(ts_doc.get(field) if isinstance(ts_doc, dict) else None).items():
+            if key not in merged:
+                merged[key] = val
+    return merged
+
+
+def _manage_ts_compute_common_args(per_ts_rows):
+    """Compute the union of arg keys and value consistency across selected test sets.
+
+    A key listed on any selected TS is included. ``multiple_values`` is true only when
+    the TS that already have the key disagree; absence on some TS is not a value.
+    """
+    if not per_ts_rows:
+        return {"framework_args": [], "test_args": []}
+
+    def _union_keys(field):
+        keys = set()
+        for row in per_ts_rows:
+            keys.update((row.get(field) or {}).keys())
+        return keys
+
+    def _build_rows(keys, field):
+        out = []
+        for key in sorted(keys):
+            values = [
+                row[field].get(key)
+                for row in per_ts_rows
+                if key in (row.get(field) or {})
+            ]
+            val_set = {_manage_ts_stringify_value(v) for v in values}
+            multiple_values = len(val_set) > 1
+            out.append({
+                "key": key,
+                "value": None if multiple_values else (values[0] if values else None),
+                "multiple_values": multiple_values,
+                "value_samples": list(val_set)[:5] if multiple_values else [],
+            })
+        return out
+
+    return {
+        "framework_args": _build_rows(_union_keys("framework_args"), "framework_args"),
+        "test_args": _build_rows(_union_keys("test_args"), "test_args"),
+    }
+
+
+def _manage_ts_normalize_update_maps(req_data):
+    """Normalize update payload into two category maps and validated new args."""
+    edits_framework = req_data.get("edit_framework_args") or {}
+    edits_test = req_data.get("edit_test_args") or {}
+    if not isinstance(edits_framework, dict):
+        raise ValueError("edit_framework_args must be an object")
+    if not isinstance(edits_test, dict):
+        raise ValueError("edit_test_args must be an object")
+
+    new_args = req_data.get("new_arguments") or []
+    if not isinstance(new_args, list):
+        raise ValueError("new_arguments must be an array")
+
+    normalized_new_args = []
+    for idx, item in enumerate(new_args):
+        if not isinstance(item, dict):
+            raise ValueError(f"new_arguments[{idx}] must be an object")
+        key = str(item.get("key", "")).strip()
+        category = str(item.get("category", "")).strip().lower()
+        overwrite_existing = bool(item.get("overwrite_existing", False))
+        if not key:
+            raise ValueError(f"new_arguments[{idx}].key is required")
+        if category not in ("framework", "test"):
+            raise ValueError(f"new_arguments[{idx}].category must be 'framework' or 'test'")
+        value = item.get("value")
+        if value is None:
+            value = ""
+        normalized_new_args.append({
+            "key": key,
+            "value": value,
+            "category": category,
+            "overwrite_existing": overwrite_existing,
+        })
+
+    return edits_framework, edits_test, normalized_new_args
+
+
+def _manage_ts_validate_search_query(query, use_regex=False):
+    """Validate search query semantics used by Manage TS UI."""
+    q = str(query or "").strip()
+    if len(q) < 2:
+        raise ValueError("query must be at least 2 characters")
+    if use_regex:
+        try:
+            re.compile(q)
+        except re.error as ex:
+            raise ValueError(f"Invalid regex: {ex}") from ex
+    return q
+
+
+def _manage_ts_apply_plan_to_args(base_framework, base_test, edits_framework, edits_test, new_args):
+    """Return updated args + structured change info without mutating input args.
+
+    Checkbox edits apply only when the key already exists on this test set.
+    ``new_arguments`` still add or overwrite according to overwrite_existing.
+    """
+    before_framework = _manage_ts_safe_copy_dict(base_framework)
+    before_test = _manage_ts_safe_copy_dict(base_test)
+    after_framework = _manage_ts_safe_copy_dict(base_framework)
+    after_test = _manage_ts_safe_copy_dict(base_test)
+
+    changed_framework = []
+    changed_test = []
+    collision_skips = []
+
+    for key, val in edits_framework.items():
+        if key not in after_framework:
+            continue
+        if val is None:
+            val = ""
+        if _manage_ts_stringify_value(after_framework.get(key)) != _manage_ts_stringify_value(val):
+            changed_framework.append({"key": key, "before": before_framework.get(key), "after": val, "kind": "edit"})
+        after_framework[key] = val
+
+    for key, val in edits_test.items():
+        if key not in after_test:
+            continue
+        if val is None:
+            val = ""
+        if _manage_ts_stringify_value(after_test.get(key)) != _manage_ts_stringify_value(val):
+            changed_test.append({"key": key, "before": before_test.get(key), "after": val, "kind": "edit"})
+        after_test[key] = val
+
+    for item in new_args:
+        tgt = after_framework if item["category"] == "framework" else after_test
+        before_tgt = before_framework if item["category"] == "framework" else before_test
+        changed_tgt = changed_framework if item["category"] == "framework" else changed_test
+        key = item["key"]
+        if key in tgt and not item["overwrite_existing"]:
+            collision_skips.append({
+                "key": key,
+                "category": item["category"],
+                "existing_value": tgt.get(key),
+                "proposed_value": item.get("value"),
+                "reason": "collision_skip",
+            })
+            continue
+        old = before_tgt.get(key)
+        new_val = item.get("value")
+        if new_val is None:
+            new_val = ""
+        if key not in tgt or _manage_ts_stringify_value(tgt.get(key)) != _manage_ts_stringify_value(new_val):
+            changed_tgt.append({
+                "key": key,
+                "before": old,
+                "after": new_val,
+                "kind": "new_overwrite" if key in before_tgt else "new",
+            })
+        tgt[key] = new_val
+
+    return {
+        "before_framework": before_framework,
+        "before_test": before_test,
+        "after_framework": after_framework,
+        "after_test": after_test,
+        "changed_framework": changed_framework,
+        "changed_test": changed_test,
+        "collision_skips": collision_skips,
+    }
+
+
+_MANAGE_TS_FW_FIELDS = (
+    ("framework_args", False),
+    ("frameworkArgs", False),
+    ("agave_options", True),
+)
+_MANAGE_TS_TEST_FIELDS = (
+    ("test_args", False),
+    ("testArgs", False),
+    ("args_map", True),
+)
+_MANAGE_TS_FW_PRIMARY = "agave_options"
+_MANAGE_TS_TEST_PRIMARY = "args_map"
+_MANAGE_TS_FW_CANONICAL = ("framework_args", "agave_options")
+_MANAGE_TS_TEST_CANONICAL = ("test_args", "args_map")
+
+
+def _manage_ts_restrict_map(original, after, allowed_new_keys):
+    """Keep original keys (values from after when present); add only allowed new keys."""
+    out = {}
+    original = original or {}
+    after = after or {}
+    for key, val in original.items():
+        out[key] = after[key] if key in after else val
+    for key in allowed_new_keys or []:
+        if key in after:
+            out[key] = after[key]
+    return out
+
+
+def _manage_ts_build_put_payload(existing_ts, after_framework, after_test, new_args=None):
+    """Clone source test set and patch each arg field in place.
+
+    Checkbox edits never copy a key into a field (or test set) that did not
+    already have it. ``new_arguments`` may add keys; on a test set with no
+    args they are written only to the canonical fields.
+    """
+    payload = _manage_ts_safe_copy_dict(existing_ts)
+    new_args = new_args or []
+    new_fw = [item.get("key") for item in new_args if item.get("category") == "framework" and item.get("key")]
+    new_test = [item.get("key") for item in new_args if item.get("category") == "test" and item.get("key")]
+    after_framework = after_framework if isinstance(after_framework, dict) else {}
+    after_test = after_test if isinstance(after_test, dict) else {}
+
+    def apply_category(fields, parse_fn, after, allowed_new, canonical, primary_name):
+        fields_with_keys = []
+        primary_target = None
+        for name, as_object in fields:
+            parsed = parse_fn(existing_ts.get(name) if isinstance(existing_ts, dict) else None)
+            if parsed:
+                fields_with_keys.append((name, as_object, parsed))
+            if name == primary_name:
+                primary_target = (name, as_object, parsed)
+
+        if primary_target and primary_target[2]:
+            targets = [primary_target]
+        elif fields_with_keys:
+            targets = fields_with_keys
+        elif allowed_new:
+            targets = [
+                (name, as_object, {})
+                for name, as_object in fields
+                if name in canonical
+            ]
+        else:
+            return
+
+        for name, as_object, original in targets:
+            restricted = _manage_ts_restrict_map(original, after, allowed_new)
+            if _manage_ts_stringify_value(original) == _manage_ts_stringify_value(restricted):
+                continue
+            if as_object:
+                payload[name] = _manage_ts_safe_copy_dict(restricted)
+            else:
+                payload[name] = json.dumps(restricted, separators=(",", ":"))
+
+    apply_category(
+        _MANAGE_TS_FW_FIELDS,
+        _framework_args_value_to_dict,
+        after_framework,
+        new_fw,
+        _MANAGE_TS_FW_CANONICAL,
+        _MANAGE_TS_FW_PRIMARY,
+    )
+    apply_category(
+        _MANAGE_TS_TEST_FIELDS,
+        _test_args_value_to_dict,
+        after_test,
+        new_test,
+        _MANAGE_TS_TEST_CANONICAL,
+        _MANAGE_TS_TEST_PRIMARY,
+    )
+    return payload
+
+
+def _manage_ts_sanitize_for_json(val):
+    """Recursively sanitize values for JSON PUT payloads."""
+    if isinstance(val, dict):
+        return {k: _manage_ts_sanitize_for_json(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_manage_ts_sanitize_for_json(v) for v in val]
+    if isinstance(val, (set, tuple)):
+        return [_manage_ts_sanitize_for_json(v) for v in val]
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    if val is Ellipsis:
+        return None
+    return val
+
+
+def _manage_ts_fetch_test_set(ts_id):
+    """Fetch one test set and return normalized record used by inspect/preview/apply."""
+    resp = requests.get(
+        f"{JITA_BASE}/test_sets/{ts_id}",
+        auth=JITA_SVC_AUTH,
+        verify=False,
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to fetch test set {ts_id} (HTTP {resp.status_code})")
+    body = resp.json() or {}
+    ts_doc = body.get("data", {}) or {}
+    ts_oid = ts_doc.get("_id")
+    if isinstance(ts_oid, dict) and "$oid" in ts_oid:
+        ts_oid = ts_oid["$oid"]
+    elif ts_oid and not isinstance(ts_oid, str):
+        ts_oid = str(ts_oid)
+    return {
+        "id": ts_oid or ts_id,
+        "name": ts_doc.get("name", ""),
+        "framework_args": _manage_ts_extract_framework_args(ts_doc),
+        "test_args": _manage_ts_extract_test_args(ts_doc),
+        "raw": ts_doc,
+    }
+
+
+def _jita_test_sets_search_params(raw_query, limit):
+    """Query params for JITA GET /test_sets name search used by Manage TS.
+
+    Name regex is unindexed. ``sort=-_id`` plus large field projections (args maps
+    / ``only`` lists) routinely exceed JITA_SEARCH_TIMEOUT, so the UI gets zero
+    test sets. Skip sort and projection so JITA can stop after ``limit``.
+    """
+    return {
+        "raw_query": raw_query,
+        "limit": min(int(limit), 200),
+    }
+
+
+def _manage_ts_build_preview_rows(ts_rows, edits_framework, edits_test, new_args):
+    """Build per-testset preview rows and summary for dry-run/apply endpoints."""
+    preview_rows = []
+    totals = {
+        "test_sets": len(ts_rows),
+        "changed_test_sets": 0,
+        "framework_changes": 0,
+        "test_changes": 0,
+        "collision_skips": 0,
+    }
+    for row in ts_rows:
+        plan = _manage_ts_apply_plan_to_args(
+            row["framework_args"],
+            row["test_args"],
+            edits_framework,
+            edits_test,
+            new_args,
+        )
+        framework_changed = len(plan["changed_framework"])
+        test_changed = len(plan["changed_test"])
+        changed = framework_changed > 0 or test_changed > 0
+        if changed:
+            totals["changed_test_sets"] += 1
+        totals["framework_changes"] += framework_changed
+        totals["test_changes"] += test_changed
+        totals["collision_skips"] += len(plan["collision_skips"])
+        preview_rows.append({
+            "ts_id": row["id"],
+            "ts_name": row["name"],
+            "changed": changed,
+            "changed_framework_args": plan["changed_framework"],
+            "changed_test_args": plan["changed_test"],
+            "collision_skips": plan["collision_skips"],
+            "before_framework_args": plan["before_framework"],
+            "after_framework_args": plan["after_framework"],
+            "before_test_args": plan["before_test"],
+            "after_test_args": plan["after_test"],
+            "put_payload": _manage_ts_build_put_payload(
+                row["raw"],
+                plan["after_framework"],
+                plan["after_test"],
+                new_args,
+            ) if changed else None,
+        })
+    return preview_rows, totals
 
 
 @app.route("/mcp/regression/dynamic-jp/check-existing", methods=["POST"])
@@ -13095,6 +12154,10 @@ def dynamic_jp_fetch_testset():
         if not isinstance(tests, list):
             tests = []
 
+        # Same fields JITA's Test Sets UI shows (args_map / agave_options).
+        normalized_test_args = _manage_ts_extract_test_args(ts_data)
+        normalized_framework_args = _manage_ts_extract_framework_args(ts_data)
+
         return jsonify({
             "success": True,
             "test_set": {
@@ -13102,7 +12165,13 @@ def dynamic_jp_fetch_testset():
                 "name": ts_data.get("name", "") or "",
                 "path": ts_data.get("path", "") or "",
                 "test_args": ts_data.get("test_args", "") or "",
+                "testArgs": ts_data.get("testArgs", "") or "",
+                "args_map": ts_data.get("args_map", {}) or {},
+                "test_args_map": normalized_test_args,
                 "framework_args": ts_data.get("framework_args", "") or "",
+                "frameworkArgs": ts_data.get("frameworkArgs", "") or "",
+                "agave_options": ts_data.get("agave_options", {}) or {},
+                "framework_args_map": normalized_framework_args,
                 "tests": tests,
                 "description": ts_data.get("description", "") or "",
             }
@@ -13343,6 +12412,47 @@ DYN_QMS_KIND_BY_RESOURCE_TYPE = {
 }
 
 
+def _validate_qms_coupon(coupon, resource_type="nested_2.0", username=None):
+    """Validate coupon against QMS and return (ok, payload)."""
+    coupon = (coupon or "").strip()
+    if not coupon:
+        return False, {"error": "No coupon specified"}
+
+    kind = DYN_QMS_KIND_BY_RESOURCE_TYPE.get((resource_type or "nested_2.0").strip(), "nested_ahv_2")
+    user_email = (username or "").strip()
+    if user_email and "@" not in user_email:
+        user_email = f"{user_email}@nutanix.com"
+    if not user_email:
+        return False, {"error": "Could not determine user email for validation"}
+
+    from urllib.parse import quote as _quote
+    try:
+        resp = requests.post(
+            f"{QMS_BASE_URL}/coupons/{_quote(coupon, safe='')}/validate",
+            json={"kinds": [kind], "username": user_email},
+            verify=False,
+            timeout=20,
+        )
+    except requests.exceptions.Timeout:
+        return False, {"error": "QMS validation timed out", "status_code": 504}
+    except requests.exceptions.RequestException as e:
+        return False, {"error": f"Could not reach QMS: {e}", "status_code": 502}
+
+    try:
+        body = resp.json()
+    except (ValueError, TypeError):
+        body = {}
+
+    if resp.status_code == 200:
+        return True, {
+            "category": body.get("category"),
+            "message": "Coupon is valid",
+        }
+
+    msg = body.get("message") if isinstance(body, dict) else None
+    return False, {"error": msg or "Invalid coupon", "status_code": 400}
+
+
 @app.route("/mcp/regression/dynamic-jp/validate-coupon", methods=["POST"])
 @jwt_required
 def dynamic_jp_validate_coupon():
@@ -13362,40 +12472,15 @@ def dynamic_jp_validate_coupon():
         if not coupon:
             return jsonify({"valid": False, "error": "No coupon specified"}), 400
 
-        kind = DYN_QMS_KIND_BY_RESOURCE_TYPE.get(resource_type, "nested_ahv_2")
-
         username = current_user_email or (req_data.get("username") or "").strip()
-        if username and "@" not in username:
-            username = f"{username}@nutanix.com"
-        if not username:
-            return jsonify({"valid": False, "error": "Could not determine user email for validation"}), 400
-
-        from urllib.parse import quote as _quote
-        try:
-            resp = requests.post(
-                f"{QMS_BASE_URL}/coupons/{_quote(coupon, safe='')}/validate",
-                json={"kinds": [kind], "username": username},
-                verify=False,
-                timeout=20,
-            )
-        except requests.exceptions.Timeout:
-            return jsonify({"valid": False, "error": "QMS validation timed out"}), 504
-        except requests.exceptions.RequestException as e:
-            return jsonify({"valid": False, "error": f"Could not reach QMS: {e}"}), 502
-
-        try:
-            body = resp.json()
-        except (ValueError, TypeError):
-            body = {}
-
-        if resp.status_code == 200:
+        valid, result = _validate_qms_coupon(coupon, resource_type=resource_type, username=username)
+        if valid:
             return jsonify({
                 "valid": True,
-                "category": body.get("category"),
-                "message": "Coupon is valid",
+                "category": result.get("category"),
+                "message": result.get("message", "Coupon is valid"),
             })
-        msg = body.get("message") if isinstance(body, dict) else None
-        return jsonify({"valid": False, "error": msg or "Invalid coupon"})
+        return jsonify({"valid": False, "error": result.get("error", "Invalid coupon")}), result.get("status_code", 400)
     except Exception as e:
         logger.error(f"Error validating coupon: {e}", exc_info=True)
         return jsonify({"valid": False, "error": str(e)}), 500
@@ -13409,10 +12494,30 @@ def dynamic_jp_create():
     - create_fresh=False: clone from source_jp_id, optionally copying test_args from source_testset_id
     """
     try:
-        # Get current user info from JWT
-        current_user_email = None
-        if hasattr(g, 'current_user') and isinstance(g.current_user, dict):
-            current_user_email = g.current_user.get('email', '').strip()
+        # Get current user info from JWT. To make JITA's native `created_by` the
+        # real person (not the shared svc account), we authenticate the JITA
+        # create/update calls with the logged-in user's cached LDAP credentials
+        # when available, falling back to the svc account otherwise (e.g. cache
+        # expired after a backend restart) so creation never fails.
+        # Independently, we also stamp the personal login into the JP's
+        # emails/user fields so RegX-side ownership stays correct even on the
+        # svc-account fallback path.
+        current_user_email, current_user_name = _personal_identity_from_jwt()
+        if not current_user_email:
+            current_user_email = None
+
+        _user_auth = _current_user_jita_auth()
+        create_auth = _user_auth or JITA_SVC_AUTH
+        if _user_auth:
+            logger.info(
+                f"[create] Authenticating JITA calls as user '{current_user_name}' "
+                f"(created_by will be the user)"
+            )
+        else:
+            logger.info(
+                "[create] No cached user credentials — authenticating JITA calls as "
+                "service account (created_by = svc; owner recorded via emails/user)"
+            )
         
         req_data = request.json
         if not req_data:
@@ -13680,12 +12785,37 @@ def dynamic_jp_create():
                 jp_payload["system_under_test"] = sut
 
             if enabled:
-                jp_payload.setdefault("package_type", "tar")
-                jp_payload.setdefault("test_service", "NutestPy3Tests")
+                # TCMS "service" is product-agnostic. Source/template JPs carry
+                # whatever they test (PC, AOS, NOS, AWS, Files, …); always publish
+                # results under nutest-py3test. Assignment (not setdefault) so a
+                # JITA GET-after-POST that restores the product value is overwritten.
+                jp_payload["service"] = "nutest-py3test"
+                # Fill blanks only — keep an explicit non-empty package/test_service.
+                if not str(jp_payload.get("package_type") or "").strip():
+                    jp_payload["package_type"] = "tar"
+                if not str(jp_payload.get("test_service") or "").strip():
+                    jp_payload["test_service"] = "NutestPy3Tests"
             else:
                 # Empty strings survive JITA PUT; missing keys get defaulted back.
                 for k in ("service", "package_type", "test_service"):
                     jp_payload[k] = ""
+
+        def _force_tcms_service_on_test_set(ts_payload):
+            """New test sets (fresh or cloned copy) use the same TCMS service as new JPs."""
+            if not isinstance(ts_payload, dict):
+                return
+            ts_payload["service"] = "nutest-py3test"
+            if not str(ts_payload.get("package_type") or "").strip():
+                ts_payload["package_type"] = "tar"
+            tests = ts_payload.get("tests")
+            if not isinstance(tests, list):
+                return
+            for row in tests:
+                if not isinstance(row, dict):
+                    continue
+                row["service"] = "nutest-py3test"
+                if not str(row.get("package_type") or "").strip():
+                    row["package_type"] = "tar"
 
         def _apply_retain_setup_on_failure(jp_payload):
             """Retain deployment after each test failure, excluding DataCorruptionError."""
@@ -13700,7 +12830,7 @@ def dynamic_jp_create():
             existing_params = (
                 existing_test_failure.get("params") if isinstance(existing_test_failure, dict) else {}
             )
-            duration = existing_params.get("duration", 720) if isinstance(existing_params, dict) else 720
+            duration = RETAIN_DURATION_72H_MIN
             states = existing_params.get("states_to_track") if isinstance(existing_params, dict) else None
             if not isinstance(states, list) or not states:
                 states = ["Failed"]
@@ -14048,7 +13178,7 @@ def dynamic_jp_create():
                     row.setdefault("framework_version", "nutest-py3-tests")
                     row.setdefault("framework", "nutest-py3-tests")
                     row.setdefault("package_type", "tar")
-                    row.setdefault("service", "NutestPy3Tests")
+                    row["service"] = "nutest-py3test"
                     test_entries.append(row)
             else:
                 test_entries = source_ts.get("tests", []) or []
@@ -14072,6 +13202,7 @@ def dynamic_jp_create():
                 new_ts_payload, retain_setup_on_failure, custom_framework_options
             )
             _ensure_test_args_on_test_set_payload(new_ts_payload, "{}", custom_test_args)
+            _force_tcms_service_on_test_set(new_ts_payload)
             logger.info(f"[create] TS POST payload: name={new_ts_name}, #tests={len(test_entries)}, "
                         f"test_args_keys={list(_test_args_value_to_dict(new_ts_payload.get('test_args')).keys())}, "
                         f"fw_args_keys={list(_framework_args_value_to_dict(new_ts_payload.get('framework_args')).keys())}")
@@ -14081,7 +13212,7 @@ def dynamic_jp_create():
                 ts_create_resp = requests.post(
                     f"{JITA_BASE}/test_sets",
                     json=new_ts_payload,
-                    auth=JITA_SVC_AUTH, verify=False, timeout=30,
+                    auth=create_auth, verify=False, timeout=30,
                 )
                 ts_resp_json = ts_create_resp.json() if ts_create_resp.content else {}
                 if ts_resp_json.get("success"):
@@ -14091,7 +13222,7 @@ def dynamic_jp_create():
                         try:
                             ts_get_resp = requests.get(
                                 f"{JITA_BASE}/test_sets/{created_ts_id}",
-                                auth=JITA_SVC_AUTH,
+                                auth=create_auth,
                                 verify=False,
                                 timeout=30,
                             )
@@ -14111,7 +13242,7 @@ def dynamic_jp_create():
                                     ts_put_resp = requests.put(
                                         f"{JITA_BASE}/test_sets/{created_ts_id}",
                                         json=created_ts_doc,
-                                        auth=JITA_SVC_AUTH,
+                                        auth=create_auth,
                                         verify=False,
                                         timeout=30,
                                     )
@@ -14244,7 +13375,7 @@ def dynamic_jp_create():
                     "infra": merged_infra,
                     "requested_hardware": _default_requested_hardware(resource_type),
                     "services": ["NOS"],
-                    "service": "AOS",
+                    "service": "nutest-py3test",
                     "test_framework": "nutest-py3-tests",
                     "nutest-py3-tests_branch": nutest_branch,
                     "scheduling_options": _default_scheduling_options(),
@@ -14274,7 +13405,7 @@ def dynamic_jp_create():
                     "infra": infra,
                     "requested_hardware": _default_requested_hardware(resource_type),
                     "services": ["NOS"],
-                    "service": "AOS",
+                    "service": "nutest-py3test",
                     "test_framework": "nutest-py3-tests",
                     "nutest-py3-tests_branch": nutest_branch,
                     "scheduling_options": _default_scheduling_options(),
@@ -14569,6 +13700,9 @@ def dynamic_jp_create():
 
         if retain_setup_on_failure:
             _apply_retain_setup_on_failure(new_jp_payload)
+        new_jp_payload["retain_resources_config"] = _ensure_retain_duration(
+            new_jp_payload.get("retain_resources_config"), RETAIN_DURATION_72H_MIN
+        )
 
         # Release Migration: use the explicitly transformed description when provided
         # (e.g. old-version -> new-version replacement), overriding the generic default.
@@ -14615,6 +13749,16 @@ def dynamic_jp_create():
                 recipients = [current_user_email]
                 jp["emails"] = recipients
                 jp["email_ids"] = recipients
+                # Record the human requester as owner-of-record. JITA authenticates
+                # this POST as the shared svc account (so created_by = svc), but the
+                # ownership logic treats `user`/`emails` as the real owner for
+                # service-account-created entities — this makes the JP's manager
+                # show the personal login instead of the svc account.
+                # JITA's owner/"Created by" follows the sAMAccountName pattern
+                # (firstname.lastname, e.g. "swapnil.wankhede"), NOT an email — so
+                # stamp the username here; keep the email only in emails/email_ids.
+                if current_user_name:
+                    jp["user"] = current_user_name
                 jp["private"] = True
                 jp["user_groups"] = ["cdp_reg_jarvis"]
             # Disable "Run Tests With Tags" and drop inherited TCMS tag(s) (e.g. "unstable").
@@ -14669,7 +13813,7 @@ def dynamic_jp_create():
             jp_create_resp = requests.post(
                 f"{JITA_BASE}/job_profiles",
                 json=serializable_payload,
-                auth=JITA_SVC_AUTH,
+                auth=create_auth,
                 verify=False,
                 timeout=30
             )
@@ -14706,7 +13850,7 @@ def dynamic_jp_create():
             try:
                 get_resp = requests.get(
                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
-                    auth=JITA_SVC_AUTH,
+                    auth=create_auth,
                     verify=False,
                     timeout=30,
                 )
@@ -14749,7 +13893,7 @@ def dynamic_jp_create():
                         put_resp = requests.put(
                             f"{JITA_BASE}/job_profiles/{created_jp_id}",
                             json=sanitize_value(jp_data),
-                            auth=JITA_SVC_AUTH,
+                            auth=create_auth,
                             verify=False,
                             timeout=30,
                         )
@@ -14761,7 +13905,7 @@ def dynamic_jp_create():
                             try:
                                 final_get = requests.get(
                                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
-                                    auth=JITA_SVC_AUTH,
+                                    auth=create_auth,
                                     verify=False,
                                     timeout=15,
                                 )
@@ -14817,7 +13961,7 @@ def dynamic_jp_create():
             try:
                 get_resp = requests.get(
                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
-                    auth=JITA_SVC_AUTH,                     verify=False, timeout=30,
+                    auth=create_auth,                     verify=False, timeout=30,
                 )
                 if get_resp.status_code == 200:
                     jp_data = get_resp.json().get("data", {})
@@ -14846,7 +13990,7 @@ def dynamic_jp_create():
                         put_resp = requests.put(
                             f"{JITA_BASE}/job_profiles/{created_jp_id}",
                             json=put_payload,
-                            auth=JITA_SVC_AUTH,                             verify=False, timeout=30,
+                            auth=create_auth,                             verify=False, timeout=30,
                         )
                         if put_resp.status_code == 200:
                             logger.info(f"[create] Tags applied successfully: tester_tags={merged}")
@@ -15192,13 +14336,31 @@ def dynamic_jp_search():
 
         ts_raw_q = _build_raw_query(ts_tool_cond) if include_test_sets else None
         if ts_raw_q:
-            try:
-                ts_resp = requests.get(
+            def _run_ts_search(raw_q, lim, timeout_s):
+                return requests.get(
                     f"{JITA_BASE}/test_sets",
-                    params={"raw_query": ts_raw_q, "limit": limit, "sort": "-_id",
-                            "only": "_id,name,description,created_at"},
-                    auth=JITA_SVC_AUTH, verify=False, timeout=JITA_SEARCH_TIMEOUT,
+                    params=_jita_test_sets_search_params(raw_q, lim),
+                    auth=JITA_SVC_AUTH, verify=False, timeout=timeout_s,
                 )
+
+            ts_resp = None
+            try:
+                ts_resp = _run_ts_search(ts_raw_q, limit, min(max(JITA_SEARCH_TIMEOUT, 20), 25))
+            except requests.exceptions.Timeout:
+                logger.warning("[search] TS search timed out; retrying with limit=10")
+                try:
+                    ts_resp = _run_ts_search(ts_raw_q, min(10, int(limit) or 10), 40)
+                except requests.exceptions.Timeout:
+                    ts_resp = None
+                    warnings.append(
+                        "Test set search timed out. Narrow the query or lower the result limit, then retry."
+                    )
+                    logger.warning("[search] TS search timed out on retry")
+            except Exception as e:
+                warnings.append(f"Test set search failed: {e}")
+                logger.warning(f"[search] TS search failed: {e}")
+
+            if ts_resp is not None:
                 if ts_resp.status_code == 200:
                     ts_body = ts_resp.json() or {}
                     for item in (ts_body.get("data", []) or []):
@@ -15209,19 +14371,19 @@ def dynamic_jp_search():
                             "name": item.get("name", ""),
                             "description": item.get("description", ""),
                             "created_at": item.get("created_at"),
+                            # Include both raw and normalized arg maps so Manage TS can
+                            # compute common keys from list/search payload directly.
+                            "test_args": item.get("test_args", "") or item.get("testArgs", "") or "",
+                            "framework_args": item.get("framework_args", "") or item.get("frameworkArgs", "") or "",
+                            "args_map": item.get("args_map", {}) or {},
+                            "agave_options": item.get("agave_options", {}) or {},
+                            "test_args_map": _manage_ts_extract_test_args(item),
+                            "framework_args_map": _manage_ts_extract_framework_args(item),
                         })
                     totals["test_sets"] = ts_body.get("total", len(result["test_sets"]))
                 else:
                     warnings.append(f"Test set search returned HTTP {ts_resp.status_code}.")
                     logger.warning(f"[search] TS search HTTP {ts_resp.status_code}: {ts_resp.text[:200]}")
-            except requests.exceptions.Timeout:
-                warnings.append(
-                    "Test set search timed out. Narrow the query or lower the result limit, then retry."
-                )
-                logger.warning("[search] TS search timed out")
-            except Exception as e:
-                warnings.append(f"Test set search failed: {e}")
-                logger.warning(f"[search] TS search failed: {e}")
 
         # Note when JITA reports more matches than we returned (shouldn't happen with
         # the high cap, but keeps the UI honest if a query exceeds SEARCH_MAX_LIMIT).
@@ -15240,6 +14402,180 @@ def dynamic_jp_search():
         })
     except Exception as e:
         logger.error(f"Error in dynamic-jp search: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/dynamic-jp/manage-ts/inspect", methods=["POST"])
+@jwt_required
+def manage_ts_inspect():
+    """Inspect selected test sets and return the union of framework/test arguments."""
+    try:
+        req_data = request.json or {}
+        ts_ids = req_data.get("ts_ids") or []
+        if not isinstance(ts_ids, list):
+            return jsonify({"error": "ts_ids must be an array"}), 400
+        ts_ids = [str(i).strip() for i in ts_ids if str(i).strip()]
+        if not ts_ids:
+            return jsonify({"error": "At least one test set id is required"}), 400
+
+        per_ts = []
+        errors = []
+        for ts_id in ts_ids:
+            try:
+                per_ts.append(_manage_ts_fetch_test_set(ts_id))
+            except Exception as e:
+                errors.append({"ts_id": ts_id, "error": str(e)})
+
+        if errors:
+            return jsonify({"error": "Failed to fetch one or more test sets", "details": errors}), 502
+
+        common = _manage_ts_compute_common_args(per_ts)
+        return jsonify({
+            "success": True,
+            "selected_count": len(per_ts),
+            "test_sets": [{"_id": row["id"], "name": row["name"]} for row in per_ts],
+            "common_framework_args": common["framework_args"],
+            "common_test_args": common["test_args"],
+        })
+    except Exception as e:
+        logger.error(f"Error in manage-ts inspect: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/dynamic-jp/manage-ts/preview", methods=["POST"])
+@jwt_required
+def manage_ts_preview():
+    """Dry-run bulk test-set argument updates and return full diff summary."""
+    try:
+        req_data = request.json or {}
+        ts_ids = req_data.get("ts_ids") or []
+        if not isinstance(ts_ids, list):
+            return jsonify({"error": "ts_ids must be an array"}), 400
+        ts_ids = [str(i).strip() for i in ts_ids if str(i).strip()]
+        if not ts_ids:
+            return jsonify({"error": "At least one test set id is required"}), 400
+
+        try:
+            edits_framework, edits_test, new_args = _manage_ts_normalize_update_maps(req_data)
+        except ValueError as vex:
+            return jsonify({"error": str(vex)}), 400
+
+        ts_rows = []
+        errors = []
+        for ts_id in ts_ids:
+            try:
+                ts_rows.append(_manage_ts_fetch_test_set(ts_id))
+            except Exception as e:
+                errors.append({"ts_id": ts_id, "error": str(e)})
+        if errors:
+            return jsonify({"error": "Failed to fetch one or more test sets", "details": errors}), 502
+
+        preview_rows, totals = _manage_ts_build_preview_rows(ts_rows, edits_framework, edits_test, new_args)
+        return jsonify({
+            "success": True,
+            "dry_run": True,
+            "summary": totals,
+            "preview": preview_rows,
+        })
+    except Exception as e:
+        logger.error(f"Error in manage-ts preview: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/dynamic-jp/manage-ts/apply", methods=["POST"])
+@jwt_required
+def manage_ts_apply():
+    """Apply bulk test-set argument updates after user-reviewed dry run."""
+    try:
+        req_data = request.json or {}
+        ts_ids = req_data.get("ts_ids") or []
+        if not isinstance(ts_ids, list):
+            return jsonify({"error": "ts_ids must be an array"}), 400
+        ts_ids = [str(i).strip() for i in ts_ids if str(i).strip()]
+        if not ts_ids:
+            return jsonify({"error": "At least one test set id is required"}), 400
+
+        try:
+            edits_framework, edits_test, new_args = _manage_ts_normalize_update_maps(req_data)
+        except ValueError as vex:
+            return jsonify({"error": str(vex)}), 400
+
+        ts_rows = []
+        fetch_errors = []
+        for ts_id in ts_ids:
+            try:
+                ts_rows.append(_manage_ts_fetch_test_set(ts_id))
+            except Exception as e:
+                fetch_errors.append({"ts_id": ts_id, "error": str(e)})
+        if fetch_errors:
+            return jsonify({"error": "Failed to fetch one or more test sets", "details": fetch_errors}), 502
+
+        preview_rows, totals = _manage_ts_build_preview_rows(ts_rows, edits_framework, edits_test, new_args)
+        update_targets = [row for row in preview_rows if row["changed"] and row.get("put_payload")]
+        if not update_targets:
+            return jsonify({
+                "success": True,
+                "updated_count": 0,
+                "failed_updates": [],
+                "summary": totals,
+                "results": [],
+            })
+
+        def _put_one(row):
+            try:
+                put_resp = requests.put(
+                    f"{JITA_BASE}/test_sets/{row['ts_id']}",
+                    json=_manage_ts_sanitize_for_json(row["put_payload"]),
+                    auth=JITA_SVC_AUTH,
+                    verify=False,
+                    timeout=30,
+                )
+                ok = put_resp.status_code == 200
+                msg = "Updated" if ok else (put_resp.text[:500] if put_resp.text else f"HTTP {put_resp.status_code}")
+                return {
+                    "ts_id": row["ts_id"],
+                    "ts_name": row["ts_name"],
+                    "success": ok,
+                    "message": msg,
+                    "changed_framework_args": row["changed_framework_args"],
+                    "changed_test_args": row["changed_test_args"],
+                    "collision_skips": row["collision_skips"],
+                }
+            except Exception as e:
+                return {
+                    "ts_id": row["ts_id"],
+                    "ts_name": row["ts_name"],
+                    "success": False,
+                    "message": str(e),
+                    "changed_framework_args": row["changed_framework_args"],
+                    "changed_test_args": row["changed_test_args"],
+                    "collision_skips": row["collision_skips"],
+                }
+
+        results = []
+        max_workers = min(10, len(update_targets)) or 1
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_idx = {
+                pool.submit(_put_one, row): idx
+                for idx, row in enumerate(update_targets)
+            }
+            ordered = [None] * len(update_targets)
+            for fut in as_completed(future_to_idx):
+                idx = future_to_idx[fut]
+                ordered[idx] = fut.result()
+            results = ordered
+
+        updated_count = len([r for r in results if r and r["success"]])
+        failed_updates = [r for r in results if r and not r["success"]]
+        return jsonify({
+            "success": True,
+            "updated_count": updated_count,
+            "failed_updates": failed_updates,
+            "summary": totals,
+            "results": results,
+        })
+    except Exception as e:
+        logger.error(f"Error in manage-ts apply: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -16087,55 +15423,6 @@ def validate_user_api_keys():
             "message": "Saved (live Confluence probe skipped)",
         }
 
-    gerrit_pwd = (body.get("gerrit_http_password") or "").strip()
-    if not gerrit_pwd or "****" in gerrit_pwd:
-        gerrit_pwd = get_user_key(username, "gerrit_http_password") or ""
-    user_email = _current_user_email()
-    gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
-    if not gerrit_pwd:
-        results["gerrit_http_password"] = {
-            "valid": None,
-            "message": "Not saved yet — required for automatic Handover Create CR",
-        }
-    elif not user_email:
-        results["gerrit_http_password"] = {
-            "valid": None,
-            "message": "Logged-in user email not found in session token",
-        }
-    else:
-        ok, msg = _validate_gerrit_credentials(gerrit_url, user_email, gerrit_pwd)
-        results["gerrit_http_password"] = {
-            "valid": bool(ok),
-            "message": ("Gerrit auth OK for %s" % user_email) if ok else ("Gerrit auth failed: %s" % msg),
-        }
-
-    sg_tok = (body.get("sourcegraph_token") or "").strip()
-    if not sg_tok or "****" in sg_tok:
-        sg_tok = resolve_sourcegraph_token()
-    if not sg_tok:
-        results["sourcegraph_token"] = {
-            "valid": None,
-            "message": "Not saved yet — required for Suggest LST",
-        }
-    else:
-        try:
-            base_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
-            gql_path = (os.getenv("SOURCEGRAPH_GRAPHQL_PATH") or "/.api/graphql").strip()
-            if not gql_path.startswith("/"):
-                gql_path = "/" + gql_path
-            url = base_url + gql_path
-            headers = {"Content-Type": "application/json", "Authorization": "token %s" % sg_tok}
-            payload = {"query": "query { currentUser { username } }"}
-            resp = requests.post(url, json=payload, headers=headers, timeout=15, verify=False)
-            if resp.status_code == 200 and not (resp.json() or {}).get("errors"):
-                results["sourcegraph_token"] = {"valid": True, "message": "Sourcegraph token is valid"}
-            elif resp.status_code in (401, 403):
-                results["sourcegraph_token"] = {"valid": False, "message": "Sourcegraph auth failed (401/403)"}
-            else:
-                results["sourcegraph_token"] = {"valid": None, "message": "Sourcegraph check returned HTTP %s" % resp.status_code}
-        except Exception as exc:
-            results["sourcegraph_token"] = {"valid": None, "message": "Sourcegraph check failed: %s" % exc}
-
     return jsonify({"results": results})
 
 
@@ -16592,7 +15879,6 @@ def cursor_ai_analyze_testcase():
         return jsonify({
             "success": True,
             "session_id": data.get("session_id", ""),
-            "agent_id": data.get("agent_id", ""),
             "analysis": data.get("analysis", {}),
         })
 
@@ -16604,100 +15890,6 @@ def cursor_ai_analyze_testcase():
     except Exception as e:
         logger.error(f"Error in cursor-ai analyze-testcase: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/mcp/regression/cursor-ai/analyze-testcase-stream", methods=["POST"])
-@app.route("/api/mcp/regression/cursor-ai/analyze-testcase-stream", methods=["POST"])
-@jwt_required
-def cursor_ai_analyze_testcase_stream():
-    """Streaming deep analysis (SSE) — the agent's output is forwarded as it is
-    produced so the UI shows a response within seconds instead of blocking on the
-    full multi-tool triage. Emits {type:delta,text} then {type:done, analysis,...}.
-    """
-    body = request.get_json(force=True) or {}
-    testcase_name = body.get("testcase_name", "")
-    if not testcase_name:
-        return jsonify({"error": "testcase_name is required"}), 400
-
-    username = _current_username()
-    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
-    if not cursor_api_key:
-        return jsonify({
-            "error": "Cursor API key required. Please configure your API keys in Settings.",
-            "require_key_setup": True,
-        }), 403
-
-    atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
-    atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
-    atlassian_tokens = {}
-    if atlassian_jira_token:
-        atlassian_tokens["jira"] = atlassian_jira_token
-    if atlassian_confluence_token:
-        atlassian_tokens["confluence"] = atlassian_confluence_token
-
-    exception_summary = body.get("exception_summary", "")
-    exception = body.get("exception", "")
-    test_log_url = body.get("test_log_url", "")
-    jira_tickets = body.get("jira_tickets", [])
-    failure_stage = body.get("failure_stage", "")
-    analysis_type = body.get("analysis_type", "failed")
-
-    steps_log = body.get("steps_log", "")
-    nutest_test_log = body.get("nutest_test_log", "")
-    if not steps_log and not nutest_test_log and test_log_url:
-        try:
-            logs = fetch_testcase_logs(testcase_name, test_log_url)
-            steps_log = logs.get("steps_log", "")
-            nutest_test_log = logs.get("nutest_test_log", "")
-        except Exception as log_exc:  # logs are best-effort; don't block streaming
-            logger.warning("[analyze-testcase-stream] log fetch failed: %s", log_exc)
-
-    payload = {
-        "testcase_name": testcase_name,
-        "exception_summary": exception_summary,
-        "exception": exception,
-        "steps_log": (steps_log or "")[:5000],
-        "nutest_test_log": (nutest_test_log or "")[:5000],
-        "test_log_url": test_log_url,
-        "jira_tickets": jira_tickets,
-        "failure_stage": failure_stage,
-        "analysis_type": analysis_type,
-        "cursor_api_key": cursor_api_key,
-        "atlassian_tokens": atlassian_tokens,
-    }
-
-    def gen():
-        try:
-            with requests.post(
-                f"{CURSOR_BRIDGE_URL}/analyze-testcase-stream",
-                json=payload,
-                stream=True,
-                timeout=600,
-            ) as bridge_resp:
-                if bridge_resp.status_code != 200:
-                    try:
-                        err = (bridge_resp.json() or {}).get("error") or bridge_resp.text
-                    except Exception:
-                        err = bridge_resp.text
-                    yield f"data: {json.dumps({'type': 'error', 'message': f'Bridge error: {err}'})}\n\n".encode()
-                    return
-                for chunk in bridge_resp.iter_content(chunk_size=None):
-                    if chunk:
-                        yield chunk
-        except requests.exceptions.ConnectionError:
-            msg = f"Cursor Bridge is not reachable at {CURSOR_BRIDGE_URL}. Start it with: cd cursor-bridge && npm start"
-            yield f"data: {json.dumps({'type': 'error', 'message': msg})}\n\n".encode()
-        except requests.exceptions.Timeout:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Analysis timed out (>600s).'})}\n\n".encode()
-        except Exception as stream_exc:
-            logger.error("[cursor-ai-analyze-stream] error: %s", stream_exc)
-            yield f"data: {json.dumps({'type': 'error', 'message': str(stream_exc)})}\n\n".encode()
-
-    return Response(
-        stream_with_context(gen()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
 
 
 @app.route("/mcp/regression/cursor-ai/analyze-batch", methods=["POST"])
@@ -16840,102 +16032,12 @@ def cursor_ai_result_callback():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/mcp/regression/cursor-ai/create-eng-ticket", methods=["POST"])
-@app.route("/api/mcp/regression/cursor-ai/create-eng-ticket", methods=["POST"])
-@jwt_required
-def cursor_ai_create_eng_ticket():
-    """Create an ENG Jira ticket from Cursor deep-analysis context via Jira REST."""
-    try:
-        body = request.get_json(force=True) or {}
-        ticket_ctx = body.get("ticket_context") or body
-        # Simple create: infer + file immediately. Only confirm when fields missing.
-        require_confirm = bool(body.get("require_confirm"))
-        if body.get("confirm") is True or ticket_ctx.get("confirm"):
-            ticket_ctx = dict(ticket_ctx)
-            ticket_ctx["confirm"] = True
-        result = create_eng_jira_ticket(ticket_ctx, require_confirm=require_confirm)
-        if result.get("needs_user_input"):
-            return jsonify({
-                "success": True,
-                "needs_user_input": True,
-                "draft": result.get("draft"),
-                "analysis": {
-                    "follow_up_answer": result.get("follow_up_answer"),
-                    "pending_ticket_draft": result.get("draft"),
-                },
-            })
-        if not result.get("ok"):
-            return jsonify({
-                "success": False,
-                "error": result.get("error") or "Failed to create ENG ticket",
-            }), 400
-        return jsonify({
-            "success": True,
-            "key": result.get("key"),
-            "url": result.get("url"),
-            "summary": result.get("summary"),
-            "issue_type": result.get("issue_type"),
-            "duplicates_linked": result.get("duplicates_linked") or [],
-            "analysis": {
-                "follow_up_answer": (
-                    f"Created ENG ticket [{result.get('key')}]({result.get('url')})\n\n"
-                    f"**Summary:** {result.get('summary')}\n"
-                    f"**Type:** {result.get('issue_type')}"
-                    + (
-                        f"\n**Linked duplicates:** {', '.join(result.get('duplicates_linked') or [])}"
-                        if result.get("duplicates_linked")
-                        else ""
-                    )
-                ),
-                "created_ticket": result.get("key"),
-                "created_ticket_url": result.get("url"),
-                "pending_ticket_draft": None,
-            },
-        })
-    except Exception as e:
-        logger.error("Error in cursor-ai create-eng-ticket: %s", e, exc_info=True)
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@app.route("/mcp/regression/cursor-ai/investigate-ticket", methods=["POST"])
-@app.route("/api/mcp/regression/cursor-ai/investigate-ticket", methods=["POST"])
-@jwt_required
-def cursor_ai_investigate_ticket():
-    """Investigate an ENG ticket: status, fixed?, linked Gerrit CRs."""
-    try:
-        body = request.get_json(force=True) or {}
-        ticket = (body.get("ticket") or body.get("key") or "").strip().upper()
-        if not ticket:
-            return jsonify({"success": False, "error": "ticket is required"}), 400
-        info = investigate_eng_ticket(ticket)
-        if not info.get("ok"):
-            return jsonify({"success": False, "error": info.get("error"), "ticket": info}), 400
-        return jsonify({
-            "success": True,
-            "ticket": info,
-            "analysis": {
-                "follow_up_answer": format_eng_investigation_answer(info),
-                "jira_duplicates": [info.get("key")],
-                "related_crs": [c.get("url") or c.get("id") for c in (info.get("crs") or []) if c],
-            },
-        })
-    except Exception as e:
-        logger.error("Error in cursor-ai investigate-ticket: %s", e, exc_info=True)
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
 @app.route("/mcp/regression/cursor-ai/follow-up", methods=["POST"])
 @app.route("/api/mcp/regression/cursor-ai/follow-up", methods=["POST"])
 @jwt_required
 def cursor_ai_follow_up():
     """Send a follow-up question to an existing Cursor AI analysis session.
-
-    Fast paths:
-      - create ENG ticket via Jira REST (Atlassian MCP has no create_issue)
-      - investigate ENG ticket status / fix / linked CRs via Jira REST
-    Other tool-heavy asks (Glean, CR create, deep code) go to the Cursor bridge
-    in agent mode with deep MCP (Sourcegraph + JITA + Glean + auto-handoff + Atlassian).
-    """
+    The agent retains full conversation context from the initial triage."""
     try:
         body = request.get_json(force=True) or {}
         session_id = body.get("session_id", "")
@@ -16949,274 +16051,6 @@ def cursor_ai_follow_up():
             return jsonify({"error": "session_id is required"}), 400
         if not question:
             return jsonify({"error": "question is required"}), 400
-
-        latest = recovery_context.get("latest_analysis") or {}
-        ticket_ctx = dict(body.get("ticket_context") or {})
-        for key in (
-            "testcase_name", "root_cause", "classification", "suggested_fix",
-            "triage_report", "description", "summary", "related_components",
-            "components", "jira_duplicates", "test_log_url", "environment",
-            "issue_type", "labels", "current_branch", "branch", "version",
-            "affects_version", "primary_component", "test_type", "regression",
-            "fix_version", "pending_ticket_draft",
-            "agave_task_id", "task_id", "testcase_id", "test_result_id",
-            "exception", "exception_summary", "traceback", "test_steps",
-            "expected_results", "failed_with", "ai_summary",
-            "nos_branch", "nos_commit", "nos_gbn", "pc_branch", "pc_commit", "pc_gbn",
-            "last_pass_at", "last_pass_branch", "gbn",
-            "nutest_branch", "nutest-py3-tests_branch", "gerrit_branch", "handoff_branch",
-            "cr_branch", "service", "label", "package_type",
-        ):
-            if not ticket_ctx.get(key) and latest.get(key):
-                ticket_ctx[key] = latest.get(key)
-        if not ticket_ctx.get("testcase_name"):
-            ticket_ctx["testcase_name"] = recovery_context.get("testcase_name") or ""
-        if not ticket_ctx.get("testcase_id"):
-            ticket_ctx["testcase_id"] = (
-                recovery_context.get("testcase_id")
-                or latest.get("testcase_id")
-                or ""
-            )
-        if not ticket_ctx.get("agave_task_id"):
-            ticket_ctx["agave_task_id"] = (
-                recovery_context.get("agave_task_id")
-                or latest.get("agave_task_id")
-                or ""
-            )
-
-        # Intent first (needed to decide whether to pay for JITA enrich).
-        create_ticket = is_create_eng_ticket_intent(question)
-        create_cr = is_create_cr_intent(question)
-        investigate = is_investigate_ticket_intent(question) and not create_ticket
-        pending_draft = latest.get("pending_ticket_draft") or ticket_ctx.get("pending_ticket_draft")
-        confirm_ticket = bool(pending_draft) and is_confirm_eng_ticket_intent(question)
-
-        # Enrich from JITA when creating ticket/CR so branch + links are accurate.
-        if (create_ticket or create_cr or confirm_ticket) and (
-            ticket_ctx.get("agave_task_id") or ticket_ctx.get("testcase_id")
-        ):
-            try:
-                ticket_ctx = _enrich_eng_ticket_context(ticket_ctx)
-            except Exception as enrich_err:
-                logger.debug("follow-up enrich skipped: %s", enrich_err)
-        branch_info = _infer_gerrit_target_branch(ticket_ctx)
-        ticket_ctx["gerrit_branch"] = branch_info.get("gerrit_branch")
-        ticket_ctx["handoff_branch"] = branch_info.get("handoff_branch")
-        ticket_ctx["cr_branch"] = branch_info.get("gerrit_branch")
-
-        cr_context = {
-            "testcase_name": ticket_ctx.get("testcase_name") or "",
-            "gerrit_branch": branch_info.get("gerrit_branch") or "master",
-            "handoff_branch": branch_info.get("handoff_branch") or "",
-            "raw_branch": branch_info.get("raw_branch") or "",
-            "source": branch_info.get("source") or "",
-            "agave_task_id": ticket_ctx.get("agave_task_id") or "",
-            "testcase_id": ticket_ctx.get("testcase_id") or "",
-            "created_ticket": ticket_ctx.get("created_ticket") or "",
-            "jira_duplicates": ticket_ctx.get("jira_duplicates") or [],
-        }
-
-        def _finalize_eng_create(created, base_analysis, also_cr=False):
-            """Return (flask_response_or_None, created_meta_or_None, analysis_or_None)."""
-            if created.get("needs_user_input"):
-                analysis = dict(base_analysis) if isinstance(base_analysis, dict) else {}
-                analysis.update({
-                    "follow_up_answer": created.get("follow_up_answer")
-                    or format_eng_ticket_draft_prompt(created.get("draft") or {}),
-                    "pending_ticket_draft": created.get("draft") or {},
-                })
-                return (
-                    jsonify({
-                        "success": True,
-                        "session_id": session_id,
-                        "agent_id": recovery_context.get("agent_id") or "",
-                        "analysis": analysis,
-                        "needs_user_input": True,
-                        "draft": created.get("draft"),
-                    }),
-                    None,
-                    analysis,
-                )
-
-            if not created.get("ok"):
-                return (
-                    (
-                        jsonify({
-                            "success": False,
-                            "error": created.get("error") or "Failed to create ENG ticket",
-                        }),
-                        400,
-                    ),
-                    None,
-                    None,
-                )
-
-            answer = (
-                f"Created ENG ticket [{created.get('key')}]({created.get('url')})\n\n"
-                f"**Summary:** {created.get('summary')}\n"
-                f"**Type:** {created.get('issue_type')}"
-            )
-            draft = created.get("draft") or {}
-            if draft:
-                answer += (
-                    f"\n**Primary Component:** {draft.get('primary_component')}"
-                    f"\n**Test Case:** {draft.get('testcase_name')}"
-                    f"\n**Affects Version:** {draft.get('affects_version')}"
-                    f"\n**Fix Version:** {draft.get('fix_version')}"
-                    f"\n**Test Type:** {draft.get('test_type')}"
-                    f"\n**Regression?:** {draft.get('regression')}"
-                )
-            if created.get("duplicates_linked"):
-                answer += f"\n**Linked duplicates:** {', '.join(created['duplicates_linked'])}"
-                dup_info = investigate_eng_ticket(created["duplicates_linked"][0])
-                if dup_info.get("ok"):
-                    answer += "\n\n" + format_eng_investigation_answer(dup_info)
-
-            analysis = dict(base_analysis) if isinstance(base_analysis, dict) else {}
-            analysis.update({
-                "follow_up_answer": answer,
-                "created_ticket": created.get("key"),
-                "created_ticket_url": created.get("url"),
-                "pending_ticket_draft": None,
-            })
-            if also_cr:
-                return None, created, analysis
-            return (
-                jsonify({
-                    "success": True,
-                    "session_id": session_id,
-                    "agent_id": recovery_context.get("agent_id") or "",
-                    "analysis": analysis,
-                    "created_ticket": created.get("key"),
-                    "created_ticket_url": created.get("url"),
-                }),
-                created,
-                analysis,
-            )
-
-        # Confirm pending ENG draft (user replied yes / field overrides).
-        if confirm_ticket:
-            merged = dict(ticket_ctx)
-            if isinstance(pending_draft, dict):
-                for k, v in pending_draft.items():
-                    if v and not merged.get(k):
-                        merged[k] = v
-            overrides = parse_eng_ticket_field_overrides(question)
-            merged.update(overrides)
-            merged["confirm"] = True
-            created = create_eng_jira_ticket(merged, require_confirm=False)
-            resp, created_meta, _analysis = _finalize_eng_create(created, latest, also_cr=create_cr)
-            if resp is not None:
-                return resp
-            question = (
-                f"{question}\n\n"
-                f"[System] ENG ticket {created_meta.get('key')} was already created at "
-                f"{created_meta.get('url')}. Now handle the CR part.\n\n"
-                f"{format_cr_branch_system_hint({**ticket_ctx, 'created_ticket': created_meta.get('key')}, branch_info)}"
-            )
-            mode = "agent"
-            body["_created_ticket"] = created_meta
-            cr_context["created_ticket"] = created_meta.get("key") or ""
-
-        # Fast path: create ENG ticket via Jira REST (infer from analysis, create now).
-        elif create_ticket:
-            created = create_eng_jira_ticket(ticket_ctx, require_confirm=False)
-            resp, created_meta, _analysis = _finalize_eng_create(
-                created, latest, also_cr=create_cr and created.get("ok")
-            )
-            if resp is not None:
-                return resp
-            question = (
-                f"{question}\n\n"
-                f"[System] ENG ticket {created_meta.get('key')} was already created at "
-                f"{created_meta.get('url')}. Now handle the CR part: find or create the "
-                f"Gerrit CR for the fix. Do NOT recreate the Jira ticket.\n\n"
-                f"{format_cr_branch_system_hint({**ticket_ctx, 'created_ticket': created_meta.get('key')}, branch_info)}"
-            )
-            mode = "agent"
-            body["_created_ticket"] = created_meta
-            cr_context["created_ticket"] = created_meta.get("key") or ""
-
-        # Fast path: investigate existing ENG ticket (status / fixed? / CR).
-        if investigate:
-            keys = extract_eng_ticket_keys(
-                question,
-                extra=(ticket_ctx.get("jira_duplicates") or []) + (
-                    [ticket_ctx.get("created_ticket")] if ticket_ctx.get("created_ticket") else []
-                ),
-            )
-            # Also consider linked tickets from analysis history / modal
-            for k in (latest.get("jira_duplicates") or []):
-                if k and k not in keys:
-                    keys.append(str(k).upper())
-            if not keys:
-                # Fall through to agent — it can discover tickets via tools
-                mode = "agent"
-            else:
-                infos = [investigate_eng_ticket(k) for k in keys[:5]]
-                ok_infos = [i for i in infos if i.get("ok")]
-                if ok_infos:
-                    answer = "\n\n---\n\n".join(
-                        format_eng_investigation_answer(i) for i in ok_infos
-                    )
-                    # Light Glean enrichment when available (best-effort, non-blocking).
-                    try:
-                        glean_q = ok_infos[0].get("summary") or keys[0]
-                        glean = search_glean_jira(glean_q, max_results=5) if glean_q else None
-                        if glean:
-                            tickets = _extract_jira_tickets_from_glean(glean) or []
-                            if tickets:
-                                snips = [
-                                    f"{t.get('ticket')}: {t.get('title') or t.get('jira_summary') or ''}".strip()
-                                    for t in tickets[:5]
-                                ]
-                                answer += "\n\n#### Related from Glean\n" + "\n".join(
-                                    f"- {s}" for s in snips if s
-                                )
-                    except Exception as glean_err:
-                        logger.info("Glean enrichment skipped: %s", glean_err)
-
-                    analysis = dict(latest) if isinstance(latest, dict) else {}
-                    analysis.update({
-                        "follow_up_answer": answer,
-                        "jira_duplicates": [i.get("key") for i in ok_infos],
-                        "related_crs": [
-                            c.get("url") or c.get("id")
-                            for i in ok_infos
-                            for c in (i.get("crs") or [])
-                            if c
-                        ],
-                    })
-                    # If user also wants a CR created, continue to agent after investigation.
-                    if not create_cr:
-                        return jsonify({
-                            "success": True,
-                            "session_id": session_id,
-                            "agent_id": recovery_context.get("agent_id") or "",
-                            "analysis": analysis,
-                            "tickets": ok_infos,
-                        })
-                    question = (
-                        f"{question}\n\n[System] Ticket investigation already done:\n{answer}\n\n"
-                        f"Now handle CR creation/review using auto-handoff / Sourcegraph as needed.\n\n"
-                        f"{format_cr_branch_system_hint(ticket_ctx, branch_info)}"
-                    )
-                    mode = "agent"
-
-        # Standalone create-CR ask (no ticket create in the same turn).
-        if create_cr and "[System] CR branch context" not in question:
-            question = f"{question}\n\n{format_cr_branch_system_hint(ticket_ctx, branch_info)}"
-            mode = "agent"
-
-        # Tool-heavy asks must not stay in ask mode (no MCP).
-        if create_cr or investigate or is_create_eng_ticket_intent(question):
-            mode = "agent"
-        elif mode == "ask" and re.search(
-            r"\b(glean|jira|gerrit|sourcegraph|cr\b|product knowledge|eng-\d+)\b",
-            question,
-            flags=re.I,
-        ):
-            mode = "agent"
 
         # Get user API keys for Cursor SDK
         username = _current_username()
@@ -17238,14 +16072,6 @@ def cursor_ai_follow_up():
         if atlassian_confluence_token:
             atlassian_tokens["confluence"] = atlassian_confluence_token
 
-        # Keep recovery_context / bridge aware of CR branch for this run.
-        recovery_context = dict(recovery_context or {})
-        recovery_context["cr_context"] = cr_context
-        recovery_context["gerrit_branch"] = cr_context.get("gerrit_branch")
-        recovery_context["handoff_branch"] = cr_context.get("handoff_branch")
-        if ticket_ctx.get("testcase_name"):
-            recovery_context.setdefault("testcase_name", ticket_ctx.get("testcase_name"))
-
         resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/follow-up",
             json={
@@ -17253,7 +16079,6 @@ def cursor_ai_follow_up():
                 "question": question,
                 "mode": mode,
                 "recovery_context": recovery_context,
-                "cr_context": cr_context,
                 "cursor_api_key": cursor_api_key,
                 "atlassian_tokens": atlassian_tokens,
             },
@@ -17266,28 +16091,10 @@ def cursor_ai_follow_up():
             return jsonify({"error": f"Bridge error: {error_msg}"}), 502
 
         data = resp.json()
-        analysis = data.get("analysis", {}) or {}
-        created_meta = body.get("_created_ticket") or {}
-        if created_meta.get("key"):
-            # Preserve ticket-create result when we continued into CR agent step.
-            analysis = dict(analysis)
-            analysis.setdefault("created_ticket", created_meta.get("key"))
-            analysis.setdefault("created_ticket_url", created_meta.get("url"))
-            prior = (
-                f"Created ENG ticket [{created_meta.get('key')}]({created_meta.get('url')}).\n\n"
-            )
-            if analysis.get("follow_up_answer"):
-                analysis["follow_up_answer"] = prior + str(analysis["follow_up_answer"])
-            else:
-                analysis["follow_up_answer"] = prior
-
         return jsonify({
             "success": True,
             "session_id": session_id,
-            "agent_id": data.get("agent_id", ""),
-            "analysis": analysis,
-            "created_ticket": created_meta.get("key") or analysis.get("created_ticket"),
-            "created_ticket_url": created_meta.get("url") or analysis.get("created_ticket_url"),
+            "analysis": data.get("analysis", {}),
         })
 
     except requests.exceptions.ConnectionError:
@@ -17345,10 +16152,8 @@ MODE_SYSTEM_PROMPTS = {
         "suggest diagnostic steps, and methodically narrow down root causes using available MCP tools and logs."
     ),
     "ask": (
-        "You are RegX AI in Ask mode — a fast regression-analysis assistant. "
-        "Answer briefly and directly (a few sentences or a short list). "
-        "If regression run data is provided in the conversation, treat it as authoritative and use it for any "
-        "counts/metrics — never say data is unavailable when it is present. "
+        "You are Cursor AI in Ask mode — a knowledge assistant for exploring code and answering questions. "
+        "Provide clear, concise explanations. Reference specific files, functions, and architecture when relevant. "
         "Do not make changes, only inform."
     ),
 }
@@ -17674,7 +16479,7 @@ def cursor_ai_sync_skills():
         return jsonify({"error": str(e)}), 500
 
 
-def _cursor_bridge_chat(messages, system_prompt, mode, agent_id=None, session_id=None):
+def _cursor_bridge_chat(messages, system_prompt, mode):
     """Send chat to cursor-bridge /chat using the caller's Cursor API key.
 
     Returns (response_dict, http_status). response_dict has success=True on OK.
@@ -17698,18 +16503,22 @@ def _cursor_bridge_chat(messages, system_prompt, mode, agent_id=None, session_id
             "require_key_setup": True,
         }, 403
 
-    # Keep ask/system prompts short — long MCP tool catalogs slow cold starts.
-    trimmed_system = (system_prompt or "")[:2500]
+    atlassian_tokens = {}
+    jira_tok = get_user_key(username, "atlassian_jira_token") if username else None
+    conf_tok = get_user_key(username, "atlassian_confluence_token") if username else None
+    if jira_tok:
+        atlassian_tokens["jira"] = jira_tok
+    if conf_tok:
+        atlassian_tokens["confluence"] = conf_tok
 
     try:
         bridge_resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/chat",
             json={
                 "message": last_user_msg,
-                "system_prompt": trimmed_system,
-                "agent_id": agent_id or "",
-                "session_id": session_id or "",
+                "system_prompt": system_prompt or "",
                 "cursor_api_key": cursor_api_key,
+                "atlassian_tokens": atlassian_tokens,
             },
             timeout=600,
         )
@@ -17742,8 +16551,6 @@ def _cursor_bridge_chat(messages, system_prompt, mode, agent_id=None, session_id
             "reply": reply,
             "mode": mode,
             "model": "cursor-bridge",
-            "agent_id": bridge_data.get("agent_id") or agent_id or "",
-            "session_id": bridge_data.get("session_id") or session_id or "",
             "tools_used": [],
         }, 200
 
@@ -17762,135 +16569,6 @@ def _cursor_bridge_chat(messages, system_prompt, mode, agent_id=None, session_id
     }, 503
 
 
-def _build_chat_system_prompt(mode, mcp_servers):
-    """System prompt for the given mode; attach MCP catalog only for agent/debug."""
-    system_prompt = MODE_SYSTEM_PROMPTS[mode]
-    if mcp_servers and mode in ("agent", "debug"):
-        active_tools = []
-        for sid in mcp_servers:
-            cfg = MCP_SERVER_CONFIGS.get(sid)
-            if cfg:
-                active_tools.append(f"- {sid}: {cfg['description']}")
-        if active_tools:
-            system_prompt += (
-                "\n\nYou have access to the following MCP tools/servers:\n"
-                + "\n".join(active_tools)
-                + "\n\nWhen answering, reference which tools you would use and provide specific, "
-                "data-driven insights where possible."
-            )
-    return system_prompt
-
-
-@app.route("/mcp/regression/cursor-ai/chat-warm", methods=["POST"])
-@app.route("/api/mcp/regression/cursor-ai/chat-warm", methods=["POST"])
-@jwt_required
-def cursor_ai_chat_warm():
-    """Pre-warm a chat agent so the first real message resumes (fast) instead of cold-starting."""
-    body = request.get_json(silent=True) or {}
-    model = body.get("model", "")
-    username = _current_username()
-    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
-    if not cursor_api_key:
-        return jsonify({"error": "Cursor API key required.", "require_key_setup": True}), 403
-    try:
-        r = requests.post(
-            f"{CURSOR_BRIDGE_URL}/chat-warm",
-            json={"cursor_api_key": cursor_api_key, "model": model},
-            timeout=120,
-        )
-        try:
-            data = r.json()
-        except Exception:
-            data = {"error": r.text}
-        return jsonify(data), (200 if r.status_code == 200 else 502)
-    except requests.exceptions.ConnectionError:
-        return jsonify({"error": "Cursor Bridge is not reachable."}), 503
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Warm-up timed out."}), 504
-    except Exception as e:
-        logger.error("[cursor-ai-chat-warm] error: %s", e)
-        return jsonify({"error": str(e)}), 502
-
-
-@app.route("/mcp/regression/cursor-ai/chat-stream", methods=["POST"])
-@app.route("/api/mcp/regression/cursor-ai/chat-stream", methods=["POST"])
-@jwt_required
-def cursor_ai_chat_stream():
-    """Streaming interactive chat (SSE) via Cursor Bridge — tokens arrive as generated."""
-    body = request.get_json(force=True) or {}
-    messages = body.get("messages", [])
-    mode = body.get("mode", "ask")
-    model = body.get("model", "")
-    mcp_servers = body.get("mcp_servers", [])
-    agent_id = body.get("agent_id") or ""
-    session_id = body.get("session_id") or ""
-    regression_context = (body.get("regression_context") or "").strip()
-
-    if not messages:
-        return jsonify({"error": "messages are required"}), 400
-    if mode not in MODE_SYSTEM_PROMPTS:
-        return jsonify({"error": f"Invalid mode: {mode}. Use: agent, plan, debug, ask"}), 400
-
-    last_user_msg = ""
-    for m in reversed(messages):
-        if m.get("role") == "user":
-            last_user_msg = (m.get("content") or "").strip()
-            break
-    if not last_user_msg:
-        return jsonify({"error": "No user message for chat"}), 400
-
-    username = _current_username()
-    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
-    if not cursor_api_key:
-        return jsonify({
-            "error": "Cursor API key required for chat. Add it under Settings → API Keys.",
-            "require_key_setup": True,
-        }), 403
-
-    system_prompt = _build_chat_system_prompt(mode, mcp_servers)[:2500]
-
-    def gen():
-        try:
-            with requests.post(
-                f"{CURSOR_BRIDGE_URL}/chat-stream",
-                json={
-                    "message": last_user_msg,
-                    "system_prompt": system_prompt,
-                    "regression_context": regression_context,
-                    "model": model,
-                    "agent_id": agent_id,
-                    "session_id": session_id,
-                    "cursor_api_key": cursor_api_key,
-                },
-                stream=True,
-                timeout=600,
-            ) as bridge_resp:
-                if bridge_resp.status_code != 200:
-                    try:
-                        err = (bridge_resp.json() or {}).get("error") or bridge_resp.text
-                    except Exception:
-                        err = bridge_resp.text
-                    yield f"data: {json.dumps({'type': 'error', 'message': f'Bridge error: {err}'})}\n\n".encode()
-                    return
-                for chunk in bridge_resp.iter_content(chunk_size=None):
-                    if chunk:
-                        yield chunk
-        except requests.exceptions.ConnectionError:
-            msg = f"Cursor Bridge is not reachable at {CURSOR_BRIDGE_URL}. Start it with: cd cursor-bridge && npm start"
-            yield f"data: {json.dumps({'type': 'error', 'message': msg})}\n\n".encode()
-        except requests.exceptions.Timeout:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Chat timed out (>600s).'})}\n\n".encode()
-        except Exception as stream_exc:
-            logger.error("[cursor-ai-chat-stream] error: %s", stream_exc)
-            yield f"data: {json.dumps({'type': 'error', 'message': str(stream_exc)})}\n\n".encode()
-
-    return Response(
-        stream_with_context(gen()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
 @app.route("/mcp/regression/cursor-ai/chat", methods=["POST"])
 @app.route("/api/mcp/regression/cursor-ai/chat", methods=["POST"])
 @jwt_required
@@ -17899,11 +16577,9 @@ def cursor_ai_chat():
     try:
         body = request.get_json(force=True) or {}
         messages = body.get("messages", [])
-        mode = body.get("mode", "ask")
+        mode = body.get("mode", "agent")
         model = body.get("model", "claude-sonnet-4.6-high")
         mcp_servers = body.get("mcp_servers", [])
-        agent_id = body.get("agent_id") or ""
-        session_id = body.get("session_id") or ""
 
         if not messages:
             return jsonify({"error": "messages are required"}), 400
@@ -17913,8 +16589,7 @@ def cursor_ai_chat():
 
         system_prompt = MODE_SYSTEM_PROMPTS[mode]
 
-        # Only attach MCP catalog for agent/debug — ask/plan stay lean/fast.
-        if mcp_servers and mode in ("agent", "debug"):
+        if mcp_servers:
             active_tools = []
             for sid in mcp_servers:
                 cfg = MCP_SERVER_CONFIGS.get(sid)
@@ -17933,9 +16608,7 @@ def cursor_ai_chat():
         username = _current_username()
         cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
         if cursor_api_key:
-            bridge_body, bridge_status = _cursor_bridge_chat(
-                messages, system_prompt, mode, agent_id=agent_id, session_id=session_id
-            )
+            bridge_body, bridge_status = _cursor_bridge_chat(messages, system_prompt, mode)
             if bridge_body.get("success"):
                 return jsonify(bridge_body), bridge_status
             logger.warning(
@@ -18628,44 +17301,9 @@ def validate_jira_ticket():
 # ======================================================
 # Handover - validate-lst, create-lst-cr, check-lst-testcases, search-lst-file, deprecate-lst-cr, deprecation-search
 # ======================================================
-def _branch_alias_candidates(branch):
-    b = (branch or "").strip()
-    if not b:
-        return ["master"]
-    out = [b]
-    low = b.lower()
-    m = re.search(r"(\d+\.\d+)", low)
-    if m:
-        v = m.group(1)
-        out.extend([
-            "ganges-%s-stable" % v,
-            "%s-stable" % v,
-            v,
-        ])
-    if low != "master":
-        out.append("master")
-    # preserve order, unique
-    seen = set()
-    uniq = []
-    for x in out:
-        if x and x not in seen:
-            seen.add(x)
-            uniq.append(x)
-    return uniq
-
-
 def validate_with_sourcegraph(repo_name, branch, file_path):
     """Validate branch and file exist in repo via Sourcegraph."""
-    results = {
-        "branch_valid": None,
-        "file_valid": None,
-        "branch_error": None,
-        "file_error": None,
-        "file_suggestions": [],
-        "branch_suggestions": [],
-        "resolved_branch": (branch or "master").strip() or "master",
-        "auth_required": False,
-    }
+    results = {"branch_valid": None, "file_valid": None, "branch_error": None, "file_error": None, "file_suggestions": [], "auth_required": False}
     sg_token = (os.getenv("SOURCEGRAPH_TOKEN", "") or "").strip()
     sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
     sg_graphql_path = (os.getenv("SOURCEGRAPH_GRAPHQL_PATH") or "/api/graphql").strip() or "/api/graphql"
@@ -18717,34 +17355,20 @@ def validate_with_sourcegraph(repo_name, branch, file_path):
                     continue
         return None, "Sourcegraph not configured or unreachable"
     try:
-        branch_candidates = _branch_alias_candidates(branch)
-        resolved_branch = None
-        last_err = None
-        for b in branch_candidates:
-            branch_query = "repo:%s rev:%s count:1" % (repo_name, b)
-            match_count, err = run_search(branch_query)
-            if err:
-                last_err = err
-                continue
-            if match_count > 0:
-                resolved_branch = b
-                break
-        results["branch_suggestions"] = branch_candidates[:6]
-        if resolved_branch:
-            results["branch_valid"] = True
-            results["resolved_branch"] = resolved_branch
-        elif last_err:
+        branch_query = "repo:%s rev:%s count:1" % (repo_name, branch)
+        match_count, err = run_search(branch_query)
+        if err:
             results["branch_valid"] = None
-            results["branch_error"] = last_err
+            results["branch_error"] = err
         else:
-            results["branch_valid"] = False
-            results["branch_error"] = "Branch '%s' not found" % branch
+            results["branch_valid"] = match_count > 0
+            if not results["branch_valid"]:
+                results["branch_error"] = "Branch '%s' not found" % branch
     except Exception as e:
         results["branch_valid"] = None
         results["branch_error"] = str(e)
     try:
-        branch_for_file = results.get("resolved_branch") or branch
-        file_query = "repo:%s rev:%s file:%s type:path count:10" % (repo_name, branch_for_file, file_path)
+        file_query = "repo:%s rev:%s file:%s type:path count:10" % (repo_name, branch, file_path)
         match_count, err = run_search(file_query)
         if err:
             results["file_valid"] = None
@@ -18825,23 +17449,19 @@ def validate_lst():
     data = request.get_json() or {}
     branch = (data.get("branch") or "master").strip()
     lst_file = (data.get("lst_file") or "").strip()
-    lst_files = data.get("lst_files") or []
     repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
     if not lst_file:
         return jsonify({"error": "lst_file is required", "branch_valid": None, "file_valid": None}), 400
     validation_results = validate_with_sourcegraph(repo_name, branch, lst_file)
     sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
-    resolved_branch = validation_results.get("resolved_branch") or branch
-    sourcegraph_url = f"{sg_url}/{repo_name}@{resolved_branch}/-/blob/{lst_file.replace(' ', '+')}" if sg_url else None
+    sourcegraph_url = f"{sg_url}/{repo_name}@{branch}/-/blob/{lst_file.replace(' ', '+')}" if sg_url else None
     return jsonify({
-        "branch": validation_results.get("resolved_branch") or branch, "input_branch": branch, "lst_file": lst_file, "repo_name": repo_name,
+        "branch": branch, "lst_file": lst_file, "repo_name": repo_name,
         "branch_valid": validation_results.get("branch_valid"),
         "file_valid": validation_results.get("file_valid"),
         "branch_error": validation_results.get("branch_error"),
         "file_error": validation_results.get("file_error"),
         "file_suggestions": validation_results.get("file_suggestions", []),
-        "branch_suggestions": validation_results.get("branch_suggestions", []),
-        "resolved_branch": validation_results.get("resolved_branch") or branch,
         "sourcegraph_url": sourcegraph_url,
         "message": validation_results.get("message", ""),
         "generated_at": datetime.utcnow().isoformat()
@@ -18914,66 +17534,6 @@ def search_reviewers():
     except Exception as e:
         logger.warning("search_reviewers failed: %s", e)
         return jsonify({"results": [], "error": "Could not fetch reviewers: %s. Add reviewers manually by typing email and pressing Enter." % str(e)})
-
-
-@app.route("/mcp/regression/search-branches", methods=["GET"])
-@jwt_required
-def search_branches():
-    """Suggest branch names for handover branch input."""
-    q = (request.args.get("q") or "").strip()
-    repo_name = (request.args.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
-    raw_project = repo_name.split("/", 1)[-1] if "/" in repo_name else repo_name
-    project_candidates = [repo_name, raw_project]
-
-    suggestions = []
-    seen = set()
-    for c in _branch_alias_candidates(q)[:8]:
-        if c not in seen:
-            seen.add(c)
-            suggestions.append(c)
-
-    gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
-    auth = _get_gerrit_auth()
-    headers = {"Accept": "application/json"}
-    prefix = ""
-    if auth:
-        import base64
-        user, pw = auth
-        headers["Authorization"] = "Basic " + base64.b64encode(("%s:%s" % (user, pw)).encode()).decode()
-        prefix = "/a"
-
-    try:
-        for project in project_candidates:
-            encoded_project = urllib.parse.quote(project, safe="")
-            url = "%s%s/projects/%s/branches/?n=25" % (gerrit_url, prefix, encoded_project)
-            resp = requests.get(url, headers=headers, timeout=10, verify=False)
-            if resp.status_code != 200:
-                continue
-            text = resp.text
-            if text.startswith(")]}'"):
-                text = text[5:]
-            data = json.loads(text) if text else []
-            branches = data if isinstance(data, list) else []
-            for b in branches:
-                ref = (b.get("ref") or "").strip()
-                name = ref.replace("refs/heads/", "").strip()
-                if not name:
-                    continue
-                if q and q.lower() not in name.lower():
-                    # keep our default aliases even if not substring match
-                    if name not in suggestions and len(suggestions) < 4:
-                        pass
-                    else:
-                        continue
-                if name not in seen:
-                    seen.add(name)
-                    suggestions.append(name)
-            if suggestions:
-                break
-    except Exception as exc:
-        logger.warning("search_branches failed: %s", exc)
-
-    return jsonify({"results": suggestions[:10], "query": q, "repo_name": repo_name})
 
 
 @app.route("/mcp/regression/gerrit-connectivity", methods=["GET"])
@@ -19057,209 +17617,63 @@ def _build_gerrit_push_ref(branch, reviewers):
     return ref
 
 
-def _current_user_email():
-    """Logged-in email from JWT payload, if available."""
-    try:
-        user = getattr(g, "current_user", None) or {}
-        return (user.get("email") or "").strip()
-    except Exception:
-        return ""
-
-
-def _get_gerrit_auth(username=""):
-    """Get Gerrit auth as (username, password) using per-user settings first."""
-    user_email = (username or _current_user_email() or "").strip()
-    user_pwd = get_user_key(_current_username(), "gerrit_http_password")
-    if user_email and user_pwd:
-        return (user_email, user_pwd)
+def _get_gerrit_auth():
+    """Get Gerrit auth as (username, password) or None if not configured."""
     gerrit_token = (os.getenv("GERRIT_TOKEN") or "").strip()
     if gerrit_token and ":" in gerrit_token:
         parts = gerrit_token.split(":", 1)
         return (parts[0], parts[1])
-    env_user = (os.getenv("GERRIT_USERNAME") or "").strip()
-    env_pwd = (os.getenv("GERRIT_HTTP_PASSWORD") or "").strip()
-    if env_user and env_pwd:
-        return (env_user, env_pwd)
+    username = (os.getenv("GERRIT_USERNAME") or "").strip()
+    password = (os.getenv("GERRIT_HTTP_PASSWORD") or "").strip()
+    if username and password:
+        return (username, password)
     return None
-
-
-def _validate_gerrit_credentials(gerrit_url, username, password):
-    """Validate Gerrit basic auth against /a/accounts/self."""
-    if not gerrit_url or not username or not password:
-        return False, "Missing Gerrit URL/username/password"
-    url = "%s/a/accounts/self" % gerrit_url.rstrip("/")
-    headers = {"Accept": "application/json"}
-    import base64
-    headers["Authorization"] = "Basic " + base64.b64encode(("%s:%s" % (username, password)).encode()).decode()
-    try:
-        resp = requests.get(url, headers=headers, timeout=12, verify=False)
-        if resp.status_code == 200:
-            return True, "Authenticated"
-        if resp.status_code in (401, 403):
-            return False, "Authentication failed (401/403)"
-        return False, "Gerrit returned HTTP %s" % resp.status_code
-    except requests.exceptions.Timeout:
-        return False, "Gerrit request timed out"
-    except requests.exceptions.ConnectionError:
-        return False, "Cannot connect to Gerrit (VPN/network)"
-    except Exception as exc:
-        return False, str(exc)
-
-
-def _run_git(args, cwd, check=True):
-    """Run git command and return CompletedProcess."""
-    cmd = ["git"] + list(args)
-    return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=check)
 
 
 @app.route("/mcp/regression/create-lst-cr", methods=["POST"])
 @jwt_required
 def create_lst_cr():
-    """Create Gerrit CR to add selected handover tests into an LST file."""
+    """Return the manual git steps to add tests to an LST file and push for review.
+
+    Manual-only by design: the backend never pushes to Gerrit itself, so no Gerrit
+    credentials are needed on the server. The reviewers are baked into the push ref.
+    """
     if request.method == "OPTIONS":
         return jsonify({}), 200
-
+    logger.info("[CREATE-LST-CR] POST received")
     data = request.get_json() or {}
     branch = (data.get("branch") or "master").strip()
     lst_file = (data.get("lst_file") or "").strip()
-    lst_files = data.get("lst_files") or []
-    test_names = data.get("test_names") or []
-    reviewers = [str(r).strip() for r in (data.get("reviewers") or []) if str(r).strip()]
-    cr_subject = (data.get("cr_subject") or "Testcase Handover").strip() or "Testcase Handover"
-    cr_description = (data.get("cr_description") or "").strip()
-    handover_tickets = data.get("handover_tickets") or []
-    if isinstance(handover_tickets, str):
-        handover_tickets = [x.strip() for x in handover_tickets.split(",") if x.strip()]
-    else:
-        handover_tickets = [str(x).strip() for x in handover_tickets if str(x).strip()]
-
-    if not isinstance(lst_files, list):
-        lst_files = []
-    lst_files = [str(x).strip() for x in lst_files if str(x).strip()]
-    if lst_file and lst_file not in lst_files:
-        lst_files.append(lst_file)
-    if not lst_files:
-        return jsonify({"error": "lst_file or lst_files is required"}), 400
-    test_names = [str(t).strip() for t in test_names if str(t or "").strip()]
+    test_names = data.get("test_names", [])
+    logger.info("[CREATE-LST-CR] Received: branch=%r, lst_file=%r, test_names_count=%s, reviewers=%s",
+                branch, lst_file, len(test_names) if isinstance(test_names, list) else "?", data.get("reviewers"))
+    reviewers = data.get("reviewers") or []
     if not test_names:
         return jsonify({"error": "test_names is required"}), 400
-
-    username = _current_username()
-    gerrit_email = _current_user_email()
-    if not gerrit_email:
-        return jsonify({"error": "Logged-in user email is required for Gerrit CR creation."}), 400
-
-    auth = _get_gerrit_auth(gerrit_email)
-    if not auth:
-        return jsonify({
-            "error": "Gerrit credentials missing. Save Gerrit HTTP password in Settings → API Key Configuration.",
-            "require_key_setup": True,
-            "missing_key": "gerrit_http_password",
-        }), 403
-
-    g_user, g_pwd = auth
-    gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
-    ok_auth, auth_msg = _validate_gerrit_credentials(gerrit_url, g_user, g_pwd)
-    if not ok_auth:
-        return jsonify({
-            "error": "Gerrit authentication failed.",
-            "message": "Unable to validate Gerrit HTTP password for %s: %s" % (g_user, auth_msg),
-            "require_key_setup": True,
-            "missing_key": "gerrit_http_password",
-        }), 403
-    repo_path = (os.getenv("HANDOVER_REPO_PATH") or "nutest-py3-tests").strip("/")
-    clone_url = "%s/a/%s" % (gerrit_url, repo_path)
+    if not lst_file:
+        return jsonify({"error": "lst_file is required"}), 400
+    test_names = [str(t).strip() for t in test_names if (t or "").strip()]
+    if not test_names:
+        return jsonify({"error": "test_names is required"}), 400
     push_ref = _build_gerrit_push_ref(branch, reviewers)
-
-    tmpdir = tempfile.mkdtemp(prefix="regx_handover_")
-    repo_dir = os.path.join(tmpdir, "repo")
-    try:
-        os.makedirs(repo_dir, exist_ok=True)
-        auth_url = clone_url.replace("https://", "https://%s:%s@" % (urllib.parse.quote(g_user), urllib.parse.quote(g_pwd)))
-
-        _run_git(["clone", auth_url, repo_dir], cwd=tmpdir, check=True)
-        _run_git(["checkout", branch], cwd=repo_dir, check=True)
-
-        per_file = []
-        total_to_add = 0
-        for lf in lst_files:
-            abs_lst = os.path.join(repo_dir, lf)
-            if not os.path.isfile(abs_lst):
-                return jsonify({
-                    "error": "LST file not found on branch.",
-                    "message": "File '%s' was not found on branch '%s'." % (lf, branch),
-                }), 400
-            with open(abs_lst, "r", encoding="utf-8", errors="ignore") as fh:
-                old_content = fh.read()
-            already_present, to_add = _check_testnames_in_lst_content(old_content, test_names)
-            if to_add:
-                append_block = "\n" + "\n".join(to_add) + "\n"
-                with open(abs_lst, "a", encoding="utf-8") as fh:
-                    fh.write(append_block)
-                _run_git(["add", lf], cwd=repo_dir, check=True)
-            per_file.append({"lst_file": lf, "already_present": already_present, "to_add": to_add})
-            total_to_add += len(to_add)
-
-        if total_to_add == 0:
-            return jsonify({
-                "success": False,
-                "message": "All selected tests are already present in selected LST file(s).",
-                "files": per_file,
-                "already_present": [x for p in per_file for x in p["already_present"]],
-                "to_add": [],
-            })
-
-        if not cr_description:
-            reviewers_line = ", ".join(reviewers) if reviewers else ""
-            tickets_line = ", ".join(handover_tickets) if handover_tickets else ""
-            all_to_add = [x for p in per_file for x in p["to_add"]]
-            tests_line = ", ".join(all_to_add[:15]) + (" ..." if len(all_to_add) > 15 else "")
-            cr_description = (
-                "Reviewers               : %s\n"
-                "Tickets resolved        : %s\n"
-                "Tests run               : %s\n"
-                "Target release          : %s\n"
-                "Code review URL         : "
-            ) % (reviewers_line, tickets_line, tests_line, branch)
-
-        commit_msg = cr_subject + "\n\n" + cr_description
-        _run_git(["commit", "-m", commit_msg], cwd=repo_dir, check=True)
-        _run_git(["push", "origin", "HEAD:%s" % push_ref], cwd=repo_dir, check=True)
-
-        remote_show = _run_git(["remote", "get-url", "origin"], cwd=repo_dir, check=False)
-        _ = remote_show
-        return jsonify({
-            "success": True,
-            "message": "CR created and pushed for review.",
-            "cr_url": "%s/q/status:open+owner:%s+project:%s+branch:%s" % (
-                gerrit_url,
-                urllib.parse.quote(g_user, safe=""),
-                urllib.parse.quote(repo_path, safe=""),
-                urllib.parse.quote(branch, safe=""),
-            ),
-            "files": per_file,
-            "already_present": [x for p in per_file for x in p["already_present"]],
-            "to_add": [x for p in per_file for x in p["to_add"]],
-            "push_ref": push_ref,
-            "generated_at": datetime.utcnow().isoformat(),
-        })
-    except subprocess.CalledProcessError as cpe:
-        stderr = (cpe.stderr or "").strip()
-        stdout = (cpe.stdout or "").strip()
-        msg = stderr or stdout or str(cpe)
-        return jsonify({
-            "error": "Failed to create CR via git/gerrit.",
-            "git_error": msg[:1000],
-            "message": "Create CR failed. Check Gerrit credentials, branch, VPN/network, and repository access.",
-        }), 502
-    except Exception as exc:
-        logger.exception("create_lst_cr failed")
-        return jsonify({"error": str(exc), "message": "Unexpected error during CR creation."}), 500
-    finally:
-        try:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        except Exception:
-            pass
+    instructions = {
+        "message": "Add the following %s test(s) to the LST file, then push for review." % len(test_names),
+        "branch": branch, "lst_file": lst_file, "test_names": test_names,
+        "manual_steps": [
+            "1. Clone the repository and checkout branch '%s'" % branch,
+            "2. Open the LST file: %s" % lst_file,
+            "3. Add the following %s test name(s) to the file:" % len(test_names),
+            "   " + "\n   ".join(test_names[:10]) + ("..." if len(test_names) > 10 else ""),
+            "4. Commit with message: 'Add %s test(s) to LST'" % len(test_names),
+            "5. Push for review: git push origin HEAD:%s" % push_ref,
+        ],
+    }
+    return jsonify({
+        "manual": True,
+        "instructions": instructions,
+        "message": "Follow the manual steps below to push the change for review.",
+        "generated_at": datetime.utcnow().isoformat(),
+    })
 
 
 @app.route("/mcp/regression/check-lst-testcases", methods=["POST"])
@@ -19291,12 +17705,12 @@ def check_lst_testcases():
     return jsonify({"branch": branch, "lst_file": lst_file, "test_names": test_names, "present": already_present, "not_present": not_present, "generated_at": datetime.utcnow().isoformat()})
 
 
-def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=False, sg_token=None, max_count=50):
+def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=False):
     """Search Sourcegraph for files containing the test name."""
     test_name = str(test_name).strip() if test_name else ""
     if not test_name:
         return []
-    token = (sg_token or os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
     if not token:
         return []
     base_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
@@ -19318,8 +17732,7 @@ def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_on
         {"Content-Type": "application/json", "Authorization": "Bearer %s" % token},
     ]
     escaped = test_name.replace("\\", "\\\\").replace('"', '\\"')
-    max_count = max(5, min(int(max_count or 50), 100))
-    search_query = f'repo:{repo_name} rev:{rev} "{escaped}" count:{max_count}'
+    search_query = f'repo:{repo_name} rev:{rev} "{escaped}" count:50'
     payload = {"query": "query Search($q: String!) { search(query: $q) { results { matchCount results { ... on FileMatch { file { path } } } } } }", "variables": {"q": search_query}}
     for api_url in api_urls:
         for headers in auth_headers:
@@ -19362,118 +17775,11 @@ def search_lst_file():
         return jsonify({"error": "test_name is required", "lst_files": []}), 400
     repo_name = os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")
     rev = (data.get("rev") or "master").strip()
-    token = resolve_sourcegraph_token(data.get("sourcegraph_token"))
-    lst_files = search_sourcegraph_for_test(repo_name, test_name, rev=rev, lst_files_only=True, sg_token=token)
+    lst_files = search_sourcegraph_for_test(repo_name, test_name, rev=rev, lst_files_only=True)
+    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
     if not lst_files and not token:
-        return jsonify({"test_name": test_name, "lst_files": [], "error": "Sourcegraph token not configured. Add Sourcegraph Token in Settings → API Key Configuration.", "generated_at": datetime.utcnow().isoformat()})
+        return jsonify({"test_name": test_name, "lst_files": [], "error": "Sourcegraph integration not configured. Set the SOURCEGRAPH_TOKEN environment variable.", "generated_at": datetime.utcnow().isoformat()})
     return jsonify({"test_name": test_name, "lst_files": [f["path"] for f in lst_files], "generated_at": datetime.utcnow().isoformat()})
-
-
-@app.route("/mcp/regression/suggest-lst-file", methods=["POST"])
-@jwt_required
-def suggest_lst_file():
-    """Suggest the best-fit LST file for selected handover testcases."""
-    data = request.get_json() or {}
-    test_names = data.get("test_names") or []
-    branch = (data.get("branch") or "master").strip() or "master"
-    repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
-
-    test_names = [str(t).strip() for t in test_names if (t or "").strip()]
-    if not test_names:
-        return jsonify({"error": "test_names is required (at least one testcase)"}), 400
-    sampled_total = len(test_names)
-    test_names = test_names[:20]
-
-    token = resolve_sourcegraph_token(data.get("sourcegraph_token"))
-    if not token:
-        return jsonify({
-            "suggested_lst_file": "",
-            "candidates": [],
-            "testcase_candidates": {},
-            "covered_tests": 0,
-            "total_tests": len(test_names),
-            "tie": False,
-            "error": "Sourcegraph token not configured. Add Sourcegraph Token in Settings → API Key Configuration.",
-            "generated_at": datetime.utcnow().isoformat(),
-        })
-
-    testcase_candidates = {}
-    freq = defaultdict(int)
-    seen_by_path = defaultdict(set)
-
-    def _search_one(test_name):
-        hits = search_sourcegraph_for_test(
-            repo_name,
-            test_name,
-            rev=branch,
-            lst_files_only=True,
-            sg_token=token,
-            max_count=20,
-        )
-        paths = []
-        seen = set()
-        for h in hits:
-            path = (h.get("path") or "").strip()
-            if not path or path in seen:
-                continue
-            seen.add(path)
-            paths.append(path)
-        return test_name, paths
-
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(test_names)))) as executor:
-        future_map = {executor.submit(_search_one, tn): tn for tn in test_names}
-        for fut in as_completed(future_map):
-            test_name, paths = fut.result()
-            testcase_candidates[test_name] = paths
-            for path in paths:
-                if test_name not in seen_by_path[path]:
-                    seen_by_path[path].add(test_name)
-                    freq[path] += 1
-
-    low_branch = branch.lower()
-    branch_hints = []
-    if low_branch == "master":
-        branch_hints = ["/master/", "/milestones/master/"]
-    else:
-        m = re.search(r"(\d+\.\d+)", low_branch)
-        if m:
-            v = m.group(1)
-            branch_hints = ["/%s/" % v, "/%s-stable/" % v, "/ganges-%s/" % v]
-        branch_hints.append("/%s/" % low_branch)
-
-    def _score(path, count):
-        p = path.lower()
-        bonus = 0
-        for i, hint in enumerate(branch_hints):
-            if hint in p:
-                bonus = max(bonus, 50 - i * 5)
-        return count * 100 + bonus
-
-    ranked = sorted(freq.items(), key=lambda kv: (-_score(kv[0], kv[1]), -kv[1], kv[0]))
-    candidates = [{"lst_file": path, "count": count} for path, count in ranked]
-
-    suggested = ranked[0][0] if ranked else ""
-    top_count = ranked[0][1] if ranked else 0
-    tie = len(ranked) > 1 and ranked[1][1] == top_count and top_count > 0
-    covered_tests = len({t for t, hits in testcase_candidates.items() if hits})
-
-    return jsonify({
-        "branch": branch,
-        "repo_name": repo_name,
-        "suggested_lst_file": suggested,
-        "candidates": candidates,
-        "testcase_candidates": testcase_candidates,
-        "covered_tests": covered_tests,
-        "total_tests": sampled_total,
-        "tie": tie,
-        "message": (
-            ("Suggested LST selected by majority of matching selected testcases."
-             + (" Checked first 20 selected passed tests for faster suggestions." if sampled_total > 20 else ""))
-            if suggested else
-            "No matching LST files found for selected testcases on this branch."
-        ),
-        "generated_at": datetime.utcnow().isoformat(),
-    })
 
 
 @app.route("/mcp/regression/deprecate-lst-cr", methods=["POST"])
@@ -19578,7 +17884,7 @@ def deprecation_search():
     if token and queries:
         seen_paths = set()
         for test_name in queries[:10]:  # Limit to first 10 queries
-            lst_files = search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=True, sg_token=token)
+            lst_files = search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=True)
             for f in lst_files:
                 path = f.get("path", "")
                 if path and path not in seen_paths:
