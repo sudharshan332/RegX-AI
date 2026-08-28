@@ -56,6 +56,9 @@ from user_keys import (
     get_user_key,
     get_user_keys_masked,
     upsert_user_keys,
+    store_login_credential,
+    get_login_credential,
+    clear_login_credential,
 )
 
 # ======================================================
@@ -99,6 +102,62 @@ def _get_user_credentials(username):
             return (username, entry["password"])
         _credential_cache.pop(username, None)
         return None
+
+
+# Corporate email domain used to construct a personal email from a sAMAccountName
+# when LDAP did not return a `mail` attribute (JWT `email` is then empty).
+CORP_EMAIL_DOMAIN = os.getenv("CORP_EMAIL_DOMAIN", "nutanix.com").strip().lstrip("@") or "nutanix.com"
+
+
+def _personal_identity_from_jwt():
+    """Resolve the personal login of the user who accessed the tool from the JWT.
+
+    Returns ``(email, username)`` for the logged-in human. Entities the tool
+    creates in JITA are authenticated as a shared service account, so JITA
+    stamps ``created_by`` = svc account. To keep the *manager/owner* attributed
+    to the real person, we record their identity in the JP's ``emails``/``user``
+    fields (the same place the delete-ownership logic reads the human requester
+    for service-account-created entities).
+
+    Falls back to ``<username>@CORP_EMAIL_DOMAIN`` when LDAP had no ``mail`` so a
+    personal identity is always stamped instead of leaving only the svc account.
+    """
+    payload = getattr(g, "current_user", None)
+    if not isinstance(payload, dict):
+        return "", ""
+    raw_username = (payload.get("sub") or payload.get("username") or "").strip()
+    email = (payload.get("email") or "").strip()
+    if not email and raw_username and "@" not in raw_username:
+        email = f"{raw_username}@{CORP_EMAIL_DOMAIN}"
+    elif not email and "@" in raw_username:
+        email = raw_username
+    # JITA's owner/"Created by" uses the bare sAMAccountName (firstname.lastname),
+    # never an email — strip any domain so `username` matches that pattern.
+    username = raw_username.split("@")[0] if raw_username else ""
+    return email, username
+
+
+def _current_user_jita_auth():
+    """Return the logged-in user's cached LDAP ``(username, password)`` for JITA
+    basic auth, or ``None`` if unavailable.
+
+    JITA attributes ``created_by`` to whoever authenticates the POST. When we
+    have the user's cached credentials (captured at login), creating entities as
+    the user makes JITA's native ``created_by`` = the real person instead of the
+    shared service account. Returns ``None`` when the cache is empty/expired
+    (e.g. token still valid but backend restarted), so callers can fall back to
+    the service account and never fail the operation.
+    """
+    payload = getattr(g, "current_user", None)
+    if not isinstance(payload, dict):
+        return None
+    username = (payload.get("sub") or payload.get("username") or "").strip()
+    if not username:
+        return None
+    creds = _get_user_credentials(username)
+    if creds:
+        return creds  # (username, password)
+    return None
 
 
 # ======================================================
@@ -241,9 +300,9 @@ BRANCH_SHORT_NAME_MAP = {
     "ganges-7.5.1-stable": "7.5.1",
 }
 
-# AI Endpoint for failure summary
-AI_BASE = "https://hkn12.ai.nutanix.com/enterpriseai/v1"
-AI_API_KEY = "ddb2b793-1004-49a1-b005-4ddf4c2ade8c"
+# AI Endpoint for failure summary (override via env when the embedded key expires)
+AI_BASE = os.getenv("AI_BASE", "https://hkn12.ai.nutanix.com/enterpriseai/v1")
+AI_API_KEY = os.getenv("AI_API_KEY", "ddb2b793-1004-49a1-b005-4ddf4c2ade8c")
 
 # SSL context for AI endpoint (skip TLS verify)
 SSL_CTX = ssl.create_default_context()
@@ -2301,7 +2360,9 @@ def fetch_qi_from_tcms(testcase_name, milestone="7.5.1"):
         float: QI value (operation_success_percentage) or None if not found/error
     """
     try:
-        # Construct payload matching TCMS UI filters (no SYSTEST_LONGEVITY/LIMITED_RUNS exclusion)
+        # Match TCMS UI per-testcase lookup (no SYSTEST_LONGEVITY/LIMITED_RUNS exclusion).
+        # Those tags belong on overall-QI aggregates only; excluding them here makes
+        # TCMS miss the test, fall back to JITA failed-status 0, and inflate QI impact.
         # Use more flexible matching - try exact name match first, then regex
         payload = [{
             "$match": {
@@ -3850,7 +3911,12 @@ def _resolve_tcms_milestone(branch_name):
 
     Lookup order:
       1. Explicit entry in BRANCH_SHORT_NAME_MAP
-      2. Regex extraction of a dotted version (7.6, 7.5.1, 7.6.0.6, …)
+      2. Regex extraction of the FULL version token (any number of dotted
+         segments, e.g. ``7.6`` → ``7.6``, ``7.5.1`` → ``7.5.1``,
+         ``7.6.0.6`` → ``7.6.0.6``). The previous pattern capped the match at
+         three segments, so a branch like ``ganges-7.6.0.6-stable`` was
+         truncated to the invalid milestone ``7.6.0`` (which TCMS has no data
+         for), causing Current/Overall QI to render blank.
       3. Fall back to the original branch_name unchanged
     """
     if branch_name in BRANCH_SHORT_NAME_MAP:
@@ -3895,44 +3961,39 @@ def get_tcms_overall_qi():
     )
 
     try:
-        # Build base filter conditions
-        base_conditions = []
-        
         if is_master:
-            # Master: team-specific filters matching TCMS UI, feat_type=regression
-            base_conditions = [
-                {"additional_data.team": f"{milestone}/{team_name}"},
-                {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
-                {"test_case.deprecated": False},
-            ]
+            # Master: team-specific filters, feat_type=regression
+            filters = json.dumps({
+                "$and": [
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/", "$options": "i"}},
+                    {"release_name": {"$ne": milestone}},
+                    {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
+                    {"additional_data.team": f"{milestone}/{team_name}"},
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
+                    {"test_case.deprecated": False},
+                ]
+            })
             feat_type = "regression"
         else:
             # Release branch: team-specific filters, feat_type=regression
-            base_conditions = [
-                {"additional_data.team": f"{milestone}/{team_name}"},
-                {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
-                {"test_case.deprecated": False},
-            ]
+            filters = json.dumps({
+                "$and": [
+                    {"additional_data.team": f"{milestone}/{team_name}"},
+                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
+                    {"test_case.deprecated": False},
+                ]
+            })
             feat_type = "regression"
 
-        filters = json.dumps({"$and": base_conditions})
-
-        # TCMS API accepts date strings directly in YYYY-MM-DD format for time_filter
-        # When time_filter is a date string, pass it directly; otherwise use "all"
         params = {
             "aggregation_field": "target_package_type",
-            "time_filter": time_filter,  # Pass the date string directly (e.g., "2026-07-13" or "all")
+            "time_filter": time_filter,
             "target_milestone": milestone,
             "feat_type": feat_type,
             "filters": filters,
         }
-        
-        logger.info(f"[DEBUG] TCMS API request params: time_filter={time_filter}, milestone={milestone}, feat_type={feat_type}")
 
         url = f"{TCMS_SUMMARY_BASE}/milestone_all_test_cases/aggregate/metrics"
-        logger.info(f"[DEBUG] TCMS API URL: {url}")
-        logger.info(f"[DEBUG] TCMS API full params: {params}")
-        
         response = requests.get(
             url,
             params=params,
@@ -3997,424 +4058,6 @@ def get_tcms_overall_qi():
         return jsonify({"error": "TCMS API request timed out"}), 504
     except Exception as e:
         logger.error(f"Error fetching TCMS Overall QI: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-
-# ---------------------------------------------------
-# TCMS Overview Endpoint (for verification UI)
-# ---------------------------------------------------
-@app.route("/mcp/regression/tcms-overview", methods=["GET"])
-@jwt_required
-def get_tcms_overview():
-    """
-    Fetch TCMS overview metrics and construct UI URL for verification.
-    
-    Query params:
-      - tag: JITA tester tag (e.g., "cdp_master_full_reg")
-      - task_ids: Comma-separated JITA task IDs (alternative to tag)
-      - team_name: Override team (optional, will be extracted from tag if not provided)
-      - branch_name: Override branch (optional, will be extracted from tasks if not provided)
-      - time_filter: Time filter for TCMS (default: "all")
-    
-    Returns: TCMS metrics + constructed TCMS UI URL for verification
-    """
-    start = time.time()
-    tag = request.args.get("tag")
-    task_ids_param = request.args.get("task_ids")
-    team_name = request.args.get("team_name")
-    branch_name = request.args.get("branch_name")
-    time_filter = request.args.get("time_filter", "all")
-    
-    # Parse task_ids if provided
-    task_ids = None
-    if task_ids_param:
-        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
-    
-    if not tag and not task_ids:
-        return jsonify({"error": "Either tag or task_ids is required"}), 400
-    
-    logger.info(f"[START] TCMS Overview | tag={tag} task_ids_count={len(task_ids) if task_ids else 0}")
-    
-    try:
-        # Extract team and branch if not provided
-        if not team_name or not branch_name:
-            if tag:
-                # Extract team from tag using TEAM_CONFIG
-                team_config = TEAM_CONFIG.get(tag, TEAM_CONFIG.get("default", {}))
-                if not team_name:
-                    team_name = team_config.get("team", "CDP")
-                
-                # Extract branch from tag or fetch from tasks
-                if not branch_name:
-                    tasks = fetch_regression_tasks(tag=tag, include_tag_extras=False)
-                    if tasks and len(tasks) > 0:
-                        branch_name = tasks[0].get("branch", "master")
-                    else:
-                        branch_name = team_config.get("default_branch", "master")
-            elif task_ids:
-                # Fetch tasks to get branch
-                tasks = fetch_regression_tasks(task_ids=task_ids, include_tag_extras=False)
-                if tasks and len(tasks) > 0:
-                    if not branch_name:
-                        branch_name = tasks[0].get("branch", "master")
-                    if not team_name:
-                        # Try to extract team from first task's tester_tags
-                        tester_tags = tasks[0].get("tester_tags", [])
-                        for tt in tester_tags:
-                            team_config = TEAM_CONFIG.get(tt, {})
-                            if team_config:
-                                team_name = team_config.get("team", "CDP")
-                                break
-                        if not team_name:
-                            team_name = "CDP"  # Default fallback
-                else:
-                    team_name = team_name or "CDP"
-                    branch_name = branch_name or "master"
-        
-        if not team_name or not branch_name:
-            return jsonify({"error": "Could not determine team_name or branch_name"}), 400
-        
-        milestone = _resolve_tcms_milestone(branch_name)
-        is_master = branch_name.lower() in ("master", "main")
-        
-        logger.info(f"TCMS Overview | team={team_name} branch={branch_name} milestone={milestone} is_master={is_master}")
-        
-        # Build base filter conditions (same as get_tcms_overall_qi)
-        base_conditions = [
-            {"additional_data.team": f"{milestone}/{team_name}"},
-            {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
-            {"test_case.deprecated": False},
-        ]
-        feat_type = "regression"
-        
-        filters = json.dumps({"$and": base_conditions})
-        
-        # Prepare TCMS API request
-        params = {
-            "aggregation_field": "target_package_type",
-            "time_filter": time_filter,
-            "target_milestone": milestone,
-            "feat_type": feat_type,
-            "filters": filters,
-        }
-        
-        url = f"{TCMS_SUMMARY_BASE}/milestone_all_test_cases/aggregate/metrics"
-        logger.info(f"[DEBUG] TCMS Overview API URL: {url}")
-        
-        response = requests.get(
-            url,
-            params=params,
-            headers={"Content-Type": "application/json"},
-            verify=False,
-            timeout=30,
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"TCMS Summary API returned {response.status_code}: {response.text[:500]}")
-            return jsonify({"error": f"TCMS API error: {response.status_code}"}), 502
-        
-        data = response.json()
-        if not data.get("success") or not data.get("data"):
-            logger.warning("TCMS Summary API returned no data")
-            return jsonify({
-                "qi_value": None,
-                "message": "No data returned from TCMS",
-                "team_name": team_name,
-                "branch_name": branch_name,
-                "milestone": milestone,
-                "time_filter": time_filter,
-                "tcms_ui_url": None,
-            })
-        
-        overall = data["data"][0]
-        qi_value = overall.get("average_total_op_success_percentage")
-        
-        # Construct TCMS UI URL (based on RegressionHome.jsx line 2828)
-        tcms_search = f"additional_data.team:{milestone}/{team_name}"
-        tcms_ui_url = (
-            f"https://tcms.eng.nutanix.com/#/testcases/milestone/{milestone}"
-            f"?search={tcms_search}&tab=package_type&pass=overall&type=Regression"
-        )
-        if time_filter and time_filter != "all":
-            tcms_ui_url += f"&timeFilter={time_filter}"
-        
-        logger.info(f"[END] TCMS Overview | qi={qi_value} | time={time.time() - start:.2f}s")
-        
-        return jsonify({
-            "qi_value": qi_value,
-            "team_name": team_name,
-            "branch_name": branch_name,
-            "milestone": milestone,
-            "time_filter": time_filter,
-            "total_tests": overall.get("total"),
-            "run": overall.get("run"),
-            "passed": overall.get("passed"),
-            "failed": overall.get("failed"),
-            "not_run": overall.get("not_run"),
-            "blocked": overall.get("blocked"),
-            "run_percentage": overall.get("run_percentage"),
-            "overall_effectiveness": overall.get("overall_effectiveness"),
-            "overall_stability": overall.get("overall_stability"),
-            "total_triaged": overall.get("total_triaged"),
-            "triage_percentage": overall.get("triage_percentage"),
-            "total_product_issues": overall.get("total_product_issues"),
-            "total_test_issues": overall.get("total_test_issues"),
-            "total_other_issues": overall.get("total_other_issues"),
-            "total_infra_issues": overall.get("total_infra_issues"),
-            "total_framework_issues": overall.get("total_framework_issues"),
-            "openBugs": overall.get("openBugs"),
-            "unique_tickets": overall.get("unique_tickets", []),
-            "execution_passed_percentage": overall.get("execution_passed_percentage"),
-            "execution_failed_percentage": overall.get("execution_failed_percentage"),
-            "tcms_ui_url": tcms_ui_url,
-        })
-    
-    except requests.exceptions.Timeout:
-        logger.error("TCMS Summary API request timed out")
-        return jsonify({"error": "TCMS API request timed out"}), 504
-    except Exception as e:
-        logger.error(f"Error fetching TCMS overview: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-
-# ---------------------------------------------------
-# JITA vs TCMS Testcase Comparison Endpoint
-# ---------------------------------------------------
-@app.route("/mcp/regression/jita-tcms-comparison", methods=["POST"])
-@jwt_required
-def compare_jita_tcms_testcases():
-    """
-    Compare testcases between JITA run and TCMS registry.
-    
-    Request body:
-      - tag: JITA tester tag
-      - task_ids: Comma-separated JITA task IDs (alternative to tag)
-      - team_name: TCMS team name (optional, will be extracted if not provided)
-      - branch_name: Branch name (optional, will be extracted if not provided)
-    
-    Returns: Detailed comparison showing matched, missing_in_jita, missing_in_tcms
-    """
-    start = time.time()
-    
-    try:
-        body = request.get_json(force=True) or {}
-        tag = body.get("tag")
-        task_ids_param = body.get("task_ids")
-        team_name = body.get("team_name")
-        branch_name = body.get("branch_name")
-        
-        # Parse task_ids
-        task_ids = None
-        if task_ids_param:
-            if isinstance(task_ids_param, list):
-                task_ids = [str(tid).strip() for tid in task_ids_param if tid]
-            elif isinstance(task_ids_param, str):
-                task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
-        
-        if not tag and not task_ids:
-            return jsonify({"error": "Either tag or task_ids is required"}), 400
-        
-        logger.info(f"[START] JITA-TCMS Comparison | tag={tag} task_ids_count={len(task_ids) if task_ids else 0}")
-        
-        # Step 1: Fetch JITA test data
-        logger.info("Fetching JITA test data...")
-        if tag:
-            tasks = fetch_regression_tasks(tag=tag, include_tag_extras=False)
-        else:
-            tasks = fetch_regression_tasks(task_ids=task_ids, include_tag_extras=False)
-        
-        if not tasks:
-            return jsonify({"error": "No tasks found"}), 404
-        
-        # Extract team and branch if not provided
-        if not team_name or not branch_name:
-            if tag:
-                team_config = TEAM_CONFIG.get(tag, TEAM_CONFIG.get("default", {}))
-                if not team_name:
-                    team_name = team_config.get("team", "CDP")
-                if not branch_name:
-                    branch_name = tasks[0].get("branch", team_config.get("default_branch", "master"))
-            else:
-                if not branch_name:
-                    branch_name = tasks[0].get("branch", "master")
-                if not team_name:
-                    tester_tags = tasks[0].get("tester_tags", [])
-                    for tt in tester_tags:
-                        team_config = TEAM_CONFIG.get(tt, {})
-                        if team_config:
-                            team_name = team_config.get("team", "CDP")
-                            break
-                    if not team_name:
-                        team_name = "CDP"
-        
-        milestone = _resolve_tcms_milestone(branch_name)
-        logger.info(f"Comparison | team={team_name} branch={branch_name} milestone={milestone}")
-        
-        # Collect all task IDs
-        jita_task_ids = [task["_id"]["$oid"] for task in tasks]
-        
-        # Fetch test results from JITA
-        test_data = fetch_test_results_batch_with_pagination(jita_task_ids, timeout=120)
-        logger.info(f"Fetched {len(test_data)} test results from JITA")
-        
-        # Extract unique testcase names from JITA with metadata
-        jita_testcases = {}
-        for test in test_data:
-            test_name = test.get("test", {}).get("name", "")
-            if test_name:
-                if test_name not in jita_testcases:
-                    jita_testcases[test_name] = {
-                        "testcase_name": test_name,
-                        "jita_status": test.get("status", "Unknown"),
-                        "jita_task_id": test.get("task_id", ""),
-                    }
-        
-        logger.info(f"Extracted {len(jita_testcases)} unique testcases from JITA")
-        
-        # Step 2: Fetch TCMS testcases
-        logger.info("Fetching TCMS testcases...")
-        payload = [{
-            "$match": {
-                "$and": [
-                    {"target_milestone": milestone},
-                    {"additional_data.team": f"{milestone}/{team_name}"},
-                    {"test_case.test_sets": {"$regex": f"test_sets/milestones/{milestone}/{team_name}/", "$options": "i"}},
-                    {"test_case.deprecated": False},
-                    {"last_result": {"$elemMatch": {"pass_name": "overall"}}}
-                ]
-            }
-        }, {"$sort": {"name": 1}}, {"$skip": 0}, {"$limit": 5000}]
-        
-        response = requests.post(
-            f"{TCMS_BASE}/milestone_all_test_cases/aggregate",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            verify=False,
-            timeout=60
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"TCMS API error: HTTP {response.status_code}")
-            return jsonify({"error": f"TCMS API error: {response.status_code}"}), 502
-        
-        tcms_data = response.json()
-        if not tcms_data.get("success") or not tcms_data.get("data"):
-            logger.warning("TCMS API returned no data")
-            return jsonify({"error": "No TCMS data available"}), 404
-        
-        # Extract TCMS testcases with metadata
-        tcms_testcases = {}
-        for tc in tcms_data["data"]:
-            test_case = tc.get("test_case", {})
-            test_name = test_case.get("name", "")
-            if not test_name:
-                continue
-            
-            last_result = tc.get("last_result", [])
-            published = {}
-            status = "Unknown"
-            last_updated = ""
-            qi = None
-            
-            if last_result and len(last_result) > 0:
-                lr = last_result[0]
-                published = lr.get("published", {})
-                status = lr.get("status", "Unknown")
-                last_updated = lr.get("last_updated", "")
-                qi = published.get("operation_success_percentage")
-            
-            # Parse test area from test name (first 2-3 parts)
-            test_parts = test_name.split(".")
-            test_area = ".".join(test_parts[:min(3, len(test_parts))]) if test_parts else ""
-            
-            tcms_testcases[test_name] = {
-                "testcase_name": test_name,
-                "tcms_qi": qi if qi is not None else 0.0,
-                "tcms_status": status,
-                "test_area": test_area,
-                "deprecated": test_case.get("deprecated", False),
-                "last_run_date": last_updated[:10] if last_updated else "",
-                "owner": test_case.get("owner", "")
-            }
-        
-        logger.info(f"Extracted {len(tcms_testcases)} testcases from TCMS")
-        
-        # Step 3: Compare and categorize
-        jita_set = set(jita_testcases.keys())
-        tcms_set = set(tcms_testcases.keys())
-        
-        matched_set = jita_set & tcms_set
-        missing_in_jita_set = tcms_set - jita_set
-        missing_in_tcms_set = jita_set - tcms_set
-        
-        # Build comparison results
-        matched = []
-        for test_name in matched_set:
-            jita_info = jita_testcases[test_name]
-            tcms_info = tcms_testcases[test_name]
-            
-            status_match = jita_info["jita_status"] == tcms_info["tcms_status"]
-            
-            matched.append({
-                "testcase_name": test_name,
-                "jita_status": jita_info["jita_status"],
-                "tcms_status": tcms_info["tcms_status"],
-                "jita_qi": None,  # JITA doesn't have QI directly
-                "tcms_qi": tcms_info["tcms_qi"],
-                "qi_difference": "N/A",
-                "test_area": tcms_info["test_area"],
-                "owner": tcms_info["owner"],
-                "deprecated": tcms_info["deprecated"],
-                "status_match": status_match
-            })
-        
-        missing_in_jita = []
-        for test_name in missing_in_jita_set:
-            tcms_info = tcms_testcases[test_name]
-            missing_in_jita.append(tcms_info)
-        
-        missing_in_tcms = []
-        for test_name in missing_in_tcms_set:
-            jita_info = jita_testcases[test_name]
-            missing_in_tcms.append(jita_info)
-        
-        # Calculate match percentage
-        total_jita = len(jita_set)
-        total_tcms = len(tcms_set)
-        matched_count = len(matched_set)
-        
-        if total_jita > 0:
-            exact_match_percentage = round((matched_count / total_jita) * 100, 2)
-        else:
-            exact_match_percentage = 0.0
-        
-        summary = {
-            "total_jita": total_jita,
-            "total_tcms": total_tcms,
-            "matched_count": matched_count,
-            "missing_in_jita_count": len(missing_in_jita_set),
-            "missing_in_tcms_count": len(missing_in_tcms_set),
-            "exact_match_percentage": exact_match_percentage
-        }
-        
-        logger.info(f"[END] JITA-TCMS Comparison | matched={matched_count} missing_jita={len(missing_in_jita_set)} missing_tcms={len(missing_in_tcms_set)} | time={time.time() - start:.2f}s")
-        
-        return jsonify({
-            "success": True,
-            "missing_in_jita": missing_in_jita,
-            "missing_in_tcms": missing_in_tcms,
-            "matched": matched,
-            "summary": summary,
-            "team_name": team_name,
-            "branch_name": branch_name,
-            "milestone": milestone
-        })
-    
-    except requests.exceptions.Timeout:
-        logger.error("TCMS API request timed out")
-        return jsonify({"error": "TCMS API request timed out"}), 504
-    except Exception as e:
-        logger.error(f"Error in JITA-TCMS comparison: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -5740,7 +5383,6 @@ def batch_update_job_profiles(run_plan_id):
         
         updated_count = 0
         failed_updates = []
-        
         def update_single_job(job_id):
             try:
                 # Fetch existing profile (use service account for fetching)
@@ -5962,7 +5604,7 @@ def batch_update_job_profiles(run_plan_id):
                         new_additional_tags = []
                     updated_profile["run_tests_with_additional_tags"] = new_additional_tags
                     logger.info(f"Overwriting run_tests_with_additional_tags for {job_id}: {new_additional_tags}")
-                
+
                 # Ensure JSON serializable (following reference script pattern)
                 serializable_payload = {}
                 for k, v in updated_profile.items():
@@ -7651,6 +7293,24 @@ def analyze_failed_testcases():
         return jsonify({"error": str(e)}), 500
 
 
+def _normalize_test_status(status):
+    """Lowercased JITA test status string. Dicts (rare) use name/status."""
+    if isinstance(status, dict):
+        status = status.get("name") or status.get("status") or ""
+    try:
+        return str(status or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _count_test_statuses(results):
+    counts = {}
+    for tr in results or []:
+        key = _normalize_test_status(tr.get("status")) or "(empty)"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None):
     """Generator that yields SSE events: progress, start, then one 'row' per result, then 'done' or 'error'."""
     if status_set is None:
@@ -7660,7 +7320,15 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
 
         tasks = fetch_regression_tasks(tag=tag, task_ids=task_ids)
         if not tasks:
-            yield json.dumps({"type": "start", "total": 0, "current_branch": "", "tag": tag})
+            yield json.dumps({
+                "type": "start",
+                "total": 0,
+                "current_branch": "",
+                "tag": tag,
+                "status_counts": {},
+                "fetched_total": 0,
+                "task_count": 0,
+            })
             yield json.dumps({"type": "done"})
             return
         collected_task_ids = [task["_id"]["$oid"] for task in tasks]
@@ -7668,10 +7336,19 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
         yield json.dumps({"type": "progress", "phase": "fetching_results"})
 
         all_results = fetch_test_results_batch_with_pagination(collected_task_ids)
+        status_counts = _count_test_statuses(all_results)
         failed_results = [
             tr for tr in all_results
-            if tr.get("status", "").lower() in status_set
+            if _normalize_test_status(tr.get("status")) in status_set
         ]
+        logger.info(
+            "Failed analysis: tasks=%s fetched=%s matched=%s status_counts=%s filter=%s",
+            len(collected_task_ids),
+            len(all_results),
+            len(failed_results),
+            status_counts,
+            sorted(status_set),
+        )
         current_branch = (tasks[0].get("branch") or "") if tasks else ""
 
         # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
@@ -7691,7 +7368,10 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
             "type": "start",
             "total": len(failed_results),
             "current_branch": current_branch,
-            "tag": tag or None
+            "tag": tag or None,
+            "status_counts": status_counts,
+            "fetched_total": len(all_results),
+            "task_count": len(collected_task_ids),
         })
 
         for test_result in failed_results:
@@ -7824,10 +7504,10 @@ def analyze_failed_testcases_stream():
     include_set = {x.strip().lower() for x in include_param.split(",") if x.strip()} if include_param else set()
     if not include_set:
         include_set = {"basic", "exception_summary", "intermittent"}
-    task_ids = None
-    if task_ids_param:
-        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
+    task_ids = normalize_task_id_list(task_ids_param) if task_ids_param else None
     if not tag and not task_ids:
+        if task_ids_param:
+            return jsonify({"error": "No valid 24-char JITA task IDs provided"}), 400
         return jsonify({"error": "Either tag or task_ids is required"}), 400
 
     statuses_param = request.args.get("statuses", "")
@@ -7836,6 +7516,7 @@ def analyze_failed_testcases_stream():
         "skipped": ("skipped", "skip"),
         "warning": ("warning", "warn"),
         "killed": ("killed", "terminated", "cancelled"),
+        "pending": ("pending", "waiting", "running", "started"),
     }
     if statuses_param:
         requested = {s.strip().lower() for s in statuses_param.split(",") if s.strip()}
@@ -8711,6 +8392,241 @@ def save_saved_tag_results(tag_name):
 # Re-trigger failed testcases via Jita agave_tasks rerun API
 # ======================================================
 
+def _query_jita_commits(raw_query, auth):
+    """Return commit documents from Jita matching raw_query, or []."""
+    if not raw_query or not auth:
+        return []
+    try:
+        resp = requests.get(
+            "%s/commits" % JITA_BASE,
+            params={
+                "raw_query": json.dumps(raw_query),
+                "limit": 10,
+                "sort": "-date_added",
+            },
+            headers={"Accept": "application/json"},
+            auth=auth,
+            verify=False,
+            timeout=20,
+        )
+        body = resp.json() if resp.content else {}
+        if not resp.ok or not body.get("success", True):
+            logger.warning("[retrigger] commits lookup HTTP %s: %s", resp.status_code, str(body)[:300])
+            return []
+        data = body.get("data") or []
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        logger.warning("[retrigger] commits lookup failed: %s", exc)
+        return []
+
+
+def _lookup_jita_commit(commit_id, gbn=None, preferred_branch=None, auth=None):
+    """
+    Resolve a NOS commit in Jita.
+
+    Rerun validation requires branch + commit_id + gbn to match a Jita Commit
+    document. A new commit is often on a different branch than the original
+    task, so we look the commit up and return that document (branch/gbn).
+    """
+    commit_id = (commit_id or "").strip()
+    if not commit_id or commit_id.startswith("$"):
+        return None
+
+    gbn_int = None
+    if gbn not in (None, ""):
+        try:
+            gbn_int = int(gbn)
+        except (ValueError, TypeError):
+            gbn_int = None
+
+    query = {"commit_id": commit_id}
+    if gbn_int is not None:
+        query["gbn"] = gbn_int
+    records = _query_jita_commits(query, auth)
+    if not records and gbn_int is not None:
+        records = _query_jita_commits({"commit_id": commit_id}, auth)
+    if not records:
+        return None
+
+    if preferred_branch:
+        for rec in records:
+            if rec.get("branch") == preferred_branch:
+                if gbn_int is None or rec.get("gbn") == gbn_int:
+                    return rec
+    if gbn_int is not None:
+        for rec in records:
+            if rec.get("gbn") == gbn_int:
+                return rec
+    return records[0]
+
+
+def _resolve_nos_commit_override(overrides, auth, original_branch=None):
+    """Fill nos_branch (and gbn if missing) from Jita so rerun validation passes."""
+    if not overrides or overrides.get("nos_branch"):
+        return overrides
+    nos_commit = (overrides.get("nos_commit") or "").strip()
+    if not nos_commit or nos_commit.startswith("$") or overrides.get("nos_tag"):
+        return overrides
+    rec = _lookup_jita_commit(
+        nos_commit,
+        gbn=overrides.get("nos_gbn"),
+        preferred_branch=original_branch,
+        auth=auth,
+    )
+    if not rec:
+        logger.warning(
+            "[retrigger] NOS commit %s gbn=%s not found in Jita commits",
+            nos_commit, overrides.get("nos_gbn"),
+        )
+        return overrides
+    if rec.get("branch"):
+        overrides["nos_branch"] = rec["branch"]
+        logger.info("[retrigger] resolved NOS branch %s from commit %s", rec["branch"], nos_commit)
+    if not overrides.get("nos_gbn") and rec.get("gbn") not in (None, ""):
+        overrides["nos_gbn"] = rec["gbn"]
+    return overrides
+
+
+def _fetch_job_profile_name(jp_id, auth=None):
+    """Look up a Jita job profile name by id. Empty string on failure."""
+    if not jp_id:
+        return ""
+    try:
+        resp = requests.get(
+            f"{JITA_BASE}/job_profiles/{jp_id}",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            auth=auth or JITA_SVC_AUTH,
+            verify=False,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            logger.warning("[retrigger] JP lookup HTTP %s for %s", resp.status_code, jp_id)
+            return ""
+        data = resp.json().get("data") or {}
+        return str(data.get("name") or "").strip()
+    except Exception as exc:
+        logger.warning("[retrigger] JP lookup failed for %s: %s", jp_id, exc)
+        return ""
+
+
+def _summarize_jita_resource_config(task_data):
+    """Human-readable Resource Requirement Configuration from a Jita task."""
+    task_data = task_data or {}
+    hw = task_data.get("requested_hardware") if isinstance(task_data.get("requested_hardware"), dict) else {}
+    infra = hw.get("infra") if isinstance(hw.get("infra"), list) else task_data.get("infra")
+    if not isinstance(infra, list):
+        infra = []
+    first = infra[0] if infra and isinstance(infra[0], dict) else {}
+    itype = str(first.get("type") or "").strip().lower()
+    if itype == "node_pool":
+        resources = "By Node Pool"
+    elif itype in ("cluster", "cluster_pool"):
+        resources = "By Cluster Pool"
+    elif itype in ("physical", "nested", "nested_1"):
+        resources = "By Global Pool"
+    elif itype in ("name", "cluster_name"):
+        resources = "By Name"
+    else:
+        resources = "By Node Pool" if first.get("entries") else (itype or "Unknown")
+
+    nested = hw.get("nested_params") if isinstance(hw.get("nested_params"), dict) else {}
+    if nested.get("is_nested") or nested.get("version"):
+        ver = str(nested.get("version") or "")
+        resource_type = "NestedAHV 2.0" if ver.startswith("2") else "NestedAHV 1.0"
+    else:
+        resource_type = "Physical"
+
+    pools = [str(e).strip() for e in (first.get("entries") or []) if str(e).strip()]
+    skip_match = task_data.get("skip_resource_spec_match")
+    if skip_match is None:
+        sched = task_data.get("scheduling_options") or {}
+        skip_match = sched.get("skip_resource_spec_match") if isinstance(sched, dict) else False
+
+    if resource_type == "NestedAHV 2.0":
+        resource_type_key = "nested_2.0"
+    elif resource_type == "NestedAHV 1.0":
+        resource_type_key = "nested_1.0"
+    else:
+        resource_type_key = "physical"
+    if itype == "node_pool":
+        resources_mode = "node_pool"
+    elif itype in ("cluster", "cluster_pool"):
+        resources_mode = "cluster"
+    elif itype in ("name", "cluster_name"):
+        resources_mode = "name"
+    elif itype in ("physical", "nested", "nested_1"):
+        resources_mode = "global_pool"
+    else:
+        resources_mode = "node_pool" if pools else "global_pool"
+
+    return {
+        "resources": resources,
+        "resources_mode": resources_mode,
+        "resource_type": resource_type,
+        "resource_type_key": resource_type_key,
+        "node_pools": pools,
+        "match_resource_spec": not bool(skip_match),
+        "hypervisor": hw.get("hypervisor") or task_data.get("hypervisor") or "",
+        "nos_branch": task_data.get("branch") or "",
+    }
+
+
+RETAIN_DURATION_72H_MIN = 72 * 60  # Jita retain duration is minutes
+
+
+def _ensure_retain_duration(retain, duration=RETAIN_DURATION_72H_MIN):
+    """Keep original retain entity/options; set duration to 72 hours."""
+    import copy
+    retain = copy.deepcopy(retain) if isinstance(retain, dict) else {}
+    criteria = retain.get("criteria")
+    if not isinstance(criteria, dict):
+        criteria = {}
+    tf = criteria.get("TEST_FAILURE")
+    if not isinstance(tf, dict):
+        tf = {
+            "entity": "CONTAINER",
+            "type": "AFTER_EACH",
+            "params": {
+                "duration": duration,
+                "exceptions": [],
+                "states_to_track": ["Failed"],
+            },
+        }
+    else:
+        params = tf.get("params") if isinstance(tf.get("params"), dict) else {}
+        params["duration"] = duration
+        tf["params"] = params
+    criteria["TEST_FAILURE"] = tf
+    retain["criteria"] = criteria
+    return retain
+
+
+@app.route("/mcp/regression/failed-analysis/retrigger-preview", methods=["POST"])
+@jwt_required
+def retrigger_preview_resource_config():
+    """Return Jita Resource Requirement Configuration for selected tasks."""
+    data = request.get_json() or {}
+    task_ids = data.get("task_ids") or []
+    if isinstance(task_ids, str):
+        task_ids = [task_ids]
+    seen = []
+    for raw in task_ids:
+        tid = str(raw or "").strip()
+        if tid and tid not in seen:
+            seen.append(tid)
+    previews = []
+    for tid in seen[:8]:
+        try:
+            task_data = fetch_agave_task(tid) or {}
+        except Exception as exc:
+            logger.warning("[retrigger-preview] fetch failed for %s: %s", tid, exc)
+            task_data = {}
+        summary = _summarize_jita_resource_config(task_data)
+        summary["task_id"] = tid
+        previews.append(summary)
+    return jsonify({"success": True, "tasks": previews})
+
+
 @app.route("/mcp/regression/failed-analysis/retrigger", methods=["POST"])
 @jwt_required
 def retrigger_failed_testcases():
@@ -8762,9 +8678,14 @@ def retrigger_failed_testcases():
         if not tests_by_task:
             return jsonify({"error": "No valid agave_task_id found in selected tests"}), 400
 
+        import copy
+        base_overrides = copy.deepcopy(overrides) if isinstance(overrides, dict) else {}
+        jp_name_cache = {}
         rerun_results = []
 
         for task_id, task_tests in tests_by_task.items():
+            jp_name = ""
+            trigger_username = current_username
             try:
                 # Fetch original task details
                 task_data = fetch_agave_task(task_id)
@@ -8776,8 +8697,25 @@ def retrigger_failed_testcases():
                     })
                     continue
 
-                # Build rerun payload from original task, apply overrides
-                payload = _build_rerun_payload(task_data, task_tests, overrides, current_username)
+                # Isolate each task: mixed AHV/ESX selections must not share
+                # resolved NOS branch or a single Jita account.
+                task_overrides = copy.deepcopy(base_overrides)
+                jp_name = _resolve_rerun_jp_name(
+                    task_data,
+                    fetch_name=lambda jid: _fetch_job_profile_name(jid, JITA_SVC_AUTH),
+                    cache=jp_name_cache,
+                )
+                task_auth, trigger_username = _select_rerun_auth(
+                    jp_name, user_auth, current_username,
+                )
+                logger.info(
+                    "[retrigger] task %s jp=%r account=%s tests=%s",
+                    task_id, jp_name, trigger_username, len(task_tests),
+                )
+
+                # Pass UI overrides through as entered. Do not look up commits
+                # or branches from the Jita commits API.
+                payload = _build_rerun_payload(task_data, task_tests, task_overrides, trigger_username)
 
                 # POST to rerun endpoint (raw JSON body, matching Jita UI)
                 rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
@@ -8787,7 +8725,7 @@ def retrigger_failed_testcases():
                     rerun_url,
                     data=json.dumps(payload),
                     headers={"Content-Type": "application/json", "Accept": "application/json"},
-                    auth=user_auth,
+                    auth=task_auth,
                     verify=False,
                     timeout=60
                 )
@@ -8804,10 +8742,14 @@ def retrigger_failed_testcases():
                     new_id = resp_data.get("_id")
                     if isinstance(new_id, dict) and "$oid" in new_id:
                         new_id = new_id["$oid"]
+                    if new_id is not None:
+                        new_id = str(new_id)
                     rerun_results.append({
                         "agave_task_id": task_id,
                         "success": True,
                         "rerun_task_id": new_id,
+                        "job_profile_name": jp_name,
+                        "triggered_as": trigger_username,
                         "message": resp_data.get("message", ""),
                     })
                 else:
@@ -8816,6 +8758,8 @@ def retrigger_failed_testcases():
                     rerun_results.append({
                         "agave_task_id": task_id,
                         "success": False,
+                        "job_profile_name": jp_name,
+                        "triggered_as": trigger_username,
                         "error": error_msg
                     })
             except Exception as e:
@@ -8823,22 +8767,191 @@ def retrigger_failed_testcases():
                 rerun_results.append({
                     "agave_task_id": task_id,
                     "success": False,
+                    "job_profile_name": jp_name,
+                    "triggered_as": trigger_username,
                     "error": str(e)
                 })
 
         succeeded = [r for r in rerun_results if r.get("success")]
         failed = [r for r in rerun_results if not r.get("success")]
+        rerun_task_ids = [
+            str(r["rerun_task_id"]) for r in succeeded if r.get("rerun_task_id")
+        ]
+        def _jita_results_urls(ids):
+            """Split so each GET stays under Apache's ~8KB Request-URI limit."""
+            prefix = "https://jita.eng.nutanix.com/results?task_ids="
+            suffix = "&active_tab=1&merge_tests=true"
+            max_len = 7800
+            out, current = [], []
+            for tid in ids:
+                trial = current + [str(tid)]
+                url = prefix + ",".join(trial) + (suffix if len(trial) > 1 else "")
+                if current and len(url) > max_len:
+                    out.append(prefix + ",".join(current) + (suffix if len(current) > 1 else ""))
+                    current = [str(tid)]
+                else:
+                    current = trial
+            if current:
+                out.append(prefix + ",".join(current) + (suffix if len(current) > 1 else ""))
+            return out
+        jita_results_urls = _jita_results_urls(rerun_task_ids) if rerun_task_ids else []
+        jita_results_url = jita_results_urls[0] if jita_results_urls else ""
         return jsonify({
             "success": len(failed) == 0,
             "total": len(rerun_results),
             "succeeded": len(succeeded),
             "failed": len(failed),
+            "rerun_task_ids": rerun_task_ids,
+            "jita_results_url": jita_results_url,
+            "jita_results_urls": jita_results_urls,
             "results": rerun_results,
         })
 
     except Exception as e:
         logger.error(f"[retrigger] Unhandled error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+def _rewrite_url_for_new_build(url, old_gbn=None, new_gbn=None, old_commit=None, new_commit=None):
+    """Keep the original NOS/image URL shape (tar.gz vs opt) for a new GBN/commit."""
+    if not url:
+        return url
+    out = str(url)
+    old_gbn_s = "" if old_gbn in (None, "") else str(old_gbn)
+    new_gbn_s = "" if new_gbn in (None, "") else str(new_gbn)
+    if old_gbn_s and new_gbn_s and old_gbn_s != new_gbn_s and old_gbn_s in out:
+        out = out.replace(old_gbn_s, new_gbn_s)
+    old_c = str(old_commit or "").strip()
+    new_c = str(new_commit or "").strip()
+    if old_c and new_c and old_c != new_c:
+        if old_c in out:
+            out = out.replace(old_c, new_c)
+        elif len(old_c) >= 7 and len(new_c) >= 7 and old_c[:7] in out:
+            out = out.replace(old_c[:7], new_c[:7])
+    return out
+
+
+def _original_imaging_options(task_data):
+    """NOS/hypervisor URLs Jita stored on the original task (from the JP)."""
+    import copy
+    task_data = task_data or {}
+    hw = task_data.get("requested_hardware") or {}
+    raw = hw.get("imaging_options") if isinstance(hw, dict) else None
+    if not isinstance(raw, dict):
+        raw = task_data.get("imaging_options")
+    if not isinstance(raw, dict):
+        return {}
+    return copy.deepcopy(raw)
+
+
+def _original_build_type(task_data, nos_url=""):
+    """Build type the original JP/task used (release tar vs opt)."""
+    task_data = task_data or {}
+    for key in ("build_type", "nos_build_type"):
+        val = task_data.get(key)
+        if val not in (None, ""):
+            return str(val).strip()
+    bs = task_data.get("build_selection") or {}
+    if isinstance(bs, dict) and bs.get("build_type"):
+        return str(bs.get("build_type")).strip()
+    url = str(nos_url or "").lower()
+    if ".tar.gz" in url:
+        return "release"
+    if "/opt/" in url or url.rstrip("/").endswith("/opt"):
+        return "opt"
+    return ""
+
+
+def _original_requested_hardware(task_data):
+    """Deep-copy Jita requested_hardware so Resource Requirement Configuration matches."""
+    import copy
+    hw = (task_data or {}).get("requested_hardware")
+    if not isinstance(hw, dict):
+        return {}
+    return copy.deepcopy(hw)
+
+
+def _normalize_override_pools(overrides):
+    raw = (overrides or {}).get("node_pools")
+    if raw in (None, ""):
+        raw = (overrides or {}).get("resource_pool")
+    if isinstance(raw, (list, tuple)):
+        return [str(e).strip() for e in raw if str(e).strip()]
+    return [e.strip() for e in str(raw or "").split(",") if e.strip()]
+
+
+def _apply_resource_requirement_overrides(requested_hw, infra, overrides):
+    """Apply Jita Resource Requirement Configuration edits onto copied hardware."""
+    import copy
+    requested_hw = copy.deepcopy(requested_hw) if isinstance(requested_hw, dict) else {}
+    infra = copy.deepcopy(infra) if isinstance(infra, list) else []
+    if not (overrides or {}).get("override_resource_config"):
+        return requested_hw, infra
+
+    mode = str(overrides.get("resources_mode") or "").strip().lower()
+    res_type = str(overrides.get("resource_type") or "").strip().lower()
+    pools = _normalize_override_pools(overrides)
+    existing = infra[0] if infra and isinstance(infra[0], dict) else {}
+    params = existing.get("params") if isinstance(existing.get("params"), dict) else None
+
+    if mode == "global_pool":
+        if res_type in ("nested_1.0", "nested_1"):
+            itype = "nested_1"
+        elif res_type in ("physical",):
+            itype = "physical"
+        else:
+            itype = "nested"
+        infra = [{
+            "type": itype,
+            "kind": "PRIVATE_CLOUD",
+            "params": params or {"category": "general"},
+        }]
+    elif mode in ("node_pool", "cluster", "name"):
+        itype = "node_pool" if mode == "node_pool" else ("cluster" if mode == "cluster" else "name")
+        entry = {
+            "kind": existing.get("kind") or "ON_PREM",
+            "type": itype,
+            "entries": pools,
+        }
+        if params:
+            entry["params"] = params
+        rest = copy.deepcopy(infra[1:]) if len(infra) > 1 else []
+        infra = [entry] + rest
+
+    if res_type == "physical":
+        requested_hw.pop("nested_params", None)
+    elif res_type in ("nested_2.0", "nested", "nested_2"):
+        requested_hw["nested_params"] = {"version": "2.0", "is_nested": True}
+    elif res_type in ("nested_1.0", "nested_1"):
+        requested_hw["nested_params"] = {"version": "1.0", "is_nested": True}
+
+    hyp = str(overrides.get("hypervisor") or "").strip()
+    if hyp:
+        requested_hw["hypervisor"] = hyp
+    return requested_hw, infra
+
+
+def _original_nested_params(task_data):
+    """Pass through nested_params from the original Jita task. Do not infer.
+
+    Nested AHV 2.0 vs physical is already on the source task. Guessing from the
+    JP name would attach nested_params to physical reruns.
+    """
+    import copy
+    task_data = task_data or {}
+    hw = task_data.get("requested_hardware") or {}
+    raw = hw.get("nested_params") if isinstance(hw, dict) else None
+    if not isinstance(raw, dict):
+        raw = task_data.get("nested_params")
+    if not isinstance(raw, dict):
+        return {}
+    out = {
+        k: v for k, v in copy.deepcopy(raw).items()
+        if v not in (None, "")
+    }
+    if not out.get("is_nested") and not out.get("version"):
+        return {}
+    return out
 
 
 def _build_rerun_payload(task_data, task_tests, overrides, username):
@@ -8898,17 +9011,28 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         if entry:
             tests.append(entry)
 
-    requested_hw = task_data.get("requested_hardware") or {}
-    infra = requested_hw.get("infra") or task_data.get("infra") or []
+    requested_hw = _original_requested_hardware(task_data)
+    infra = requested_hw.get("infra")
+    if not isinstance(infra, list) or not infra:
+        infra = copy.deepcopy(task_data.get("infra") or [])
+    if not isinstance(infra, list):
+        infra = []
+    else:
+        infra = copy.deepcopy(infra)
     # Keep the original task pool unless the user explicitly overrides it.
+    # Only replace entries so kind/type/params (By Node Pool, Physical, etc.) stay Jita's.
     if overrides.get("override_pool") and overrides.get("resource_pool"):
         entries = [e.strip() for e in str(overrides["resource_pool"]).split(",") if e.strip()]
         if entries:
-            kind, itype = "ON_PREM", "node_pool"
-            if isinstance(infra, list) and infra and isinstance(infra[0], dict):
-                kind = infra[0].get("kind") or kind
-                itype = infra[0].get("type") or itype
-            infra = [{"kind": kind, "type": itype, "entries": entries}]
+            if infra and isinstance(infra[0], dict):
+                updated = copy.deepcopy(infra[0])
+                updated["entries"] = entries
+                updated.setdefault("kind", "ON_PREM")
+                updated.setdefault("type", "node_pool")
+                infra = [updated] + copy.deepcopy(infra[1:])
+            else:
+                infra = [{"kind": "ON_PREM", "type": "node_pool", "entries": entries}]
+    requested_hw, infra = _apply_resource_requirement_overrides(requested_hw, infra, overrides)
 
     nos_commit = overrides.get("nos_commit")
     if not nos_commit and overrides.get("nos_tag"):
@@ -8918,18 +9042,47 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
     commit_id = _first(nos_commit, task_data.get("commit_id"))
     gbn = _first(_as_int(overrides.get("nos_gbn")), _as_int(task_data.get("gbn")), task_data.get("gbn"))
 
-    image_branch = _first(overrides.get("image_branch"), task_data.get("image_branch"), branch)
-    image_commit = _first(
-        overrides.get("image_commit"),
-        task_data.get("image_commit"),
-        commit_id if nos_commit else None,
-    )
-    image_gbn = _first(
-        _as_int(overrides.get("image_gbn")),
-        _as_int(task_data.get("image_gbn")),
-        gbn if overrides.get("nos_gbn") else None,
-        task_data.get("image_gbn"),
-    )
+    orig_nos_branch = str(task_data.get("branch") or "").strip()
+    orig_image_branch = str(task_data.get("image_branch") or "").strip()
+    orig_nos_commit = str(task_data.get("commit_id") or "").strip()
+    orig_image_commit = str(task_data.get("image_commit") or "").strip()
+    # Jita default: image is a copy of NOS when branches match, when the original
+    # image commit already equalled NOS, or when image fields were left unset.
+    if orig_image_branch and orig_nos_branch:
+        image_follows_nos = orig_image_branch == orig_nos_branch
+    elif orig_image_commit and orig_nos_commit:
+        image_follows_nos = orig_image_commit == orig_nos_commit
+    else:
+        image_follows_nos = not orig_image_branch and not orig_image_commit
+
+    if overrides.get("image_branch"):
+        image_branch = overrides.get("image_branch")
+    elif image_follows_nos:
+        image_branch = branch
+    else:
+        image_branch = _first(task_data.get("image_branch"), branch)
+
+    if overrides.get("image_commit"):
+        image_commit = overrides.get("image_commit")
+    elif image_follows_nos:
+        # Unchecked Image Build: use the new NOS commit, not the previous image commit.
+        image_commit = commit_id
+    else:
+        image_commit = _first(
+            task_data.get("image_commit"),
+            commit_id if nos_commit else None,
+        )
+
+    if overrides.get("image_gbn") not in (None, ""):
+        image_gbn = _as_int(overrides.get("image_gbn"))
+    elif image_follows_nos:
+        image_gbn = gbn
+    else:
+        image_gbn = _first(
+            _as_int(task_data.get("image_gbn")),
+            gbn if overrides.get("nos_gbn") else None,
+            task_data.get("image_gbn"),
+        )
 
     test_framework = task_data.get("test_framework") or "nutest-py3-tests"
     fw_branch_key = "%s_branch" % test_framework
@@ -8946,21 +9099,23 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         task_data.get(fw_branch_key),
         fw_meta.get("branch"),
     )
-    nutest_commit = _first(
-        overrides.get("nutest_commit"),
-        overrides.get("framework_commit"),
-        task_data.get(fw_commit_key),
-        fw_meta.get("commit"),
+    # Leave nutest/framework commits empty unless the user typed them so Jita
+    # picks the latest on the branch instead of pinning the original SHAs.
+    nutest_commit = (
+        str(overrides.get("nutest_commit") or overrides.get("framework_commit") or "").strip()
+        or None
     )
     test_branch = _first(overrides.get("test_branch"), test_meta.get("branch"), nutest_branch)
-    test_commit = _first(overrides.get("test_commit"), test_meta.get("commit"))
+    test_commit = str(overrides.get("test_commit") or "").strip() or None
 
     if nutest_branch:
         fw_meta["branch"] = nutest_branch
+    fw_meta.pop("commit", None)
     if nutest_commit:
         fw_meta["commit"] = nutest_commit
     if test_branch:
         test_meta["branch"] = test_branch
+    test_meta.pop("commit", None)
     if test_commit:
         test_meta["commit"] = test_commit
     if overrides.get("patch_url"):
@@ -8993,7 +9148,9 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
     if "jita3" not in tester_tags:
         tester_tags.append("jita3")
 
-    if "skip_resource_spec_match" in overrides and overrides.get("skip_resource_spec_match") is not None:
+    if "match_resource_spec" in overrides and overrides.get("match_resource_spec") is not None:
+        skip_match = not bool(overrides.get("match_resource_spec"))
+    elif "skip_resource_spec_match" in overrides and overrides.get("skip_resource_spec_match") is not None:
         skip_match = bool(overrides.get("skip_resource_spec_match"))
     else:
         skip_match = _bool_from_task("skip_resource_spec_match", False)
@@ -9033,7 +9190,10 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         rm_json = {}
 
     nos_overridden = any(overrides.get(k) for k in ("nos_branch", "nos_commit", "nos_gbn", "nos_tag"))
-    pc_overridden = any(overrides.get(k) for k in ("pc_commit", "pc_branch", "pc_gbn", "pc_tag"))
+    pc_overridden = any(overrides.get(k) for k in (
+        "pc_commit", "pc_branch", "pc_gbn", "pc_tag",
+        "pc_build_url", "pc_build_url_qcow2",
+    ))
 
     if nos_overridden:
         nos_cluster, nos_build = _ensure_product_build(rm_json, "NOS_CLUSTER")
@@ -9067,6 +9227,13 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         pc_gbn = _as_int(overrides.get("pc_gbn"))
         if pc_gbn is not None:
             pc_build["gbn"] = pc_gbn
+        # Jita PC tab: Build Url -> nos_build_url, Build QCOW2 URL -> pc_build_url.
+        pc_build_url = str(overrides.get("pc_build_url") or "").strip()
+        if pc_build_url:
+            pc_build["nos_build_url"] = pc_build_url
+        pc_qcow2_url = str(overrides.get("pc_build_url_qcow2") or "").strip()
+        if pc_qcow2_url:
+            pc_build["pc_build_url"] = pc_qcow2_url
         pc_build.setdefault("component", "main")
         pc["build"] = pc_build
 
@@ -9075,23 +9242,7 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         if isinstance(spec, dict) and isinstance(spec.get("build"), dict):
             spec["build"] = _sanitize_rm_build(spec["build"])
 
-    retain = copy.deepcopy(task_data.get("retain_resources_config"))
-    if overrides.get("retain_on_failure"):
-        duration = _as_int(overrides.get("retain_duration")) or 720
-        entity = overrides.get("retain_entity") or "CONTAINER"
-        retain = {
-            "criteria": {
-                "TEST_FAILURE": {
-                    "entity": entity,
-                    "type": "AFTER_EACH",
-                    "params": {
-                        "duration": duration,
-                        "exceptions": [],
-                        "states_to_track": ["Failed"],
-                    },
-                }
-            }
-        }
+    retain = _ensure_retain_duration(task_data.get("retain_resources_config"), RETAIN_DURATION_72H_MIN)
 
     sdk_opts = copy.deepcopy(task_data.get("sdk_installation_options") or {})
     if not isinstance(sdk_opts, dict):
@@ -9125,6 +9276,62 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         payload[fw_commit_key] = nutest_commit
     if overrides.get("nos_build_type"):
         payload["build_type"] = overrides["nos_build_type"]
+    else:
+        orig_build_type = _original_build_type(task_data)
+        if orig_build_type:
+            payload["build_type"] = orig_build_type
+    orig_image_build_type = task_data.get("image_build_type")
+    if orig_image_build_type not in (None, ""):
+        payload["image_build_type"] = orig_image_build_type
+
+    imaging_options = _original_imaging_options(task_data)
+    orig_nos_url = str(imaging_options.get("nos_url") or "").strip()
+    orig_hyp_url = str(imaging_options.get("hypervisor_url") or "").strip()
+    if orig_nos_url or orig_hyp_url:
+        orig_gbn = task_data.get("gbn")
+        orig_commit = task_data.get("commit_id")
+        orig_image_commit = task_data.get("image_commit")
+        orig_image_gbn = task_data.get("image_gbn")
+        if orig_nos_url:
+            imaging_options["nos_url"] = _rewrite_url_for_new_build(
+                orig_nos_url, orig_gbn, gbn, orig_commit, commit_id,
+            )
+        if orig_hyp_url:
+            imaging_options["hypervisor_url"] = _rewrite_url_for_new_build(
+                orig_hyp_url,
+                orig_image_gbn if orig_image_gbn not in (None, "") else orig_gbn,
+                image_gbn if image_gbn not in (None, "") else gbn,
+                orig_image_commit or orig_commit,
+                image_commit or commit_id,
+            )
+        if not payload.get("build_type"):
+            inferred = _original_build_type(task_data, orig_nos_url)
+            if inferred:
+                payload["build_type"] = inferred
+        payload["imaging_options"] = imaging_options
+    if overrides.get("override_resource_config"):
+        nested_params = requested_hw.get("nested_params") if isinstance(requested_hw.get("nested_params"), dict) else {}
+    else:
+        nested_params = _original_nested_params(task_data)
+    if nested_params:
+        payload["nested_params"] = nested_params
+    elif overrides.get("override_resource_config"):
+        payload.pop("nested_params", None)
+    if requested_hw or infra:
+        if not requested_hw:
+            requested_hw = {}
+        requested_hw["infra"] = infra
+        if payload.get("imaging_options"):
+            requested_hw["imaging_options"] = payload["imaging_options"]
+        if nested_params:
+            requested_hw["nested_params"] = nested_params
+        payload["requested_hardware"] = requested_hw
+        hypervisor = requested_hw.get("hypervisor") or task_data.get("hypervisor")
+        if hypervisor:
+            payload["hypervisor"] = hypervisor
+        hypervisor_version = requested_hw.get("hypervisor_version") or task_data.get("hypervisor_version")
+        if hypervisor_version:
+            payload["hypervisor_version"] = hypervisor_version
     if label:
         payload["label"] = label
     if tester_tags:
@@ -9140,6 +9347,106 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         payload["retain_resources_config"] = retain
 
     return {k: v for k, v in payload.items() if v is not None and v != ""}
+
+
+def _task_job_profile_id(task_data):
+    if not isinstance(task_data, dict):
+        return ""
+    jp = task_data.get("job_profile")
+    if isinstance(jp, dict):
+        oid = jp.get("$oid") or jp.get("_id") or jp.get("id")
+        if isinstance(oid, dict):
+            oid = oid.get("$oid")
+        return str(oid or "").strip()
+    if isinstance(jp, str):
+        return jp.strip()
+    return ""
+
+
+def _jp_name_from_agave_task(task_data):
+    """JP name from a fetched agave task: explicit name, then label without -(N)."""
+    if not isinstance(task_data, dict):
+        return ""
+    name = str(task_data.get("job_profile_name") or "").strip()
+    if name:
+        return name
+    jp = task_data.get("job_profile")
+    if isinstance(jp, dict):
+        name = str(jp.get("name") or "").strip()
+        if name:
+            return name
+    label = str(task_data.get("label") or "").strip()
+    if label:
+        import re
+        stripped = re.sub(r"-\(\d+\)$", "", label).strip()
+        return stripped or label
+    return ""
+
+
+def _last_hypervisor_in_jp_name(jp_name):
+    """Return 'esx' or 'ahv' from the last AHV/ESX/ESXi token in the JP name.
+
+    Names like AHVorESX_special_config_AOS-tar_(AHV) mention both; the suffix wins.
+    """
+    import re
+    last = None
+    for match in re.finditer(r"AHV|ESXi?", str(jp_name or ""), flags=re.IGNORECASE):
+        last = match.group(0)
+    if not last:
+        return None
+    return "esx" if last.lower().startswith("esx") else "ahv"
+
+
+def _is_esx_job_profile(jp_name):
+    return _last_hypervisor_in_jp_name(jp_name) == "esx"
+
+
+def _rerun_trigger_account(jp_name):
+    """ESX job profiles run as svc.teamchandra; others use the caller's LDAP account."""
+    if _is_esx_job_profile(jp_name):
+        return "svc.teamchandra"
+    return None
+
+
+def _select_rerun_auth(jp_name, user_auth, current_username, service_accounts=None):
+    """Pick Jita auth for one task. AHV and ESX tasks in the same batch stay independent."""
+    svc_name = _rerun_trigger_account(jp_name)
+    accounts = service_accounts if service_accounts is not None else RUN_PLAN_SERVICE_ACCOUNTS
+    if svc_name and svc_name in accounts:
+        return accounts[svc_name], svc_name
+    return user_auth, current_username
+
+
+def _resolve_rerun_jp_name(task_data, fetch_name=None, cache=None):
+    """
+    Resolve the real JP name for account selection.
+
+    Prefer job_profile_name / job_profile.name. If the task only has a JP id,
+    fetch the name (cached per batch) so a generic AHV label cannot hide an
+    ESX JP, and an ESX leftover label cannot steal an AHV rerun.
+    Label is the last fallback.
+    """
+    if not isinstance(task_data, dict):
+        return ""
+    name = str(task_data.get("job_profile_name") or "").strip()
+    if name:
+        return name
+    jp = task_data.get("job_profile")
+    if isinstance(jp, dict):
+        name = str(jp.get("name") or "").strip()
+        if name:
+            return name
+    jp_id = _task_job_profile_id(task_data)
+    if jp_id and fetch_name:
+        if cache is not None and jp_id in cache:
+            fetched = cache[jp_id]
+        else:
+            fetched = str(fetch_name(jp_id) or "").strip()
+            if cache is not None:
+                cache[jp_id] = fetched
+        if fetched:
+            return fetched
+    return _jp_name_from_agave_task(task_data)
 
 
 # ======================================================
@@ -9611,9 +9918,10 @@ def _apply_testcase_tag_ops(testcase_oids, tags, branch, team, action="add"):
 def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip, limit):
     """Build the MongoDB aggregation pipeline payload for the TCMS POST API.
 
-    Master and release branches use the same filter clauses to match TCMS UI:
-    - Both use team-specific test_sets regex matching TCMS detail page filters
-    - No extra exclusions to ensure consistency with TCMS UI data
+    Master and release branches use different filter clauses:
+    - Master includes release_name exclusion and metadata tag exclusions.
+    - Release branches include tc_type filter for regression/smart_qual.
+    Both include a team-specific test_sets regex.
     """
     is_master = milestone == "master"
     team_test_set_regex = f"{test_set_regex}{team}/"
@@ -9625,6 +9933,9 @@ def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip,
                 "last_result": {"$elemMatch": {"pass_name": "overall"}},
                 "deleted": False,
             },
+            {"test_case.test_sets": {"$regex": test_set_regex, "$options": "i"}},
+            {"release_name": {"$ne": milestone}},
+            {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
             {"additional_data.team": f"{team_prefix}/{team}"},
             {"test_case.test_sets": {"$regex": team_test_set_regex, "$options": "i"}},
             {"test_case.deprecated": False},
@@ -11104,7 +11415,13 @@ def _framework_args_value_to_dict(val):
             parsed = json.loads(s)
             return dict(parsed) if isinstance(parsed, dict) else {}
         except (json.JSONDecodeError, TypeError, ValueError):
-            return {}
+            # Some payloads arrive as python-literal dict strings with single quotes.
+            try:
+                import ast
+                parsed = ast.literal_eval(s)
+                return dict(parsed) if isinstance(parsed, dict) else {}
+            except (SyntaxError, ValueError, TypeError):
+                return {}
     return {}
 
 
@@ -11208,6 +11525,404 @@ def _ensure_test_args_on_test_set_payload(ts_payload, default_value="{}", custom
     # JITA UI "Test Args" panel renders from args_map (dict, not JSON string).
     ts_payload["args_map"] = dict(existing)
     return ts_payload
+
+
+def _manage_ts_safe_copy_dict(value):
+    """Return a plain dict copy for mapping values; fallback to {} for non-dicts."""
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _manage_ts_stringify_value(value):
+    """Stable stringify for comparing values that may be nested types."""
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def _manage_ts_extract_test_args(ts_doc):
+    """Use JITA Test Args (args_map). Fall back to string fields only if args_map is empty."""
+    primary = _test_args_value_to_dict(ts_doc.get("args_map") if isinstance(ts_doc, dict) else None)
+    if primary:
+        return primary
+    merged = {}
+    for field in ("test_args", "testArgs"):
+        for key, val in _test_args_value_to_dict(ts_doc.get(field) if isinstance(ts_doc, dict) else None).items():
+            if key not in merged:
+                merged[key] = val
+    return merged
+
+
+def _manage_ts_extract_framework_args(ts_doc):
+    """Use JITA Test Framework Options (agave_options). Fall back to strings if empty."""
+    primary = _framework_args_value_to_dict(ts_doc.get("agave_options") if isinstance(ts_doc, dict) else None)
+    if primary:
+        return primary
+    merged = {}
+    for field in ("framework_args", "frameworkArgs"):
+        for key, val in _framework_args_value_to_dict(ts_doc.get(field) if isinstance(ts_doc, dict) else None).items():
+            if key not in merged:
+                merged[key] = val
+    return merged
+
+
+def _manage_ts_compute_common_args(per_ts_rows):
+    """Compute the union of arg keys and value consistency across selected test sets.
+
+    A key listed on any selected TS is included. ``multiple_values`` is true only when
+    the TS that already have the key disagree; absence on some TS is not a value.
+    """
+    if not per_ts_rows:
+        return {"framework_args": [], "test_args": []}
+
+    def _union_keys(field):
+        keys = set()
+        for row in per_ts_rows:
+            keys.update((row.get(field) or {}).keys())
+        return keys
+
+    def _build_rows(keys, field):
+        out = []
+        for key in sorted(keys):
+            values = [
+                row[field].get(key)
+                for row in per_ts_rows
+                if key in (row.get(field) or {})
+            ]
+            val_set = {_manage_ts_stringify_value(v) for v in values}
+            multiple_values = len(val_set) > 1
+            out.append({
+                "key": key,
+                "value": None if multiple_values else (values[0] if values else None),
+                "multiple_values": multiple_values,
+                "value_samples": list(val_set)[:5] if multiple_values else [],
+            })
+        return out
+
+    return {
+        "framework_args": _build_rows(_union_keys("framework_args"), "framework_args"),
+        "test_args": _build_rows(_union_keys("test_args"), "test_args"),
+    }
+
+
+def _manage_ts_normalize_update_maps(req_data):
+    """Normalize update payload into two category maps and validated new args."""
+    edits_framework = req_data.get("edit_framework_args") or {}
+    edits_test = req_data.get("edit_test_args") or {}
+    if not isinstance(edits_framework, dict):
+        raise ValueError("edit_framework_args must be an object")
+    if not isinstance(edits_test, dict):
+        raise ValueError("edit_test_args must be an object")
+
+    new_args = req_data.get("new_arguments") or []
+    if not isinstance(new_args, list):
+        raise ValueError("new_arguments must be an array")
+
+    normalized_new_args = []
+    for idx, item in enumerate(new_args):
+        if not isinstance(item, dict):
+            raise ValueError(f"new_arguments[{idx}] must be an object")
+        key = str(item.get("key", "")).strip()
+        category = str(item.get("category", "")).strip().lower()
+        overwrite_existing = bool(item.get("overwrite_existing", False))
+        if not key:
+            raise ValueError(f"new_arguments[{idx}].key is required")
+        if category not in ("framework", "test"):
+            raise ValueError(f"new_arguments[{idx}].category must be 'framework' or 'test'")
+        value = item.get("value")
+        if value is None:
+            value = ""
+        normalized_new_args.append({
+            "key": key,
+            "value": value,
+            "category": category,
+            "overwrite_existing": overwrite_existing,
+        })
+
+    return edits_framework, edits_test, normalized_new_args
+
+
+def _manage_ts_validate_search_query(query, use_regex=False):
+    """Validate search query semantics used by Manage TS UI."""
+    q = str(query or "").strip()
+    if len(q) < 2:
+        raise ValueError("query must be at least 2 characters")
+    if use_regex:
+        try:
+            re.compile(q)
+        except re.error as ex:
+            raise ValueError(f"Invalid regex: {ex}") from ex
+    return q
+
+
+def _manage_ts_apply_plan_to_args(base_framework, base_test, edits_framework, edits_test, new_args):
+    """Return updated args + structured change info without mutating input args.
+
+    Checkbox edits apply only when the key already exists on this test set.
+    ``new_arguments`` still add or overwrite according to overwrite_existing.
+    """
+    before_framework = _manage_ts_safe_copy_dict(base_framework)
+    before_test = _manage_ts_safe_copy_dict(base_test)
+    after_framework = _manage_ts_safe_copy_dict(base_framework)
+    after_test = _manage_ts_safe_copy_dict(base_test)
+
+    changed_framework = []
+    changed_test = []
+    collision_skips = []
+
+    for key, val in edits_framework.items():
+        if key not in after_framework:
+            continue
+        if val is None:
+            val = ""
+        if _manage_ts_stringify_value(after_framework.get(key)) != _manage_ts_stringify_value(val):
+            changed_framework.append({"key": key, "before": before_framework.get(key), "after": val, "kind": "edit"})
+        after_framework[key] = val
+
+    for key, val in edits_test.items():
+        if key not in after_test:
+            continue
+        if val is None:
+            val = ""
+        if _manage_ts_stringify_value(after_test.get(key)) != _manage_ts_stringify_value(val):
+            changed_test.append({"key": key, "before": before_test.get(key), "after": val, "kind": "edit"})
+        after_test[key] = val
+
+    for item in new_args:
+        tgt = after_framework if item["category"] == "framework" else after_test
+        before_tgt = before_framework if item["category"] == "framework" else before_test
+        changed_tgt = changed_framework if item["category"] == "framework" else changed_test
+        key = item["key"]
+        if key in tgt and not item["overwrite_existing"]:
+            collision_skips.append({
+                "key": key,
+                "category": item["category"],
+                "existing_value": tgt.get(key),
+                "proposed_value": item.get("value"),
+                "reason": "collision_skip",
+            })
+            continue
+        old = before_tgt.get(key)
+        new_val = item.get("value")
+        if new_val is None:
+            new_val = ""
+        if key not in tgt or _manage_ts_stringify_value(tgt.get(key)) != _manage_ts_stringify_value(new_val):
+            changed_tgt.append({
+                "key": key,
+                "before": old,
+                "after": new_val,
+                "kind": "new_overwrite" if key in before_tgt else "new",
+            })
+        tgt[key] = new_val
+
+    return {
+        "before_framework": before_framework,
+        "before_test": before_test,
+        "after_framework": after_framework,
+        "after_test": after_test,
+        "changed_framework": changed_framework,
+        "changed_test": changed_test,
+        "collision_skips": collision_skips,
+    }
+
+
+_MANAGE_TS_FW_FIELDS = (
+    ("framework_args", False),
+    ("frameworkArgs", False),
+    ("agave_options", True),
+)
+_MANAGE_TS_TEST_FIELDS = (
+    ("test_args", False),
+    ("testArgs", False),
+    ("args_map", True),
+)
+_MANAGE_TS_FW_PRIMARY = "agave_options"
+_MANAGE_TS_TEST_PRIMARY = "args_map"
+_MANAGE_TS_FW_CANONICAL = ("framework_args", "agave_options")
+_MANAGE_TS_TEST_CANONICAL = ("test_args", "args_map")
+
+
+def _manage_ts_restrict_map(original, after, allowed_new_keys):
+    """Keep original keys (values from after when present); add only allowed new keys."""
+    out = {}
+    original = original or {}
+    after = after or {}
+    for key, val in original.items():
+        out[key] = after[key] if key in after else val
+    for key in allowed_new_keys or []:
+        if key in after:
+            out[key] = after[key]
+    return out
+
+
+def _manage_ts_build_put_payload(existing_ts, after_framework, after_test, new_args=None):
+    """Clone source test set and patch each arg field in place.
+
+    Checkbox edits never copy a key into a field (or test set) that did not
+    already have it. ``new_arguments`` may add keys; on a test set with no
+    args they are written only to the canonical fields.
+    """
+    payload = _manage_ts_safe_copy_dict(existing_ts)
+    new_args = new_args or []
+    new_fw = [item.get("key") for item in new_args if item.get("category") == "framework" and item.get("key")]
+    new_test = [item.get("key") for item in new_args if item.get("category") == "test" and item.get("key")]
+    after_framework = after_framework if isinstance(after_framework, dict) else {}
+    after_test = after_test if isinstance(after_test, dict) else {}
+
+    def apply_category(fields, parse_fn, after, allowed_new, canonical, primary_name):
+        fields_with_keys = []
+        primary_target = None
+        for name, as_object in fields:
+            parsed = parse_fn(existing_ts.get(name) if isinstance(existing_ts, dict) else None)
+            if parsed:
+                fields_with_keys.append((name, as_object, parsed))
+            if name == primary_name:
+                primary_target = (name, as_object, parsed)
+
+        if primary_target and primary_target[2]:
+            targets = [primary_target]
+        elif fields_with_keys:
+            targets = fields_with_keys
+        elif allowed_new:
+            targets = [
+                (name, as_object, {})
+                for name, as_object in fields
+                if name in canonical
+            ]
+        else:
+            return
+
+        for name, as_object, original in targets:
+            restricted = _manage_ts_restrict_map(original, after, allowed_new)
+            if _manage_ts_stringify_value(original) == _manage_ts_stringify_value(restricted):
+                continue
+            if as_object:
+                payload[name] = _manage_ts_safe_copy_dict(restricted)
+            else:
+                payload[name] = json.dumps(restricted, separators=(",", ":"))
+
+    apply_category(
+        _MANAGE_TS_FW_FIELDS,
+        _framework_args_value_to_dict,
+        after_framework,
+        new_fw,
+        _MANAGE_TS_FW_CANONICAL,
+        _MANAGE_TS_FW_PRIMARY,
+    )
+    apply_category(
+        _MANAGE_TS_TEST_FIELDS,
+        _test_args_value_to_dict,
+        after_test,
+        new_test,
+        _MANAGE_TS_TEST_CANONICAL,
+        _MANAGE_TS_TEST_PRIMARY,
+    )
+    return payload
+
+
+def _manage_ts_sanitize_for_json(val):
+    """Recursively sanitize values for JSON PUT payloads."""
+    if isinstance(val, dict):
+        return {k: _manage_ts_sanitize_for_json(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_manage_ts_sanitize_for_json(v) for v in val]
+    if isinstance(val, (set, tuple)):
+        return [_manage_ts_sanitize_for_json(v) for v in val]
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    if val is Ellipsis:
+        return None
+    return val
+
+
+def _manage_ts_fetch_test_set(ts_id):
+    """Fetch one test set and return normalized record used by inspect/preview/apply."""
+    resp = requests.get(
+        f"{JITA_BASE}/test_sets/{ts_id}",
+        auth=JITA_SVC_AUTH,
+        verify=False,
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to fetch test set {ts_id} (HTTP {resp.status_code})")
+    body = resp.json() or {}
+    ts_doc = body.get("data", {}) or {}
+    ts_oid = ts_doc.get("_id")
+    if isinstance(ts_oid, dict) and "$oid" in ts_oid:
+        ts_oid = ts_oid["$oid"]
+    elif ts_oid and not isinstance(ts_oid, str):
+        ts_oid = str(ts_oid)
+    return {
+        "id": ts_oid or ts_id,
+        "name": ts_doc.get("name", ""),
+        "framework_args": _manage_ts_extract_framework_args(ts_doc),
+        "test_args": _manage_ts_extract_test_args(ts_doc),
+        "raw": ts_doc,
+    }
+
+
+def _jita_test_sets_search_params(raw_query, limit):
+    """Query params for JITA GET /test_sets name search used by Manage TS.
+
+    Name regex is unindexed. ``sort=-_id`` plus large field projections (args maps
+    / ``only`` lists) routinely exceed JITA_SEARCH_TIMEOUT, so the UI gets zero
+    test sets. Skip sort and projection so JITA can stop after ``limit``.
+    """
+    return {
+        "raw_query": raw_query,
+        "limit": min(int(limit), 200),
+    }
+
+
+def _manage_ts_build_preview_rows(ts_rows, edits_framework, edits_test, new_args):
+    """Build per-testset preview rows and summary for dry-run/apply endpoints."""
+    preview_rows = []
+    totals = {
+        "test_sets": len(ts_rows),
+        "changed_test_sets": 0,
+        "framework_changes": 0,
+        "test_changes": 0,
+        "collision_skips": 0,
+    }
+    for row in ts_rows:
+        plan = _manage_ts_apply_plan_to_args(
+            row["framework_args"],
+            row["test_args"],
+            edits_framework,
+            edits_test,
+            new_args,
+        )
+        framework_changed = len(plan["changed_framework"])
+        test_changed = len(plan["changed_test"])
+        changed = framework_changed > 0 or test_changed > 0
+        if changed:
+            totals["changed_test_sets"] += 1
+        totals["framework_changes"] += framework_changed
+        totals["test_changes"] += test_changed
+        totals["collision_skips"] += len(plan["collision_skips"])
+        preview_rows.append({
+            "ts_id": row["id"],
+            "ts_name": row["name"],
+            "changed": changed,
+            "changed_framework_args": plan["changed_framework"],
+            "changed_test_args": plan["changed_test"],
+            "collision_skips": plan["collision_skips"],
+            "before_framework_args": plan["before_framework"],
+            "after_framework_args": plan["after_framework"],
+            "before_test_args": plan["before_test"],
+            "after_test_args": plan["after_test"],
+            "put_payload": _manage_ts_build_put_payload(
+                row["raw"],
+                plan["after_framework"],
+                plan["after_test"],
+                new_args,
+            ) if changed else None,
+        })
+    return preview_rows, totals
 
 
 @app.route("/mcp/regression/dynamic-jp/check-existing", methods=["POST"])
@@ -11439,6 +12154,10 @@ def dynamic_jp_fetch_testset():
         if not isinstance(tests, list):
             tests = []
 
+        # Same fields JITA's Test Sets UI shows (args_map / agave_options).
+        normalized_test_args = _manage_ts_extract_test_args(ts_data)
+        normalized_framework_args = _manage_ts_extract_framework_args(ts_data)
+
         return jsonify({
             "success": True,
             "test_set": {
@@ -11446,7 +12165,13 @@ def dynamic_jp_fetch_testset():
                 "name": ts_data.get("name", "") or "",
                 "path": ts_data.get("path", "") or "",
                 "test_args": ts_data.get("test_args", "") or "",
+                "testArgs": ts_data.get("testArgs", "") or "",
+                "args_map": ts_data.get("args_map", {}) or {},
+                "test_args_map": normalized_test_args,
                 "framework_args": ts_data.get("framework_args", "") or "",
+                "frameworkArgs": ts_data.get("frameworkArgs", "") or "",
+                "agave_options": ts_data.get("agave_options", {}) or {},
+                "framework_args_map": normalized_framework_args,
                 "tests": tests,
                 "description": ts_data.get("description", "") or "",
             }
@@ -11687,6 +12412,47 @@ DYN_QMS_KIND_BY_RESOURCE_TYPE = {
 }
 
 
+def _validate_qms_coupon(coupon, resource_type="nested_2.0", username=None):
+    """Validate coupon against QMS and return (ok, payload)."""
+    coupon = (coupon or "").strip()
+    if not coupon:
+        return False, {"error": "No coupon specified"}
+
+    kind = DYN_QMS_KIND_BY_RESOURCE_TYPE.get((resource_type or "nested_2.0").strip(), "nested_ahv_2")
+    user_email = (username or "").strip()
+    if user_email and "@" not in user_email:
+        user_email = f"{user_email}@nutanix.com"
+    if not user_email:
+        return False, {"error": "Could not determine user email for validation"}
+
+    from urllib.parse import quote as _quote
+    try:
+        resp = requests.post(
+            f"{QMS_BASE_URL}/coupons/{_quote(coupon, safe='')}/validate",
+            json={"kinds": [kind], "username": user_email},
+            verify=False,
+            timeout=20,
+        )
+    except requests.exceptions.Timeout:
+        return False, {"error": "QMS validation timed out", "status_code": 504}
+    except requests.exceptions.RequestException as e:
+        return False, {"error": f"Could not reach QMS: {e}", "status_code": 502}
+
+    try:
+        body = resp.json()
+    except (ValueError, TypeError):
+        body = {}
+
+    if resp.status_code == 200:
+        return True, {
+            "category": body.get("category"),
+            "message": "Coupon is valid",
+        }
+
+    msg = body.get("message") if isinstance(body, dict) else None
+    return False, {"error": msg or "Invalid coupon", "status_code": 400}
+
+
 @app.route("/mcp/regression/dynamic-jp/validate-coupon", methods=["POST"])
 @jwt_required
 def dynamic_jp_validate_coupon():
@@ -11706,40 +12472,15 @@ def dynamic_jp_validate_coupon():
         if not coupon:
             return jsonify({"valid": False, "error": "No coupon specified"}), 400
 
-        kind = DYN_QMS_KIND_BY_RESOURCE_TYPE.get(resource_type, "nested_ahv_2")
-
         username = current_user_email or (req_data.get("username") or "").strip()
-        if username and "@" not in username:
-            username = f"{username}@nutanix.com"
-        if not username:
-            return jsonify({"valid": False, "error": "Could not determine user email for validation"}), 400
-
-        from urllib.parse import quote as _quote
-        try:
-            resp = requests.post(
-                f"{QMS_BASE_URL}/coupons/{_quote(coupon, safe='')}/validate",
-                json={"kinds": [kind], "username": username},
-                verify=False,
-                timeout=20,
-            )
-        except requests.exceptions.Timeout:
-            return jsonify({"valid": False, "error": "QMS validation timed out"}), 504
-        except requests.exceptions.RequestException as e:
-            return jsonify({"valid": False, "error": f"Could not reach QMS: {e}"}), 502
-
-        try:
-            body = resp.json()
-        except (ValueError, TypeError):
-            body = {}
-
-        if resp.status_code == 200:
+        valid, result = _validate_qms_coupon(coupon, resource_type=resource_type, username=username)
+        if valid:
             return jsonify({
                 "valid": True,
-                "category": body.get("category"),
-                "message": "Coupon is valid",
+                "category": result.get("category"),
+                "message": result.get("message", "Coupon is valid"),
             })
-        msg = body.get("message") if isinstance(body, dict) else None
-        return jsonify({"valid": False, "error": msg or "Invalid coupon"})
+        return jsonify({"valid": False, "error": result.get("error", "Invalid coupon")}), result.get("status_code", 400)
     except Exception as e:
         logger.error(f"Error validating coupon: {e}", exc_info=True)
         return jsonify({"valid": False, "error": str(e)}), 500
@@ -11753,10 +12494,30 @@ def dynamic_jp_create():
     - create_fresh=False: clone from source_jp_id, optionally copying test_args from source_testset_id
     """
     try:
-        # Get current user info from JWT
-        current_user_email = None
-        if hasattr(g, 'current_user') and isinstance(g.current_user, dict):
-            current_user_email = g.current_user.get('email', '').strip()
+        # Get current user info from JWT. To make JITA's native `created_by` the
+        # real person (not the shared svc account), we authenticate the JITA
+        # create/update calls with the logged-in user's cached LDAP credentials
+        # when available, falling back to the svc account otherwise (e.g. cache
+        # expired after a backend restart) so creation never fails.
+        # Independently, we also stamp the personal login into the JP's
+        # emails/user fields so RegX-side ownership stays correct even on the
+        # svc-account fallback path.
+        current_user_email, current_user_name = _personal_identity_from_jwt()
+        if not current_user_email:
+            current_user_email = None
+
+        _user_auth = _current_user_jita_auth()
+        create_auth = _user_auth or JITA_SVC_AUTH
+        if _user_auth:
+            logger.info(
+                f"[create] Authenticating JITA calls as user '{current_user_name}' "
+                f"(created_by will be the user)"
+            )
+        else:
+            logger.info(
+                "[create] No cached user credentials — authenticating JITA calls as "
+                "service account (created_by = svc; owner recorded via emails/user)"
+            )
         
         req_data = request.json
         if not req_data:
@@ -12024,12 +12785,37 @@ def dynamic_jp_create():
                 jp_payload["system_under_test"] = sut
 
             if enabled:
-                jp_payload.setdefault("package_type", "tar")
-                jp_payload.setdefault("test_service", "NutestPy3Tests")
+                # TCMS "service" is product-agnostic. Source/template JPs carry
+                # whatever they test (PC, AOS, NOS, AWS, Files, …); always publish
+                # results under nutest-py3test. Assignment (not setdefault) so a
+                # JITA GET-after-POST that restores the product value is overwritten.
+                jp_payload["service"] = "nutest-py3test"
+                # Fill blanks only — keep an explicit non-empty package/test_service.
+                if not str(jp_payload.get("package_type") or "").strip():
+                    jp_payload["package_type"] = "tar"
+                if not str(jp_payload.get("test_service") or "").strip():
+                    jp_payload["test_service"] = "NutestPy3Tests"
             else:
                 # Empty strings survive JITA PUT; missing keys get defaulted back.
                 for k in ("service", "package_type", "test_service"):
                     jp_payload[k] = ""
+
+        def _force_tcms_service_on_test_set(ts_payload):
+            """New test sets (fresh or cloned copy) use the same TCMS service as new JPs."""
+            if not isinstance(ts_payload, dict):
+                return
+            ts_payload["service"] = "nutest-py3test"
+            if not str(ts_payload.get("package_type") or "").strip():
+                ts_payload["package_type"] = "tar"
+            tests = ts_payload.get("tests")
+            if not isinstance(tests, list):
+                return
+            for row in tests:
+                if not isinstance(row, dict):
+                    continue
+                row["service"] = "nutest-py3test"
+                if not str(row.get("package_type") or "").strip():
+                    row["package_type"] = "tar"
 
         def _apply_retain_setup_on_failure(jp_payload):
             """Retain deployment after each test failure, excluding DataCorruptionError."""
@@ -12044,7 +12830,7 @@ def dynamic_jp_create():
             existing_params = (
                 existing_test_failure.get("params") if isinstance(existing_test_failure, dict) else {}
             )
-            duration = existing_params.get("duration", 720) if isinstance(existing_params, dict) else 720
+            duration = RETAIN_DURATION_72H_MIN
             states = existing_params.get("states_to_track") if isinstance(existing_params, dict) else None
             if not isinstance(states, list) or not states:
                 states = ["Failed"]
@@ -12392,7 +13178,7 @@ def dynamic_jp_create():
                     row.setdefault("framework_version", "nutest-py3-tests")
                     row.setdefault("framework", "nutest-py3-tests")
                     row.setdefault("package_type", "tar")
-                    row.setdefault("service", "NutestPy3Tests")
+                    row["service"] = "nutest-py3test"
                     test_entries.append(row)
             else:
                 test_entries = source_ts.get("tests", []) or []
@@ -12416,6 +13202,7 @@ def dynamic_jp_create():
                 new_ts_payload, retain_setup_on_failure, custom_framework_options
             )
             _ensure_test_args_on_test_set_payload(new_ts_payload, "{}", custom_test_args)
+            _force_tcms_service_on_test_set(new_ts_payload)
             logger.info(f"[create] TS POST payload: name={new_ts_name}, #tests={len(test_entries)}, "
                         f"test_args_keys={list(_test_args_value_to_dict(new_ts_payload.get('test_args')).keys())}, "
                         f"fw_args_keys={list(_framework_args_value_to_dict(new_ts_payload.get('framework_args')).keys())}")
@@ -12425,7 +13212,7 @@ def dynamic_jp_create():
                 ts_create_resp = requests.post(
                     f"{JITA_BASE}/test_sets",
                     json=new_ts_payload,
-                    auth=JITA_SVC_AUTH, verify=False, timeout=30,
+                    auth=create_auth, verify=False, timeout=30,
                 )
                 ts_resp_json = ts_create_resp.json() if ts_create_resp.content else {}
                 if ts_resp_json.get("success"):
@@ -12435,7 +13222,7 @@ def dynamic_jp_create():
                         try:
                             ts_get_resp = requests.get(
                                 f"{JITA_BASE}/test_sets/{created_ts_id}",
-                                auth=JITA_SVC_AUTH,
+                                auth=create_auth,
                                 verify=False,
                                 timeout=30,
                             )
@@ -12455,7 +13242,7 @@ def dynamic_jp_create():
                                     ts_put_resp = requests.put(
                                         f"{JITA_BASE}/test_sets/{created_ts_id}",
                                         json=created_ts_doc,
-                                        auth=JITA_SVC_AUTH,
+                                        auth=create_auth,
                                         verify=False,
                                         timeout=30,
                                     )
@@ -12588,7 +13375,7 @@ def dynamic_jp_create():
                     "infra": merged_infra,
                     "requested_hardware": _default_requested_hardware(resource_type),
                     "services": ["NOS"],
-                    "service": "AOS",
+                    "service": "nutest-py3test",
                     "test_framework": "nutest-py3-tests",
                     "nutest-py3-tests_branch": nutest_branch,
                     "scheduling_options": _default_scheduling_options(),
@@ -12618,7 +13405,7 @@ def dynamic_jp_create():
                     "infra": infra,
                     "requested_hardware": _default_requested_hardware(resource_type),
                     "services": ["NOS"],
-                    "service": "AOS",
+                    "service": "nutest-py3test",
                     "test_framework": "nutest-py3-tests",
                     "nutest-py3-tests_branch": nutest_branch,
                     "scheduling_options": _default_scheduling_options(),
@@ -12913,6 +13700,9 @@ def dynamic_jp_create():
 
         if retain_setup_on_failure:
             _apply_retain_setup_on_failure(new_jp_payload)
+        new_jp_payload["retain_resources_config"] = _ensure_retain_duration(
+            new_jp_payload.get("retain_resources_config"), RETAIN_DURATION_72H_MIN
+        )
 
         # Release Migration: use the explicitly transformed description when provided
         # (e.g. old-version -> new-version replacement), overriding the generic default.
@@ -12959,6 +13749,16 @@ def dynamic_jp_create():
                 recipients = [current_user_email]
                 jp["emails"] = recipients
                 jp["email_ids"] = recipients
+                # Record the human requester as owner-of-record. JITA authenticates
+                # this POST as the shared svc account (so created_by = svc), but the
+                # ownership logic treats `user`/`emails` as the real owner for
+                # service-account-created entities — this makes the JP's manager
+                # show the personal login instead of the svc account.
+                # JITA's owner/"Created by" follows the sAMAccountName pattern
+                # (firstname.lastname, e.g. "swapnil.wankhede"), NOT an email — so
+                # stamp the username here; keep the email only in emails/email_ids.
+                if current_user_name:
+                    jp["user"] = current_user_name
                 jp["private"] = True
                 jp["user_groups"] = ["cdp_reg_jarvis"]
             # Disable "Run Tests With Tags" and drop inherited TCMS tag(s) (e.g. "unstable").
@@ -13013,7 +13813,7 @@ def dynamic_jp_create():
             jp_create_resp = requests.post(
                 f"{JITA_BASE}/job_profiles",
                 json=serializable_payload,
-                auth=JITA_SVC_AUTH,
+                auth=create_auth,
                 verify=False,
                 timeout=30
             )
@@ -13050,7 +13850,7 @@ def dynamic_jp_create():
             try:
                 get_resp = requests.get(
                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
-                    auth=JITA_SVC_AUTH,
+                    auth=create_auth,
                     verify=False,
                     timeout=30,
                 )
@@ -13093,7 +13893,7 @@ def dynamic_jp_create():
                         put_resp = requests.put(
                             f"{JITA_BASE}/job_profiles/{created_jp_id}",
                             json=sanitize_value(jp_data),
-                            auth=JITA_SVC_AUTH,
+                            auth=create_auth,
                             verify=False,
                             timeout=30,
                         )
@@ -13105,7 +13905,7 @@ def dynamic_jp_create():
                             try:
                                 final_get = requests.get(
                                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
-                                    auth=JITA_SVC_AUTH,
+                                    auth=create_auth,
                                     verify=False,
                                     timeout=15,
                                 )
@@ -13161,7 +13961,7 @@ def dynamic_jp_create():
             try:
                 get_resp = requests.get(
                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
-                    auth=JITA_SVC_AUTH,                     verify=False, timeout=30,
+                    auth=create_auth,                     verify=False, timeout=30,
                 )
                 if get_resp.status_code == 200:
                     jp_data = get_resp.json().get("data", {})
@@ -13190,7 +13990,7 @@ def dynamic_jp_create():
                         put_resp = requests.put(
                             f"{JITA_BASE}/job_profiles/{created_jp_id}",
                             json=put_payload,
-                            auth=JITA_SVC_AUTH,                             verify=False, timeout=30,
+                            auth=create_auth,                             verify=False, timeout=30,
                         )
                         if put_resp.status_code == 200:
                             logger.info(f"[create] Tags applied successfully: tester_tags={merged}")
@@ -13536,13 +14336,31 @@ def dynamic_jp_search():
 
         ts_raw_q = _build_raw_query(ts_tool_cond) if include_test_sets else None
         if ts_raw_q:
-            try:
-                ts_resp = requests.get(
+            def _run_ts_search(raw_q, lim, timeout_s):
+                return requests.get(
                     f"{JITA_BASE}/test_sets",
-                    params={"raw_query": ts_raw_q, "limit": limit, "sort": "-_id",
-                            "only": "_id,name,description,created_at"},
-                    auth=JITA_SVC_AUTH, verify=False, timeout=JITA_SEARCH_TIMEOUT,
+                    params=_jita_test_sets_search_params(raw_q, lim),
+                    auth=JITA_SVC_AUTH, verify=False, timeout=timeout_s,
                 )
+
+            ts_resp = None
+            try:
+                ts_resp = _run_ts_search(ts_raw_q, limit, min(max(JITA_SEARCH_TIMEOUT, 20), 25))
+            except requests.exceptions.Timeout:
+                logger.warning("[search] TS search timed out; retrying with limit=10")
+                try:
+                    ts_resp = _run_ts_search(ts_raw_q, min(10, int(limit) or 10), 40)
+                except requests.exceptions.Timeout:
+                    ts_resp = None
+                    warnings.append(
+                        "Test set search timed out. Narrow the query or lower the result limit, then retry."
+                    )
+                    logger.warning("[search] TS search timed out on retry")
+            except Exception as e:
+                warnings.append(f"Test set search failed: {e}")
+                logger.warning(f"[search] TS search failed: {e}")
+
+            if ts_resp is not None:
                 if ts_resp.status_code == 200:
                     ts_body = ts_resp.json() or {}
                     for item in (ts_body.get("data", []) or []):
@@ -13553,19 +14371,19 @@ def dynamic_jp_search():
                             "name": item.get("name", ""),
                             "description": item.get("description", ""),
                             "created_at": item.get("created_at"),
+                            # Include both raw and normalized arg maps so Manage TS can
+                            # compute common keys from list/search payload directly.
+                            "test_args": item.get("test_args", "") or item.get("testArgs", "") or "",
+                            "framework_args": item.get("framework_args", "") or item.get("frameworkArgs", "") or "",
+                            "args_map": item.get("args_map", {}) or {},
+                            "agave_options": item.get("agave_options", {}) or {},
+                            "test_args_map": _manage_ts_extract_test_args(item),
+                            "framework_args_map": _manage_ts_extract_framework_args(item),
                         })
                     totals["test_sets"] = ts_body.get("total", len(result["test_sets"]))
                 else:
                     warnings.append(f"Test set search returned HTTP {ts_resp.status_code}.")
                     logger.warning(f"[search] TS search HTTP {ts_resp.status_code}: {ts_resp.text[:200]}")
-            except requests.exceptions.Timeout:
-                warnings.append(
-                    "Test set search timed out. Narrow the query or lower the result limit, then retry."
-                )
-                logger.warning("[search] TS search timed out")
-            except Exception as e:
-                warnings.append(f"Test set search failed: {e}")
-                logger.warning(f"[search] TS search failed: {e}")
 
         # Note when JITA reports more matches than we returned (shouldn't happen with
         # the high cap, but keeps the UI honest if a query exceeds SEARCH_MAX_LIMIT).
@@ -13584,6 +14402,180 @@ def dynamic_jp_search():
         })
     except Exception as e:
         logger.error(f"Error in dynamic-jp search: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/dynamic-jp/manage-ts/inspect", methods=["POST"])
+@jwt_required
+def manage_ts_inspect():
+    """Inspect selected test sets and return the union of framework/test arguments."""
+    try:
+        req_data = request.json or {}
+        ts_ids = req_data.get("ts_ids") or []
+        if not isinstance(ts_ids, list):
+            return jsonify({"error": "ts_ids must be an array"}), 400
+        ts_ids = [str(i).strip() for i in ts_ids if str(i).strip()]
+        if not ts_ids:
+            return jsonify({"error": "At least one test set id is required"}), 400
+
+        per_ts = []
+        errors = []
+        for ts_id in ts_ids:
+            try:
+                per_ts.append(_manage_ts_fetch_test_set(ts_id))
+            except Exception as e:
+                errors.append({"ts_id": ts_id, "error": str(e)})
+
+        if errors:
+            return jsonify({"error": "Failed to fetch one or more test sets", "details": errors}), 502
+
+        common = _manage_ts_compute_common_args(per_ts)
+        return jsonify({
+            "success": True,
+            "selected_count": len(per_ts),
+            "test_sets": [{"_id": row["id"], "name": row["name"]} for row in per_ts],
+            "common_framework_args": common["framework_args"],
+            "common_test_args": common["test_args"],
+        })
+    except Exception as e:
+        logger.error(f"Error in manage-ts inspect: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/dynamic-jp/manage-ts/preview", methods=["POST"])
+@jwt_required
+def manage_ts_preview():
+    """Dry-run bulk test-set argument updates and return full diff summary."""
+    try:
+        req_data = request.json or {}
+        ts_ids = req_data.get("ts_ids") or []
+        if not isinstance(ts_ids, list):
+            return jsonify({"error": "ts_ids must be an array"}), 400
+        ts_ids = [str(i).strip() for i in ts_ids if str(i).strip()]
+        if not ts_ids:
+            return jsonify({"error": "At least one test set id is required"}), 400
+
+        try:
+            edits_framework, edits_test, new_args = _manage_ts_normalize_update_maps(req_data)
+        except ValueError as vex:
+            return jsonify({"error": str(vex)}), 400
+
+        ts_rows = []
+        errors = []
+        for ts_id in ts_ids:
+            try:
+                ts_rows.append(_manage_ts_fetch_test_set(ts_id))
+            except Exception as e:
+                errors.append({"ts_id": ts_id, "error": str(e)})
+        if errors:
+            return jsonify({"error": "Failed to fetch one or more test sets", "details": errors}), 502
+
+        preview_rows, totals = _manage_ts_build_preview_rows(ts_rows, edits_framework, edits_test, new_args)
+        return jsonify({
+            "success": True,
+            "dry_run": True,
+            "summary": totals,
+            "preview": preview_rows,
+        })
+    except Exception as e:
+        logger.error(f"Error in manage-ts preview: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/dynamic-jp/manage-ts/apply", methods=["POST"])
+@jwt_required
+def manage_ts_apply():
+    """Apply bulk test-set argument updates after user-reviewed dry run."""
+    try:
+        req_data = request.json or {}
+        ts_ids = req_data.get("ts_ids") or []
+        if not isinstance(ts_ids, list):
+            return jsonify({"error": "ts_ids must be an array"}), 400
+        ts_ids = [str(i).strip() for i in ts_ids if str(i).strip()]
+        if not ts_ids:
+            return jsonify({"error": "At least one test set id is required"}), 400
+
+        try:
+            edits_framework, edits_test, new_args = _manage_ts_normalize_update_maps(req_data)
+        except ValueError as vex:
+            return jsonify({"error": str(vex)}), 400
+
+        ts_rows = []
+        fetch_errors = []
+        for ts_id in ts_ids:
+            try:
+                ts_rows.append(_manage_ts_fetch_test_set(ts_id))
+            except Exception as e:
+                fetch_errors.append({"ts_id": ts_id, "error": str(e)})
+        if fetch_errors:
+            return jsonify({"error": "Failed to fetch one or more test sets", "details": fetch_errors}), 502
+
+        preview_rows, totals = _manage_ts_build_preview_rows(ts_rows, edits_framework, edits_test, new_args)
+        update_targets = [row for row in preview_rows if row["changed"] and row.get("put_payload")]
+        if not update_targets:
+            return jsonify({
+                "success": True,
+                "updated_count": 0,
+                "failed_updates": [],
+                "summary": totals,
+                "results": [],
+            })
+
+        def _put_one(row):
+            try:
+                put_resp = requests.put(
+                    f"{JITA_BASE}/test_sets/{row['ts_id']}",
+                    json=_manage_ts_sanitize_for_json(row["put_payload"]),
+                    auth=JITA_SVC_AUTH,
+                    verify=False,
+                    timeout=30,
+                )
+                ok = put_resp.status_code == 200
+                msg = "Updated" if ok else (put_resp.text[:500] if put_resp.text else f"HTTP {put_resp.status_code}")
+                return {
+                    "ts_id": row["ts_id"],
+                    "ts_name": row["ts_name"],
+                    "success": ok,
+                    "message": msg,
+                    "changed_framework_args": row["changed_framework_args"],
+                    "changed_test_args": row["changed_test_args"],
+                    "collision_skips": row["collision_skips"],
+                }
+            except Exception as e:
+                return {
+                    "ts_id": row["ts_id"],
+                    "ts_name": row["ts_name"],
+                    "success": False,
+                    "message": str(e),
+                    "changed_framework_args": row["changed_framework_args"],
+                    "changed_test_args": row["changed_test_args"],
+                    "collision_skips": row["collision_skips"],
+                }
+
+        results = []
+        max_workers = min(10, len(update_targets)) or 1
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_idx = {
+                pool.submit(_put_one, row): idx
+                for idx, row in enumerate(update_targets)
+            }
+            ordered = [None] * len(update_targets)
+            for fut in as_completed(future_to_idx):
+                idx = future_to_idx[fut]
+                ordered[idx] = fut.result()
+            results = ordered
+
+        updated_count = len([r for r in results if r and r["success"]])
+        failed_updates = [r for r in results if r and not r["success"]]
+        return jsonify({
+            "success": True,
+            "updated_count": updated_count,
+            "failed_updates": failed_updates,
+            "summary": totals,
+            "results": results,
+        })
+    except Exception as e:
+        logger.error(f"Error in manage-ts apply: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -15487,11 +16479,101 @@ def cursor_ai_sync_skills():
         return jsonify({"error": str(e)}), 500
 
 
+def _cursor_bridge_chat(messages, system_prompt, mode):
+    """Send chat to cursor-bridge /chat using the caller's Cursor API key.
+
+    Returns (response_dict, http_status). response_dict has success=True on OK.
+    """
+    last_user_msg = ""
+    for msg in reversed(messages or []):
+        if msg.get("role") == "user":
+            last_user_msg = (msg.get("content") or "").strip()
+            break
+    if not last_user_msg:
+        return {"error": "No user message for Cursor Bridge chat"}, 400
+
+    username = _current_username()
+    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+    if not cursor_api_key:
+        return {
+            "error": (
+                "Cursor API key required for chat (Nutanix AI key is invalid/unavailable). "
+                "Add it under Settings → API Keys."
+            ),
+            "require_key_setup": True,
+        }, 403
+
+    atlassian_tokens = {}
+    jira_tok = get_user_key(username, "atlassian_jira_token") if username else None
+    conf_tok = get_user_key(username, "atlassian_confluence_token") if username else None
+    if jira_tok:
+        atlassian_tokens["jira"] = jira_tok
+    if conf_tok:
+        atlassian_tokens["confluence"] = conf_tok
+
+    try:
+        bridge_resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/chat",
+            json={
+                "message": last_user_msg,
+                "system_prompt": system_prompt or "",
+                "cursor_api_key": cursor_api_key,
+                "atlassian_tokens": atlassian_tokens,
+            },
+            timeout=600,
+        )
+    except requests.exceptions.ConnectionError:
+        logger.error("[cursor-ai-chat] Cursor bridge not reachable at %s", CURSOR_BRIDGE_URL)
+        return {
+            "error": (
+                f"Cursor Bridge is not reachable at {CURSOR_BRIDGE_URL}. "
+                "Start it with: cd cursor-bridge && npm start"
+            ),
+        }, 503
+    except requests.exceptions.Timeout:
+        return {"error": "Cursor Bridge chat timed out (>600s)."}, 504
+    except Exception as bridge_exc:
+        logger.error("[cursor-ai-chat] Cursor Bridge request failed: %s", bridge_exc)
+        return {"error": f"Cursor Bridge request failed: {bridge_exc}"}, 503
+
+    if bridge_resp.status_code == 200:
+        bridge_data = bridge_resp.json() or {}
+        reply = (bridge_data.get("reply") or "").strip()
+        if not reply:
+            analysis = bridge_data.get("analysis") or {}
+            reply = (
+                analysis.get("follow_up_answer")
+                or analysis.get("root_cause")
+                or json.dumps(analysis or bridge_data, indent=2)
+            )
+        return {
+            "success": True,
+            "reply": reply,
+            "mode": mode,
+            "model": "cursor-bridge",
+            "tools_used": [],
+        }, 200
+
+    bridge_err = ""
+    try:
+        bridge_err = ((bridge_resp.json() or {}).get("error") or "") or bridge_resp.text
+    except Exception:
+        bridge_err = bridge_resp.text
+    logger.error(
+        "[cursor-ai-chat] Cursor Bridge HTTP %s: %s",
+        bridge_resp.status_code,
+        (bridge_err or "")[:500],
+    )
+    return {
+        "error": f"Cursor Bridge chat failed: {bridge_err or bridge_resp.status_code}",
+    }, 503
+
+
 @app.route("/mcp/regression/cursor-ai/chat", methods=["POST"])
 @app.route("/api/mcp/regression/cursor-ai/chat", methods=["POST"])
 @jwt_required
 def cursor_ai_chat():
-    """Interactive Cursor AI chat endpoint supporting multiple modes and MCP context."""
+    """Interactive chat: prefer Cursor Bridge (user key), else Nutanix AI."""
     try:
         body = request.get_json(force=True) or {}
         messages = body.get("messages", [])
@@ -15507,7 +16589,6 @@ def cursor_ai_chat():
 
         system_prompt = MODE_SYSTEM_PROMPTS[mode]
 
-        # Add MCP context to system prompt
         if mcp_servers:
             active_tools = []
             for sid in mcp_servers:
@@ -15522,19 +16603,32 @@ def cursor_ai_chat():
                     "data-driven insights where possible."
                 )
 
-        # Build chat messages in OpenAI-compatible format
+        # Prefer Cursor Bridge when the user has a Cursor API key — Nutanix AI
+        # enterprise key is frequently expired/unauthorized in local/dev setups.
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        if cursor_api_key:
+            bridge_body, bridge_status = _cursor_bridge_chat(messages, system_prompt, mode)
+            if bridge_body.get("success"):
+                return jsonify(bridge_body), bridge_status
+            logger.warning(
+                "[cursor-ai-chat] Cursor Bridge preferred path failed (%s); trying Nutanix AI",
+                bridge_body.get("error", bridge_status),
+            )
+        else:
+            bridge_body, bridge_status = None, None
+
         chat_messages = [{"role": "system", "content": system_prompt}]
         for msg in messages:
             role = msg.get("role", "user")
             if role in ("user", "assistant"):
                 chat_messages.append({"role": role, "content": msg.get("content", "")})
 
-        # Map model names
         ai_model = model
         if model in ("claude-sonnet-4.6-high", "claude-sonnet-4.6"):
             ai_model = "hack-reason"
 
-        payload = {
+        nutanix_payload = {
             "model": ai_model,
             "messages": chat_messages,
             "max_tokens": 4096,
@@ -15548,83 +16642,48 @@ def cursor_ai_chat():
             "Content-Type": "application/json",
         }
 
-        data = json.dumps(payload).encode("utf-8")
+        data = json.dumps(nutanix_payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, context=SSL_CTX, timeout=120) as resp:
-            if resp.getcode() != 200:
-                return jsonify({"error": f"AI API returned HTTP {resp.getcode()}"}), 502
-
-            response_data = json.loads(resp.read().decode())
-            choices = response_data.get("choices", [])
-            if not choices:
-                return jsonify({"error": "AI returned no choices"}), 502
-
-            content = (choices[0].get("message") or {}).get("content", "")
-
-            tools_used = []
-            if mcp_servers:
-                for sid in mcp_servers[:5]:
-                    cfg = MCP_SERVER_CONFIGS.get(sid)
-                    if cfg and cfg["description"].lower() in content.lower():
-                        tools_used.append(sid)
-
-            return jsonify({
-                "success": True,
-                "reply": content.strip(),
-                "mode": mode,
-                "model": model,
-                "tools_used": tools_used,
-            })
-
-    except (urllib.error.HTTPError, urllib.error.URLError) as e:
-        # Handle both HTTP errors (401, 403, 500, etc) and connection errors
-        if isinstance(e, urllib.error.HTTPError):
-            error_body = e.read().decode() if e.fp else ""
-            logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
-            logger.info(f"[cursor-ai-chat] Nutanix AI returned HTTP {e.code}, falling back to Cursor Bridge")
-        else:
-            logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason}), falling back to Cursor Bridge")
-        
-        # Fallback: route through the Cursor Bridge when the Nutanix AI endpoint fails
         try:
-            last_user_msg = ""
-            for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    last_user_msg = msg.get("content", "")
-                    break
-            if not last_user_msg:
-                return jsonify({"error": "Cannot reach AI API endpoint and no user message for fallback"}), 503
+            with urllib.request.urlopen(req, context=SSL_CTX, timeout=120) as resp:
+                if resp.getcode() != 200:
+                    return jsonify({"error": f"AI API returned HTTP {resp.getcode()}"}), 502
 
-            bridge_resp = requests.post(
-                f"{CURSOR_BRIDGE_URL}/analyze-testcase",
-                json={
-                    "testcase_name": "cursor-ai-chat-fallback",
-                    "exception_summary": last_user_msg,
-                    "exception": "",
-                    "steps_log": "",
-                    "nutest_test_log": "",
-                    "test_log_url": "",
-                    "jira_tickets": [],
-                    "failure_stage": "chat",
-                },
-                timeout=600,
-            )
-            if bridge_resp.status_code == 200:
-                bridge_data = bridge_resp.json()
-                analysis = bridge_data.get("analysis", {})
-                reply = analysis.get("follow_up_answer") or analysis.get("root_cause") or json.dumps(analysis, indent=2)
+                response_data = json.loads(resp.read().decode())
+                choices = response_data.get("choices", [])
+                if not choices:
+                    return jsonify({"error": "AI returned no choices"}), 502
+
+                content = (choices[0].get("message") or {}).get("content", "")
+
+                tools_used = []
+                if mcp_servers:
+                    for sid in mcp_servers[:5]:
+                        cfg = MCP_SERVER_CONFIGS.get(sid)
+                        if cfg and cfg["description"].lower() in content.lower():
+                            tools_used.append(sid)
+
                 return jsonify({
                     "success": True,
-                    "reply": reply,
+                    "reply": content.strip(),
                     "mode": mode,
-                    "model": "cursor-bridge-fallback",
-                    "tools_used": [],
+                    "model": model,
+                    "tools_used": tools_used,
                 })
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            if isinstance(e, urllib.error.HTTPError):
+                error_body = e.read().decode() if e.fp else ""
+                logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
             else:
-                return jsonify({"error": "Cannot reach AI API endpoint and Cursor Bridge also failed"}), 503
-        except Exception as fallback_err:
-            logger.error(f"[cursor-ai-chat] Cursor Bridge fallback also failed: {fallback_err}")
-            return jsonify({"error": "Cannot reach AI API endpoint. Cursor Bridge fallback also unavailable."}), 503
+                logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason})")
+
+            if cursor_api_key and bridge_body is not None:
+                return jsonify(bridge_body), bridge_status
+
+            # No Cursor key — bridge call returns require_key_setup
+            fb_body, fb_status = _cursor_bridge_chat(messages, system_prompt, mode)
+            return jsonify(fb_body), fb_status
+
     except Exception as e:
         logger.error(f"Error in cursor-ai chat: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500

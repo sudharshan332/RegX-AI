@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import api from '../api';
-import { buildJitaResultsUrl, buildViewInTriageGenieUrl } from '../utils/jitaTaskIds';
+import { buildJitaResultsUrls, buildViewInTriageGenieUrl, buildViewInTriageGenieUrls } from '../utils/jitaTaskIds';
 import {
   resolveRegressionScope,
   scopeToQueryParams,
@@ -72,9 +72,13 @@ export default function TriageGenieCoverageModal({ open, onClose }) {
   // Instant links from dashboard Regression_Run_Tasks (no backend wait)
   const instantLinks = useMemo(() => {
     const ids = scope?.taskIds || [];
+    const jitaUrls = buildJitaResultsUrls(ids);
+    const tgUrls = buildViewInTriageGenieUrls(ids);
     return {
-      jita_results_url: buildJitaResultsUrl(ids),
-      triage_genie_url: buildViewInTriageGenieUrl(ids),
+      jita_results_urls: jitaUrls,
+      jita_results_url: jitaUrls[0] || null,
+      triage_genie_urls: tgUrls,
+      triage_genie_url: tgUrls[0] || null,
     };
   }, [scope]);
 
@@ -138,9 +142,10 @@ export default function TriageGenieCoverageModal({ open, onClose }) {
   const byOwner = data?.by_owner || [];
   // Prefer instant View-in-TG / JITA links from Full link; fall back to API links
   // TG must use /view_tasks?jita_task_ids=… (same as JITA → View in Triage Genie).
-  const jitaUrl = instantLinks.jita_results_url || data?.links?.jita_results_url;
-  const tgUrl =
-    instantLinks.triage_genie_url ||
+  const jitaUrls = (instantLinks.jita_results_urls && instantLinks.jita_results_urls.length)
+    ? instantLinks.jita_results_urls
+    : (data?.links?.jita_results_url ? [data.links.jita_results_url] : []);
+  const tgFallback = instantLinks.triage_genie_url ||
     data?.links?.triage_genie_view_url ||
     (data?.links?.triage_genie_url?.includes('/view_tasks?')
       ? data.links.triage_genie_url
@@ -148,6 +153,9 @@ export default function TriageGenieCoverageModal({ open, onClose }) {
     (Array.isArray(data?.task_ids) && data.task_ids.length
       ? buildViewInTriageGenieUrl(data.task_ids)
       : null);
+  const tgUrls = (instantLinks.triage_genie_urls && instantLinks.triage_genie_urls.length)
+    ? instantLinks.triage_genie_urls
+    : (tgFallback ? [tgFallback] : []);
   const activeTag = data?.tag || scope?.tag || '—';
   const taskCount = Array.isArray(scope?.taskIds)
     ? scope.taskIds.length
@@ -202,29 +210,35 @@ export default function TriageGenieCoverageModal({ open, onClose }) {
         <div className="tg-cov-body">
           {/* Links available immediately from Regression_Run_Tasks — no wait for stats */}
           <div className="tg-cov-actions" style={{ marginBottom: 12 }}>
-            {jitaUrl && (
+            {jitaUrls.map((url, i) => (
               <a
+                key={`jita-${i}`}
                 className="tg-cov-link"
-                href={jitaUrl}
+                href={url}
                 target="_blank"
                 rel="noopener noreferrer"
-                title={jitaUrl}
+                title={url}
               >
-                Open JITA (Regression_Run_Tasks)
+                {jitaUrls.length > 1
+                  ? `Open JITA (part ${i + 1}/${jitaUrls.length})`
+                  : 'Open JITA (Regression_Run_Tasks)'}
               </a>
-            )}
-            {tgUrl && (
+            ))}
+            {tgUrls.map((url, i) => (
               <a
+                key={`tg-${i}`}
                 className="tg-cov-link"
-                href={tgUrl}
+                href={url}
                 target="_blank"
                 rel="noopener noreferrer"
-                title={tgUrl}
+                title={url}
               >
-                Open Triage Genie (View in TG)
+                {tgUrls.length > 1
+                  ? `Open Triage Genie (part ${i + 1}/${tgUrls.length})`
+                  : 'Open Triage Genie (View in TG)'}
               </a>
-            )}
-            {!tgUrl && (
+            ))}
+            {!tgUrls.length && (
               <span className="tg-cov-status-hint">
                 No Regression_Run_Tasks IDs yet — select a tag / wait for the Full link.
               </span>

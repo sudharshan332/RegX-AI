@@ -1,0 +1,20 @@
+{
+  "generated_time": "2026-08-24T15:26:36.707740",
+  "tag": "7.5.2_RC1",
+  "task_ids": [],
+  "tag_extra_task_ids": [],
+  "testcases": [],
+  "triage_summary": {
+    "total_failed_warning_count": 0,
+    "triaged_count": 0,
+    "triage_genie_count": 0,
+    "total_triage_genie_count": 0,
+    "triage_completed_percent": 0,
+    "triage_genie_percent": 0,
+    "total_triage_genie_percent": 0,
+    "matched_count": 0,
+    "unmatched_count": 0,
+    "matched_percent": 0,
+    "unmatched_percent": 0
+  }
+}

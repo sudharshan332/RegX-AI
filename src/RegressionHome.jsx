@@ -4,10 +4,11 @@ import { API_BASE_URL } from "./config";
 import AiMarkdown from "./components/AiMarkdown";
 import TriageGenieCoverageModal from "./components/TriageGenieCoverageModal";
 import {
-  buildJitaResultsUrl,
+  buildJitaResultsUrls,
   extractJitaTaskIds,
   mergeJitaTaskIds,
   normalizeJitaTaskId,
+  normalizeJitaTaskIdList,
 } from "./utils/jitaTaskIds";
 import { shouldRefetchOwnerJiraDetails } from "./utils/dashboardRefreshAfterAppend";
 import {
@@ -30,6 +31,11 @@ const DEFAULT_TAG = "cdp_master_full_reg";
 const JITA_RESULTS_URL = "https://jita.eng.nutanix.com/results?task_ids=";
 const JIRA_URL = "https://jira.nutanix.com/browse/";
 const OWNER_TRIAGE_REPORT_API = `${API_BASE_URL}/mcp/regression/owner-triage-report`;
+
+const safeScopedTaskIds = (scopeTag = null) => {
+  const ids = readScopedFullRegressionTaskIds(scopeTag);
+  return Array.isArray(ids) ? ids : [];
+};
 
 /** TCMS milestone from branch: ganges-7.6.0.6-stable → 7.6.0.6, ganges-7.6-stable → 7.6 */
 const resolveTcmsMilestone = (branch) => {
@@ -57,7 +63,7 @@ const collectJitaTaskIdsFromPage = (rowList = []) => {
   };
 
   const tag = (localStorage.getItem("regressionDashboardTag") || "").trim();
-  add(readScopedFullRegressionTaskIds(tag || null));
+  add(safeScopedTaskIds(tag || null));
   (rowList || []).forEach((row) => add(row.actualTasks || []));
   return out;
 };
@@ -95,7 +101,7 @@ const resolveTagOrTaskIdsParams = (tagToUse, taskIdsToUse, tagState) => {
     }
   }
 
-  const scoped = readScopedFullRegressionTaskIds(null);
+  const scoped = safeScopedTaskIds(null);
   if (scoped.length) {
     params.task_ids = scoped.join(",");
   }
@@ -127,7 +133,7 @@ const resolveTriageAccuracyScope = (tagToUse, taskIdsToUse, tagState, globalIds 
     taskIds = globalIds.map(normalizeJitaTaskId).filter(Boolean);
   }
   if (!taskIds.length) {
-    taskIds = readScopedFullRegressionTaskIds(activeTag);
+    taskIds = safeScopedTaskIds(activeTag);
   }
 
   return {
@@ -370,7 +376,7 @@ export default function RegressionHome() {
 
   // Parse JITA task link or comma-separated task IDs
   const parseTaskIds = (input) => {
-    if (!input || !input.trim()) return null;
+    if (!input || !input.trim()) return [];
     
     const trimmed = input.trim();
     
@@ -555,7 +561,7 @@ export default function RegressionHome() {
     } else if (savedMode === "task_ids") {
       const ids = globalJitaTaskIds.length
         ? globalJitaTaskIds
-        : readScopedFullRegressionTaskIds(null);
+        : safeScopedTaskIds(null);
       if (ids.length > 0) {
         fetchTriageCount(null, ids.join(","));
       }
@@ -575,7 +581,7 @@ export default function RegressionHome() {
         return;
       }
     }
-    const ids = readScopedFullRegressionTaskIds(mode === "tag" ? activeTag || null : null);
+    const ids = safeScopedTaskIds(mode === "tag" ? activeTag || null : null);
     setGlobalJitaTaskIds(ids);
   }, [taskIdsKey, tag]);
 
@@ -617,7 +623,7 @@ export default function RegressionHome() {
     }
     const ids = globalJitaTaskIds.length
       ? globalJitaTaskIds
-      : readScopedFullRegressionTaskIds(null);
+      : safeScopedTaskIds(null);
     if (ids.length > 0) {
       setOwnerReportTaskIds(ids);
       fetchOwnerTriageReport({ taskIds: ids });
@@ -630,7 +636,7 @@ export default function RegressionHome() {
     if (!advancedOptions.triageAccuracy) return;
     const ids = globalJitaTaskIds.length
       ? globalJitaTaskIds
-      : readScopedFullRegressionTaskIds(tag || null);
+      : safeScopedTaskIds(tag || null);
     if (ids.length > 0) {
       fetchTriageAccuracy(tag || null, ids.join(","));
     } else if (tag) {
@@ -648,7 +654,7 @@ export default function RegressionHome() {
     } else {
       const ids = globalJitaTaskIds.length
         ? globalJitaTaskIds
-        : readScopedFullRegressionTaskIds(null);
+        : safeScopedTaskIds(null);
       if (ids.length > 0) {
         fetchQiSummaryReport(null, ids.join(","));
       }
@@ -949,7 +955,7 @@ export default function RegressionHome() {
     const effectiveTag = tag || defaultTag || null;
     const ids = globalJitaTaskIds.length
       ? globalJitaTaskIds
-      : readScopedFullRegressionTaskIds(effectiveTag);
+      : safeScopedTaskIds(effectiveTag);
     if (ids.length > 0) {
       fetchTriageAccuracy(effectiveTag, ids.join(","), true);
       return;
@@ -1042,6 +1048,32 @@ export default function RegressionHome() {
     } finally {
       setLoadingOwnerReport(false);
     }
+  };
+
+  const handleRefreshOwnerTriageSection = async () => {
+    const savedMode = localStorage.getItem("regressionDashboardInputMode") || "tag";
+    const ids = globalJitaTaskIds.length
+      ? globalJitaTaskIds
+      : safeScopedTaskIds(savedMode === "tag" ? tag : null);
+
+    if (savedMode === "tag" && tag) {
+      await Promise.all([
+        fetchOwnerTriageReport({ tagToUse: tag }),
+        fetchTriageCount(tag, null),
+      ]);
+      return;
+    }
+
+    if (ids.length > 0) {
+      setOwnerReportTaskIds(ids);
+      await Promise.all([
+        fetchOwnerTriageReport({ taskIds: ids }),
+        fetchTriageCount(null, ids.join(",")),
+      ]);
+      return;
+    }
+
+    setOwnerReportError("No JITA task IDs or tag available to refresh.");
   };
 
   /** 1-click: scrape page for JITA task IDs, else prompt, else fall back to tag. */
@@ -1538,32 +1570,75 @@ export default function RegressionHome() {
     setDeepAnalysisFollowUp(prev => ({ ...prev, [ticket]: "" }));
 
     try {
+      const tab = deepAnalysisTabs.find(t => t.ticket === ticket);
+      const prevResult = deepAnalysisResults[ticket] || {};
+      const ticketContext = {
+        testcase_name: tab?.testName || "",
+        root_cause: String(prevResult.root_cause || ""),
+        classification: prevResult.classification || "",
+        suggested_fix: String(prevResult.suggested_fix || ""),
+        triage_report: String(prevResult.triage_report || ""),
+        related_components: prevResult.related_components || [],
+        jira_duplicates: prevResult.jira_duplicates || (ticket ? [ticket] : []),
+        summary: "",
+      };
+
       let resp;
       if (sessionId) {
         resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/follow-up`, {
           session_id: sessionId,
           question,
+          mode: "agent",
+          ticket_context: ticketContext,
+          recovery_context: {
+            testcase_name: tab?.testName || "",
+            latest_analysis: {
+              ...ticketContext,
+              failing_code: prevResult.failing_code || null,
+              confidence: prevResult.confidence || "",
+            },
+          },
         });
       } else {
-        const tab = deepAnalysisTabs.find(t => t.ticket === ticket);
-        const prevResult = deepAnalysisResults[ticket] || {};
-        resp = await api.post(
-          `${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase`,
-          {
-            testcase_name: tab?.testName || "",
-            exception_summary: `Follow-up question on ${ticket}: ${question}\n\nPrevious analysis: ${prevResult.root_cause || "N/A"}`,
-            exception: "",
-            test_log_url: "",
-            jira_tickets: [ticket],
-            failure_stage: "follow_up",
-          },
-          { timeout: 600000 }
-        );
-        if (resp.data?.success) {
-          if (resp.data.session_id) {
-            setDeepAnalysisSessions(prev => ({ ...prev, [ticket]: resp.data.session_id }));
+        // No live session — still support create-ticket via dedicated endpoint /
+        // follow-up intercept by synthesizing a short-lived session path.
+        const createIntent = /\b(create|file|open|raise|make|creaet)\b.*\b(ticket|eng|jira)\b/i.test(question)
+          || /\b(create|file)\s+eng\b/i.test(question);
+        if (createIntent) {
+          resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/create-eng-ticket`, {
+            ticket_context: ticketContext,
+          });
+          if (resp.data?.success) {
+            resp = {
+              data: {
+                success: true,
+                analysis: resp.data.analysis || {
+                  follow_up_answer: `Created ${resp.data.key}: ${resp.data.url}`,
+                  created_ticket: resp.data.key,
+                  created_ticket_url: resp.data.url,
+                },
+              },
+            };
           }
-          resp = { data: { success: true, analysis: resp.data.analysis } };
+        } else {
+          resp = await api.post(
+            `${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase`,
+            {
+              testcase_name: tab?.testName || "",
+              exception_summary: `Follow-up question on ${ticket}: ${question}\n\nPrevious analysis: ${prevResult.root_cause || "N/A"}`,
+              exception: "",
+              test_log_url: "",
+              jira_tickets: [ticket],
+              failure_stage: "follow_up",
+            },
+            { timeout: 600000 }
+          );
+          if (resp.data?.success) {
+            if (resp.data.session_id) {
+              setDeepAnalysisSessions(prev => ({ ...prev, [ticket]: resp.data.session_id }));
+            }
+            resp = { data: { success: true, analysis: resp.data.analysis } };
+          }
         }
       }
       if (resp.data?.success) {
@@ -1586,9 +1661,10 @@ export default function RegressionHome() {
         }));
       }
     } catch (err) {
+      const errMsg = err.response?.data?.error || err.message || "Follow-up failed";
       setDeepAnalysisHistory(prev => ({
         ...prev,
-        [ticket]: [...(prev[ticket] || []), { role: "error", text: err.message || "Follow-up failed" }]
+        [ticket]: [...(prev[ticket] || []), { role: "error", text: errMsg }]
       }));
     } finally {
       setDeepAnalysisFollowUpLoading(prev => ({ ...prev, [ticket]: false }));
@@ -1945,7 +2021,7 @@ export default function RegressionHome() {
                 }}>
                   <input
                     type="text"
-                    placeholder="Ask a follow-up question about this analysis..."
+                    placeholder="Ask anything — create eng ticket, ENG status/CR, Glean, create CR..."
                     value={followUpText}
                     onChange={e => setDeepAnalysisFollowUp(prev => ({ ...prev, [tab.ticket]: e.target.value }))}
                     onKeyDown={e => { if (e.key === "Enter" && !followUpLoading && followUpText.trim()) handleDeepAnalysisFollowUp(tab.ticket); }}
@@ -3100,7 +3176,27 @@ export default function RegressionHome() {
       {/* Triage Count Section */}
       {advancedOptions.triageCount && (
         <div style={{ marginTop: "40px", padding: "20px", background: "#f8f9fa", borderRadius: "8px" }}>
-          <h3 style={{ marginTop: 0, marginBottom: "15px", color: "#333" }}>Triage Count by Regression Owner</h3>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", marginBottom: "15px" }}>
+            <h3 style={{ marginTop: 0, marginBottom: 0, color: "#333" }}>Triage Count by Regression Owner</h3>
+            <button
+              type="button"
+              onClick={handleRefreshOwnerTriageSection}
+              disabled={loadingOwnerReport || loadingTriage}
+              style={{
+                padding: "7px 12px",
+                fontSize: "12px",
+                border: "1px solid #cbd5e1",
+                borderRadius: "6px",
+                background: (loadingOwnerReport || loadingTriage) ? "#e2e8f0" : "#ffffff",
+                color: "#1e293b",
+                cursor: (loadingOwnerReport || loadingTriage) ? "not-allowed" : "pointer",
+                fontWeight: 600
+              }}
+              title="Refresh owner triage report and triage count"
+            >
+              {loadingOwnerReport || loadingTriage ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
 
           {ownerReportError && (
             <div style={{ color: "#dc3545", marginBottom: "12px", fontSize: "13px" }}>
@@ -4783,32 +4879,65 @@ function deriveStatus(statuses) {
 }
 
 function renderTaskButton(taskIds, buttonName) {
-  if (!taskIds || taskIds.length === 0) return "-";
+  const ids = normalizeJitaTaskIdList(taskIds);
+  if (!ids.length) return "-";
 
-  const url = buildJitaResultsUrl(taskIds);
-  if (!url) return "-";
+  const urls = buildJitaResultsUrls(ids);
+  if (!urls.length) return "-";
   const isFullRegression = buttonName === "Regression_Run_Tasks";
+  const dataAttrs = isFullRegression
+    ? { "data-regression-run-tasks": "1", "data-task-ids": ids.join(",") }
+    : {};
+  const btnStyle = {
+    display: "inline-block",
+    padding: "6px 12px",
+    background: "#007bff",
+    color: "white",
+    textDecoration: "none",
+    borderRadius: "4px",
+    fontSize: "13px",
+  };
+
+  if (urls.length === 1) {
+    return (
+      <a
+        href={urls[0]}
+        target="_blank"
+        rel="noreferrer"
+        className="task-btn"
+        title={urls[0]}
+        {...dataAttrs}
+        style={btnStyle}
+      >
+        {buttonName}
+      </a>
+    );
+  }
 
   return (
-    <a
-      href={url}
-      target="_blank"
-      rel="noreferrer"
-      className="task-btn"
-      title={url}
-      {...(isFullRegression ? { "data-regression-run-tasks": "1" } : {})}
-      style={{
-        display: "inline-block",
-        padding: "6px 12px",
-        background: "#007bff",
-        color: "white",
-        textDecoration: "none",
-        borderRadius: "4px",
-        fontSize: "13px"
-      }}
+    <span
+      {...dataAttrs}
+      style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: "4px" }}
     >
-      {buttonName}
-    </a>
+      <span style={{ ...btnStyle, cursor: "default" }}>
+        {buttonName} ({ids.length})
+      </span>
+      <span style={{ display: "flex", flexWrap: "wrap", gap: "4px", justifyContent: "center" }}>
+        {urls.map((url, i) => (
+          <a
+            key={`${i}-${url.slice(-12)}`}
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="task-btn"
+            title={`JITA part ${i + 1} of ${urls.length} (URL length limit)`}
+            style={{ ...btnStyle, padding: "4px 8px", fontSize: "11px", background: "#2563eb" }}
+          >
+            JITA {i + 1}/{urls.length}
+          </a>
+        ))}
+      </span>
+    </span>
   );
 }
 

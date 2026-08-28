@@ -32,8 +32,8 @@ def normalize_task_id_list(task_ids: Any) -> List[str]:
         for item in task_ids:
             if item is None:
                 continue
-            if isinstance(item, str) and ("," in item or " " in item.strip()):
-                parts.extend(re.split(r"[\s,]+", item.strip()))
+            if isinstance(item, str) and re.search(r"[\s,]", item.strip()):
+                parts.extend(p for p in re.split(r"[\s,]+", item.strip()) if p)
             else:
                 parts.append(str(item).strip())
     else:

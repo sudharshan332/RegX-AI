@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import RegressionHome from './RegressionHome';
 import RunPlan from './pages/RunPlan';
 import Handover from './pages/Handover';
@@ -15,20 +15,39 @@ import LoginPage from './components/LoginPage';
 import { resolveDisplayName } from './utils/authUser';
 import './App.css';
 
+const PAGE_COMPONENTS = {
+  home: RegressionHome,
+  'run-plan': RunPlan,
+  handover: Handover,
+  testcase: TestcaseManagement,
+  'triage-genie': TriageGenie,
+  'failed-analysis': FailedTestcaseAnalysis,
+  'run-report': RunReport,
+  'job-profile': DynamicJobProfile,
+  'cursor-ai': CursorAI,
+};
+
 function Dashboard() {
   const { user, logout } = useAuth();
   const [activePage, setActivePage] = useState('home');
+  const [visitedPages, setVisitedPages] = useState(() => ['home']);
   const [menuVisible, setMenuVisible] = useState(true);
+
+  const navigateToPage = useCallback((pageId) => {
+    const id = PAGE_COMPONENTS[pageId] ? pageId : 'home';
+    setActivePage(id);
+    setVisitedPages((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }, []);
 
   useEffect(() => {
     const handleSetActivePage = (event) => {
-      setActivePage(event.detail);
+      navigateToPage(event.detail);
     };
     window.addEventListener('setActivePage', handleSetActivePage);
     return () => {
       window.removeEventListener('setActivePage', handleSetActivePage);
     };
-  }, []);
+  }, [navigateToPage]);
 
   const menuItems = [
     { id: 'home', label: 'Home', icon: '🏠', description: 'Regression Overview' },
@@ -42,34 +61,9 @@ function Dashboard() {
     { id: 'cursor-ai', label: 'Cursor AI', icon: '✨', description: 'Interactive AI Chat' },
   ];
 
-  const renderPage = () => {
-    switch (activePage) {
-      case 'home':
-        return <RegressionHome />;
-      case 'run-plan':
-        return <RunPlan />;
-      case 'handover':
-        return <Handover />;
-      case 'testcase':
-        return <TestcaseManagement />;
-      case 'triage-genie':
-        return <TriageGenie />;
-      case 'failed-analysis':
-        return <FailedTestcaseAnalysis />;
-      case 'run-report':
-        return <RunReport />;
-      case 'job-profile':
-        return <DynamicJobProfile />;
-      case 'cursor-ai':
-        return <CursorAI />;
-      default:
-        return <RegressionHome />;
-    }
-  };
-
   const displayName = resolveDisplayName(user);
   const openSidebarSettings = () => {
-    setActivePage('cursor-ai');
+    navigateToPage('cursor-ai');
     setTimeout(() => {
       window.dispatchEvent(new CustomEvent('openCursorAiSettings'));
     }, 0);
@@ -94,7 +88,7 @@ function Dashboard() {
               <li
                 key={item.id}
                 className={`menu-item ${activePage === item.id ? 'active' : ''}`}
-                onClick={() => setActivePage(item.id)}
+                onClick={() => navigateToPage(item.id)}
               >
                 <span className="menu-icon">{item.icon}</span>
                 <div className="menu-content">
@@ -138,7 +132,21 @@ function Dashboard() {
         )}
 
         <main className={`main-content ${menuVisible ? '' : 'expanded'}`}>
-          {renderPage()}
+          {visitedPages.map((id) => {
+            const PageComponent = PAGE_COMPONENTS[id];
+            if (!PageComponent) return null;
+            const isActive = activePage === id;
+            return (
+              <div
+                key={id}
+                className={`page-pane${isActive ? ' is-active' : ''}`}
+                hidden={!isActive}
+                aria-hidden={!isActive}
+              >
+                <PageComponent />
+              </div>
+            );
+          })}
         </main>
 
         <TaskStatusIcon />

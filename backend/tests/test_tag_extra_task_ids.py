@@ -36,6 +36,12 @@ class TestNormalizeAndMerge(unittest.TestCase):
     def test_merge_unique(self):
         self.assertEqual(merge_unique_ids([A, B], [B, C]), [A, B, C])
 
+    def test_normalize_newlines_and_spaces(self):
+        blob = f"{A}\n{B}\n {C} "
+        self.assertEqual(normalize_task_id_list(blob), [A, B, C])
+        # Pre-split-by-comma leftover: one list item containing newlines
+        self.assertEqual(normalize_task_id_list([f"{A}\n{B}"]), [A, B])
+
 
 class TestAppendExtrasForTag(unittest.TestCase):
     def test_append_and_idempotent(self):

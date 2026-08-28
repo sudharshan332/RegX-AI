@@ -1,6 +1,6 @@
 {
   "input_mode": "tag",
-  "default_tag": "752_rc1",
+  "default_tag": "7.6.0.1_RC1",
   "added_tags": [
     "cdp_master_full_reg",
     "7.6.0.1_RC1",
@@ -9,7 +9,7 @@
     "master|Full|25Jul2026",
     "752_rc1"
   ],
-  "tag": "752_rc1",
+  "tag": "7.6.0.1_RC1",
   "task_ids": [],
   "tag_extra_task_ids": {
     "7.6.0.1_RC1": [
@@ -57,7 +57,25 @@
       "6a79e05e2bc0c4ac86a4ae66",
       "6a7be371d24d8207dc166ad9",
       "6a7dcc00d24d826124baee84",
-      "6a8be5bc8e79ced60a291e54"
+      "6a8be5bc8e79ced60a291e54",
+      "6a8e8ce9d24d82b198e22680",
+      "6a8e8ceb2bc0c471bafb37b7",
+      "6a8e8ced8e79ce54913fd2b0",
+      "6a8e8ceed24d82b191248055",
+      "6a8e8cf08e79ce419626f01d",
+      "6a8e8cf18e79ce547f5ec297",
+      "6a8e8cf2b5e475886a28ad37",
+      "6a8eb8918e79ce5beab65107",
+      "6a8eb893d24d82b1a110807e",
+      "6a8fa3bb2bc0c4dbe5746685",
+      "6a8fc61eb5e475fe02fbf852",
+      "6a8fc6052bc0c4dbf732b71e",
+      "6a8fc5f32bc0c4dc03affd24",
+      "6a8fc5d88e79ce6a6b672e49",
+      "6a8d6b288e79ce547b39e956",
+      "6a8d6b262bc0c4fb2d0e2a30",
+      "6a85d88f2bc0c495b66cef5f",
+      "6a788618d24d82eeb63a9acd"
     ],
     "master|Failed|17Aug2026": [
       "6a869af4d24d823d69a0872a",

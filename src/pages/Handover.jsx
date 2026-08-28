@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import api from "../api";
 import "./Handover.css";
 
@@ -14,7 +14,9 @@ const HANDOVER_RECORD_DELETE_API = "/mcp/regression/handover-record-delete";
 const DEPRECATION_SEARCH_API = "/mcp/regression/deprecation-search";
 const JIRA_VALIDATE_API = "/mcp/regression/validate-jira-ticket";
 const SEARCH_LST_FILE_API = "/mcp/regression/search-lst-file";
+const SUGGEST_LST_FILE_API = "/mcp/regression/suggest-lst-file";
 const SEARCH_REVIEWERS_API = "/mcp/regression/search-reviewers";
+const SEARCH_BRANCHES_API = "/mcp/regression/search-branches";
 const JIRA_URL = "https://jira.nutanix.com/browse/";
 
 const btnBase = { fontSize: "13px", fontWeight: "500", border: "none", borderRadius: "8px", cursor: "pointer", transition: "all 0.15s ease", boxSizing: "border-box" };
@@ -48,7 +50,11 @@ function ReviewerAutocomplete({ value, onChange, placeholder, disabled, style })
   const [searchError, setSearchError] = useState(null);
   const debounceRef = useRef(null);
   const containerRef = useRef(null);
-  const selectedEmails = (value || "").split(",").map((e) => e.trim()).filter(Boolean);
+  const selectedEmails = useMemo(
+    () => (value || "").split(",").map((e) => e.trim()).filter(Boolean),
+    [value]
+  );
+  const selectedEmailsKey = useMemo(() => selectedEmails.join("|"), [selectedEmails]);
   const addReviewer = (emailOrUsername, name) => {
     const id = (emailOrUsername || "").trim();
     if (!id || selectedEmails.includes(id)) return;
@@ -99,7 +105,7 @@ function ReviewerAutocomplete({ value, onChange, placeholder, disabled, style })
         .finally(() => { setLoading(false); });
     }, 300);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-  }, [query, value, selectedEmails]);
+  }, [query, value, selectedEmails, selectedEmailsKey]);
   useEffect(() => {
     const h = (e) => { if (containerRef.current && !containerRef.current.contains(e.target)) setShowDropdown(false); };
     document.addEventListener("click", h);
@@ -180,7 +186,13 @@ export default function Handover({ userInfo }) {
   const [handoverAnalysis, setHandoverAnalysis] = useState(null);
   const [loadingHandover, setLoadingHandover] = useState(false);
   const [handoverCreateLstBranch, setHandoverCreateLstBranch] = useState("");
+  const [handoverBranchSuggestions, setHandoverBranchSuggestions] = useState([]);
+  const [handoverBranchLoading, setHandoverBranchLoading] = useState(false);
+  const [handoverShowBranchDropdown, setHandoverShowBranchDropdown] = useState(false);
   const [handoverCreateLstFile, setHandoverCreateLstFile] = useState("");
+  const [handoverCreateLstFiles, setHandoverCreateLstFiles] = useState([]);
+  const [handoverLstSuggestion, setHandoverLstSuggestion] = useState(null);
+  const [handoverSuggestingLst, setHandoverSuggestingLst] = useState(false);
   const [handoverCommitMessage, setHandoverCommitMessage] = useState("");
   const [handoverCreateLstLoading, setHandoverCreateLstLoading] = useState(false);
   const [handoverManualLstInstructions, setHandoverManualLstInstructions] = useState(null);
@@ -190,6 +202,9 @@ export default function Handover({ userInfo }) {
   const [handoverOverrideSave, setHandoverOverrideSave] = useState(false);
   const [handoverTicketsExtra, setHandoverTicketsExtra] = useState("");
   const [handoverReviewers, setHandoverReviewers] = useState("");
+  const [handoverCrPreviewOpen, setHandoverCrPreviewOpen] = useState(false);
+  const [handoverCrSubject, setHandoverCrSubject] = useState("Testcase Handover");
+  const [handoverCrDescription, setHandoverCrDescription] = useState("");
   const [handoverTestTickets, setHandoverTestTickets] = useState({});
   const [handoverBugTypeMap, setHandoverBugTypeMap] = useState({}); // Hidden state for bug type logic
   const [handoverJiraTicketValidation, setHandoverJiraTicketValidation] = useState({});
@@ -201,6 +216,9 @@ export default function Handover({ userInfo }) {
   const [handoverSelectedTests, setHandoverSelectedTests] = useState(new Set());
   const [handoverFetchingOverride, setHandoverFetchingOverride] = useState(false);
   const [handoverOverrideResult, setHandoverOverrideResult] = useState(null);
+  const handoverLstSuggestCacheRef = useRef(new Map());
+  const handoverBranchSuggestTimerRef = useRef(null);
+  const handoverBranchContainerRef = useRef(null);
   // eslint-disable-next-line no-unused-vars
   const [handoverSearchingLst, setHandoverSearchingLst] = useState({});
   // eslint-disable-next-line no-unused-vars
@@ -230,6 +248,172 @@ export default function Handover({ userInfo }) {
     return {};
   };
 
+  const getSelectedHandoverTests = () => {
+    if (!handoverAnalysis?.test_cases?.length) return [];
+    return handoverSelectedTests.size > 0
+      ? Array.from(handoverSelectedTests).filter((name) => handoverAnalysis.test_cases.some((tc) => tc.test_name === name))
+      : handoverAnalysis.test_cases.map((tc) => tc.test_name).filter(Boolean);
+  };
+
+  const getSelectedPassedHandoverTests = () => {
+    if (!handoverAnalysis?.test_cases?.length) return [];
+    const selected = new Set(getSelectedHandoverTests());
+    return (handoverAnalysis.test_cases || [])
+      .filter((tc) => {
+        if (!selected.has(tc.test_name)) return false;
+        const status = (tc.status || "").toLowerCase();
+        const passCount = tc.passed_count || 0;
+        return status === "succeeded" || passCount >= 2;
+      })
+      .map((tc) => tc.test_name)
+      .filter(Boolean);
+  };
+
+  const getResolvedLstFiles = () => {
+    const set = new Set();
+    (handoverCreateLstFiles || []).forEach((f) => {
+      const v = (f || "").trim();
+      if (v) set.add(v);
+    });
+    const current = (handoverCreateLstFile || "").trim();
+    if (current) set.add(current);
+    return Array.from(set);
+  };
+
+  const buildDefaultCrDescription = () => {
+    const reviewersLine = (handoverReviewers || "").split(",").map((r) => r.trim()).filter(Boolean).join(", ");
+    const ticketsLine = (handoverTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean).join(", ");
+    const targetRelease = (handoverCreateLstBranch || "master").trim() || "master";
+    return (
+      `Reviewers               : ${reviewersLine}\n` +
+      `Tickets resolved        : ${ticketsLine}\n` +
+      "Tests run               : \n" +
+      `Target release          : ${targetRelease}\n` +
+      `Code review URL         : `
+    );
+  };
+
+  const handleSuggestLstFile = async ({ silent = false } = {}) => {
+    const branch = (handoverCreateLstBranch || "").trim();
+    const test_names = getSelectedPassedHandoverTests().slice(0, 20);
+    if (!branch) {
+      if (!silent) alert("Please enter Branch before suggesting LST.");
+      return;
+    }
+    if (!test_names.length) {
+      if (!silent) alert("Please select at least one passed testcase before suggesting an LST file.");
+      return;
+    }
+    const cacheKey = `${branch}::${[...test_names].sort().join("|")}`;
+    const cached = handoverLstSuggestCacheRef.current.get(cacheKey);
+    if (cached) {
+      setHandoverLstSuggestion(cached);
+      if (cached.suggested_lst_file && getResolvedLstFiles().length === 0 && !(handoverCreateLstFile || "").trim()) {
+        setHandoverCreateLstFiles([cached.suggested_lst_file]);
+      }
+      return;
+    }
+    setHandoverSuggestingLst(true);
+    if (!handoverLstSuggestion) setHandoverLstSuggestion(null);
+    try {
+      const res = await api.post(
+        SUGGEST_LST_FILE_API,
+        { branch, test_names },
+        { headers: getAuthHeaders(), timeout: 60000 }
+      );
+      const data = res.data || {};
+      handoverLstSuggestCacheRef.current.set(cacheKey, data);
+      setHandoverLstSuggestion(data);
+      if (data.suggested_lst_file) {
+        if (getResolvedLstFiles().length === 0 && !(handoverCreateLstFile || "").trim()) {
+          setHandoverCreateLstFiles([data.suggested_lst_file]);
+        }
+      }
+      if (data.error) {
+        setHandoverCrResult({ success: false, error: data.error, message: data.message });
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || "Failed to suggest LST file.";
+      setHandoverLstSuggestion({ error: msg, suggested_lst_file: "", candidates: [] });
+    } finally {
+      setHandoverSuggestingLst(false);
+    }
+  };
+
+  useEffect(() => {
+    const branch = (handoverCreateLstBranch || "").trim();
+    const passed = getSelectedPassedHandoverTests();
+    if (!branch || !passed.length || handoverDataLocked) return undefined;
+    const t = setTimeout(() => {
+      handleSuggestLstFile({ silent: true });
+    }, 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handoverCreateLstBranch, handoverSelectedTests, handoverAnalysis, handoverDataLocked]);
+
+  useEffect(() => {
+    const q = (handoverCreateLstBranch || "").trim();
+    if (handoverBranchSuggestTimerRef.current) clearTimeout(handoverBranchSuggestTimerRef.current);
+    if (!q || handoverDataLocked) {
+      setHandoverBranchSuggestions([]);
+      setHandoverShowBranchDropdown(false);
+      return undefined;
+    }
+    handoverBranchSuggestTimerRef.current = setTimeout(async () => {
+      setHandoverBranchLoading(true);
+      try {
+        const res = await api.get(SEARCH_BRANCHES_API, { params: { q }, headers: getAuthHeaders(), timeout: 20000 });
+        const results = (res.data?.results || []).filter(Boolean);
+        setHandoverBranchSuggestions(results);
+        setHandoverShowBranchDropdown(results.length > 0);
+      } catch {
+        setHandoverBranchSuggestions([]);
+        setHandoverShowBranchDropdown(false);
+      } finally {
+        setHandoverBranchLoading(false);
+      }
+    }, 220);
+    return () => {
+      if (handoverBranchSuggestTimerRef.current) clearTimeout(handoverBranchSuggestTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handoverCreateLstBranch, handoverDataLocked]);
+
+  useEffect(() => {
+    const onDocClick = (e) => {
+      if (handoverBranchContainerRef.current && !handoverBranchContainerRef.current.contains(e.target)) {
+        setHandoverShowBranchDropdown(false);
+      }
+    };
+    document.addEventListener("click", onDocClick);
+    return () => document.removeEventListener("click", onDocClick);
+  }, []);
+
+  const openCrPreview = () => {
+    const selectedTests = getSelectedHandoverTests();
+    if (!selectedTests.length) {
+      alert("Please select at least one testcase.");
+      return;
+    }
+    if (!(handoverCreateLstBranch || "").trim()) {
+      alert("Please enter Branch before previewing CR.");
+      return;
+    }
+    if (!(handoverTicketsExtra || "").trim()) {
+      alert("Please enter Handover ticket(s) before previewing CR.");
+      return;
+    }
+    if (!(handoverReviewers || "").trim()) {
+      alert("Please add at least one reviewer before previewing CR.");
+      return;
+    }
+    setHandoverCrSubject((prev) => prev || "Testcase Handover");
+    if (!(handoverCrDescription || "").trim()) {
+      setHandoverCrDescription(buildDefaultCrDescription());
+    }
+    setHandoverCrPreviewOpen(true);
+  };
+
 
   const handleHandoverAnalyze = async () => {
     const urls = (handoverJitaUrls || [""]).map((u) => (u || "").trim()).filter(Boolean);
@@ -252,8 +436,16 @@ export default function Handover({ userInfo }) {
     setHandoverLstFileResults({});
     setHandoverTicketsExtra(""); // Clear handover tickets from previous search
     setHandoverCreateLstFile(""); // Clear LST file from previous search
+    setHandoverCreateLstFiles([]);
+    handoverLstSuggestCacheRef.current.clear();
+    setHandoverLstSuggestion(null); // Clear LST suggestion
     setHandoverCreateLstBranch(""); // Clear branch from previous search
+    setHandoverBranchSuggestions([]);
+    setHandoverShowBranchDropdown(false);
     setHandoverCommitMessage(""); // Clear commit message from previous search
+    setHandoverCrPreviewOpen(false);
+    setHandoverCrSubject("Testcase Handover");
+    setHandoverCrDescription("");
     setHandoverValidatedProductBugTests(new Set()); // Clear validated Product Bug tests
     setHandoverValidation(null); // Clear LST validation
     setHandoverJiraTicketValidation({}); // Clear Jira validation
@@ -624,21 +816,16 @@ export default function Handover({ userInfo }) {
 
   const handleValidateLst = async () => {
     // Validate all mandatory fields
-    const lst_file = (handoverCreateLstFile || "").trim();
+    const lst_files = getResolvedLstFiles();
     const branch = (handoverCreateLstBranch || "").trim();
-    const commitMessage = (handoverCommitMessage || "").trim();
     const handoverTickets = (handoverTicketsExtra || "").trim();
     
-    if (!lst_file) {
+    if (lst_files.length === 0) {
       alert("Please enter the LST file path to validate.");
       return;
     }
     if (!branch) {
       alert("Please enter the Branch.");
-      return;
-    }
-    if (!commitMessage) {
-      alert("Please enter the Commit Message.");
       return;
     }
     if (!handoverTickets) {
@@ -649,13 +836,28 @@ export default function Handover({ userInfo }) {
     setHandoverValidation(null);
     setHandoverCrResult(null);
     try {
-      const res = await api.post(VALIDATE_LST_API, { branch, lst_file, repo_name: "nugerrit.ntnxdpro.com/nutest-py3-tests" }, { timeout: 30000 });
-      if (res.data) {
-        console.log("LST Validation Response:", res.data);
-        setHandoverValidation(res.data);
-      } else {
-        setHandoverValidation({ error: "No response from server", branch_valid: null, file_valid: null });
+      const responses = await Promise.all(
+        lst_files.map((lst_file) =>
+          api.post(
+            VALIDATE_LST_API,
+            { branch, lst_file, repo_name: "nugerrit.ntnxdpro.com/nutest-py3-tests" },
+            { timeout: 30000 }
+          ).then((r) => ({ lst_file, ...(r.data || {}) }))
+        )
+      );
+      const resolvedBranch = responses.find((r) => (r.resolved_branch || "").trim())?.resolved_branch;
+      if (resolvedBranch && resolvedBranch !== branch) {
+        setHandoverCreateLstBranch(resolvedBranch);
       }
+      const allValid = responses.length > 0 && responses.every((r) => r.file_valid === true && r.branch_valid === true && !r.error);
+      setHandoverValidation({
+        all_valid: allValid,
+        files: responses,
+        branch_valid: allValid,
+        file_valid: allValid,
+        branch_error: allValid ? null : responses.find((r) => r.branch_error)?.branch_error || null,
+        file_error: allValid ? null : responses.find((r) => r.file_error)?.file_error || null,
+      });
     } catch (err) {
       console.error("LST validation error:", err);
       let errorMsg = "Validation failed";
@@ -680,19 +882,28 @@ export default function Handover({ userInfo }) {
       alert("Analyze JITA results first.");
       return;
     }
-    // Use selected tests if any, otherwise all tests
-    const test_names = handoverSelectedTests.size > 0
-      ? Array.from(handoverSelectedTests).filter((name) => handoverAnalysis.test_cases.some((tc) => tc.test_name === name))
-      : handoverAnalysis.test_cases.map((tc) => tc.test_name).filter(Boolean);
+    const test_names = getSelectedHandoverTests();
 
     if (test_names.length === 0) {
       alert("Please select at least one test case.");
       return;
     }
     const branch = (handoverCreateLstBranch || "master").trim() || "master";
-    const lst_file = (handoverCreateLstFile || "").trim();
-    if (!lst_file) {
-      alert("Please enter the LST file path.");
+    const lst_files = getResolvedLstFiles();
+    const lst_file = lst_files[0] || "";
+    const reviewersList = (handoverReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
+    const handoverTicketsList = (handoverTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean);
+
+    if (!reviewersList.length) {
+      alert("Please add reviewer(s) before creating CR.");
+      return;
+    }
+    if (!handoverTicketsList.length) {
+      alert("Please enter handover ticket(s) before creating CR.");
+      return;
+    }
+    if (!lst_files.length) {
+      alert("Please add at least one LST file path.");
       return;
     }
     if (!manualOnly) {
@@ -705,14 +916,10 @@ export default function Handover({ userInfo }) {
     setHandoverCreateLstLoading(true);
     setHandoverManualLstInstructions(null);
     setHandoverCrResult(null);
-    const handover_tickets = {};
-    (handoverAnalysis.test_cases || []).forEach((tc) => {
-      if (tc.test_name && (tc.jira_tickets || []).length) handover_tickets[tc.test_name] = tc.jira_tickets;
-    });
-    const handover_tickets_list = handoverAnalysis.assigned_tickets || [];
     const commitMsg = "Add " + test_names.length + " test(s) to " + lst_file + (handoverCommitMessage.trim() ? "\n\n" + handoverCommitMessage.trim() : "");
+    const finalCrSubject = (handoverCrSubject || "Testcase Handover").trim() || "Testcase Handover";
+    const finalCrDescription = (handoverCrDescription || "").trim() || buildDefaultCrDescription();
     try {
-      const reviewersList = (handoverReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
       const res = await api.post(
         CREATE_LST_CR_API,
         {
@@ -723,8 +930,10 @@ export default function Handover({ userInfo }) {
           manual_only: !!manualOnly,
           user_email: userInfo?.email,
           user_name: userInfo?.name,
-          handover_tickets: Object.keys(handover_tickets).length ? handover_tickets : handover_tickets_list,
+          handover_tickets: handoverTicketsList,
           reviewers: reviewersList.length ? reviewersList : undefined,
+          cr_subject: finalCrSubject,
+          cr_description: finalCrDescription,
         },
         { headers: getAuthHeaders() }
       );
@@ -743,6 +952,15 @@ export default function Handover({ userInfo }) {
       }
     } catch (err) {
       const errData = err.response?.data;
+      if (errData?.require_key_setup && errData?.missing_key === "gerrit_http_password") {
+        setHandoverCrResult({
+          success: false,
+          error: "Gerrit HTTP password is missing. Please add it in Settings → API Key Configuration.",
+          message: errData?.message || errData?.error,
+          require_key_setup: true,
+        });
+        return;
+      }
       setHandoverCrResult({
         success: false,
         error: errData?.error || "Failed to create LST CR.",
@@ -885,10 +1103,7 @@ export default function Handover({ userInfo }) {
   // eslint-disable-next-line no-unused-vars
   const handleRecordHandover = async () => {
     if (!handoverAnalysis?.test_cases?.length) return;
-    // Use selected tests if any, otherwise all tests
-    const test_names = handoverSelectedTests.size > 0
-      ? Array.from(handoverSelectedTests).filter((name) => handoverAnalysis.test_cases.some((tc) => tc.test_name === name))
-      : handoverAnalysis.test_cases.map((tc) => tc.test_name).filter(Boolean);
+    const test_names = getSelectedHandoverTests();
     
     if (test_names.length === 0) {
       alert("Please select at least one test case.");
@@ -995,9 +1210,20 @@ export default function Handover({ userInfo }) {
     }
 
     const branch = (handoverCreateLstBranch || "master").trim() || "master";
-    const lst_file = (handoverCreateLstFile || "").trim();
-    if (!lst_file) {
-      alert("Please enter the LST file path.");
+    const lst_files = getResolvedLstFiles();
+    const lst_file = lst_files[0] || "";
+    const reviewersList = (handoverReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
+    const handoverTicketsList = (handoverTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean);
+    if (!reviewersList.length) {
+      alert("Please add reviewer(s) before creating CR.");
+      return;
+    }
+    if (!handoverTicketsList.length) {
+      alert("Please enter handover ticket(s) before creating CR.");
+      return;
+    }
+    if (!lst_files.length) {
+      alert("Please add at least one LST file path.");
       return;
     }
 
@@ -1007,7 +1233,6 @@ export default function Handover({ userInfo }) {
     setHandoverCrResult(null);
 
     // Prepare handover data
-    const handoverTicketsList = (handoverTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean);
     const test_bug_tickets = {};
     handoverAnalysis.test_cases.forEach((tc) => {
       if (!tc.test_name) return;
@@ -1020,12 +1245,9 @@ export default function Handover({ userInfo }) {
     const ticketsList = hasPerTestBugTickets ? undefined : [...new Set([...(handoverAnalysis.assigned_tickets || []), ...handoverTicketsList])];
 
     // Prepare CR data
-    const handover_tickets = {};
-    (handoverAnalysis.test_cases || []).forEach((tc) => {
-      if (tc.test_name && (tc.jira_tickets || []).length) handover_tickets[tc.test_name] = tc.jira_tickets;
-    });
-    const handover_tickets_list = handoverAnalysis.assigned_tickets || [];
     const commitMsg = "Add " + test_names.length + " test(s) to " + lst_file + (handoverCommitMessage.trim() ? "\n\n" + handoverCommitMessage.trim() : "");
+    const finalCrSubject = (handoverCrSubject || "Testcase Handover").trim() || "Testcase Handover";
+    const finalCrDescription = (handoverCrDescription || "").trim() || buildDefaultCrDescription();
 
     // Execute both operations independently
     let handoverResult = null;
@@ -1041,7 +1263,7 @@ export default function Handover({ userInfo }) {
         handover_tickets: handoverTicketsList.length > 0 ? handoverTicketsList : undefined,
         by_whom: userInfo?.email || userInfo?.name || "unknown",
         branch,
-        lst_file,
+        lst_file: lst_file || "",
       });
       handoverResult = { success: true, message: "Handover saved successfully." };
     } catch (err) {
@@ -1050,19 +1272,21 @@ export default function Handover({ userInfo }) {
 
     // 2. Create CR (independent)
     try {
-      const reviewersList = (handoverReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
       const res = await api.post(
         CREATE_LST_CR_API,
         {
           branch,
           test_names,
-          lst_file,
+          lst_file: lst_file || "",
+          lst_files,
           commit_message: commitMsg,
           manual_only: false,
           user_email: userInfo?.email,
           user_name: userInfo?.name,
-          handover_tickets: Object.keys(handover_tickets).length ? handover_tickets : handover_tickets_list,
+          handover_tickets: handoverTicketsList,
           reviewers: reviewersList.length ? reviewersList : undefined,
+          cr_subject: finalCrSubject,
+          cr_description: finalCrDescription,
         },
         { headers: getAuthHeaders(), timeout: 300000 }
       );
@@ -1079,6 +1303,18 @@ export default function Handover({ userInfo }) {
       }
     } catch (err) {
       const errData = err.response?.data;
+      if (errData?.require_key_setup && errData?.missing_key === "gerrit_http_password") {
+        crResult = {
+          success: false,
+          error: "Gerrit HTTP password is missing. Please add it in Settings → API Key Configuration.",
+          message: errData?.message || errData?.error,
+          require_key_setup: true,
+        };
+        setHandoverCrResult(crResult);
+        setHandoverCreateLstLoading(false);
+        alert(crResult.error);
+        return;
+      }
       let errMsg = errData?.error || errData?.message;
       if (!errMsg) {
         const isConnReset = err.code === "ECONNRESET" || err.code === "ETIMEDOUT" || err.message === "Network Error"
@@ -1564,28 +1800,154 @@ export default function Handover({ userInfo }) {
                 return shouldShowCR ? (
                 <div style={{ marginTop: "20px", padding: "16px", background: bgColor, borderRadius: "8px", border: `2px solid ${borderColor}` }}>
                   <h4 style={{ marginTop: 0, marginBottom: "12px" }}>{headingText}</h4>
+                  <div ref={handoverBranchContainerRef} style={{ marginBottom: "10px", maxWidth: "360px", position: "relative" }}>
+                    <label style={{ display: "block", marginBottom: "4px", fontSize: "13px", fontWeight: "500" }}>Branch <span style={{ color: "#dc2626" }}>*</span></label>
+                    <input
+                      type="text"
+                      value={handoverCreateLstBranch}
+                      onChange={(e) => { setHandoverCreateLstBranch(e.target.value); setHandoverValidation(null); }}
+                      onFocus={() => { if (handoverBranchSuggestions.length > 0) setHandoverShowBranchDropdown(true); }}
+                      placeholder="master"
+                      disabled={handoverDataLocked}
+                      style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", backgroundColor: handoverDataLocked ? "#f3f4f6" : "white", opacity: handoverDataLocked ? 0.7 : 1 }}
+                    />
+                    {handoverShowBranchDropdown && !handoverDataLocked && (
+                      <div style={{ position: "absolute", top: "100%", left: 0, right: 0, maxHeight: "220px", overflowY: "auto", background: "white", border: "1px solid #d1d5db", borderRadius: "4px", boxShadow: "0 4px 6px rgba(0,0,0,0.1)", zIndex: 1000, marginTop: "2px" }}>
+                        {handoverBranchLoading ? (
+                          <div style={{ padding: "8px 12px", fontSize: "13px", color: "#64748b" }}>Searching branches...</div>
+                        ) : handoverBranchSuggestions.length === 0 ? (
+                          <div style={{ padding: "8px 12px", fontSize: "13px", color: "#64748b" }}>No branch suggestions</div>
+                        ) : (
+                          handoverBranchSuggestions.map((b) => (
+                            <button
+                              key={b}
+                              type="button"
+                              onClick={() => {
+                                setHandoverCreateLstBranch(b);
+                                setHandoverShowBranchDropdown(false);
+                                setHandoverValidation(null);
+                              }}
+                              style={{ width: "100%", textAlign: "left", padding: "8px 12px", fontSize: "13px", cursor: "pointer", border: "none", borderBottom: "1px solid #f1f5f9", background: b === handoverCreateLstBranch ? "#e0f2fe" : "white" }}
+                            >
+                              {b}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
                   <div style={{ marginBottom: "10px" }}>
                     <label style={{ display: "block", marginBottom: "4px", fontSize: "13px", fontWeight: "500" }}>LST File Path *</label>
-                    <input
+                    <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", width: "100%" }}>
+                      <input
                       type="text"
                       value={handoverCreateLstFile}
                       onChange={(e) => { setHandoverCreateLstFile(e.target.value); setHandoverValidation(null); }}
                       placeholder="e.g. test_sets/milestones/7.3.0.98/zookeeper.lst"
                       disabled={handoverDataLocked}
-                      style={{ padding: "8px 12px", fontSize: "13px", width: "100%", maxWidth: "500px", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box", backgroundColor: handoverDataLocked ? "#f3f4f6" : "white", opacity: handoverDataLocked ? 0.7 : 1 }}
+                      style={{ padding: "8px 12px", fontSize: "13px", width: "100%", flex: 1, minWidth: "420px", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box", backgroundColor: handoverDataLocked ? "#f3f4f6" : "white", opacity: handoverDataLocked ? 0.7 : 1 }}
                     />
+                      <button
+                        type="button"
+                        disabled={handoverDataLocked || !(handoverCreateLstFile || "").trim()}
+                        onClick={() => {
+                          const f = (handoverCreateLstFile || "").trim();
+                          if (!f) return;
+                          setHandoverCreateLstFiles((prev) => Array.from(new Set([...(prev || []), f])));
+                          setHandoverCreateLstFile("");
+                          setHandoverValidation(null);
+                        }}
+                        style={handoverDataLocked || !(handoverCreateLstFile || "").trim() ? { ...btnTertiaryDisabled } : { ...btnTertiary }}
+                      >
+                        Add LST
+                      </button>
+                    </div>
+                    {getResolvedLstFiles().length > 0 && (
+                      <div style={{ marginTop: "8px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                        {getResolvedLstFiles().map((f) => (
+                          <span key={f} style={{ display: "inline-flex", alignItems: "center", gap: "6px", padding: "4px 8px", borderRadius: "999px", background: "#ecfeff", border: "1px solid #a5f3fc", color: "#155e75", fontSize: "12px" }}>
+                            {f}
+                            {!handoverDataLocked && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setHandoverCreateLstFiles((prev) => (prev || []).filter((x) => x !== f));
+                                  if ((handoverCreateLstFile || "").trim() === f) setHandoverCreateLstFile("");
+                                  setHandoverValidation(null);
+                                }}
+                                style={{ border: "none", background: "none", cursor: "pointer", color: "#0e7490" }}
+                              >
+                                ×
+                              </button>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ marginTop: "8px", display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        onClick={() => handleSuggestLstFile({ silent: false })}
+                        disabled={handoverDataLocked || handoverSuggestingLst}
+                        style={handoverDataLocked || handoverSuggestingLst ? { ...btnTertiaryDisabled } : { ...btnTertiary }}
+                      >
+                        {handoverSuggestingLst ? "Refreshing..." : "Refresh Suggestion"}
+                      </button>
+                      {handoverLstSuggestion?.message && (
+                        <span style={{ fontSize: "12px", color: "#475569" }}>{handoverLstSuggestion.message}</span>
+                      )}
+                    </div>
+                    {Array.isArray(handoverLstSuggestion?.candidates) && handoverLstSuggestion.candidates.length > 0 && (
+                      <div style={{ marginTop: "8px", padding: "10px", border: "1px solid #dbeafe", borderRadius: "6px", background: "#f8fbff", width: "100%" }}>
+                        <div style={{ fontSize: "12px", color: "#1e3a8a", fontWeight: 600, marginBottom: "6px" }}>
+                          Click to select suggested LST files (you can select multiple)
+                        </div>
+                        {handoverLstSuggestion.candidates.slice(0, 4).map((c) => {
+                          const file = c.lst_file || "";
+                          const selected = getResolvedLstFiles().includes(file);
+                          return (
+                            <button
+                              key={file}
+                              type="button"
+                              disabled={handoverDataLocked}
+                              onClick={() => {
+                                if (!file) return;
+                                if (selected) {
+                                  setHandoverCreateLstFiles((prev) => (prev || []).filter((x) => x !== file));
+                                } else {
+                                  setHandoverCreateLstFiles((prev) => Array.from(new Set([...(prev || []), file])));
+                                }
+                                setHandoverCreateLstFile(file);
+                                setHandoverValidation(null);
+                              }}
+                              style={{
+                                width: "100%",
+                                textAlign: "left",
+                                marginBottom: "6px",
+                                padding: "8px 10px",
+                                borderRadius: "6px",
+                                border: selected ? "1px solid #0284c7" : "1px solid #cbd5e1",
+                                background: selected ? "#e0f2fe" : "#ffffff",
+                                color: "#0f172a",
+                                cursor: "pointer",
+                                fontSize: "12px",
+                              }}
+                            >
+                              <span style={{ fontWeight: selected ? 700 : 500 }}>{selected ? "✓ " : ""}{file}</span>{" "}
+                              <span style={{ color: "#64748b" }}>({c.count} matching testcase{c.count === 1 ? "" : "s"})</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                   <div style={{ marginBottom: "10px", display: "flex", gap: "12px", flexWrap: "wrap" }}>
-                    <div>
-                      <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Branch <span style={{ color: "#dc2626" }}>*</span></label>
-                      <input type="text" value={handoverCreateLstBranch} onChange={(e) => { setHandoverCreateLstBranch(e.target.value); setHandoverValidation(null); }} placeholder="master" disabled={handoverDataLocked} style={{ padding: "8px 12px", fontSize: "13px", width: "150px", border: "1px solid #d1d5db", borderRadius: "4px", backgroundColor: handoverDataLocked ? "#f3f4f6" : "white", opacity: handoverDataLocked ? 0.7 : 1 }} />
-                    </div>
                     <div style={{ flex: 1, minWidth: "200px" }}>
-                      <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Commit Message <span style={{ color: "#dc2626" }}>*</span></label>
+                      <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Commit Note (optional)</label>
                       <input type="text" value={handoverCommitMessage} onChange={(e) => {
                         setHandoverCommitMessage(e.target.value);
                         // Commit message doesn't affect validation, so no need to clear
-                      }} placeholder={"Add " + (handoverAnalysis?.test_cases?.length || 0) + " test(s) to LST"} disabled={handoverDataLocked} style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box", backgroundColor: handoverDataLocked ? "#f3f4f6" : "white", opacity: handoverDataLocked ? 0.7 : 1 }} />
+                      }} placeholder="Optional note appended after preview template" disabled={handoverDataLocked} style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box", backgroundColor: handoverDataLocked ? "#f3f4f6" : "white", opacity: handoverDataLocked ? 0.7 : 1 }} />
                     </div>
                   </div>
                   <div style={{ marginBottom: "10px" }}>
@@ -1599,13 +1961,12 @@ export default function Handover({ userInfo }) {
                   <div style={{ display: "flex", gap: "10px", marginBottom: "12px", flexWrap: "wrap" }}>
                     {(() => {
                       // Check all mandatory fields before enabling Validate LST button
-                      const hasLstFile = handoverCreateLstFile.trim() !== "";
+                      const hasLstFile = getResolvedLstFiles().length > 0;
                       const hasBranch = handoverCreateLstBranch.trim() !== "";
-                      const hasCommitMessage = handoverCommitMessage.trim() !== "";
                       const hasHandoverTickets = handoverTicketsExtra.trim() !== "";
                       
                       // Button is disabled if any mandatory field is missing
-                      const isValidateLstDisabled = handoverValidating || handoverDataLocked || !hasLstFile || !hasBranch || !hasCommitMessage || !hasHandoverTickets;
+                      const isValidateLstDisabled = handoverValidating || handoverDataLocked || !hasLstFile || !hasBranch || !hasHandoverTickets;
                       
                       return (
                         <button 
@@ -1615,7 +1976,6 @@ export default function Handover({ userInfo }) {
                           title={isValidateLstDisabled ? (
                             !hasLstFile ? "Please enter LST File Path" :
                             !hasBranch ? "Please enter Branch" :
-                            !hasCommitMessage ? "Please enter Commit Message" :
                             !hasHandoverTickets ? "Please enter Handover ticket(s)" :
                             "Validating..."
                           ) : ""}
@@ -1644,6 +2004,15 @@ export default function Handover({ userInfo }) {
                           )}
                           {!handoverValidation.message && handoverValidation.file_error && handoverValidation.file_error !== handoverValidation.branch_error && (
                             <div style={{ marginTop: "4px", color: "#dc2626", fontSize: "12px" }}>{handoverValidation.file_error}</div>
+                          )}
+                          {Array.isArray(handoverValidation.files) && handoverValidation.files.length > 0 && (
+                            <div style={{ marginTop: "8px", fontSize: "12px" }}>
+                              {handoverValidation.files.map((f) => (
+                                <div key={f.lst_file} style={{ marginBottom: "2px", color: f.file_valid && f.branch_valid ? "#166534" : "#b91c1c" }}>
+                                  {(f.file_valid && f.branch_valid) ? "✓" : "✗"} {f.lst_file}
+                                </div>
+                              ))}
+                            </div>
                           )}
                         </>
                       )}
@@ -1674,13 +2043,21 @@ export default function Handover({ userInfo }) {
                     // Step 3: Enable "Record Handover" - Jira validation only required when selection includes failed tests
                     const isButtonDisabled = handoverCreateLstLoading || 
                                             handoverDataLocked ||
-                                            !handoverCreateLstFile.trim() || 
+                                            getResolvedLstFiles().length === 0 || 
                                             (jiraValidationRequired && !hasJiraValidation) || 
                                             !hasLstValidation;
                     
                     return (
                       <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px", alignItems: "center" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          <button
+                            type="button"
+                            onClick={openCrPreview}
+                            disabled={handoverDataLocked || handoverCreateLstLoading}
+                            style={handoverDataLocked || handoverCreateLstLoading ? { ...btnValidateDisabled } : { ...btnValidate }}
+                          >
+                            Preview CR
+                          </button>
                           <button 
                             onClick={handleRecordHandoverAndCreateCR} 
                             disabled={isButtonDisabled} 
@@ -1718,6 +2095,51 @@ export default function Handover({ userInfo }) {
                       </div>
                     );
                   })()}
+                  {handoverCrPreviewOpen && (
+                    <div style={{ marginTop: "12px", padding: "12px", border: "1px solid #cbd5e1", borderRadius: "8px", background: "#f8fafc" }}>
+                      <h5 style={{ margin: "0 0 10px 0", fontSize: "14px", color: "#0f172a" }}>CR Preview (editable)</h5>
+                      <div style={{ marginBottom: "8px" }}>
+                        <label style={{ display: "block", fontSize: "12px", marginBottom: "4px", color: "#334155" }}>Subject</label>
+                        <input
+                          type="text"
+                          value={handoverCrSubject}
+                          onChange={(e) => setHandoverCrSubject(e.target.value)}
+                          disabled={handoverDataLocked}
+                          style={{ width: "100%", maxWidth: "560px", padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: "4px", fontSize: "13px" }}
+                        />
+                      </div>
+                      <div style={{ marginBottom: "8px" }}>
+                        <label style={{ display: "block", fontSize: "12px", marginBottom: "4px", color: "#334155" }}>Description</label>
+                        <textarea
+                          value={handoverCrDescription}
+                          onChange={(e) => setHandoverCrDescription(e.target.value)}
+                          rows={8}
+                          disabled={handoverDataLocked}
+                          style={{ width: "100%", maxWidth: "760px", padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: "4px", fontSize: "13px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}
+                        />
+                      </div>
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const selectedTests = getSelectedHandoverTests();
+                            setHandoverCrDescription(buildDefaultCrDescription());
+                          }}
+                          disabled={handoverDataLocked}
+                          style={handoverDataLocked ? { ...btnTertiaryDisabled } : { ...btnTertiary }}
+                        >
+                          Reset Template
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setHandoverCrPreviewOpen(false)}
+                          style={{ ...btnSecondary, padding: "9px 16px" }}
+                        >
+                          Save & Close
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 ) : null;
               })()}

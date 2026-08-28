@@ -64,26 +64,22 @@ export function buildFailedAnalysisPrompt(opts) {
 
   return `## Your Task
 
-You are triaging a failed nutest testcase. You MUST read and follow the
+You are triaging a failed nutest testcase. You MUST follow the
 **triage-cdp-test-failure** skill from the nutest-py3-tests repository.
 
-### Step 1 — Read ALL skill files
+### Step 1 — Load skill guidance (lazy, not all files)
 
-Use the **gw-sourcegraph** MCP server (\`sourcegraph__read_file\`) to read
-every file in the skill directory. The repo is \`${NUTEST_REPO}\`.
+Use the **gw-sourcegraph** MCP server (\`sourcegraph__read_file\`).
+Repo: \`${NUTEST_REPO}\`.
 
-**Start with SKILL.md** (it is the entry point and references all other files),
-then read the remaining reference files as directed by the workflow:
-
+1. Read \`${CDP_SKILL_DIR}/SKILL.md\` first (entry point).
+2. Read additional reference files **only as the workflow requires them**
+   (do not preload every file). Available references:
 ${fileList}
+3. If a service-specific flow is needed, list \`${CDP_SKILL_DIR}/flows/\`
+   and read only the matching flow file.
 
-Also list and read any files inside the \`${CDP_SKILL_DIR}/flows/\` subdirectory —
-these contain service-specific investigation flows referenced by
-\`failure-patterns-reference.md\`. Read the specific flow file that matches the
-failing service/subsystem.
-
-Read these files **before** you begin triage so you have the full methodology,
-reference tables, report templates, and investigation patterns loaded.
+Prefer speed: gather enough evidence for a confident root cause, then stop.
 
 ### Step 2 — Execute the skill with this input
 
@@ -158,18 +154,17 @@ You are triaging a skipped nutest testcase (likely due to a deployment failure).
 You MUST read and follow the **triage-rdm-deployment-failure** skill from the
 nutest-py3-tests repository.
 
-### Step 1 — Read ALL skill files
+### Step 1 — Load skill guidance (lazy)
 
-Use the **gw-sourcegraph** MCP server (\`sourcegraph__read_file\`) to read
-the skill files. The repo is \`${NUTEST_REPO}\`.
+Use the **gw-sourcegraph** MCP server (\`sourcegraph__read_file\`).
+Repo: \`${NUTEST_REPO}\`.
 
 1. **Start with:** \`${RDM_SKILL_DIR}/SKILL.md\`
-2. Then read every reference file it points to inside \`${RDM_SKILL_DIR}/\`.
-   Use \`sourcegraph__list_files\` on path \`${RDM_SKILL_DIR}\` to discover all
-   files, then read each one.
-3. Also read any \`flows/\` subdirectory files that match the deployment failure type.
+2. Read additional files under \`${RDM_SKILL_DIR}/\` only as the workflow requires
+   (do not preload every file).
+3. If needed, read only the matching \`flows/\` file for this deployment failure type.
 
-Read these files **before** you begin triage so you have the full methodology loaded.
+Prefer speed: gather enough evidence for a confident skip/root-cause call, then stop.
 
 ### Step 2 — Execute the skill with this input
 
