@@ -52,17 +52,17 @@
       "name": "CDP_Regression_Upgrade",
       "branch": "7.5.2",
       "job_profiles": [
-        "6a88279f8e79cee504be9934",
-        "6a88279e8e79cee504be9932",
-        "6a88279f2bc0c4048203ade1",
-        "6a88279fd24d8266e12cbffd",
-        "6a88279e2bc0c4047947100b",
-        "6a8827a0b5e4750b7ab42a97"
+        "6a9017c12bc0c4ff8622addb",
+        "6a9017b9b5e4752204a0d7ef",
+        "6a9017b9d24d823aad09c725",
+        "6a9017c18e79ceaddfe3598c",
+        "6a9017b98e79ceadf2b45762",
+        "6a9017c1b5e4752202fd1151"
       ],
       "tag_name": "Upgrade_1787308052046",
       "schedule_date": null,
       "schedule_triggered": false,
-      "service_account": "svc.cdp.regression",
+      "service_account": "",
       "is_dummy": false,
       "created_at": "2026-08-21T10:27:32.448856",
       "last_triggered": null

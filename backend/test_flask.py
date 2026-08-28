@@ -20,7 +20,7 @@ from collections import defaultdict
 from io import BytesIO
 from datetime import datetime, timedelta
 
-from flask import Flask, jsonify, request, Response, stream_with_context, send_file, g
+from flask import Flask, jsonify, request, Response, stream_with_context, send_file, g, has_request_context
 from flask_cors import CORS
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -402,9 +402,8 @@ def _trigger_scheduled_run_plan(run_plan, data):
         logger.warning(f"[scheduler] Run plan '{rp_name}' has no valid job profiles — skipping")
         return
 
-    svc_name = run_plan.get("service_account", "")
-    trigger_auth = RUN_PLAN_SERVICE_ACCOUNTS.get(svc_name, JITA_SVC_AUTH) if svc_name else JITA_SVC_AUTH
-    logger.info(f"[scheduler] Triggering '{rp_name}' ({len(job_profile_ids)} JP(s)) via {'svc:' + svc_name if svc_name else 'default svc account'}")
+    trigger_auth, triggered_by = _resolve_run_plan_trigger_auth(run_plan, allow_ldap=False)
+    logger.info(f"[scheduler] Triggering '{rp_name}' ({len(job_profile_ids)} JP(s)) via {triggered_by}")
     task_ids = []
     failed_jobs = []
 
@@ -446,7 +445,7 @@ def _trigger_scheduled_run_plan(run_plan, data):
         "id": str(int(time.time() * 1000)),
         "run_plan_id": rp_id,
         "triggered_at": now_iso,
-        "triggered_by": "scheduler (service account)",
+        "triggered_by": f"scheduler ({triggered_by})",
         "task_ids": task_ids,
         "failed_jobs": failed_jobs,
         "status": "success" if not failed_jobs else "partial"
@@ -4836,6 +4835,33 @@ RUN_PLAN_SERVICE_ACCOUNTS = {
     "svc.cdp.regression": (JITA_SVC_USERNAME, JITA_SVC_PASSWORD),
 }
 
+
+def _resolve_run_plan_trigger_auth(run_plan, allow_ldap=True):
+    """Resolve JITA credentials for triggering a run plan.
+
+    Prefers the run plan's configured service account so Trigger Now,
+    bulk trigger, and the scheduler all run as the selected user.
+    Returns (auth_tuple, triggered_by_label). auth_tuple is None when
+    LDAP is required but the session cache has expired.
+    """
+    svc_name = (run_plan.get("service_account") or "").strip()
+    if svc_name and svc_name in RUN_PLAN_SERVICE_ACCOUNTS:
+        return RUN_PLAN_SERVICE_ACCOUNTS[svc_name], svc_name
+
+    if allow_ldap:
+        username = ""
+        try:
+            user = getattr(g, "current_user", None) or {}
+            username = (user.get("sub") or user.get("username") or "").strip()
+        except Exception:
+            username = ""
+        user_auth = _get_user_credentials(username) if username else None
+        if user_auth:
+            return user_auth, username
+        return None, username
+
+    return JITA_SVC_AUTH, "svc.cdp.regression"
+
 # User credentials for triggering (matching reference script)
 JITA_USERNAME = safe_b64decode("c3VkaGFyc2hhbi5tdXNhbGk=")
 JITA_PASSWORD = safe_b64decode("V29ya291dEAy")
@@ -5165,21 +5191,18 @@ def trigger_run_plan(run_plan_id):
             logger.error(f"Run plan not found: {run_plan_id}")
             return jsonify({"error": "Run plan not found"}), 404
 
-        # Resolve credentials: prefer run-plan-level service account, fall back to LDAP
-        svc_name = run_plan.get("service_account", "")
-        if svc_name and svc_name in RUN_PLAN_SERVICE_ACCOUNTS:
-            user_auth = RUN_PLAN_SERVICE_ACCOUNTS[svc_name]
-            logger.info(f"Using service account '{svc_name}' for Jita trigger")
-        else:
-            current_username = g.current_user.get("sub", "")
-            user_auth = _get_user_credentials(current_username)
-            if not user_auth:
-                logger.warning(f"No cached credentials for user '{current_username}' — asking for re-auth")
-                return jsonify({
-                    "error": "Session credentials expired. Please re-login to trigger runs.",
-                    "code": "CREDENTIALS_EXPIRED"
-                }), 401
-            logger.info(f"Using LDAP credentials of '{current_username}' for Jita trigger")
+        # Prefer the run plan's selected service account; fall back to LDAP
+        user_auth, triggered_by = _resolve_run_plan_trigger_auth(run_plan, allow_ldap=True)
+        if not user_auth:
+            logger.warning(
+                f"No cached credentials for user '{triggered_by}' and no service account "
+                f"on run plan '{run_plan.get('name')}' — asking for re-auth"
+            )
+            return jsonify({
+                "error": "Session credentials expired. Please re-login to trigger runs.",
+                "code": "CREDENTIALS_EXPIRED"
+            }), 401
+        logger.info(f"Using '{triggered_by}' for Jita trigger of '{run_plan.get('name')}'")
         
         logger.info(f"Found run plan: {run_plan.get('name')} (ID: {run_plan_id})")
         
@@ -5255,8 +5278,7 @@ def trigger_run_plan(run_plan_id):
                             if update_resp.status_code != 200:
                                 logger.warning(f"Failed to update commit for {job_id}: {update_resp.text[:200]}")
                 
-                # Trigger using the logged-in user's LDAP credentials
-                logger.info(f"Triggering Job Profile ID: {job_id} as user '{user_auth[0]}'")
+                logger.info(f"Triggering Job Profile ID: {job_id} as user '{triggered_by}'")
                 resp = requests.post(
                     url,
                     headers=headers,
@@ -5314,7 +5336,7 @@ def trigger_run_plan(run_plan_id):
             "id": str(int(time.time() * 1000)),
             "run_plan_id": run_plan_id,
             "triggered_at": datetime.now().isoformat(),
-            "triggered_by": current_username,
+            "triggered_by": triggered_by,
             "task_ids": task_ids,
             "failed_jobs": failed_jobs,
             "status": "success" if not failed_jobs else "partial"
@@ -5326,11 +5348,11 @@ def trigger_run_plan(run_plan_id):
         
         save_run_plans(data)
         
-        logger.info(f"[END] Trigger Run Plan | run_plan_id={run_plan_id} | task_ids={len(task_ids)} | failed={len(failed_jobs)}")
+        logger.info(f"[END] Trigger Run Plan | run_plan_id={run_plan_id} | triggered_by={triggered_by} | task_ids={len(task_ids)} | failed={len(failed_jobs)}")
         
         return jsonify({
             "success": True,
-            "triggered_by": current_username,
+            "triggered_by": triggered_by,
             "task_ids": task_ids,
             "failed_jobs": failed_jobs,
             "total_triggered": len(task_ids),
@@ -5993,13 +6015,11 @@ def get_available_tags():
 @app.route("/mcp/regression/run-plan/bulk-trigger", methods=["POST"])
 @jwt_required
 def bulk_trigger_by_branch():
-    """Trigger all run plans that belong to a given branch."""
-    try:
-        current_username = g.current_user.get("sub", "")
-        user_auth = _get_user_credentials(current_username)
-        if not user_auth:
-            return jsonify({"error": "Session credentials expired. Please re-login.", "code": "CREDENTIALS_EXPIRED"}), 401
+    """Trigger all run plans that belong to a given branch.
 
+    Each plan is triggered with its own selected service account when set.
+    """
+    try:
         branch = (request.json or {}).get("branch", "")
         if not branch:
             return jsonify({"error": "branch is required"}), 400
@@ -6012,9 +6032,22 @@ def bulk_trigger_by_branch():
         results = []
         for rp in targets:
             rp_id = rp["id"]
+            user_auth, triggered_by = _resolve_run_plan_trigger_auth(rp, allow_ldap=True)
+            if not user_auth:
+                results.append({
+                    "run_plan_id": rp_id,
+                    "name": rp.get("name"),
+                    "triggered_by": triggered_by,
+                    "task_ids": [],
+                    "failed": 1,
+                    "error": "Session credentials expired and no service account configured"
+                })
+                continue
+
             job_profile_ids = [jp for jp in rp.get("job_profiles", []) if jp and isinstance(jp, str) and jp.strip()]
             task_ids = []
             failed_jobs = []
+            logger.info(f"[bulk-trigger] '{rp.get('name')}' via {triggered_by}")
             for jp_id in job_profile_ids:
                 try:
                     resp = requests.post(
@@ -6041,12 +6074,18 @@ def bulk_trigger_by_branch():
                 "id": str(int(time.time() * 1000)),
                 "run_plan_id": rp_id,
                 "triggered_at": rp["last_triggered"],
-                "triggered_by": current_username,
+                "triggered_by": triggered_by,
                 "task_ids": task_ids,
                 "failed_jobs": failed_jobs,
                 "status": "success" if not failed_jobs else "partial"
             })
-            results.append({"run_plan_id": rp_id, "name": rp.get("name"), "task_ids": task_ids, "failed": len(failed_jobs)})
+            results.append({
+                "run_plan_id": rp_id,
+                "name": rp.get("name"),
+                "triggered_by": triggered_by,
+                "task_ids": task_ids,
+                "failed": len(failed_jobs)
+            })
 
         save_run_plans(data)
         return jsonify({"success": True, "branch": branch, "results": results})
@@ -6361,6 +6400,23 @@ def _current_username():
         return ""
 
 
+def _current_user_email():
+    """Login user email for Jarvis 'Disabled by' comments."""
+    try:
+        user = getattr(g, "current_user", None) or {}
+        email = (user.get("email") or "").strip()
+        if email:
+            return email
+        username = _current_username()
+        if username:
+            if "@" in username:
+                return username
+            return f"{username}@nutanix.com"
+    except Exception:
+        pass
+    return "unknown@nutanix.com"
+
+
 def resolve_jira_token(explicit_token=None):
     """
     Resolve Jira personal token for API calls.
@@ -6615,6 +6671,31 @@ def is_intermittent_rerun(exception_summary):
             return "Yes"
     return "No"
 
+def _jira_field_text(value):
+    """Flatten a Jira field that may be a string or Atlassian document format."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        texts = []
+
+        def _walk(node):
+            if isinstance(node, dict):
+                text = node.get("text")
+                if text:
+                    texts.append(str(text))
+                for child in node.get("content") or []:
+                    _walk(child)
+            elif isinstance(node, list):
+                for child in node:
+                    _walk(child)
+
+        _walk(value)
+        return " ".join(texts)
+    return str(value)
+
+
 def classify_failure(exception_summary, exception, jira_data, glean_data):
     """Classify failure as Test Issue or Product Issue"""
     exception_lower = (exception_summary or "").lower() + " " + (exception or "").lower()
@@ -6637,8 +6718,9 @@ def classify_failure(exception_summary, exception, jira_data, glean_data):
     
     # Check Jira ticket if available
     if jira_data:
-        jira_summary = jira_data.get("fields", {}).get("summary", "").lower()
-        jira_description = jira_data.get("fields", {}).get("description", "").lower()
+        fields = jira_data.get("fields") or {}
+        jira_summary = _jira_field_text(fields.get("summary")).lower()
+        jira_description = _jira_field_text(fields.get("description")).lower()
         jira_combined = f"{jira_summary} {jira_description}"
         
         if "test" in jira_combined and "fix" in jira_combined:
@@ -6665,8 +6747,8 @@ def validate_triage_genie_ticket(jira_ticket_id, exception_summary, exception):
     fields = jira_data.get("fields", {})
     ticket_status = fields.get("status", {}).get("name", "")
     resolution = fields.get("resolution", {}).get("name", "") if fields.get("resolution") else None
-    summary = fields.get("summary", "").lower()
-    description = fields.get("description", "").lower()
+    summary = _jira_field_text(fields.get("summary")).lower()
+    description = _jira_field_text(fields.get("description")).lower()
     
     # Check if ticket is resolved/closed
     if resolution or ticket_status in ["Closed", "Resolved", "Done"]:
@@ -7218,6 +7300,12 @@ def analyze_failed_testcases():
                     else:
                         agave_task_id = None
 
+                    deployment_id = (
+                        _rdm_oid(test_result.get("deployment_id"))
+                        or _rdm_oid(detailed_result.get("deployment_id"))
+                        or None
+                    )
+
                     row = {
                         "testcase_id": testcase_id,
                         "testcase_name": testcase_name,
@@ -7241,6 +7329,8 @@ def analyze_failed_testcases():
                         row["triage_genie_ticket_id"] = triage_genie_ticket_id
                     if ai_summary is not None:
                         row["ai_summary"] = ai_summary
+                    if deployment_id:
+                        row["deployment_id"] = deployment_id
 
                     analysis_results.append(row)
                 
@@ -7463,6 +7553,12 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
             else:
                 agave_task_id = None
 
+            deployment_id = (
+                _rdm_oid(test_result.get("deployment_id"))
+                or _rdm_oid(detailed_result.get("deployment_id"))
+                or None
+            )
+
             row = {
                 "testcase_id": testcase_id,
                 "testcase_name": testcase_name,
@@ -7486,6 +7582,8 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
                 row["triage_genie_ticket_id"] = triage_genie_ticket_id
             if ai_summary is not None:
                 row["ai_summary"] = ai_summary
+            if deployment_id:
+                row["deployment_id"] = deployment_id
 
             yield json.dumps({"type": "row", "result": row})
         yield json.dumps({"type": "done"})
@@ -7594,14 +7692,84 @@ def update_triage_comments():
 # RDM Failure Analysis for Skipped Testcases
 # ======================================================
 
-RDM_PATTERNS_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "rdm_failure_patterns.json")
+_RDM_PATTERNS_DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+
+# Categories that auto-disable the failing node in Jarvis on approve / auto-workflow.
+RDM_NODE_DISABLE_CATEGORIES = {"INFRA_NODE"}
+RDM_RERUN_ACTIONS = {"disable_node_and_rerun", "rerun"}
+
+
+def _rdm_patterns_file(for_write=False):
+    """Team-scoped RDM pattern file; fall back to CDP_FT then legacy data/ path."""
+    team = ""
+    try:
+        if has_request_context():
+            team = (getattr(g, "team", None) or "").strip()
+    except Exception:
+        pass
+    candidates = []
+    if team:
+        candidates.append(os.path.join(_RDM_PATTERNS_DATA_ROOT, team, "rdm_failure_patterns.json"))
+    candidates.append(os.path.join(_RDM_PATTERNS_DATA_ROOT, "CDP_FT", "rdm_failure_patterns.json"))
+    candidates.append(os.path.join(_RDM_PATTERNS_DATA_ROOT, "rdm_failure_patterns.json"))
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    if for_write:
+        dest_dir = os.path.join(_RDM_PATTERNS_DATA_ROOT, team or "CDP_FT")
+        os.makedirs(dest_dir, exist_ok=True)
+        return os.path.join(dest_dir, "rdm_failure_patterns.json")
+    return candidates[0]
+
+
+# Back-compat alias used by older helpers / tests.
+RDM_PATTERNS_FILE = os.path.join(_RDM_PATTERNS_DATA_ROOT, "CDP_FT", "rdm_failure_patterns.json")
+
+
+def _pattern_next_action(pattern):
+    """Resolve next_action from explicit field or category."""
+    explicit = (pattern.get("next_action") or "").strip()
+    if explicit:
+        return explicit
+    cat = (pattern.get("category") or "").upper()
+    if cat in RDM_NODE_DISABLE_CATEGORIES:
+        return "disable_node_and_rerun"
+    if cat == "INFRA_INTERMITTENT":
+        return "rerun"
+    return "comment_only"
+
+
+def _strip_json_line_comments(text):
+    """Drop `//` comment lines so accidental JS-style comments do not break JSON."""
+    kept = []
+    for line in (text or "").splitlines():
+        if line.lstrip().startswith("//"):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _read_rdm_patterns_json(path):
+    """Read the patterns file; tolerate // comment lines in otherwise valid JSON."""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = json.loads(_strip_json_line_comments(text))
+    if not isinstance(data, dict):
+        return {"patterns": []}
+    if not isinstance(data.get("patterns"), list):
+        data["patterns"] = []
+    return data
+
 
 def _load_rdm_patterns():
     """Load RDM failure patterns from JSON file and compile regexes."""
     try:
-        if os.path.exists(RDM_PATTERNS_FILE):
-            with open(RDM_PATTERNS_FILE, "r") as f:
-                data = json.load(f)
+        path = _rdm_patterns_file()
+        if os.path.exists(path):
+            data = _read_rdm_patterns_json(path)
             patterns = data.get("patterns", [])
             compiled = []
             for p in patterns:
@@ -7613,6 +7781,8 @@ def _load_rdm_patterns():
                         "category": p.get("category", ""),
                         "description": p.get("description", ""),
                         "jira": p.get("jira", ""),
+                        "next_action": _pattern_next_action(p),
+                        "action": p.get("action", ""),
                     })
                 except re.error as e:
                     logger.warning(f"Invalid regex in RDM pattern '{p.get('id')}': {e}")
@@ -7643,99 +7813,288 @@ def _extract_node_names(message):
     return list(dict.fromkeys(all_nodes))
 
 
-def fetch_jita_deployments(task_id):
-    """Fetch JITA deployments for a given agave_task_id."""
-    payload = {
-        "raw_query": {"task_id": {"$oid": task_id}},
-        "start": 0,
-        "limit": 20,
-    }
-    try:
-        resp = session.post(
-            f"{JITA_BASE}/reports/deployments",
-            json=payload,
-            timeout=30,
+_RDM_SKILL_TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+_RDM_JIRA_CREATE_URL = "https://jira.nutanix.com/secure/CreateIssue!default.jspa"
+
+
+def _ticket_keys_from_rdm_skill(analysis):
+    """Collect ENG/DIAL (and other) Jira keys from skill JSON."""
+    analysis = analysis or {}
+    keys = []
+    for item in analysis.get("existing_tickets") or []:
+        if isinstance(item, dict):
+            key = item.get("ticket") or item.get("key") or ""
+        else:
+            key = str(item or "")
+        if key:
+            keys.append(key.strip())
+    for key in analysis.get("jira_duplicates") or []:
+        if key:
+            keys.append(str(key).strip())
+    for field in (
+        analysis.get("suggested_comment"),
+        analysis.get("root_cause"),
+        analysis.get("triage_report"),
+    ):
+        if field:
+            keys.extend(_RDM_SKILL_TICKET_RE.findall(str(field)))
+    seen = []
+    for key in keys:
+        if key and key not in seen:
+            seen.append(key)
+    return seen
+
+
+def _rdm_skill_jira_project(issue_category, tickets, suggested_project=""):
+    project = (suggested_project or "").strip().upper()
+    if project in ("DIAL", "ENG"):
+        return project
+    if tickets:
+        prefix = tickets[0].split("-", 1)[0].upper()
+        if prefix in ("DIAL", "ENG"):
+            return prefix
+    cat = (issue_category or "").upper()
+    if any(token in cat for token in ("FOUNDATION", "INFRA", "INTERMITTENT", "PLUGIN")):
+        return "DIAL"
+    if any(token in cat for token in ("PRODUCT", "CONFIG")):
+        return "ENG"
+    return "DIAL"
+
+
+def _normalize_rdm_skill_analysis(analysis, rdm_message=""):
+    """Map triage-rdm-deployment-failure JSON to RDM-cell actions."""
+    analysis = analysis or {}
+    issue_category = (
+        analysis.get("issue_category") or analysis.get("classification") or ""
+    ).strip()
+    recommended_action = (analysis.get("recommended_action") or "").strip().lower().replace("-", "_")
+    tickets = _ticket_keys_from_rdm_skill(analysis)
+    nodes = _extract_node_names(rdm_message or "")
+    cat_upper = issue_category.upper()
+
+    if recommended_action not in (
+        "link_existing",
+        "create_jira",
+        "rerun",
+        "disable_node_and_rerun",
+    ):
+        if tickets:
+            recommended_action = "link_existing"
+        elif nodes:
+            recommended_action = "disable_node_and_rerun"
+        elif any(token in cat_upper for token in ("INTERMITTENT", "FLAKY", "ONE-OFF", "ONE_OFF")):
+            recommended_action = "rerun"
+        else:
+            recommended_action = "create_jira"
+
+    suggested_comment = (analysis.get("suggested_comment") or "").strip()
+    if not suggested_comment:
+        if recommended_action == "link_existing" and tickets:
+            suggested_comment = "regx_rerun (%s)" % tickets[0]
+        elif recommended_action == "disable_node_and_rerun" and nodes:
+            suggested_comment = ", ".join(
+                "regx_rerun_disable-%s Rerun cause due to node issue" % n for n in nodes
+            )
+        else:
+            suggested_comment = "regx_rerun"
+
+    next_action = (
+        "disable_node_and_rerun"
+        if recommended_action == "disable_node_and_rerun" or (
+            nodes and recommended_action == "rerun"
         )
-        if resp.status_code == 200:
-            return resp.json().get("data", [])
-        logger.warning(f"JITA deployments fetch failed for task {task_id}: HTTP {resp.status_code}")
+        else "rerun"
+    )
+    jira_project = _rdm_skill_jira_project(
+        issue_category, tickets, analysis.get("suggested_jira_project") or ""
+    )
+    summary = (analysis.get("suggested_fix") or analysis.get("root_cause") or "RDM deployment failure")[:180]
+    return {
+        "issue_category": issue_category,
+        "recommended_action": recommended_action,
+        "suggested_comment": suggested_comment,
+        "jira_refs": tickets,
+        "jira_ticket": tickets[0] if tickets else "",
+        "failed_nodes": nodes,
+        "suggested_next_action": next_action,
+        "suggested_jira_project": jira_project,
+        "jira_create": {
+            "needed": recommended_action == "create_jira",
+            "project": jira_project,
+            "url": _RDM_JIRA_CREATE_URL,
+            "summary": "RDM: %s" % summary,
+            "description": analysis.get("triage_report") or analysis.get("root_cause") or "",
+        },
+    }
+
+
+def fetch_jita_deployments(task_id):
+    """Fetch JITA deployments for a given agave_task_id (paginated)."""
+    deployments = []
+    start = 0
+    limit = 100
+    try:
+        while True:
+            payload = {
+                "raw_query": {"task_id": {"$oid": task_id}},
+                "start": start,
+                "limit": limit,
+            }
+            resp = session.post(
+                f"{JITA_BASE}/reports/deployments",
+                json=payload,
+                auth=globals().get("JITA_SVC_AUTH"),
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    f"JITA deployments fetch failed for task {task_id}: HTTP {resp.status_code}"
+                )
+                break
+            batch = resp.json().get("data", []) or []
+            deployments.extend(batch)
+            if len(batch) < limit:
+                break
+            start += limit
+        return deployments
     except Exception as e:
         logger.warning(f"JITA deployments fetch error for task {task_id}: {e}")
-    return []
+        return deployments
 
 
-def get_rdm_failure_info(task_id):
+def _rdm_oid(val):
+    """Normalize Mongo/JSON id fields to a string."""
+    if not val:
+        return ""
+    if isinstance(val, dict):
+        return str(val.get("$oid") or val.get("$id") or "")
+    return str(val)
+
+
+def _rdm_info_from_deployments(deployments, deployment_id=None):
     """
-    Get RDM failure information for a task by inspecting its JITA deployments.
-    Returns a dict with rdm_message, rdm_link, provision_request_id, category, etc.
-    or None if no failed deployments found.
+    Build RDM failure info from JITA deployments.
+
+    When ``deployment_id`` (JITA deployment ``_id``) is set, use that
+    deployment's ``provision_request_id`` — a task can have many RDMs,
+    one per test. Do not fall back to another test's failed RDM.
     """
-    deployments = fetch_jita_deployments(task_id)
     if not deployments:
         return None
 
-    failed_deployments = [d for d in deployments if d.get("status") == "failed"]
-    if not failed_deployments:
-        return None
+    failed_deployments = [
+        d for d in deployments if (d.get("status") or "").lower() == "failed"
+    ]
+    chosen = None
+    if deployment_id:
+        want = str(deployment_id)
+        for dep in deployments:
+            if _rdm_oid(dep.get("_id")) == want:
+                chosen = dep
+                break
+        if chosen is None:
+            logger.warning(
+                f"JITA deployment_id {want} not found among {len(deployments)} deployments"
+            )
+            return None
+    else:
+        chosen = failed_deployments[0] if failed_deployments else None
+        if chosen is None:
+            return None
 
-    # Collect failure messages from status_transitions
-    all_reasons = []
-    rdm_ids = []
-    for dep in failed_deployments:
-        prov_id = ""
-        raw_prov = dep.get("provision_request_id")
-        if isinstance(raw_prov, dict) and "$oid" in raw_prov:
-            prov_id = raw_prov["$oid"]
-        elif raw_prov:
-            prov_id = str(raw_prov)
-        if prov_id:
-            rdm_ids.append(prov_id)
+    prov_id = _rdm_oid(chosen.get("provision_request_id"))
+    combined_message = ""
+    for transition in chosen.get("status_transitions") or []:
+        if (transition.get("status") or "").lower() == "failed":
+            reason = transition.get("reason") or ""
+            if reason:
+                combined_message = reason
+                break
 
-        for transition in dep.get("status_transitions", []):
-            if transition.get("status") == "failed":
-                reason = transition.get("reason", "")
-                if reason and "RDM" in reason:
-                    all_reasons.append(reason)
-
-    if not all_reasons and not rdm_ids:
-        return None
-
-    combined_message = all_reasons[0] if all_reasons else ""
-    primary_rdm_id = rdm_ids[0] if rdm_ids else ""
-
-    # Try fetching detailed RDM failure_analysis from the RDM API
     rdm_category = ""
     rdm_resolution = ""
     rdm_source = ""
-    if primary_rdm_id:
+    if prov_id:
         try:
             rdm_resp = session.get(
-                f"https://rdm.eng.nutanix.com/api/v1/scheduled_deployments/{primary_rdm_id}?expand=created_by",
+                f"https://rdm.eng.nutanix.com/api/v1/scheduled_deployments/{prov_id}?expand=created_by",
                 timeout=15,
             )
             if rdm_resp.status_code == 200:
-                rdm_data = rdm_resp.json().get("data", {})
+                rdm_data = rdm_resp.json().get("data", {}) or {}
                 rdm_msg = rdm_data.get("message", "")
-                if rdm_msg and not combined_message:
+                if rdm_msg:
                     combined_message = rdm_msg
-                fa = rdm_data.get("failure_analysis", {})
+                fa = rdm_data.get("failure_analysis") or {}
                 rdm_category = fa.get("category", "")
                 rdm_resolution = fa.get("resolution", "")
-                em = fa.get("error_metadata", {}).get("RDM", {})
+                em = (fa.get("error_metadata") or {}).get("RDM") or {}
                 rdm_source = em.get("source", "")
         except Exception as e:
-            logger.warning(f"RDM API fetch failed for {primary_rdm_id}: {e}")
+            logger.warning(f"RDM API fetch failed for {prov_id}: {e}")
+
+    if not combined_message and not prov_id:
+        return None
 
     return {
         "rdm_message": combined_message,
-        "rdm_link": f"https://rdm.eng.nutanix.com/scheduled_deployments/{primary_rdm_id}" if primary_rdm_id else "",
-        "provision_request_id": primary_rdm_id,
+        "rdm_link": (
+            f"https://rdm.eng.nutanix.com/scheduled_deployments/{prov_id}" if prov_id else ""
+        ),
+        "provision_request_id": prov_id,
+        "jita_deployment_id": _rdm_oid(chosen.get("_id")),
         "rdm_category": rdm_category,
         "rdm_resolution": rdm_resolution,
         "rdm_source": rdm_source,
         "failed_deployment_count": len(failed_deployments),
         "total_deployment_count": len(deployments),
     }
+
+
+def get_rdm_failure_info(task_id, deployment_id=None, testcase_id=None, deployments=None):
+    """
+    Get RDM failure information for a task / specific test.
+
+    Prefer the test result's ``deployment_id`` so each skipped test maps to
+    its own RDM scheduled-deployment, not the first failed RDM on the task.
+    """
+    if deployments is None:
+        deployments = fetch_jita_deployments(task_id)
+    if not deployments:
+        return None
+
+    if not deployment_id and testcase_id:
+        deployment_id = _jita_test_result_deployment_id(testcase_id) or None
+        if not deployment_id:
+            logger.warning(
+                "Could not resolve deployment_id for testcase %s; "
+                "not falling back to first failed RDM on the task",
+                testcase_id,
+            )
+            return None
+
+    return _rdm_info_from_deployments(deployments, deployment_id=deployment_id)
+
+
+def _jita_test_result_deployment_id(testcase_id):
+    """Resolve a test result's JITA deployment_id (PHX, then JITA)."""
+    if not testcase_id:
+        return ""
+    tr = fetch_detailed_test_result(testcase_id) or {}
+    did = _rdm_oid(tr.get("deployment_id"))
+    if did:
+        return did
+    try:
+        resp = session.get(
+            f"{JITA_BASE}/agave_test_results/{testcase_id}",
+            auth=globals().get("JITA_SVC_AUTH"),
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return _rdm_oid((resp.json().get("data") or {}).get("deployment_id"))
+    except Exception as e:
+        logger.warning(f"JITA test result fetch failed for {testcase_id}: {e}")
+    return ""
 
 
 def match_rdm_pattern(rdm_message):
@@ -7755,8 +8114,8 @@ def match_rdm_pattern(rdm_message):
             template = pattern["comment_template"]
             comment = template
 
+            nodes = _extract_node_names(rdm_message)
             if "{node_name}" in template:
-                nodes = _extract_node_names(rdm_message)
                 if nodes:
                     comment = ", ".join(
                         template.replace("{node_name}", n) for n in nodes
@@ -7769,12 +8128,153 @@ def match_rdm_pattern(rdm_message):
                 "category": pattern["category"],
                 "description": pattern["description"],
                 "generated_comment": comment,
-                "failed_nodes": nodes if "{node_name}" in template and nodes else [],
+                "failed_nodes": nodes or [],
                 "jira": pattern.get("jira", ""),
+                "next_action": _pattern_next_action(pattern),
                 "matched": True,
             }
 
     return None
+
+
+def _suggest_rdm_pattern_from_message(rdm_message, rdm_link="", nodes=None):
+    """Draft a reusable pattern from an unmatched RDM failure for user approval."""
+    nodes = nodes if nodes is not None else _extract_node_names(rdm_message or "")
+    snippet = (rdm_message or "").strip()
+    # Use the first ~6 non-empty lines as the signature, then escape.
+    lines = [ln.strip() for ln in snippet.splitlines() if ln.strip()][:6]
+    signature = " ".join(lines)[:400]
+    escaped = re.escape(signature)
+    for n in nodes:
+        escaped = escaped.replace(re.escape(n), r"([\w\-]+)")
+    regex = re.sub(r"(\\ )+", r"\\s+", escaped)
+    regex = regex.replace(r"\:", ":")
+    slug_src = (nodes[0] if nodes else "rdm") + "_" + (signature[:40] or "pattern")
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", slug_src).strip("_").lower()[:60]
+    next_action = "disable_node_and_rerun" if nodes else "rerun"
+    category = "INFRA_NODE" if nodes else "INFRA_INTERMITTENT"
+    comment = (
+        "regx_rerun_disable-{node_name} Rerun cause due to node issue"
+        if nodes else "regx_rerun"
+    )
+    return {
+        "id": f"learned_{slug}" if slug else f"learned_{int(time.time())}",
+        "regex": regex or r"Installer errors[:\s]+Nodes?:\s*([\w\-]+)",
+        "confidence": 0.9,
+        "comment_template": comment,
+        "category": category,
+        "next_action": next_action,
+        "description": "Learned from RDM AI analysis approval",
+        "action": (
+            "Disable failed node(s) in Jarvis and rerun"
+            if nodes else "Rerun the skipped test"
+        ),
+        "example_failure": snippet[:800],
+        "reference_task": rdm_link or "",
+    }
+
+
+_JARVIS_SERVICE_MOD = None
+
+
+def _jarvis_mod():
+    """Load Jarvis helpers without importing agents.base (requires PyYAML)."""
+    global _JARVIS_SERVICE_MOD
+    if _JARVIS_SERVICE_MOD is not None:
+        return _JARVIS_SERVICE_MOD
+    try:
+        from agents.services import jarvis_service as mod
+        _JARVIS_SERVICE_MOD = mod
+        return mod
+    except ModuleNotFoundError as e:
+        if getattr(e, "name", "") != "yaml" and "yaml" not in str(e):
+            raise
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents", "services", "jarvis_service.py")
+    spec = importlib.util.spec_from_file_location("regx_jarvis_service", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _JARVIS_SERVICE_MOD = mod
+    return mod
+
+
+def _jarvis_service():
+    return _jarvis_mod().JarvisNodeService(auth=JITA_SVC_AUTH)
+
+
+def _apply_jita_triage_update(test_id, comment, jira_tickets=None):
+    """Update JITA agave_test_result comments. Returns (ok, payload_or_error)."""
+    current_username = _current_username()
+    user_auth = _get_user_credentials(current_username)
+    if not user_auth:
+        return False, {
+            "error": "Session credentials expired. Please re-login to update triage.",
+            "code": "CREDENTIALS_EXPIRED",
+        }
+    update_fields = {
+        "comments": comment,
+        "triaged_by": current_username,
+    }
+    if jira_tickets is not None:
+        if isinstance(jira_tickets, str):
+            jira_tickets = [jira_tickets] if jira_tickets else []
+        update_fields["jira_tickets"] = jira_tickets
+    payload = {
+        "query": {"_id": {"$in": [{"$oid": test_id}]}},
+        "data": {"$set": update_fields},
+        "multi": True,
+    }
+    try:
+        resp = requests.put(
+            f"{JITA_BASE}/agave_test_results",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            auth=user_auth,
+            verify=False,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return True, {"success": True, "triaged_by": current_username, "comment": comment}
+        return False, {"error": resp.text or f"HTTP {resp.status_code}"}
+    except Exception as e:
+        logger.error(f"Error updating triage: {e}", exc_info=True)
+        return False, {"error": str(e)}
+
+
+def _disable_rdm_nodes(failed_nodes, rdm_link, disabled_by):
+    """Disable each hostname in Jarvis. Returns list of per-node results."""
+    results = []
+    if not failed_nodes:
+        return results
+    svc = _jarvis_service()
+    seen = set()
+    for node_name in failed_nodes:
+        name = (node_name or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        result = svc.disable_node_sync(
+            node_name=name,
+            rdm_link=rdm_link,
+            disabled_by=disabled_by,
+            reason="Rerun cause due to node issue",
+        )
+        results.append(result)
+    return results
+
+
+def _rdm_should_disable(category, next_action, failed_nodes):
+    action = (next_action or "").strip() or _pattern_next_action({"category": category, "next_action": next_action})
+    if action == "disable_node_and_rerun":
+        return True
+    if (category or "").upper() in RDM_NODE_DISABLE_CATEGORIES and failed_nodes:
+        return True
+    return False
+
+
+def _rdm_should_rerun(next_action, category):
+    action = (next_action or "").strip() or _pattern_next_action({"category": category, "next_action": next_action})
+    return action in RDM_RERUN_ACTIONS
 
 
 @app.route("/mcp/regression/failed-analysis/rdm-analyze", methods=["POST"])
@@ -7782,49 +8282,38 @@ def match_rdm_pattern(rdm_message):
 def rdm_analyze_skipped():
     """
     Analyze RDM failure for skipped testcases.
-    Accepts: { task_ids: [agave_task_id, ...] }
-    Returns RDM failure info with pattern-matched comments for each task.
+
+    Accepts either:
+      { tests: [{ agave_task_id, testcase_id, testcase_name, deployment_id }] }
+      { task_ids: [agave_task_id, ...] }  (legacy; one RDM per task)
+
+    Prefer ``tests`` so each testcase maps to its own JITA deployment / RDM.
     """
     try:
         data = request.get_json() or {}
+        tests = data.get("tests") or []
         task_ids = data.get("task_ids", [])
         if isinstance(task_ids, str):
             task_ids = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
-        if not task_ids:
-            return jsonify({"error": "task_ids is required"}), 400
+        if tests:
+            rows = tests
+        elif task_ids:
+            rows = [{"agave_task_id": tid} for tid in task_ids]
+        else:
+            return jsonify({"error": "tests or task_ids is required"}), 400
 
+        dep_cache = {}
         results = []
-        for task_id in task_ids:
-            rdm_info = get_rdm_failure_info(task_id)
-            if not rdm_info:
-                results.append({
-                    "agave_task_id": task_id,
-                    "rdm_found": False,
-                    "rdm_message": "",
-                    "generated_comment": "",
-                    "pattern_matched": False,
-                })
-                continue
-
-            pattern_result = match_rdm_pattern(rdm_info["rdm_message"])
-            results.append({
-                "agave_task_id": task_id,
-                "rdm_found": True,
-                "rdm_message": rdm_info["rdm_message"][:500],
-                "rdm_link": rdm_info["rdm_link"],
-                "rdm_category": rdm_info["rdm_category"],
-                "rdm_resolution": rdm_info["rdm_resolution"],
-                "rdm_source": rdm_info["rdm_source"],
-                "failed_deployments": rdm_info["failed_deployment_count"],
-                "total_deployments": rdm_info["total_deployment_count"],
-                "pattern_matched": bool(pattern_result),
-                "generated_comment": pattern_result["generated_comment"] if pattern_result else "",
-                "pattern_id": pattern_result["pattern_id"] if pattern_result else "",
-                "pattern_category": pattern_result["category"] if pattern_result else "",
-                "pattern_description": pattern_result["description"] if pattern_result else "",
-                "pattern_jira": pattern_result.get("jira", "") if pattern_result else "",
-                "failed_nodes": pattern_result.get("failed_nodes", []) if pattern_result else [],
-            })
+        for row in rows:
+            task_id = row.get("agave_task_id") or ""
+            if task_id and task_id not in dep_cache:
+                dep_cache[task_id] = fetch_jita_deployments(task_id)
+            results.append(_analyze_one_rdm_task(
+                task_id,
+                testcase_id=row.get("testcase_id"),
+                deployment_id=row.get("deployment_id"),
+                deployments=dep_cache.get(task_id),
+            ))
 
         return jsonify({"success": True, "results": results})
     except Exception as e:
@@ -7842,15 +8331,22 @@ def rdm_analyze_ai():
     try:
         data = request.get_json() or {}
         task_id = data.get("task_id", "")
+        testcase_id = data.get("testcase_id", "")
+        deployment_id = data.get("deployment_id", "")
         rdm_message = data.get("rdm_message", "")
         testcase_name = data.get("testcase_name", "")
 
         if not rdm_message and not task_id:
             return jsonify({"error": "task_id or rdm_message is required"}), 400
 
-        if not rdm_message and task_id:
-            rdm_info = get_rdm_failure_info(task_id)
-            if rdm_info:
+        rdm_info = None
+        if task_id:
+            rdm_info = get_rdm_failure_info(
+                task_id,
+                deployment_id=deployment_id or None,
+                testcase_id=testcase_id or None,
+            )
+            if not rdm_message and rdm_info:
                 rdm_message = rdm_info.get("rdm_message", "")
 
         if not rdm_message:
@@ -7902,19 +8398,570 @@ def rdm_analyze_ai():
         ai_summary = "\n".join(summary_parts)
 
         suggested_comment = "regx_rerun"
-        if jira_refs:
+        nodes = _extract_node_names(rdm_message)
+        if nodes:
+            suggested_comment = ", ".join(
+                f"regx_rerun_disable-{n} Rerun cause due to node issue" for n in nodes
+            )
+        elif jira_refs:
             suggested_comment = f"regx_rerun ({jira_refs[0]})"
+
+        rdm_link = (rdm_info or {}).get("rdm_link") or ""
+
+        suggested_pattern = _suggest_rdm_pattern_from_message(
+            rdm_message, rdm_link=rdm_link, nodes=nodes
+        )
 
         return jsonify({
             "success": True,
             "ai_summary": ai_summary,
             "jira_refs": jira_refs,
             "suggested_comment": suggested_comment,
+            "failed_nodes": nodes,
+            "suggested_next_action": "disable_node_and_rerun" if nodes else "rerun",
+            "suggested_pattern": suggested_pattern,
             "glean_results_count": len(glean_results) if glean_results else 0,
         })
     except Exception as e:
         logger.error(f"RDM AI analyze error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-skill-analyze", methods=["POST"])
+@jwt_required
+def rdm_skill_analyze():
+    """
+    Skill-based RDM triage for unmatched skipped tests.
+
+    Runs triage-rdm-deployment-failure via the Cursor bridge using the RDM
+    scheduled-deployment URL, then maps the result to a JITA comment
+    (link existing ENG/DIAL ticket, rerun, or draft a new Jira).
+    """
+    try:
+        data = request.get_json() or {}
+        task_id = data.get("task_id") or data.get("agave_task_id") or ""
+        testcase_id = data.get("testcase_id") or ""
+        deployment_id = data.get("deployment_id") or ""
+        rdm_message = data.get("rdm_message") or ""
+        rdm_link = data.get("rdm_link") or ""
+        testcase_name = data.get("testcase_name") or ""
+
+        if not testcase_name and not rdm_link and not task_id:
+            return jsonify({"success": False, "error": "testcase_name or rdm_link is required"}), 400
+
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        if not cursor_api_key:
+            return jsonify({
+                "success": False,
+                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "require_key_setup": True,
+            }), 403
+
+        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
+        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
+        atlassian_tokens = {}
+        if atlassian_jira_token:
+            atlassian_tokens["jira"] = atlassian_jira_token
+        if atlassian_confluence_token:
+            atlassian_tokens["confluence"] = atlassian_confluence_token
+
+        rdm_info = None
+        if task_id and (not rdm_link or not rdm_message):
+            rdm_info = get_rdm_failure_info(
+                task_id,
+                deployment_id=deployment_id or None,
+                testcase_id=testcase_id or None,
+            )
+            if rdm_info:
+                rdm_link = rdm_link or rdm_info.get("rdm_link") or ""
+                rdm_message = rdm_message or rdm_info.get("rdm_message") or ""
+
+        if not rdm_link and task_id:
+            rdm_link = "https://jita.eng.nutanix.com/results?task_ids=%s" % task_id
+
+        glean_tickets = []
+        glean_snippets = []
+        try:
+            search = search_existing_tickets_for_failure(
+                rdm_message, rdm_message, testcase_name
+            )
+            glean_tickets = _enrich_tickets_with_jira(search.get("tickets") or [])
+            glean_snippets = search.get("snippets") or []
+        except Exception as glean_err:
+            logger.warning("Glean search failed for RDM skill analysis: %s", glean_err)
+
+        payload = {
+            "testcase_name": testcase_name or "rdm_skipped_testcase",
+            "exception_summary": rdm_message[:500],
+            "exception": rdm_message,
+            "steps_log": "",
+            "nutest_test_log": "",
+            "test_log_url": rdm_link,
+            "rdm_url": rdm_link,
+            "rdm_message": rdm_message,
+            "jita_task_id": task_id,
+            "jira_tickets": data.get("jira_tickets") or [],
+            "failure_stage": data.get("failure_stage") or "DEPLOYMENT_FAILED",
+            "triage_genie_ticket": data.get("triage_genie_ticket") or "",
+            "glean_tickets": glean_tickets,
+            "glean_snippets": glean_snippets,
+            "analysis_type": "skipped",
+            "cursor_api_key": cursor_api_key,
+            "atlassian_tokens": atlassian_tokens,
+        }
+
+        resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/analyze-testcase",
+            json=payload,
+            timeout=600,
+        )
+        if resp.status_code != 200:
+            error_msg = (
+                resp.json().get("error", resp.text)
+                if resp.headers.get("content-type", "").startswith("application/json")
+                else resp.text
+            )
+            return jsonify({"success": False, "error": "Bridge error: %s" % error_msg}), 502
+
+        bridge = resp.json()
+        analysis = bridge.get("analysis") or {}
+        mapped = _normalize_rdm_skill_analysis(analysis, rdm_message=rdm_message)
+        suggested_pattern = _suggest_rdm_pattern_from_message(
+            rdm_message, rdm_link=rdm_link, nodes=mapped.get("failed_nodes") or []
+        )
+        if mapped.get("suggested_comment"):
+            suggested_pattern["comment_template"] = mapped["suggested_comment"]
+        if mapped.get("jira_ticket"):
+            suggested_pattern["jira"] = mapped["jira_ticket"]
+        if mapped.get("issue_category"):
+            suggested_pattern["description"] = mapped["issue_category"]
+
+        return jsonify({
+            "success": True,
+            "session_id": bridge.get("session_id", ""),
+            "skill_used": "triage-rdm-deployment-failure",
+            "rdm_link": rdm_link,
+            "analysis": analysis,
+            "root_cause": analysis.get("root_cause"),
+            "classification": analysis.get("classification") or mapped["issue_category"],
+            "confidence": analysis.get("confidence"),
+            "suggested_fix": analysis.get("suggested_fix"),
+            "triage_report": analysis.get("triage_report"),
+            "tg_ticket_validation": analysis.get("tg_ticket_validation"),
+            "enriched_tickets": glean_tickets,
+            "glean_snippets": glean_snippets,
+            "ai_summary": analysis.get("root_cause") or analysis.get("triage_report") or "",
+            "suggested_pattern": suggested_pattern,
+            **mapped,
+        })
+    except requests.exceptions.ConnectionError:
+        logger.error("Cursor bridge is not reachable at %s", CURSOR_BRIDGE_URL)
+        return jsonify({
+            "success": False,
+            "error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start",
+        }), 503
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "success": False,
+            "error": "AI Skill Analysis timed out (>600s).",
+        }), 504
+    except Exception as e:
+        logger.error("RDM skill analyze error: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _analyze_one_rdm_task(task_id, testcase_id=None, deployment_id=None, deployments=None):
+    """Return rdm_info + pattern match for a single test (or legacy per-task)."""
+    rdm_info = get_rdm_failure_info(
+        task_id,
+        deployment_id=deployment_id,
+        testcase_id=testcase_id,
+        deployments=deployments,
+    )
+    if not rdm_info:
+        return {
+            "agave_task_id": task_id or "",
+            "testcase_id": testcase_id or "",
+            "rdm_found": False,
+            "rdm_message": "",
+            "generated_comment": "",
+            "pattern_matched": False,
+            "failed_nodes": [],
+            "next_action": "",
+        }
+    pattern_result = match_rdm_pattern(rdm_info["rdm_message"])
+    return {
+        "agave_task_id": task_id or "",
+        "testcase_id": testcase_id or "",
+        "rdm_found": True,
+        "rdm_message": rdm_info["rdm_message"][:500],
+        "rdm_link": rdm_info["rdm_link"],
+        "rdm_category": rdm_info["rdm_category"],
+        "rdm_resolution": rdm_info["rdm_resolution"],
+        "rdm_source": rdm_info["rdm_source"],
+        "jita_deployment_id": rdm_info.get("jita_deployment_id", ""),
+        "failed_deployments": rdm_info["failed_deployment_count"],
+        "total_deployments": rdm_info["total_deployment_count"],
+        "pattern_matched": bool(pattern_result),
+        "generated_comment": pattern_result["generated_comment"] if pattern_result else "",
+        "pattern_id": pattern_result["pattern_id"] if pattern_result else "",
+        "pattern_category": pattern_result["category"] if pattern_result else "",
+        "pattern_description": pattern_result["description"] if pattern_result else "",
+        "pattern_jira": pattern_result.get("jira", "") if pattern_result else "",
+        "failed_nodes": pattern_result.get("failed_nodes", []) if pattern_result else [],
+        "next_action": pattern_result.get("next_action", "") if pattern_result else "",
+    }
+
+
+def _process_rdm_approve_and_fix(row, retrigger=False):
+    """
+    Approve JITA comment, optionally disable Jarvis nodes, optionally rerun.
+
+    row keys: testcase_id, testcase_name, agave_task_id, comment, jira_tickets,
+              rdm_link, failed_nodes, pattern_category, next_action,
+              pattern_matched (optional).
+    """
+    test_id = row.get("testcase_id") or row.get("test_id")
+    comment = row.get("comment") or row.get("generated_comment") or ""
+    jira_tickets = row.get("jira_tickets")
+    rdm_link = row.get("rdm_link") or ""
+    failed_nodes = row.get("failed_nodes") or []
+    category = row.get("pattern_category") or row.get("category") or ""
+    next_action = row.get("next_action") or ""
+    disabled_by = _current_user_email()
+
+    result = {
+        "testcase_id": test_id,
+        "testcase_name": row.get("testcase_name", ""),
+        "agave_task_id": row.get("agave_task_id", ""),
+        "comment": comment,
+        "disabled_by": disabled_by,
+        "jarvis_results": [],
+        "retrigger": None,
+        "triage_updated": False,
+    }
+
+    if test_id and comment:
+        ok, payload = _apply_jita_triage_update(test_id, comment, jira_tickets)
+        result["triage_updated"] = ok
+        result["triage"] = payload
+        if not ok:
+            result["success"] = False
+            result["error"] = payload.get("error", "JITA triage update failed")
+            return result
+    elif test_id and not comment:
+        result["success"] = False
+        result["error"] = "comment is required"
+        return result
+
+    if _rdm_should_disable(category, next_action, failed_nodes):
+        if not failed_nodes:
+            result["jarvis_error"] = "Pattern requires node disable but no node names were extracted"
+        else:
+            result["jarvis_results"] = _disable_rdm_nodes(failed_nodes, rdm_link, disabled_by)
+            if any(not jr.get("success") for jr in result["jarvis_results"]):
+                result["success"] = False
+                result["error"] = "One or more Jarvis node disable operations failed"
+                return result
+
+    if retrigger and _rdm_should_rerun(next_action, category):
+        tests = [{
+            "testcase_id": test_id,
+            "testcase_name": row.get("testcase_name", ""),
+            "agave_task_id": row.get("agave_task_id", ""),
+        }]
+        result["retrigger"] = _rerun_selected_tests(tests, overrides={})
+
+    jarvis_ok = all(jr.get("success") for jr in result["jarvis_results"]) if result["jarvis_results"] else True
+    retrigger_ok = True
+    if result["retrigger"] is not None:
+        retrigger_ok = bool(result["retrigger"].get("success"))
+    result["success"] = jarvis_ok and retrigger_ok
+    return result
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-approve", methods=["POST"])
+@jwt_required
+def rdm_approve_comment_and_fix():
+    """
+    Approve a pattern-matched RDM comment, disable failed nodes in Jarvis,
+    and optionally re-run the test.
+
+    Body: testcase_id, comment, jira_tickets?, rdm_link, failed_nodes[],
+          pattern_category, next_action, retrigger (bool)
+    """
+    try:
+        data = request.get_json() or {}
+        test_id = data.get("testcase_id") or data.get("test_id")
+        if not test_id:
+            return jsonify({"error": "testcase_id is required"}), 400
+        result = _process_rdm_approve_and_fix(data, retrigger=bool(data.get("retrigger")))
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"RDM approve error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-auto-workflow", methods=["POST"])
+@jwt_required
+def rdm_auto_workflow():
+    """
+    Pattern-matched complete workflow: analyze RDM failure, update JITA comment,
+    disable Jarvis node(s) when next_action is disable_node_and_rerun, then
+    rerun selected tests once on the parent JITA task (same as the JITA UI
+    rerun of the parent with those tests selected).
+
+    Body: tests[], retrigger (bool, default true), parent_task_id? (preferred
+    JITA task to POST /rerun against).
+
+    Only runs the fix/rerun steps when a pattern matches. Unmatched rows are
+    returned with pattern_matched=false and are not auto-fixed.
+    """
+    try:
+        data = request.get_json() or {}
+        tests = data.get("tests") or []
+        if not tests:
+            return jsonify({"error": "tests array is required"}), 400
+
+        retrigger = data.get("retrigger", True)
+        results = []
+        rerun_candidates = []
+        for row in tests:
+            task_id = row.get("agave_task_id")
+            rdm = row.get("rdm_info") or {}
+            if not rdm.get("pattern_matched"):
+                if not task_id:
+                    results.append({
+                        "testcase_id": row.get("testcase_id"),
+                        "success": False,
+                        "pattern_matched": False,
+                        "error": "agave_task_id is required to analyze RDM failure",
+                    })
+                    continue
+                rdm = _analyze_one_rdm_task(
+                    task_id,
+                    testcase_id=row.get("testcase_id"),
+                    deployment_id=row.get("deployment_id"),
+                )
+
+            if not rdm.get("pattern_matched"):
+                results.append({
+                    "testcase_id": row.get("testcase_id"),
+                    "testcase_name": row.get("testcase_name", ""),
+                    "agave_task_id": task_id,
+                    "success": False,
+                    "pattern_matched": False,
+                    "rdm_info": rdm,
+                    "error": "No pattern match — Analyze, Fix & Re-run only runs for pattern-matched failures",
+                })
+                continue
+
+            payload = {
+                "testcase_id": row.get("testcase_id"),
+                "testcase_name": row.get("testcase_name", ""),
+                "agave_task_id": task_id,
+                "comment": rdm.get("generated_comment") or row.get("comment") or "",
+                "jira_tickets": row.get("jira_tickets") or ([rdm.get("pattern_jira")] if rdm.get("pattern_jira") else None),
+                "rdm_link": rdm.get("rdm_link") or "",
+                "failed_nodes": rdm.get("failed_nodes") or [],
+                "pattern_category": rdm.get("pattern_category") or rdm.get("category") or "",
+                "next_action": rdm.get("next_action") or "",
+            }
+            # Approve / disable per test; one parent-task JITA rerun below.
+            processed = _process_rdm_approve_and_fix(payload, retrigger=False)
+            processed["pattern_matched"] = True
+            processed["rdm_info"] = rdm
+            results.append(processed)
+            if (
+                retrigger
+                and processed.get("success") is not False
+                and _rdm_should_rerun(payload.get("next_action"), payload.get("pattern_category"))
+                and task_id
+            ):
+                rerun_candidates.append({
+                    "testcase_id": row.get("testcase_id"),
+                    "testcase_name": row.get("testcase_name", ""),
+                    "agave_task_id": task_id,
+                })
+
+        if retrigger and rerun_candidates:
+            parent_task_id = _resolve_rerun_parent_task_id(
+                rerun_candidates,
+                data.get("parent_task_id") or data.get("agave_task_id"),
+            )
+            logger.info(
+                "[rdm-auto-workflow] One parent rerun on %s for %s test(s)",
+                parent_task_id,
+                len(rerun_candidates),
+            )
+            batch = _rerun_selected_tests(
+                rerun_candidates,
+                overrides={},
+                parent_task_id=parent_task_id,
+            )
+            task_rerun = (batch.get("results") or [None])[0]
+            candidate_keys = {
+                (c.get("testcase_id") or c.get("testcase_name") or "")
+                for c in rerun_candidates
+            }
+            for processed in results:
+                key = processed.get("testcase_id") or processed.get("testcase_name") or ""
+                if not task_rerun or key not in candidate_keys:
+                    continue
+                processed["retrigger"] = {
+                    "success": bool(task_rerun.get("success")),
+                    "total": 1,
+                    "succeeded": 1 if task_rerun.get("success") else 0,
+                    "failed": 0 if task_rerun.get("success") else 1,
+                    "parent_task_id": parent_task_id,
+                    "rerun_task_id": task_rerun.get("rerun_task_id"),
+                    "results": [task_rerun],
+                }
+                if processed.get("success") is not False:
+                    processed["success"] = bool(task_rerun.get("success"))
+                    if not task_rerun.get("success"):
+                        processed["error"] = task_rerun.get("error") or "JITA retrigger failed"
+
+        succeeded = sum(1 for r in results if r.get("success"))
+        return jsonify({
+            "success": succeeded == len(results) and len(results) > 0,
+            "total": len(results),
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
+            "results": results,
+        })
+    except Exception as e:
+        logger.error(f"RDM auto-workflow error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-patterns/suggest", methods=["POST"])
+@jwt_required
+def rdm_patterns_suggest():
+    """Draft a pattern from an RDM failure message for user review."""
+    try:
+        data = request.get_json() or {}
+        rdm_message = data.get("rdm_message") or ""
+        if not rdm_message:
+            return jsonify({"error": "rdm_message is required"}), 400
+        draft = _suggest_rdm_pattern_from_message(
+            rdm_message,
+            rdm_link=data.get("rdm_link") or "",
+            nodes=data.get("failed_nodes"),
+        )
+        return jsonify({"success": True, "pattern": draft})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-patterns/add", methods=["POST"])
+@jwt_required
+def rdm_patterns_add():
+    """Append one approved pattern to the team RDM pattern file."""
+    global RDM_PATTERNS
+    try:
+        data = request.get_json() or {}
+        pattern = data.get("pattern") or data
+        regex = (pattern.get("regex") or "").strip()
+        comment_template = (pattern.get("comment_template") or "").strip()
+        if not regex or not comment_template:
+            return jsonify({"error": "regex and comment_template are required"}), 400
+        try:
+            re.compile(regex)
+        except re.error as e:
+            return jsonify({"error": f"Invalid regex: {e}"}), 400
+
+        path = _rdm_patterns_file(for_write=True)
+        existing = {"patterns": []}
+        if os.path.exists(path):
+            existing = _read_rdm_patterns_json(path)
+        patterns = existing.get("patterns") or []
+        new_id = (pattern.get("id") or "").strip() or f"learned_{int(time.time())}"
+        if any(p.get("id") == new_id for p in patterns):
+            new_id = f"{new_id}_{int(time.time())}"
+        entry = {
+            "id": new_id,
+            "regex": regex,
+            "confidence": float(pattern.get("confidence") or 0.9),
+            "comment_template": comment_template,
+            "category": pattern.get("category") or "INFRA_INTERMITTENT",
+            "next_action": pattern.get("next_action") or _pattern_next_action(pattern),
+            "description": pattern.get("description") or "Learned from RDM AI analysis",
+            "action": pattern.get("action") or "",
+            "example_failure": pattern.get("example_failure") or "",
+            "reference_task": pattern.get("reference_task") or pattern.get("rdm_link") or "",
+            "jira": pattern.get("jira") or "",
+            "created_by": _current_user_email(),
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+        patterns.insert(0, entry)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({"patterns": patterns}, f, indent=2)
+        RDM_PATTERNS = _load_rdm_patterns()
+        return jsonify({"success": True, "pattern": entry, "count": len(RDM_PATTERNS), "file": path})
+    except Exception as e:
+        logger.error(f"Error adding RDM pattern: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/jarvis/nodes", methods=["GET"])
+@jwt_required
+def jarvis_search_nodes():
+    """GET Jarvis nodes by hostname search. Returns is_enabled and node id."""
+    try:
+        hostname = (request.args.get("search") or request.args.get("hostname") or "").strip()
+        if not hostname:
+            return jsonify({"error": "search (hostname) is required"}), 400
+        svc = _jarvis_service()
+        nodes, err = svc.search_nodes(hostname)
+        if err:
+            return jsonify({"success": False, "error": err, "nodes": []}), 502
+        jmod = _jarvis_mod()
+        summarized = []
+        for n in nodes:
+            summarized.append({
+                "node_id": jmod._node_id(n),
+                "hostname": jmod._node_hostname(n),
+                "is_enabled": jmod._is_enabled(n),
+                "raw": n,
+            })
+        return jsonify({"success": True, "nodes": summarized, "count": len(summarized)})
+    except Exception as e:
+        logger.error(f"Jarvis node search error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/jarvis/nodes", methods=["PUT"])
+@jwt_required
+def jarvis_set_node_enabled():
+    """Enable or disable a Jarvis node. Disabled-by is the logged-in user."""
+    try:
+        data = request.get_json() or {}
+        hostname = (data.get("hostname") or data.get("node_name") or data.get("search") or "").strip()
+        is_enabled = data.get("is_enabled")
+        if is_enabled is None:
+            return jsonify({"error": "is_enabled is required (true/false)"}), 400
+        if not hostname:
+            return jsonify({"error": "hostname is required"}), 400
+        rdm_link = data.get("rdm_link") or ""
+        user_email = _current_user_email()
+        svc = _jarvis_service()
+        if bool(is_enabled):
+            result = svc.enable_node_sync(hostname, rdm_link=rdm_link, enabled_by=user_email)
+        else:
+            result = svc.disable_node_sync(
+                hostname,
+                rdm_link=rdm_link,
+                disabled_by=user_email,
+                reason=data.get("reason") or "Rerun cause due to node issue",
+            )
+        status = 200 if result.get("success") else 400
+        return jsonify(result), status
+    except Exception as e:
+        logger.error(f"Jarvis node enable/disable error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/mcp/regression/failed-analysis/ai-summary-single", methods=["POST"])
@@ -7978,85 +9025,28 @@ def glean_search_single_testcase():
         if not testcase_name:
             return jsonify({"success": False, "error": "testcase_name is required"}), 400
 
-        short_name = testcase_name.split(".")[-1] if "." in testcase_name else testcase_name
+        testcase_id = body.get("testcase_id") or ""
+        steps_log = body.get("steps_log") or ""
+        if testcase_id and (not exception_summary or not exception_text):
+            detailed = fetch_detailed_test_result(testcase_id)
+            exception_summary = exception_summary or detailed.get("exception_summary") or ""
+            exception_text = exception_text or detailed.get("exception") or ""
+            test_log_url = test_log_url or detailed.get("test_log_url") or ""
 
-        # ---- Multi-query Glean search strategy ----
+        if not steps_log and test_log_url and testcase_name:
+            logs = fetch_testcase_logs(testcase_name, test_log_url)
+            steps_log = logs.get("steps_log") or ""
 
-        all_glean_tickets = {}   # ticket_id -> metadata dict
-        all_glean_snippets = []
-        queries_used = []
-
-        # Query 1: exception summary (most specific error text)
-        q1 = (exception_summary or "")[:250].strip()
-        if q1:
-            queries_used.append(q1)
-            g1 = search_glean_jira(q1, max_results=10)
-            for t in _extract_jira_tickets_from_glean(g1):
-                all_glean_tickets.setdefault(t["ticket"], t)
-            all_glean_snippets.extend(_build_glean_snippets(g1))
-
-        # Query 2: testcase short name + condensed error keywords
-        error_keywords = _extract_error_keywords(exception_summary, exception_text)
-        q2 = f"{short_name} {error_keywords}"[:250].strip()
-        if q2 and q2 != q1:
-            queries_used.append(q2)
-            g2 = search_glean_jira(q2, max_results=10)
-            for t in _extract_jira_tickets_from_glean(g2):
-                all_glean_tickets.setdefault(t["ticket"], t)
-            all_glean_snippets.extend(_build_glean_snippets(g2))
-
-        # Query 3: AI summary as search input (if available and different)
-        if ai_summary:
-            q3 = ai_summary[:250].strip()
-            if q3 and q3 != q1 and q3 != q2:
-                queries_used.append(q3)
-                g3 = search_glean_jira(q3, max_results=5)
-                for t in _extract_jira_tickets_from_glean(g3):
-                    all_glean_tickets.setdefault(t["ticket"], t)
-                all_glean_snippets.extend(_build_glean_snippets(g3))
-
-        # De-dup snippets by URL
-        seen_urls = set()
-        deduped_snippets = []
-        for s in all_glean_snippets:
-            key = s.get("url") or s.get("title")
-            if key and key not in seen_urls:
-                seen_urls.add(key)
-                deduped_snippets.append(s)
-
-        # ---- Enrich top JIRA tickets via JIRA REST API ----
-
-        glean_ticket_list = list(all_glean_tickets.values())
-        enriched_tickets = []
-        for t_info in glean_ticket_list[:8]:
-            tid = t_info["ticket"]
-            jdata = fetch_jira_ticket(tid)
-            entry = {
-                "ticket": tid,
-                "url": t_info.get("url", f"https://jira.nutanix.com/browse/{tid}"),
-                "glean_title": t_info.get("title", ""),
-                "glean_snippet": t_info.get("snippet", ""),
-            }
-            if jdata:
-                fields = jdata.get("fields", {})
-                entry["jira_summary"] = fields.get("summary", "")
-                entry["jira_status"] = (fields.get("status") or {}).get("name", "Unknown")
-                resolution = fields.get("resolution")
-                entry["jira_resolution"] = (resolution.get("name", "") if isinstance(resolution, dict) else "") if resolution else ""
-                entry["jira_priority"] = (fields.get("priority") or {}).get("name", "")
-                entry["jira_type"] = (fields.get("issuetype") or {}).get("name", "")
-                entry["is_open"] = entry["jira_status"] not in ("Closed", "Resolved", "Done", "Won't Fix")
-            else:
-                entry["jira_summary"] = t_info.get("title", "")
-                entry["jira_status"] = "Unknown"
-                entry["jira_resolution"] = ""
-                entry["is_open"] = True
-            enriched_tickets.append(entry)
-
-        # Sort: open tickets first, then by whether title/snippet shares keywords with exception
-        enriched_tickets.sort(key=lambda e: (0 if e.get("is_open") else 1))
-
-        # Flat ref list for backward compat
+        search = search_existing_tickets_for_failure(
+            exception_summary,
+            exception_text,
+            testcase_name,
+            ai_summary=ai_summary,
+            steps_log=steps_log,
+        )
+        queries_used = search.get("queries") or []
+        deduped_snippets = search.get("snippets") or []
+        enriched_tickets = _enrich_tickets_with_jira(search.get("tickets") or [])
         glean_jira_refs = [t["ticket"] for t in enriched_tickets]
 
         # ---- Classify ----
@@ -8074,6 +9064,9 @@ def glean_search_single_testcase():
         ]
         if exception_text:
             prompt_parts.append(f"Traceback:\n```\n{exception_text[:3000]}\n```")
+        steps_errors = _extract_steps_log_errors(steps_log)
+        if steps_errors:
+            prompt_parts.append(f"steps.log error lines:\n```\n{steps_errors[:2000]}\n```")
         if ai_summary:
             prompt_parts.append(f"AI Failure Summary:\n{ai_summary[:1500]}")
         if failure_stage:
@@ -8155,22 +9148,41 @@ def glean_search_single_testcase():
             "glean_snippets": deduped_snippets[:5],
             "ai_analysis": ai_analysis,
             "search_queries": queries_used,
+            "glean_available": search.get("glean_available"),
+            "glean_ok": search.get("glean_ok"),
+            "search_source": search.get("source"),
         })
     except Exception as e:
         logger.error(f"Glean search single testcase error: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-def _extract_error_keywords(exception_summary, exception_text):
-    """Pull the most useful error keywords from exception text for search."""
-    import re as _re
-    text = f"{exception_summary or ''} {(exception_text or '')[:500]}"
-    # Extract class-style error names like NuTestError, TimeoutException, etc.
-    error_names = _re.findall(r'[A-Z][a-zA-Z]*(?:Error|Exception|Failure|Fault)', text)
-    # Extract key phrases: status codes, method names, short phrases
-    status_codes = _re.findall(r'\b[45]\d{2}\b', text)
-    keywords = list(dict.fromkeys(error_names + status_codes))
-    return " ".join(keywords[:5])
+def _extract_steps_log_errors(steps_log, max_lines=10):
+    """Keep the last ERROR/FATAL/Exception lines from steps.log for search and analysis."""
+    if not steps_log:
+        return ""
+    hits = []
+    pat = re.compile(r"(ERROR|FATAL|Exception|FAIL|Traceback|CRITICAL|AssertionError|NuTestError)", re.I)
+    for line in steps_log.splitlines():
+        if pat.search(line):
+            cleaned = re.sub(r"^\s*\d{4}-\d{2}-\d{2}[ T]\S+\s*", "", line).strip()
+            if cleaned:
+                hits.append(cleaned[:220])
+    return "\n".join(hits[-max_lines:])
+
+
+def _extract_error_keywords(exception_summary, exception_text, extra_text=""):
+    """Pull the most useful error keywords from exception text and steps.log."""
+    text = "%s %s %s" % (
+        exception_summary or "",
+        (exception_text or "")[:800],
+        (extra_text or "")[:800],
+    )
+    error_names = re.findall(r"[A-Z][a-zA-Z]*(?:Error|Exception|Failure|Fault)", text)
+    status_codes = re.findall(r"\b[45]\d{2}\b", text)
+    quoted = re.findall(r'"([^"]{8,80})"', text)
+    keywords = list(dict.fromkeys(error_names + status_codes + quoted[:3]))
+    return " ".join(keywords[:8])
 
 
 def _build_glean_snippets(glean_data):
@@ -8205,14 +9217,447 @@ def _build_glean_snippets(glean_data):
     return snippets
 
 
+def _glean_token_available():
+    return bool((os.getenv("GLEAN_TOKEN") or "").strip())
+
+
+def search_jira_similar_tickets(query_text, max_results=8, token=None):
+    """Jira JQL text search used when Glean is unavailable or returns nothing."""
+    jira_token = resolve_jira_token(token)
+    if not jira_token or not (query_text or "").strip():
+        return []
+    keywords = _extract_error_keywords(query_text, "") or " ".join((query_text or "").split()[:8])
+    escaped = keywords.replace("\\", "\\\\").replace('"', '\\"')[:180].strip()
+    if not escaped:
+        return []
+    jql = 'text ~ "%s" AND project = ENG ORDER BY updated DESC' % escaped
+    try:
+        resp = session.get(
+            f"{JIRA_BASE}/search",
+            headers=get_jira_headers(jira_token),
+            params={
+                "jql": jql,
+                "maxResults": max_results,
+                "fields": "summary,status,resolution,issuetype,priority",
+            },
+            timeout=30,
+            verify=False,
+        )
+        if resp.status_code != 200:
+            logger.warning("Jira similar-ticket search returned %s", resp.status_code)
+            return []
+        out = []
+        for issue in (resp.json() or {}).get("issues") or []:
+            key = issue.get("key") or ""
+            fields = issue.get("fields") or {}
+            if not key:
+                continue
+            out.append({
+                "ticket": key,
+                "title": fields.get("summary") or "",
+                "url": "https://jira.nutanix.com/browse/%s" % key,
+                "snippet": (fields.get("summary") or "")[:300],
+                "source": "jira",
+            })
+        return out
+    except Exception as e:
+        logger.warning("Jira similar-ticket search failed: %s", e)
+        return []
+
+
+def search_existing_tickets_for_failure(exception_summary, exception_text, testcase_name, ai_summary="", steps_log=""):
+    """Glean-first, Jira-fallback search for existing ENG tickets matching the failure."""
+    all_tickets = {}
+    snippets = []
+    queries = []
+    glean_used = False
+    glean_ok = False
+    source = "none"
+
+    short_name = testcase_name.split(".")[-1] if "." in (testcase_name or "") else (testcase_name or "")
+    steps_errors = _extract_steps_log_errors(steps_log)
+    q1 = (exception_summary or "")[:250].strip()
+    error_keywords = _extract_error_keywords(exception_summary, exception_text, steps_errors)
+    q2 = ("%s %s" % (short_name, error_keywords))[:250].strip()
+    q3 = (ai_summary or "")[:250].strip()
+    q4 = ""
+    if steps_errors:
+        q4 = steps_errors.strip().splitlines()[-1][:250].strip()
+    q5 = (exception_text or "").strip().splitlines()
+    q5 = next((line.strip()[:250] for line in reversed(q5) if line.strip() and "Error" in line), "")
+
+    if _glean_token_available():
+        glean_used = True
+        for query, limit in ((q1, 10), (q2, 10), (q4, 8), (q5, 8), (q3, 5)):
+            if not query or query in queries:
+                continue
+            queries.append(query)
+            data = search_glean_jira(query, max_results=limit)
+            if data:
+                glean_ok = True
+                for ticket in _extract_jira_tickets_from_glean(data):
+                    all_tickets.setdefault(ticket["ticket"], ticket)
+                snippets.extend(_build_glean_snippets(data))
+        if all_tickets:
+            source = "glean"
+
+    if not all_tickets:
+        for fallback_q in (q1, q2, q4, q5, q3):
+            if not fallback_q:
+                continue
+            if fallback_q not in queries:
+                queries.append(fallback_q)
+            for ticket in search_jira_similar_tickets(fallback_q, max_results=10):
+                all_tickets.setdefault(ticket["ticket"], ticket)
+            if all_tickets:
+                source = "jira_fallback"
+                break
+
+    seen = set()
+    deduped = []
+    for snippet in snippets:
+        key = snippet.get("url") or snippet.get("title")
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(snippet)
+
+    return {
+        "tickets": list(all_tickets.values()),
+        "snippets": deduped[:8],
+        "queries": queries,
+        "glean_available": _glean_token_available(),
+        "glean_used": glean_used,
+        "glean_ok": glean_ok,
+        "source": source,
+    }
+
+
+def _enrich_tickets_with_jira(ticket_infos, limit=8):
+    """Attach live Jira status/summary to Glean or Jira search hits."""
+    enriched = []
+    for t_info in (ticket_infos or [])[:limit]:
+        tid = t_info.get("ticket")
+        if not tid:
+            continue
+        jdata = fetch_jira_ticket(tid)
+        entry = {
+            "ticket": tid,
+            "url": t_info.get("url") or ("https://jira.nutanix.com/browse/%s" % tid),
+            "glean_title": t_info.get("title", ""),
+            "glean_snippet": t_info.get("snippet", ""),
+            "source": t_info.get("source", "glean"),
+        }
+        if jdata:
+            fields = jdata.get("fields") or {}
+            entry["jira_summary"] = fields.get("summary", "")
+            entry["jira_status"] = (fields.get("status") or {}).get("name", "Unknown")
+            resolution = fields.get("resolution")
+            entry["jira_resolution"] = (
+                resolution.get("name", "") if isinstance(resolution, dict) else ""
+            ) if resolution else ""
+            entry["jira_priority"] = (fields.get("priority") or {}).get("name", "")
+            entry["jira_type"] = (fields.get("issuetype") or {}).get("name", "")
+            entry["is_open"] = entry["jira_status"] not in ("Closed", "Resolved", "Done", "Won't Fix")
+        else:
+            entry["jira_summary"] = t_info.get("title", "")
+            entry["jira_status"] = "Unknown"
+            entry["jira_resolution"] = ""
+            entry["is_open"] = True
+        enriched.append(entry)
+    enriched.sort(key=lambda e: (0 if e.get("is_open") else 1))
+    return enriched
+
+
+_TG_STOP_WORDS = {
+    "the", "and", "for", "with", "from", "this", "that", "have", "will", "was",
+    "were", "been", "being", "into", "onto", "over", "under", "after", "before",
+    "during", "while", "than", "then", "also", "just", "only", "very", "more",
+    "most", "some", "any", "all", "not", "but", "are", "test", "failed", "error",
+    "exception", "none",
+}
+
+
+def _significant_failure_words(text):
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_]{3,}", (text or "").lower())
+    return [w for w in words if w not in _TG_STOP_WORDS]
+
+
+def validate_triage_genie_ticket_detailed(ticket_id, exception_summary, exception, glean_tickets=None):
+    """Decide whether the Triage Genie ticket matches this failure."""
+    ticket_id = _normalize_jira_issue_key(ticket_id) if ticket_id else ""
+    result = {
+        "ticket": ticket_id or "",
+        "verdict": "Missing",
+        "reason": "No Triage Genie ticket was suggested for this testcase.",
+        "jira_summary": "",
+        "jira_status": "",
+        "jira_type": "",
+        "jira_resolution": "",
+        "is_open": None,
+        "found_in_glean": False,
+        "overlap_score": 0,
+    }
+    if not ticket_id:
+        return result
+
+    glean_ids = {(t.get("ticket") or "").upper() for t in (glean_tickets or [])}
+    result["found_in_glean"] = ticket_id.upper() in glean_ids
+
+    jira_data = fetch_jira_ticket(ticket_id)
+    if not jira_data:
+        result["verdict"] = "Unknown"
+        result["reason"] = (
+            "Could not fetch %s from Jira (missing token or ticket not found), "
+            "so the suggestion cannot be confirmed from ticket fields."
+        ) % ticket_id
+        if result["found_in_glean"]:
+            result["verdict"] = "Correct"
+            result["reason"] = (
+                "%s also appeared in error-message search for this failure, "
+                "so it is likely the right suggested ticket. Jira details were unavailable."
+            ) % ticket_id
+        return result
+
+    fields = jira_data.get("fields") or {}
+    summary = _jira_field_text(fields.get("summary"))
+    description = _jira_field_text(fields.get("description"))
+    status = (fields.get("status") or {}).get("name", "")
+    resolution = fields.get("resolution")
+    resolution_name = resolution.get("name", "") if isinstance(resolution, dict) else ""
+    issue_type = (fields.get("issuetype") or {}).get("name", "")
+    result.update({
+        "jira_summary": summary,
+        "jira_status": status,
+        "jira_type": issue_type,
+        "jira_resolution": resolution_name,
+        "is_open": status not in ("Closed", "Resolved", "Done", "Won't Fix"),
+    })
+
+    fail_words = set(_significant_failure_words("%s %s" % (exception_summary or "", exception or "")))
+    ticket_words = set(_significant_failure_words("%s %s" % (summary, description[:2000])))
+    common = fail_words & ticket_words
+    result["overlap_score"] = len(common)
+    common_preview = ", ".join(sorted(common)[:8]) or "none"
+
+    if result["found_in_glean"] and len(common) >= 2:
+        result["verdict"] = "Correct"
+        result["reason"] = (
+            "%s matches this failure: it appeared in error-message search and "
+            "shares key terms (%s)."
+        ) % (ticket_id, common_preview)
+    elif len(common) >= 4:
+        result["verdict"] = "Correct"
+        result["reason"] = (
+            "%s summary/description matches the failure signature (shared terms: %s)."
+        ) % (ticket_id, common_preview)
+    elif result["found_in_glean"] or len(common) >= 2:
+        result["verdict"] = "Partial"
+        result["reason"] = (
+            "%s is related but not a strong match. Overlap is limited (%s). "
+            "Review before linking."
+        ) % (ticket_id, common_preview)
+    else:
+        result["verdict"] = "Incorrect"
+        result["reason"] = (
+            "%s does not match this failure. Ticket is '%s' (%s) and does not "
+            "share the error signature."
+        ) % (ticket_id, (summary or "no summary")[:160], status or "unknown status")
+    return result
+
+
+def _parse_first_level_ai_json(text):
+    """Extract a JSON object from an AI response, or return {}."""
+    if not text:
+        return {}
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    raw = fenced.group(1).strip() if fenced else text.strip()
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(raw[start:end + 1])
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
+    return {}
+
+
+def _run_first_level_ai_analysis(test_result, run_ai=True):
+    """Fast first-level analysis: Glean/Jira ticket hunt + TG ticket validation + AI summary."""
+    testcase_name = test_result.get("testcase_name") or ""
+    exception_summary = test_result.get("exception_summary") or ""
+    exception = test_result.get("exception") or ""
+    test_log_url = test_result.get("test_log_url") or ""
+    failure_stage = test_result.get("failure_stage") or ""
+    jira_tickets = test_result.get("jira_tickets") or []
+    tg_ticket = (
+        test_result.get("triage_genie_ticket_id")
+        or test_result.get("triage_genie_ticket")
+        or ""
+    )
+    testcase_id = test_result.get("testcase_id") or ""
+    ai_summary = test_result.get("ai_summary") or ""
+
+    if testcase_id and (not exception_summary or not exception):
+        detailed = fetch_detailed_test_result(testcase_id)
+        exception_summary = exception_summary or detailed.get("exception_summary") or ""
+        exception = exception or detailed.get("exception") or ""
+        test_log_url = test_log_url or detailed.get("test_log_url") or ""
+
+    steps_log = test_result.get("steps_log") or ""
+    if not steps_log and test_log_url and testcase_name:
+        logs = fetch_testcase_logs(testcase_name, test_log_url)
+        steps_log = logs.get("steps_log") or ""
+    steps_errors = _extract_steps_log_errors(steps_log)
+
+    if not tg_ticket and testcase_id:
+        try:
+            tg_ticket = fetch_triage_genie_ticket_id(testcase_id) or ""
+        except Exception as tg_err:
+            logger.warning("Could not fetch Triage Genie ticket for %s: %s", testcase_id, tg_err)
+
+    search = search_existing_tickets_for_failure(
+        exception_summary, exception, testcase_name, ai_summary=ai_summary, steps_log=steps_log
+    )
+    enriched = _enrich_tickets_with_jira(search["tickets"])
+    tg_validation = validate_triage_genie_ticket_detailed(
+        tg_ticket, exception_summary, exception, search["tickets"] + enriched
+    )
+
+    first_ticket = None
+    if jira_tickets:
+        first_ticket = jira_tickets[0]
+    elif tg_ticket:
+        first_ticket = tg_ticket
+    elif enriched:
+        first_ticket = enriched[0].get("ticket")
+    first_jira = fetch_jira_ticket(first_ticket) if first_ticket else None
+    issue_type = classify_failure(exception_summary, exception, first_jira, search["tickets"] or None)
+
+    analysis_text = ""
+    recommended_action = ""
+    best_ticket = ""
+    if run_ai:
+        ticket_lines = []
+        for t in enriched[:8]:
+            status_str = t.get("jira_status") or "Unknown"
+            if t.get("jira_resolution"):
+                status_str += " (%s)" % t["jira_resolution"]
+            ticket_lines.append(
+                "- %s [%s] %s — %s"
+                % (t["ticket"], status_str, t.get("jira_type") or "", t.get("jira_summary") or t.get("glean_title") or "")
+            )
+        tg_line = "None"
+        if tg_validation.get("ticket"):
+            tg_line = "%s [%s] %s — %s" % (
+                tg_validation["ticket"],
+                tg_validation.get("jira_status") or "unknown",
+                tg_validation.get("jira_type") or "",
+                tg_validation.get("jira_summary") or "",
+            )
+
+        user_content = "\n".join([
+            "Testcase: %s" % testcase_name,
+            "Failure Stage: %s" % (failure_stage or "Unknown"),
+            "Exception Summary: %s" % (exception_summary or "N/A"),
+            "Traceback:\n```\n%s\n```" % ((exception or "N/A")[:3000]),
+            "steps.log errors:\n```\n%s\n```" % (steps_errors[:2000] or "N/A"),
+            "Triage Genie suggested ticket: %s" % tg_line,
+            "Heuristic TG verdict: %s — %s" % (tg_validation.get("verdict"), tg_validation.get("reason")),
+            "Existing tickets from error-message search:\n%s" % ("\n".join(ticket_lines) or "None found"),
+            "",
+            "Return ONLY JSON with these keys:",
+            '{',
+            '  "issue_type": "Product Issue | Test Issue | Infrastructure Issue | Unknown / Needs Manual Review",',
+            '  "analysis": "2-4 sentence first-level analysis of the failure",',
+            '  "tg_verdict": "Correct | Incorrect | Partial | Missing",',
+            '  "tg_reason": "why the Triage Genie ticket is or is not the right ticket",',
+            '  "best_matching_ticket": "ENG-XXXX or empty",',
+            '  "recommended_action": "one concrete next step"',
+            '}',
+        ])
+        system_prompt = (
+            "You are a first-level regression failure analyst at Nutanix. "
+            "Classify the failure, validate whether the Triage Genie suggested JIRA ticket "
+            "is the correct ticket for THIS error (not merely open/closed), pick the best "
+            "matching existing ticket from the search results, and recommend the next action. "
+            "Be factual. Do not invent ticket IDs."
+        )
+        try:
+            ai_raw = _call_ai_chat(system_prompt, user_content, max_tokens=900)
+            parsed = _parse_first_level_ai_json(ai_raw)
+            if parsed:
+                analysis_text = (parsed.get("analysis") or "").strip()
+                recommended_action = (parsed.get("recommended_action") or "").strip()
+                best_ticket = (parsed.get("best_matching_ticket") or "").strip()
+                if parsed.get("issue_type"):
+                    issue_type = parsed["issue_type"]
+                ai_verdict = (parsed.get("tg_verdict") or "").strip()
+                if ai_verdict in ("Correct", "Incorrect", "Partial", "Missing"):
+                    tg_validation["verdict"] = ai_verdict
+                    if parsed.get("tg_reason"):
+                        tg_validation["reason"] = parsed["tg_reason"].strip()
+            else:
+                analysis_text = (ai_raw or "").strip()
+        except Exception as ai_err:
+            logger.warning("First Level AI chat failed: %s", ai_err)
+            analysis_text = (
+                "AI summary unavailable (%s). Heuristic classification is %s. "
+                "Triage Genie ticket verdict: %s."
+            ) % (str(ai_err)[:160], issue_type, tg_validation.get("verdict"))
+
+    if not analysis_text:
+        analysis_text = (
+            "Failure classified as %s. Triage Genie ticket %s is %s. %s"
+        ) % (
+            issue_type,
+            tg_validation.get("ticket") or "(none)",
+            tg_validation.get("verdict"),
+            tg_validation.get("reason") or "",
+        )
+    if not best_ticket and enriched:
+        best_ticket = enriched[0].get("ticket") or ""
+    if not recommended_action:
+        if tg_validation.get("verdict") == "Correct" and tg_validation.get("ticket"):
+            recommended_action = "Link this failure to %s and monitor the ticket." % tg_validation["ticket"]
+        elif best_ticket:
+            recommended_action = "Review %s as the closest existing ticket before filing a new one." % best_ticket
+        else:
+            recommended_action = "No strong existing ticket found. Review logs and file a new Jira if this is a product defect."
+
+    return {
+        "success": True,
+        "analysis_type": "first_level_ai",
+        "issue_type": issue_type,
+        "analysis": analysis_text,
+        "recommended_action": recommended_action,
+        "best_matching_ticket": best_ticket,
+        "tg_ticket_validation": tg_validation,
+        "enriched_tickets": enriched[:8],
+        "glean_jira_refs": [t["ticket"] for t in enriched[:10]],
+        "glean_snippets": search.get("snippets") or [],
+        "search_queries": search.get("queries") or [],
+        "glean_available": search.get("glean_available"),
+        "glean_ok": search.get("glean_ok"),
+        "search_source": search.get("source"),
+        "existing_issues": enriched[:8],
+        "test_log_url": test_log_url,
+        "failure_stage": failure_stage,
+    }
+
+
 @app.route("/mcp/regression/failed-analysis/rdm-patterns", methods=["GET"])
 @jwt_required
 def get_rdm_patterns():
     """Return current RDM failure patterns."""
     try:
-        if os.path.exists(RDM_PATTERNS_FILE):
-            with open(RDM_PATTERNS_FILE, "r") as f:
-                return jsonify(json.load(f))
+        path = _rdm_patterns_file()
+        if os.path.exists(path):
+            return jsonify(_read_rdm_patterns_json(path))
         return jsonify({"patterns": []})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -8228,7 +9673,9 @@ def update_rdm_patterns():
         patterns = data.get("patterns")
         if patterns is None:
             return jsonify({"error": "patterns array is required"}), 400
-        with open(RDM_PATTERNS_FILE, "w") as f:
+        path = _rdm_patterns_file(for_write=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
             json.dump({"patterns": patterns}, f, indent=2)
         RDM_PATTERNS = _load_rdm_patterns()
         return jsonify({"success": True, "count": len(RDM_PATTERNS)})
@@ -8625,6 +10072,157 @@ def retrigger_preview_resource_config():
         summary["task_id"] = tid
         previews.append(summary)
     return jsonify({"success": True, "tasks": previews})
+
+def _jita_oid_str(value):
+    if isinstance(value, dict) and "$oid" in value:
+        return str(value.get("$oid") or "").strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _resolve_rerun_parent_task_id(tests, explicit_parent=None):
+    """
+    Pick the single JITA parent task to POST /rerun against.
+
+    Analyze, Fix & Re-run must create one child task for the selected tests,
+    matching the JITA UI: open the parent, select those tests, trigger once.
+    """
+    parent = _jita_oid_str(explicit_parent)
+    if parent:
+        return parent
+    ids = [_jita_oid_str(t.get("agave_task_id")) for t in (tests or [])]
+    ids = [tid for tid in ids if tid]
+    if not ids:
+        return ""
+    unique = list(dict.fromkeys(ids))
+    if len(unique) == 1:
+        return unique[0]
+    from collections import Counter
+    return Counter(ids).most_common(1)[0][0]
+
+
+def _group_tests_for_rerun(tests, parent_task_id=None):
+    """
+    Build {task_id: [test entries]} for JITA /rerun.
+
+    When parent_task_id is set, every selected test is attached to that one
+    parent so JITA creates a single rerun task.
+    """
+    parent = _jita_oid_str(parent_task_id)
+    tests_by_task = {}
+    for t in tests or []:
+        atid = parent or _jita_oid_str(t.get("agave_task_id"))
+        if not atid:
+            continue
+        name = (t.get("testcase_name") or t.get("name") or "").strip()
+        result_id = t.get("testcase_id") or t.get("test_result_id")
+        if not name and not result_id:
+            continue
+        entry = {}
+        if name:
+            entry["name"] = name
+        if result_id:
+            entry["test_result_id"] = result_id
+        tests_by_task.setdefault(atid, []).append(entry)
+    return tests_by_task
+
+
+def _rerun_selected_tests(tests, overrides=None, parent_task_id=None):
+    """
+    Re-run selected tests via JITA agave_tasks/{id}/rerun.
+    Returns a dict (not a Flask response) so other workflows can reuse it.
+
+    parent_task_id: when set, all tests are posted on that one parent task.
+    """
+    overrides = overrides or {}
+    if not tests:
+        return {"success": False, "error": "No tests provided", "results": []}
+
+    current_username = _current_username()
+    user_auth = _get_user_credentials(current_username)
+    if not user_auth:
+        return {
+            "success": False,
+            "error": "Session credentials expired. Please re-login to retrigger.",
+            "code": "CREDENTIALS_EXPIRED",
+            "results": [],
+        }
+
+    tests_by_task = _group_tests_for_rerun(tests, parent_task_id=parent_task_id)
+
+    if not tests_by_task:
+        return {
+            "success": False,
+            "error": "No valid agave_task_id found in selected tests",
+            "results": [],
+        }
+
+    rerun_results = []
+    for task_id, task_tests in tests_by_task.items():
+        try:
+            task_data = fetch_agave_task(task_id)
+            if not task_data:
+                rerun_results.append({
+                    "agave_task_id": task_id,
+                    "success": False,
+                    "error": "Could not fetch task details",
+                })
+                continue
+
+            payload = _build_rerun_payload(task_data, task_tests, overrides, current_username)
+            rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
+            logger.info(f"[retrigger] POST {rerun_url} with {len(task_tests)} test(s): {task_tests}")
+            resp = requests.post(
+                rerun_url,
+                data=json.dumps(payload),
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                auth=user_auth,
+                verify=False,
+                timeout=60,
+            )
+            resp_text = resp.text[:500]
+            logger.info(f"[retrigger] Response {resp.status_code} for task {task_id}: {resp_text}")
+            try:
+                resp_data = resp.json()
+            except Exception:
+                resp_data = {}
+
+            if resp_data.get("success") is True:
+                new_id = resp_data.get("_id")
+                if isinstance(new_id, dict) and "$oid" in new_id:
+                    new_id = new_id["$oid"]
+                rerun_results.append({
+                    "agave_task_id": task_id,
+                    "success": True,
+                    "rerun_task_id": new_id,
+                    "message": resp_data.get("message", ""),
+                })
+            else:
+                error_msg = resp_data.get("message") or resp_data.get("error") or f"HTTP {resp.status_code}: {resp_text}"
+                logger.warning(f"[retrigger] Failed for task {task_id}: {error_msg}")
+                rerun_results.append({
+                    "agave_task_id": task_id,
+                    "success": False,
+                    "error": error_msg,
+                })
+        except Exception as e:
+            logger.error(f"[retrigger] Error rerunning task {task_id}: {e}", exc_info=True)
+            rerun_results.append({
+                "agave_task_id": task_id,
+                "success": False,
+                "error": str(e),
+            })
+
+    succeeded = [r for r in rerun_results if r.get("success")]
+    failed = [r for r in rerun_results if not r.get("success")]
+    return {
+        "success": len(failed) == 0,
+        "total": len(rerun_results),
+        "succeeded": len(succeeded),
+        "failed": len(failed),
+        "results": rerun_results,
+    }
 
 
 @app.route("/mcp/regression/failed-analysis/retrigger", methods=["POST"])
@@ -9147,6 +10745,11 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
             tester_tags.append(fw_tag)
     if "jita3" not in tester_tags:
         tester_tags.append("jita3")
+    if overrides.get("override_pool") and resource_type in nested_resource_types:
+        if "rdm__virtual" not in tester_tags:
+            tester_tags.append("rdm__virtual")
+    elif overrides.get("override_pool") and resource_type in physical_resource_types:
+        tester_tags = [tag for tag in tester_tags if tag != "rdm__virtual"]
 
     if "match_resource_spec" in overrides and overrides.get("match_resource_spec") is not None:
         skip_match = not bool(overrides.get("match_resource_spec"))
@@ -9162,14 +10765,26 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
 
     priority = _first(_as_int(overrides.get("priority")), _as_int(task_data.get("priority")), 10)
 
-    # Jita rm_json_schema rejects extra build keys such as tag/build_type.
-    RM_BUILD_DISALLOWED = ("tag", "build_type")
+    # Jita rm_json_schema rejects extra keys such as tag/build_type anywhere
+    # in resource_manager_json (build objects and product-level spec overrides).
+    RM_JSON_DISALLOWED = ("tag", "build_type")
     RM_BUILD_STALE_ON_COMMIT = ("artifact_id", "nos_build_url", "pc_build_url")
+
+    def _strip_rm_illegal_keys(obj):
+        if isinstance(obj, dict):
+            return {
+                k: _strip_rm_illegal_keys(v)
+                for k, v in obj.items()
+                if k not in RM_JSON_DISALLOWED
+            }
+        if isinstance(obj, list):
+            return [_strip_rm_illegal_keys(v) for v in obj]
+        return obj
 
     def _sanitize_rm_build(build, drop_stale=False):
         if not isinstance(build, dict):
             return {}
-        drop = set(RM_BUILD_DISALLOWED)
+        drop = set(RM_JSON_DISALLOWED)
         if drop_stale:
             drop.update(RM_BUILD_STALE_ON_COMMIT)
         return {k: v for k, v in build.items() if k not in drop and v not in (None, "")}
@@ -9188,6 +10803,7 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
     rm_json = copy.deepcopy(task_data.get("resource_manager_json") or {})
     if not isinstance(rm_json, dict):
         rm_json = {}
+    rm_json = _strip_rm_illegal_keys(rm_json)
 
     nos_overridden = any(overrides.get(k) for k in ("nos_branch", "nos_commit", "nos_gbn", "nos_tag"))
     pc_overridden = any(overrides.get(k) for k in (
@@ -9219,13 +10835,17 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         pc_commit = overrides.get("pc_commit")
         if not pc_commit and overrides.get("pc_tag"):
             pc_commit = TAG_TO_COMMIT.get(overrides["pc_tag"])
-        if pc_commit and not str(pc_commit).startswith("$"):
-            pc_build["commit_id"] = pc_commit
-        elif pc_commit and str(pc_commit).startswith("$"):
+        if overrides.get("pc_tag"):
+            # Jita resolve step pops these before schema validation.
+            pc_build["build_selection_option"] = overrides["pc_tag"]
+            if overrides.get("pc_build_type"):
+                pc_build["build_selection_build_type"] = overrides["pc_build_type"]
             pc_build.pop("commit_id", None)
             pc_build.pop("gbn", None)
+        elif pc_commit and not str(pc_commit).startswith("$"):
+            pc_build["commit_id"] = pc_commit
         pc_gbn = _as_int(overrides.get("pc_gbn"))
-        if pc_gbn is not None:
+        if pc_gbn is not None and not overrides.get("pc_tag"):
             pc_build["gbn"] = pc_gbn
         # Jita PC tab: Build Url -> nos_build_url, Build QCOW2 URL -> pc_build_url.
         pc_build_url = str(overrides.get("pc_build_url") or "").strip()
@@ -9238,6 +10858,7 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         pc["build"] = pc_build
 
     # Always strip schema-illegal keys copied from the original task.
+    rm_json = _strip_rm_illegal_keys(rm_json)
     for product, spec in list(rm_json.items()):
         if isinstance(spec, dict) and isinstance(spec.get("build"), dict):
             spec["build"] = _sanitize_rm_build(spec["build"])
@@ -9345,6 +10966,8 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         payload["priority"] = priority_int
     if retain:
         payload["retain_resources_config"] = retain
+    if nested_params:
+        payload["nested_params"] = nested_params
 
     return {k: v for k, v in payload.items() if v is not None and v != ""}
 
@@ -15844,6 +17467,29 @@ def cursor_ai_analyze_testcase():
         test_log_url = body.get("test_log_url", "")
         jira_tickets = body.get("jira_tickets", [])
         failure_stage = body.get("failure_stage", "")
+        testcase_id = body.get("testcase_id") or ""
+        status = (body.get("status") or "").lower()
+        analysis_type = body.get("analysis_type") or ("skipped" if status == "skipped" else "failed")
+        triage_genie_ticket = body.get("triage_genie_ticket") or body.get("triage_genie_ticket_id") or ""
+        glean_tickets = body.get("glean_tickets") or []
+        glean_snippets = body.get("glean_snippets") or []
+
+        if not triage_genie_ticket and testcase_id:
+            try:
+                triage_genie_ticket = fetch_triage_genie_ticket_id(testcase_id) or ""
+            except Exception as tg_err:
+                logger.warning("Could not fetch TG ticket for cursor-ai %s: %s", testcase_id, tg_err)
+
+        if not glean_tickets:
+            try:
+                search = search_existing_tickets_for_failure(
+                    exception_summary, exception, testcase_name
+                )
+                glean_tickets = _enrich_tickets_with_jira(search.get("tickets") or [])
+                if not glean_snippets:
+                    glean_snippets = search.get("snippets") or []
+            except Exception as glean_err:
+                logger.warning("Glean auto-search for cursor-ai failed: %s", glean_err)
 
         # Fetch logs if not provided in the request
         steps_log = body.get("steps_log", "")
@@ -15853,15 +17499,26 @@ def cursor_ai_analyze_testcase():
             steps_log = logs.get("steps_log", "")
             nutest_test_log = logs.get("nutest_test_log", "")
 
+        rdm_link = body.get("rdm_link") or body.get("rdm_url") or ""
+        rdm_message = body.get("rdm_message") or exception_summary or ""
+        skill_url = rdm_link if analysis_type == "skipped" else test_log_url
+
         payload = {
             "testcase_name": testcase_name,
-            "exception_summary": exception_summary,
-            "exception": exception,
+            "exception_summary": exception_summary or rdm_message,
+            "exception": exception or rdm_message,
             "steps_log": steps_log[:5000],
             "nutest_test_log": nutest_test_log[:5000],
-            "test_log_url": test_log_url,
+            "test_log_url": skill_url or test_log_url,
+            "rdm_url": rdm_link,
+            "rdm_message": rdm_message,
+            "jita_task_id": body.get("agave_task_id") or body.get("jita_task_id") or "",
             "jira_tickets": jira_tickets,
             "failure_stage": failure_stage,
+            "triage_genie_ticket": triage_genie_ticket,
+            "glean_tickets": glean_tickets,
+            "glean_snippets": glean_snippets,
+            "analysis_type": analysis_type,
             "cursor_api_key": cursor_api_key,
             "atlassian_tokens": atlassian_tokens,
         }
@@ -17901,76 +19558,168 @@ def deprecation_search():
     })
 
 
+@app.route("/mcp/regression/failed-analysis/first-level-ai", methods=["POST"])
 @app.route("/api/agents/triage/first-level-ai", methods=["POST"])
 @jwt_required
 def first_level_ai_analysis():
-    """Trigger First Level AI analysis using JITA and Glean."""
+    """First Level AI: failure analysis plus Triage Genie ticket validation."""
     try:
-        request_data = request.get_json()
-        test_result = request_data.get("test_result", {})
-        
-        if not test_result:
+        request_data = request.get_json(force=True) or {}
+        test_result = request_data.get("test_result") or request_data
+        if not test_result or not (
+            test_result.get("testcase_name") or test_result.get("testcase_id")
+        ):
+            return jsonify({"success": False, "error": "test_result is required"}), 400
+
+        result = _run_first_level_ai_analysis(test_result, run_ai=True)
+        result["user_requested"] = True
+        result["analysis_result"] = {
+            "analysis_type": "first_level_ai",
+            "confidence": 0.85 if result.get("tg_ticket_validation", {}).get("verdict") == "Correct" else 0.7,
+        }
+        return jsonify(result)
+    except Exception as e:
+        logger.error("Error in first level AI analysis: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/deep-ai", methods=["POST"])
+@jwt_required
+def failed_analysis_deep_ai():
+    """Deep AI: skill-based triage via Cursor bridge, plus Glean/Jira ticket hunt."""
+    try:
+        body = request.get_json(force=True) or {}
+        test_result = body.get("test_result") or body
+        testcase_name = test_result.get("testcase_name") or ""
+        if not testcase_name:
+            return jsonify({"success": False, "error": "testcase_name is required"}), 400
+
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        if not cursor_api_key:
             return jsonify({
                 "success": False,
-                "error": "test_result is required"
-            }), 400
-        
-        # Initialize intelligent triage agent directly
-        from agents.analysis.intelligent_triage_agent import IntelligentTriageAgent
-        from agents.base import AgentConfig
-        
-        agent_config = AgentConfig(
-            name="intelligent_triage",
-            type="intelligent_triage"
+                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "require_key_setup": True,
+            }), 403
+
+        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
+        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
+        atlassian_tokens = {}
+        if atlassian_jira_token:
+            atlassian_tokens["jira"] = atlassian_jira_token
+        if atlassian_confluence_token:
+            atlassian_tokens["confluence"] = atlassian_confluence_token
+
+        first_level = _run_first_level_ai_analysis(test_result, run_ai=False)
+        exception_summary = test_result.get("exception_summary") or ""
+        exception = test_result.get("exception") or ""
+        test_log_url = test_result.get("test_log_url") or first_level.get("test_log_url") or ""
+        failure_stage = test_result.get("failure_stage") or first_level.get("failure_stage") or ""
+        jira_tickets = list(test_result.get("jira_tickets") or [])
+        tg_ticket = (
+            test_result.get("triage_genie_ticket_id")
+            or test_result.get("triage_genie_ticket")
+            or (first_level.get("tg_ticket_validation") or {}).get("ticket")
+            or ""
         )
-        agent = IntelligentTriageAgent(agent_config)
-        
-        # Since this is async, we need to run it in an event loop
-        import asyncio
-        
-        async def run_analysis():
-            return await agent.analyze(test_result, user_requested_ai=True)
-        
-        # Create new event loop for the analysis
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            analysis_result = loop.run_until_complete(run_analysis())
-        finally:
-            loop.close()
-        
-        # Handle different response formats
-        if hasattr(analysis_result, '__dict__'):
-            result_dict = analysis_result.__dict__
-        else:
-            result_dict = analysis_result
-        
-        response_data = {
-            "success": True,
-            "analysis_result": result_dict,
-            "analysis_type": "first_level_ai", 
-            "user_requested": True
+        if tg_ticket and tg_ticket not in jira_tickets:
+            jira_tickets.append(tg_ticket)
+
+        steps_log = test_result.get("steps_log") or ""
+        nutest_test_log = test_result.get("nutest_test_log") or ""
+        if not steps_log and not nutest_test_log and test_log_url:
+            logs = fetch_testcase_logs(testcase_name, test_log_url)
+            steps_log = logs.get("steps_log", "")
+            nutest_test_log = logs.get("nutest_test_log", "")
+
+        status = (test_result.get("status") or "").lower()
+        analysis_type = "skipped" if status == "skipped" else "failed"
+        rdm_link = (
+            test_result.get("rdm_link")
+            or (test_result.get("rdm_info") or {}).get("rdm_link")
+            or ""
+        )
+        rdm_message = (
+            test_result.get("rdm_message")
+            or (test_result.get("rdm_info") or {}).get("rdm_message")
+            or exception_summary
+            or ""
+        )
+        skill_url = rdm_link if analysis_type == "skipped" else test_log_url
+
+        payload = {
+            "testcase_name": testcase_name,
+            "exception_summary": exception_summary or rdm_message,
+            "exception": exception or rdm_message,
+            "steps_log": steps_log[:5000],
+            "nutest_test_log": nutest_test_log[:5000],
+            "test_log_url": skill_url or test_log_url,
+            "rdm_url": rdm_link,
+            "rdm_message": rdm_message,
+            "jita_task_id": test_result.get("agave_task_id") or "",
+            "jira_tickets": jira_tickets,
+            "failure_stage": failure_stage,
+            "triage_genie_ticket": tg_ticket,
+            "glean_tickets": first_level.get("enriched_tickets") or [],
+            "glean_snippets": first_level.get("glean_snippets") or [],
+            "analysis_type": analysis_type,
+            "cursor_api_key": cursor_api_key,
+            "atlassian_tokens": atlassian_tokens,
         }
-        
-        # Add metadata if available
-        if hasattr(analysis_result, 'data') and analysis_result.data:
-            response_data.update(analysis_result.data)
-        
-        if hasattr(analysis_result, 'metadata') and analysis_result.metadata:
-            response_data.update({
-                "pattern_suggestion": analysis_result.metadata.get("pattern_suggestion"),
-                "jita_analysis": analysis_result.metadata.get("jita_analysis"),
-                "glean_results": analysis_result.metadata.get("glean_results")
-            })
-        
-        return jsonify(response_data)
-        
-    except Exception as e:
-        logger.error(f"Error in first level AI analysis: {str(e)}")
+
+        resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/analyze-testcase",
+            json=payload,
+            timeout=600,
+        )
+        if resp.status_code != 200:
+            error_msg = (
+                resp.json().get("error", resp.text)
+                if resp.headers.get("content-type", "").startswith("application/json")
+                else resp.text
+            )
+            return jsonify({"success": False, "error": "Bridge error: %s" % error_msg}), 502
+
+        data = resp.json()
+        analysis = data.get("analysis") or {}
+        return jsonify({
+            "success": True,
+            "session_id": data.get("session_id", ""),
+            "analysis": analysis,
+            "root_cause": analysis.get("root_cause"),
+            "classification": analysis.get("classification"),
+            "confidence": analysis.get("confidence"),
+            "suggested_fix": analysis.get("suggested_fix"),
+            "failing_code": analysis.get("failing_code"),
+            "related_components": analysis.get("related_components"),
+            "jira_duplicates": analysis.get("jira_duplicates"),
+            "triage_report": analysis.get("triage_report"),
+            "tg_ticket_validation": analysis.get("tg_ticket_validation") or first_level.get("tg_ticket_validation"),
+            "enriched_tickets": first_level.get("enriched_tickets") or [],
+            "glean_snippets": first_level.get("glean_snippets") or [],
+            "glean_available": first_level.get("glean_available"),
+            "search_source": first_level.get("search_source"),
+            "skill_used": (
+                "triage-rdm-deployment-failure"
+                if analysis_type == "skipped"
+                else "triage-cdp-test-failure"
+            ),
+        })
+    except requests.exceptions.ConnectionError:
+        logger.error("Cursor bridge is not reachable at %s", CURSOR_BRIDGE_URL)
         return jsonify({
             "success": False,
-            "error": str(e)
-        }), 500
+            "error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start",
+        }), 503
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "success": False,
+            "error": "Deep AI analysis timed out (>600s).",
+        }), 504
+    except Exception as e:
+        logger.error("Error in failed-analysis deep-ai: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ======================================================

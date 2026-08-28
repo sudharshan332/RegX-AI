@@ -196,6 +196,31 @@ class RetriggerPayloadTests(unittest.TestCase):
         self.assertEqual(payload["requested_hardware"]["infra"], payload["infra"])
         self.assertEqual(payload["requested_hardware"]["hypervisor"], "esx")
 
+    def test_override_pool_physical_drops_nested_params(self):
+        self.task["requested_hardware"]["nested_params"] = {"is_nested": True, "version": "2.0"}
+        self.task["tester_tags"] = ["jita3", "rdm__virtual", "infra__cdp"]
+        payload = self.build(self.task, self.tests, {
+            "override_pool": True,
+            "resource_pool": "PoolA",
+            "resource_type": "physical",
+        }, "user")
+        self.assertNotIn("nested_params", payload)
+        self.assertNotIn("rdm__virtual", payload["tester_tags"])
+
+    def test_override_pool_nested_2_sets_nested_params(self):
+        payload = self.build(self.task, self.tests, {
+            "override_pool": True,
+            "resource_pool": "PoolA",
+            "resource_type": "nested_2.0",
+        }, "user")
+        self.assertEqual(payload["nested_params"], {"is_nested": True, "version": "2.0"})
+        self.assertIn("rdm__virtual", payload["tester_tags"])
+
+    def test_keeps_original_nested_params_when_pool_not_overridden(self):
+        self.task["requested_hardware"]["nested_params"] = {"is_nested": True, "version": "2.0"}
+        payload = self.build(self.task, self.tests, {}, "user")
+        self.assertEqual(payload["nested_params"], {"is_nested": True, "version": "2.0"})
+
     def test_smoke_tag_maps_to_latest_smoke_commit(self):
         payload = self.build(self.task, self.tests, {
             "nos_tag": "Latest Smoke Passed",

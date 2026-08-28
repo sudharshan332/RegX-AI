@@ -40,102 +40,91 @@ class TestJarvisNodeService:
         return ('test_user', 'test_password')
     
     def test_jarvis_node_disable_unit_test(self):
-        """
-        Unit test matching the user-provided test code format.
-        Tests the exact API call format for disabling a node.
-        """
-        # Test parameters matching the user's requirements
-        node_name = "ARACHNE-2"
-        rdm_failure_link = "https://rdm.eng.nutanix.com/scheduled_deployments/6a46739892fce97bbf2f27a6"
-        
-        # Expected API call parameters
-        expected_url = f"https://jarvis.eng.nutanix.com/api/v1/nodes/{node_name}"
+        """GET nodes by hostname, then PUT /nodes/<id> with RDM comment and login user."""
+        node_name = "kylun01-1"
+        node_id = "690541f29627e5bcb16b8315"
+        rdm_failure_link = "https://rdm.eng.nutanix.com/scheduled_deployments/6a886b6c7298f618eda249cb"
+        disabled_by = "sudharshan.musali@nutanix.com"
+        expected_put_url = f"https://jarvis.eng.nutanix.com/api/v1/nodes/{node_id}"
         expected_payload = {
             "is_enabled": False,
-            "comment": f"Node disabled due to RDM failure: {rdm_failure_link}"
+            "comment": f"RDM: {rdm_failure_link} (Disabled by - {disabled_by})",
         }
-        expected_headers = {
-            "Content-Type": "application/json"
+
+        get_enabled = Mock()
+        get_enabled.status_code = 200
+        get_enabled.content = b"{}"
+        get_enabled.json.return_value = {
+            "data": [{
+                "_id": node_id,
+                "is_enabled": True,
+                "network": {"hostname": node_name},
+            }]
         }
-        
-        # Mock the requests.request call (which is used internally)
-        with patch('agents.services.jarvis_service.requests.request') as mock_request:
-            # Configure mock response for success
-            mock_response = Mock()
-            mock_response.status_code = 200
-            mock_response.json.return_value = {"success": True, "node_name": node_name}
-            mock_response.content = b'{"success": true}'
-            mock_request.return_value = mock_response
-            
-            # Create service and make the API call
+
+        put_ok = Mock()
+        put_ok.status_code = 200
+        put_ok.content = b'{"success": true}'
+        put_ok.json.return_value = {"success": True}
+
+        get_disabled = Mock()
+        get_disabled.status_code = 200
+        get_disabled.content = b"{}"
+        get_disabled.json.return_value = {
+            "data": [{
+                "_id": node_id,
+                "is_enabled": False,
+                "network": {"hostname": node_name},
+            }]
+        }
+
+        with patch("agents.services.jarvis_service.requests.request") as mock_request:
+            mock_request.side_effect = [get_enabled, put_ok, get_disabled]
             service = JarvisNodeService()
-            
-            # Override auth for testing
-            service.auth = ('test_username', 'test_password')
-            
-            # Test the disable_node method
+            service.auth = ("test_username", "test_password")
             result = asyncio.run(service.disable_node(
                 node_name=node_name,
-                rdm_link=rdm_failure_link
+                rdm_link=rdm_failure_link,
+                disabled_by=disabled_by,
             ))
-            
-            # Verify the API call was made with correct parameters
-            mock_request.assert_called_once()
-            call_args = mock_request.call_args
-            
-            # Verify method and URL
-            assert call_args[0][0] == "PUT"  # HTTP method
-            assert call_args[0][1] == expected_url  # URL
-            
-            # Check payload
-            actual_payload = call_args[1]['json']
-            assert actual_payload == expected_payload, f"Expected payload: {expected_payload}, Actual: {actual_payload}"
-            
-            # Check headers
-            actual_headers = call_args[1]['headers']
-            assert actual_headers['Content-Type'] == expected_headers['Content-Type']
-            
-            # Check auth
-            actual_auth = call_args[1]['auth']
-            assert actual_auth == ('test_username', 'test_password')
-            
-            # Check verify=False for internal SSL
-            assert call_args[1]['verify'] is False
-            
-            # Verify result
-            assert result['success'] is True
-            assert result['node_name'] == node_name
-            assert rdm_failure_link in result['comment']
-            
-            print(f"✅ Successfully tested node disable for {node_name}")
-            print(f"✅ RDM link properly included: {rdm_failure_link}")
-            print(f"✅ API call format matches requirements")
-    
+
+            assert mock_request.call_count == 3
+            get_call, put_call, verify_call = mock_request.call_args_list
+            assert get_call[0][0] == "GET"
+            assert get_call[0][1] == "https://jarvis.eng.nutanix.com/api/v1/nodes"
+            assert get_call[1]["params"]["search"] == node_name
+            assert put_call[0][0] == "PUT"
+            assert put_call[0][1] == expected_put_url
+            assert put_call[1]["json"] == expected_payload
+            assert put_call[1]["auth"] == ("test_username", "test_password")
+            assert put_call[1]["verify"] is False
+            assert result["success"] is True
+            assert result["node_name"] == node_name
+            assert result["node_id"] == node_id
+            assert result["is_enabled"] is False
+            assert result["comment"] == expected_payload["comment"]
+
     def test_jarvis_node_disable_failure_case(self):
-        """Test node disable failure scenario."""
-        node_name = "ARACHNE-2"
-        rdm_link = "https://rdm.eng.nutanix.com/scheduled_deployments/6a46739892fce97bbf2f27a6"
-        
-        with patch('agents.services.jarvis_service.requests.request') as mock_request:
-            # Configure mock response for failure
+        """Test node disable failure when Jarvis search returns no nodes."""
+        node_name = "kylun01-1"
+        rdm_link = "https://rdm.eng.nutanix.com/scheduled_deployments/6a886b6c7298f618eda249cb"
+
+        with patch("agents.services.jarvis_service.requests.request") as mock_request:
             mock_response = Mock()
             mock_response.status_code = 404
             mock_response.text = "Node not found"
             mock_request.return_value = mock_response
-            
+
             service = JarvisNodeService()
-            service.auth = ('test_username', 'test_password')
-            
+            service.auth = ("test_username", "test_password")
             result = asyncio.run(service.disable_node(
                 node_name=node_name,
-                rdm_link=rdm_link
+                rdm_link=rdm_link,
+                disabled_by="sudharshan.musali@nutanix.com",
             ))
-            
-            # Verify failure handling
-            assert result['success'] is False
-            assert result['node_name'] == node_name
-            
-            print(f"✅ Failure case properly handled for {node_name}")
+
+            assert result["success"] is False
+            assert result["node_name"] == node_name
     
     def test_rdm_link_extraction(self, jarvis_service):
         """Test extraction of RDM deployment links from analysis."""
@@ -180,6 +169,13 @@ class TestJarvisNodeService:
     def test_node_extraction_from_rdm_analysis(self, jarvis_service):
         """Test extraction of node names from RDM analysis."""
         test_cases = [
+            {
+                "name": "Installer CVM fatal on kylun01-1",
+                "rdm_analysis": {
+                    "rdm_message": 'Installer errors:\n\nNodes: kylun01-1: Received "fatal" in waiting for event "Running CVM Installer"'
+                },
+                "expected": "kylun01-1"
+            },
             {
                 "name": "Node in error message",
                 "rdm_analysis": {
