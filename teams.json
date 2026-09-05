@@ -1,0 +1,15 @@
+{
+  "teams": [
+    {
+      "id": "CDP_FT",
+      "name": "CDP Functional Testing",
+      "description": "CDP FT regression team"
+    },
+    {
+      "id": "CDP_ST",
+      "name": "CDP System Testing",
+      "description": "CDP ST regression team"
+    }
+  ],
+  "default_team": "CDP_FT"
+}

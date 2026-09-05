@@ -296,7 +296,7 @@ const PatternManagement = ({ apiEndpoint }) => {
             </div>
             <div className="summary-card needs-review">
               <span className="summary-value">{effectivenessData.summary.needs_review}</span>
-              <span className="summary-label">Needs Review (<30%)</span>
+              <span className="summary-label">Needs Review (&lt;30%)</span>
             </div>
           </div>
         </div>

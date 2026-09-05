@@ -1,20 +1,235 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
 import { API_BASE_URL } from '../config';
+import { extractJitaTaskIds, buildJitaResultsUrls } from '../utils/jitaTaskIds';
 import './FailedTestcaseAnalysis.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/failed-analysis`;
+const NODE_POOL_SEARCH_URL = `${API_BASE_URL}/mcp/regression/dynamic-jp/search-node-pools`;
 const JIRA_URL = 'https://jira.nutanix.com/browse/';
+const RESOURCE_MODE_OPTIONS = [
+  { value: 'node_pool', label: 'By Node Pool' },
+  { value: 'cluster', label: 'By Cluster Pool' },
+  { value: 'global_pool', label: 'By Global Pool' },
+  { value: 'name', label: 'By Name' },
+];
+const RESOURCE_TYPE_OPTIONS = [
+  { value: 'physical', label: 'Physical' },
+  { value: 'nested_2.0', label: 'NestedAHV 2.0' },
+  { value: 'nested_1.0', label: 'NestedAHV 1.0' },
+];
+const HYPERVISOR_OPTIONS = ['esx', 'kvm', 'hyperv', 'xen'];
+
+function normalizeJitaTaskId(id) {
+  if (!id) return '';
+  if (typeof id === 'object') return String(id.$oid || id._id || id.id || '');
+  return String(id).trim();
+}
+
+const TRIAGE_GENIE_REVIEW_BASE = 'http://triage-genie.eng.nutanix.com/review';
+
+
+function jitaResultsUrl(taskIds) {
+  const urls = buildJitaResultsUrls(
+    (Array.isArray(taskIds) ? taskIds : [taskIds]).map(normalizeJitaTaskId).filter(Boolean)
+  );
+  return urls[0] || '';
+}
+
+function jitaResultsUrls(taskIds) {
+  return buildJitaResultsUrls(
+    (Array.isArray(taskIds) ? taskIds : [taskIds]).map(normalizeJitaTaskId).filter(Boolean)
+  );
+}
+
+function copyTextToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+  return Promise.resolve();
+}
+
+const RETRIGGER_SMOKE_TAGS = [
+  'Latest Smoke Passed',
+  'Latest DIAL Passed',
+  'latest_smoke_passed',
+  '$LATEST_SMOKE_PASSED',
+];
+
+function applyCommitOrTag(overrides, raw, commitKey, tagKey) {
+  const value = (raw || '').trim();
+  if (!value) return;
+  const mapped = RETRIGGER_SMOKE_TAGS.find(t => t.toLowerCase() === value.toLowerCase());
+  if (mapped || value.startsWith('$')) {
+    overrides[tagKey] = mapped || value;
+  } else {
+    overrides[commitKey] = value;
+  }
+}
+
+function triageGenieReviewId(result) {
+  if (result?.testcase_id) return String(result.testcase_id);
+  const logUrl = (result?.test_log_url || '').replace(/\/+$/, '');
+  const last = logUrl.split('/').filter(Boolean).pop();
+  return last || '';
+}
+
+function triageGenieReviewUrl(result) {
+  const id = triageGenieReviewId(result);
+  return id ? `${TRIAGE_GENIE_REVIEW_BASE}/${id}` : '';
+}
+
+function tgTicketFromResult(result) {
+  return result?.triage_genie_ticket_id || result?.triage_genie_ticket || '';
+}
+
+function tgVerdictClass(verdict) {
+  const v = String(verdict || 'Missing').toLowerCase();
+  if (v === 'correct') return 'tg-verdict-correct';
+  if (v === 'incorrect') return 'tg-verdict-incorrect';
+  if (v === 'partial') return 'tg-verdict-partial';
+  return 'tg-verdict-missing';
+}
+
+function buildFailedAnalysisTestResult(result) {
+  const tg = tgTicketFromResult(result);
+  const rdm = result.rdm_info || {};
+  return {
+    testcase_id: result.testcase_id,
+    testcase_name: result.testcase_name,
+    status: result.status,
+    failure_stage: result.failure_stage,
+    exception_summary: result.exception_summary || rdm.rdm_message || '',
+    exception: result.exception || rdm.rdm_message || '',
+    ai_summary: result.ai_summary || '',
+    agave_task_id: result.agave_task_id,
+    test_log_url: result.test_log_url || '',
+    rdm_link: rdm.rdm_link || result.rdm_link || '',
+    rdm_message: rdm.rdm_message || '',
+    jira_tickets: result.jira_tickets || [],
+    triage_genie_ticket: tg,
+    triage_genie_ticket_id: tg,
+  };
+}
+
+function TgValidationBlock({ validation }) {
+  if (!validation) return null;
+  const verdict = validation.verdict || 'Missing';
+  return (
+    <div className={`tg-validation-box tg-box-${String(verdict).toLowerCase()}`}>
+      <div className="tg-validation-header">
+        <span className={`badge ${tgVerdictClass(verdict)}`}>TG Ticket {verdict}</span>
+        {validation.ticket ? (
+          <a
+            href={`${JIRA_URL}${validation.ticket}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="jira-link"
+          >
+            {validation.ticket}
+          </a>
+        ) : (
+          <span className="tg-validation-none">No ticket suggested</span>
+        )}
+        {validation.jira_status && (
+          <span className={`glean-status-badge ${validation.is_open ? 'glean-status-open' : 'glean-status-closed'}`}>
+            {validation.jira_status}
+          </span>
+        )}
+      </div>
+      {validation.jira_summary && (
+        <div className="tg-validation-summary">{validation.jira_summary}</div>
+      )}
+      {validation.reason && (
+        <div className="tg-validation-reason">{validation.reason}</div>
+      )}
+    </div>
+  );
+}
+
+function EnrichedTicketTable({ tickets }) {
+  if (!tickets || tickets.length === 0) return null;
+  return (
+    <div className="glean-ticket-table-wrapper">
+      <table className="glean-ticket-table">
+        <thead>
+          <tr>
+            <th>Ticket</th>
+            <th>Status</th>
+            <th>Type</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody>
+          {tickets.map((t) => (
+            <tr key={t.ticket} className={t.is_open ? 'glean-ticket-open' : 'glean-ticket-closed'}>
+              <td>
+                <a href={t.url || `${JIRA_URL}${t.ticket}`} target="_blank" rel="noopener noreferrer" className="jira-link">
+                  {t.ticket}
+                </a>
+              </td>
+              <td>
+                <span className={`glean-status-badge ${t.is_open ? 'glean-status-open' : 'glean-status-closed'}`}>
+                  {t.jira_status || 'Unknown'}
+                </span>
+                {t.jira_resolution && <span className="glean-resolution">({t.jira_resolution})</span>}
+              </td>
+              <td className="glean-ticket-type">{t.jira_type || '-'}</td>
+              <td className="glean-ticket-summary" title={t.jira_summary || t.glean_title}>
+                {t.jira_summary || t.glean_title || '-'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 const TEST_STATUS_OPTIONS = [
   { id: 'failed', label: 'Failed' },
   { id: 'skipped', label: 'Skipped' },
   { id: 'warning', label: 'Warning' },
   { id: 'killed', label: 'Killed' },
+  { id: 'pending', label: 'Pending' },
 ];
+
+const STATUS_OPTION_ALIASES = {
+  failed: ['failed', 'failure'],
+  skipped: ['skipped', 'skip'],
+  warning: ['warning', 'warn'],
+  killed: ['killed', 'terminated', 'cancelled'],
+  pending: ['pending', 'waiting', 'running', 'started'],
+};
+
+function optionIdForRawStatus(raw) {
+  const s = String(raw || '').toLowerCase();
+  if (!s || s === '(empty)') return null;
+  for (const opt of TEST_STATUS_OPTIONS) {
+    const aliases = STATUS_OPTION_ALIASES[opt.id] || [opt.id];
+    if (opt.id === s || aliases.includes(s)) return opt.id;
+  }
+  return null;
+}
+
+function formatStatusCountSummary(counts) {
+  return Object.entries(counts || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([status, n]) => `${n} ${status}`)
+    .join(', ');
+}
 
 const COLUMNS = [
   { id: 'testcase_name', label: 'Testcase Name', defaultVisible: true },
+  { id: 'jita_task', label: 'Jita Task', defaultVisible: true },
   { id: 'regression_owner', label: 'Regression Owner', defaultVisible: true },
   { id: 'status', label: 'Status', defaultVisible: true },
   { id: 'failure_stage', label: 'Failure Stage', defaultVisible: true },
@@ -25,6 +240,7 @@ const COLUMNS = [
   { id: 'glean_search', label: 'Glean Search', defaultVisible: true },
   { id: 'cursor_ai_analysis', label: 'Cursor AI Deep Analysis', defaultVisible: false },
   { id: 'triage_genie_ticket', label: 'Triage Genie Ticket', defaultVisible: true },
+  { id: 'triage_genie_review', label: 'Triage Genie Review', defaultVisible: true },
   { id: 'jira_tickets', label: 'Jira Tickets', defaultVisible: true },
   { id: 'comment', label: 'Comment', defaultVisible: true },
   { id: 'update_jita', label: 'Update Jita', defaultVisible: true },
@@ -39,13 +255,33 @@ const COLUMNS = [
 
 const DEFAULT_VISIBLE = COLUMNS.filter(c => c.defaultVisible).map(c => c.id);
 const STORAGE_KEY = 'failedAnalysisVisibleColumns';
+const TG_REVIEW_COL_KEY = 'failedAnalysisAddedTgReview';
+const JITA_TASK_COL_KEY = 'failedAnalysisAddedJitaTask';
 
 function getStoredVisibleColumns() {
   try {
     const s = localStorage.getItem(STORAGE_KEY);
     if (s) {
       const parsed = JSON.parse(s);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const known = new Set(COLUMNS.map(c => c.id));
+        const cols = parsed.filter(id => known.has(id));
+        if (!localStorage.getItem(TG_REVIEW_COL_KEY) && !cols.includes('triage_genie_review')) {
+          const idx = cols.indexOf('triage_genie_ticket');
+          if (idx !== -1) cols.splice(idx + 1, 0, 'triage_genie_review');
+          else cols.push('triage_genie_review');
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(cols));
+        }
+        localStorage.setItem(TG_REVIEW_COL_KEY, '1');
+        if (!localStorage.getItem(JITA_TASK_COL_KEY) && !cols.includes('jita_task')) {
+          const nameIdx = cols.indexOf('testcase_name');
+          if (nameIdx !== -1) cols.splice(nameIdx + 1, 0, 'jita_task');
+          else cols.unshift('jita_task');
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(cols));
+        }
+        localStorage.setItem(JITA_TASK_COL_KEY, '1');
+        return cols.length > 0 ? cols : DEFAULT_VISIBLE;
+      }
     }
   } catch (_) {}
   return DEFAULT_VISIBLE;
@@ -57,16 +293,237 @@ function getIntermittentLabel(r) {
   return '-';
 }
 
+function rdmNeedsNodeDisable(rdm) {
+  if (!rdm) return false;
+  const action = rdm.next_action || '';
+  const cat = (rdm.pattern_category || '').toUpperCase();
+  return action === 'disable_node_and_rerun' || cat === 'INFRA_NODE';
+}
+
+function rdmNeedsRerun(rdm) {
+  const action = (rdm && rdm.next_action) || '';
+  return action === 'disable_node_and_rerun' || action === 'rerun';
+}
+
+function isSkippedRow(row) {
+  const s = ((row && row.status) || '').toLowerCase();
+  return s === 'skipped' || s === 'skip';
+}
+
+function parseTaskIdsText(text) {
+  return (text || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+}
+
+function resolveParentJitaTaskId(rows, inputMode, taskIdsText) {
+  if (inputMode === 'task_ids') {
+    const ids = parseTaskIdsText(taskIdsText);
+    if (ids.length === 1) return ids[0];
+  }
+  const counts = {};
+  (rows || []).forEach((row) => {
+    const id = row && row.agave_task_id;
+    if (!id) return;
+    counts[id] = (counts[id] || 0) + 1;
+  });
+  const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return ranked.length ? ranked[0][0] : '';
+}
+
+function expandSkippedRowsByJitaTask(selectedSkipped, allResults) {
+  const selected = (selectedSkipped || []).filter(Boolean);
+  const taskIds = new Set(selected.map(r => r.agave_task_id).filter(Boolean));
+  if (taskIds.size === 0) return selected;
+  const seen = new Set();
+  const expanded = [];
+  (allResults || []).forEach((row) => {
+    if (!isSkippedRow(row) || !row.agave_task_id || !taskIds.has(row.agave_task_id)) return;
+    const key = row.testcase_id || `${row.agave_task_id}:${row.testcase_name}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    expanded.push(row);
+  });
+  return expanded.length ? expanded : selected;
+}
+
+function mapRdmAnalyzeFields(taskRdm) {
+  return {
+    rdm_found: true,
+    rdm_message: taskRdm.rdm_message,
+    rdm_link: taskRdm.rdm_link,
+    rdm_category: taskRdm.rdm_category,
+    rdm_resolution: taskRdm.rdm_resolution,
+    failed_deployments: taskRdm.failed_deployments,
+    pattern_matched: taskRdm.pattern_matched,
+    generated_comment: taskRdm.generated_comment,
+    pattern_description: taskRdm.pattern_description,
+    pattern_jira: taskRdm.pattern_jira || '',
+    pattern_id: taskRdm.pattern_id || '',
+    pattern_category: taskRdm.pattern_category || '',
+    failed_nodes: taskRdm.failed_nodes || [],
+    next_action: taskRdm.next_action || '',
+    jita_deployment_id: taskRdm.jita_deployment_id || '',
+  };
+}
+
 const STATUS_GROUP_MAP = {
   failed: 'Failed', failure: 'Failed',
   skipped: 'Skipped', skip: 'Skipped',
   warning: 'Warning', warn: 'Warning',
   killed: 'Killed', terminated: 'Killed', cancelled: 'Killed',
+  pending: 'Pending', waiting: 'Pending', running: 'Pending', started: 'Pending',
 };
-const ALL_STATUS_GROUPS = ['Failed', 'Skipped', 'Warning', 'Killed'];
+const ALL_STATUS_GROUPS = ['Failed', 'Skipped', 'Warning', 'Killed', 'Pending'];
 
 function normalizeStatusGroup(status) {
   return STATUS_GROUP_MAP[(status || '').toLowerCase()] || 'Failed';
+}
+
+const EMPTY_EXCEPTION_KEY = '__empty__';
+
+function normalizeExceptionSummary(summary) {
+  const raw = String(summary || '').replace(/\s+/g, ' ').trim();
+  if (!raw) {
+    return { key: '', label: '(No exception summary)', preview: '' };
+  }
+  const normalized = raw
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<UUID>')
+    .replace(/scsi-SNUTANIX_VDISK[A-Za-z0-9_]*/gi, '<DISK>')
+    .replace(/\b(?:[0-9a-f]{8}_){3}[0-9a-f]{12}\b/gi, '<HEXID>')
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<IP>')
+    .replace(/\bF20\d{6}\b/g, '<FDATE>')
+    .replace(/\b\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b/g, '<TIME>')
+    .replace(/0x[0-9a-f]+/gi, '<PTR>')
+    .replace(/Thread-\d+/g, 'Thread-N')
+    .replace(/internal_pm_uvm_\d+_\d+/g, 'internal_pm_uvm_*')
+    .replace(/test_VM_\d+/g, 'test_VM_*')
+    .replace(/\b\d{10,}\b/g, '<ID>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const key = normalized.slice(0, 200).toLowerCase();
+  const label = normalized.length > 160 ? `${normalized.slice(0, 160)}…` : normalized;
+  return { key, label, preview: normalized };
+}
+
+function buildExceptionGroups(rows) {
+  const map = new Map();
+  (rows || []).forEach((r) => {
+    const meta = normalizeExceptionSummary(r.exception_summary);
+    if (!map.has(meta.key)) {
+      map.set(meta.key, { key: meta.key, label: meta.label, preview: meta.preview, rows: [] });
+    }
+    map.get(meta.key).rows.push(r);
+  });
+  return [...map.values()]
+    .map((g) => ({
+      ...g,
+      rows: [...g.rows].sort((a, b) => (a.testcase_name || '').localeCompare(b.testcase_name || '')),
+    }))
+    .sort((a, b) => {
+      const aEmpty = !a.key;
+      const bEmpty = !b.key;
+      if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
+      if (b.rows.length !== a.rows.length) return b.rows.length - a.rows.length;
+      return a.label.localeCompare(b.label);
+    });
+}
+
+function isSkippedStatus(status) {
+  const s = (status || '').toLowerCase();
+  return s === 'skipped' || s === 'skip';
+}
+
+function normalizeRdmFailureText(message) {
+  const base = normalizeExceptionSummary(message);
+  if (!base.key) return base;
+  const extra = base.preview
+    .replace(/\b[0-9a-f]{24}\b/gi, '<OID>')
+    .replace(/\b[a-zA-Z][a-zA-Z0-9]*\d{2,}-\d+\b/g, '<NODE>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const key = extra.slice(0, 200).toLowerCase();
+  const label = extra.length > 160 ? `${extra.slice(0, 160)}…` : extra;
+  return { key, label, preview: extra };
+}
+
+function rdmGroupMeta(result) {
+  if (!isSkippedStatus(result?.status)) return null;
+  const rdm = result.rdm_info;
+  if (!rdm) return null;
+  if (rdm.rdm_found === false) {
+    return {
+      key: 'rdm:none',
+      label: 'RDM: No deployment found',
+      preview: '',
+      kind: 'rdm',
+    };
+  }
+  if (rdm.pattern_matched && rdm.pattern_id) {
+    const desc = rdm.pattern_description || rdm.pattern_id;
+    return {
+      key: `rdm:pattern:${rdm.pattern_id}`,
+      label: `RDM [${rdm.pattern_id}]: ${desc}`,
+      preview: rdm.rdm_message || desc,
+      kind: 'rdm',
+    };
+  }
+  if (rdm.rdm_message) {
+    const meta = normalizeRdmFailureText(rdm.rdm_message);
+    return {
+      key: `rdm:msg:${meta.key}`,
+      label: `RDM: ${meta.label}`,
+      preview: rdm.rdm_message,
+      kind: 'rdm',
+    };
+  }
+  if (rdm.rdm_link) {
+    return {
+      key: `rdm:link:${rdm.rdm_link}`,
+      label: `RDM: ${rdm.rdm_link}`,
+      preview: rdm.rdm_link,
+      kind: 'rdm',
+    };
+  }
+  return {
+    key: 'rdm:unknown',
+    label: 'RDM: Analyzed (no message)',
+    preview: '',
+    kind: 'rdm',
+  };
+}
+
+function buildResultGroups(rows) {
+  const map = new Map();
+  (rows || []).forEach((r) => {
+    const rdmMeta = rdmGroupMeta(r);
+    const meta = rdmMeta || (() => {
+      const e = normalizeExceptionSummary(r.exception_summary);
+      return {
+        key: `exc:${e.key || EMPTY_EXCEPTION_KEY}`,
+        label: e.label,
+        preview: e.preview,
+        kind: 'exception',
+      };
+    })();
+    if (!map.has(meta.key)) {
+      map.set(meta.key, { ...meta, rows: [] });
+    }
+    map.get(meta.key).rows.push(r);
+  });
+  return [...map.values()]
+    .map((g) => ({
+      ...g,
+      rows: [...g.rows].sort((a, b) => {
+        const aLink = a.rdm_info?.rdm_link || '';
+        const bLink = b.rdm_info?.rdm_link || '';
+        if (aLink !== bLink) return aLink.localeCompare(bLink);
+        return (a.testcase_name || '').localeCompare(b.testcase_name || '');
+      }),
+    }))
+    .sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === 'rdm' ? -1 : 1;
+      if (b.rows.length !== a.rows.length) return b.rows.length - a.rows.length;
+      return a.label.localeCompare(b.label);
+    });
 }
 
 export default function FailedTestcaseAnalysis() {
@@ -80,6 +537,7 @@ export default function FailedTestcaseAnalysis() {
   const [results, setResults] = useState([]);
   const [filteredResults, setFilteredResults] = useState([]);
   const [error, setError] = useState(null);
+  const [statusMismatch, setStatusMismatch] = useState(null);
   const [visibleColumns, setVisibleColumns] = useState(getStoredVisibleColumns);
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [columnCheckboxes, setColumnCheckboxes] = useState(() => {
@@ -96,6 +554,7 @@ export default function FailedTestcaseAnalysis() {
   const [filterFailureStage, setFilterFailureStage] = useState('');
   const [filterIntermittent, setFilterIntermittent] = useState('');
   const [filterComment, setFilterComment] = useState('');
+  const [filterException, setFilterException] = useState('');
   const [filterTestStatus, setFilterTestStatus] = useState([...ALL_STATUS_GROUPS]);
   const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
   const statusDropdownRef = useRef(null);
@@ -119,23 +578,49 @@ export default function FailedTestcaseAnalysis() {
   const [followUpLoading, setFollowUpLoading] = useState(false);
   const [followUpHistory, setFollowUpHistory] = useState([]);
   const [followUpHistoryByTestcase, setFollowUpHistoryByTestcase] = useState({});
-  const [followUpMode, setFollowUpMode] = useState('agent');
+  // Ask is the fast path (answer from existing analysis; minimal/no MCP).
+  // Use Agent/Plan only when the user wants deeper re-investigation.
+  const [followUpMode, setFollowUpMode] = useState('ask');
 
   // Retrigger state
   const [retriggerModalOpen, setRetriggerModalOpen] = useState(false);
   const [retriggerLoading, setRetriggerLoading] = useState(false);
   const RETRIGGER_DEFAULTS = {
     updateNos: false,
-    nos: { branch: '', updateType: 'tag', buildType: '', tag: '', commitId: '', gbn: '' },
+    nos: { branch: '', commitId: '', gbn: '' },
     updatePc: false,
-    pc: { branch: '', updateType: 'tag', buildType: '', tag: '', commitId: '', gbn: '' },
+    pc: { branch: '', commitId: '', gbn: '', buildUrl: '', qcow2Url: '' },
+    updateImage: false,
+    image: { branch: '', commitId: '', gbn: '' },
+    updateFramework: false,
     nutest_branch: '',
     patch_url: '',
     framework_patch_url: '',
+    overridePool: false,
     resource_pool: '',
+    updateResource: false,
+    overrideResource: false,
+    resources_mode: 'node_pool',
+    resource_type: 'physical',
+    hypervisor: '',
+    node_pools: [],
+    match_resource_spec: true,
+    label: '',
+    priority: '',
+    tester_tags: '',
+    overrideScheduling: false,
+    skip_resource_spec_match: false,
+    check_image_compatibility: true,
   };
   const [retriggerOverrides, setRetriggerOverrides] = useState({ ...RETRIGGER_DEFAULTS });
   const [retriggerResults, setRetriggerResults] = useState(null);
+  const [retriggerCopied, setRetriggerCopied] = useState('');
+  const [retriggerResourcePreview, setRetriggerResourcePreview] = useState({ loading: false, tasks: [] });
+  const [nodePoolSearch, setNodePoolSearch] = useState('');
+  const [nodePoolResults, setNodePoolResults] = useState([]);
+  const [nodePoolLoading, setNodePoolLoading] = useState(false);
+  const nodePoolDebounce = useRef(null);
+  const nodePoolReqId = useRef(0);
 
   // Per-row AI summary state
   const [aiSummaryLoading, setAiSummaryLoading] = useState({});
@@ -149,6 +634,11 @@ export default function FailedTestcaseAnalysis() {
   const [rdmAnalyzing, setRdmAnalyzing] = useState(false);
   const [rdmAiLoading, setRdmAiLoading] = useState({});
   const [rdmAiResults, setRdmAiResults] = useState({});
+  const [rdmSkillLoading, setRdmSkillLoading] = useState({});
+  const [rdmSkillResults, setRdmSkillResults] = useState({});
+  const [rdmWorkflowLoading, setRdmWorkflowLoading] = useState({});
+  const [patternModal, setPatternModal] = useState(null);
+  const [patternSaving, setPatternSaving] = useState(false);
 
   // Intelligent Triage state
   const [intelligentTriageLoading, setIntelligentTriageLoading] = useState({});
@@ -157,6 +647,7 @@ export default function FailedTestcaseAnalysis() {
   const [firstLevelAiResults, setFirstLevelAiResults] = useState({});
   const [deepAiLoading, setDeepAiLoading] = useState({});
   const [deepAiResults, setDeepAiResults] = useState({});
+  const [triageAnalysisModal, setTriageAnalysisModal] = useState(null);
 
   // Auto Test Fix state 
   const [autoTestFixLoading, setAutoTestFixLoading] = useState({});
@@ -256,6 +747,7 @@ export default function FailedTestcaseAnalysis() {
     setFilterFailureStage('');
     setFilterIntermittent('');
     setFilterComment('');
+    setFilterException('');
     try {
       setLoading(true);
       const { data } = await api.get(`${API_BASE}/saved-tags/${encodeURIComponent(tagName)}/results`);
@@ -309,25 +801,39 @@ export default function FailedTestcaseAnalysis() {
     return Array.from(include).join(',');
   }, []);
 
-  const handleAnalyze = async () => {
-    if (!tag.trim() && !taskIds.trim()) {
+  const handleAnalyze = async (statusOverride = null) => {
+    const statuses = (Array.isArray(statusOverride) && statusOverride.length)
+      ? statusOverride
+      : selectedStatuses;
+    const parsedTaskIds = inputMode === 'task_ids' ? extractJitaTaskIds(taskIds) : [];
+    if (inputMode === 'task_ids') {
+      if (!parsedTaskIds.length) {
+        alert('Please provide valid JITA task IDs (24-char hex) or a JITA results URL');
+        return;
+      }
+    } else if (!tag.trim()) {
       alert('Please provide either a tag or task IDs');
       return;
     }
-    if (selectedStatuses.length === 0) {
+    if (statuses.length === 0) {
       alert('Please select at least one test status');
       return;
+    }
+    if (Array.isArray(statusOverride) && statusOverride.length) {
+      setSelectedStatuses(statusOverride);
     }
     setAnalyzing(true);
     setStreamPhase('preparing');
     setTotalExpected(0);
     setError(null);
+    setStatusMismatch(null);
     setResults([]);
     setFilteredResults([]);
     setFilterOwner('');
     setFilterFailureStage('');
     setFilterIntermittent('');
     setFilterComment('');
+    setFilterException('');
     setSelectedRows([]);
     setHistoryCache({});
     const include = buildIncludeParam(visibleColumns);
@@ -341,9 +847,10 @@ export default function FailedTestcaseAnalysis() {
           current_branch: '',
         });
       } catch (_) {}
+    } else if (inputMode === 'task_ids' && parsedTaskIds.length) {
+      searchParams.set('task_ids', parsedTaskIds.join(','));
     }
-    else if (inputMode === 'task_ids' && taskIds.trim()) searchParams.set('task_ids', taskIds.trim());
-    searchParams.set('statuses', selectedStatuses.join(','));
+    searchParams.set('statuses', statuses.join(','));
     const url = `${API_BASE}/analyze-stream?${searchParams.toString()}`;
 
     const collectedRows = [];
@@ -385,7 +892,28 @@ export default function FailedTestcaseAnalysis() {
                 if (event.total === 0) {
                   setAnalyzing(false);
                   setStreamPhase('');
-                  alert('No testcases found for the given criteria and selected statuses.');
+                  const counts = event.status_counts || {};
+                  const summary = formatStatusCountSummary(counts);
+                  const optionIds = [...new Set(
+                    Object.keys(counts).map(optionIdForRawStatus).filter(Boolean)
+                  )];
+                  if ((event.fetched_total || 0) > 0 && summary) {
+                    setStatusMismatch({
+                      counts,
+                      optionIds,
+                      fetchedTotal: event.fetched_total,
+                      taskCount: event.task_count,
+                    });
+                    setError(
+                      `No testcases matched the selected status filter. ` +
+                      `Fetched ${event.fetched_total} result(s)` +
+                      (event.task_count ? ` from ${event.task_count} task(s)` : '') +
+                      `: ${summary}. Select those statuses and analyze again.`
+                    );
+                  } else {
+                    setStatusMismatch(null);
+                    setError('No testcases found for the given criteria and selected statuses.');
+                  }
                 }
               } else if (event.type === 'row' && event.result) {
                 collectedRows.push(event.result);
@@ -492,11 +1020,23 @@ export default function FailedTestcaseAnalysis() {
         return text.toLowerCase().includes(q);
       });
     }
+    if (filterException) {
+      const want = filterException === EMPTY_EXCEPTION_KEY ? '' : filterException;
+      filtered = filtered.filter(r => normalizeExceptionSummary(r.exception_summary).key === want);
+    }
     setFilteredResults(filtered);
-  }, [results, filterTestStatus, filterOwner, filterFailureStage, filterIntermittent, filterComment, commentEdits]);
+  }, [results, filterTestStatus, filterOwner, filterFailureStage, filterIntermittent, filterComment, filterException, commentEdits]);
 
   const uniqueOwners = [...new Set(results.map(r => r.regression_owner).filter(Boolean))].sort();
   const uniqueFailureStages = [...new Set(results.map(r => r.failure_stage).filter(Boolean))].sort();
+  const uniqueExceptionGroups = buildExceptionGroups(results).map(g => ({
+    key: g.key,
+    label: g.label,
+    count: g.rows.length,
+  }));
+  const resultGroups = buildResultGroups(filteredResults);
+  const rdmGroupCount = resultGroups.filter(g => g.kind === 'rdm').length;
+  const exceptionGroupCount = resultGroups.filter(g => g.kind !== 'rdm').length;
   const uniqueIntermittent = [...new Set(results.map(r => getIntermittentLabel(r)))].sort((a, b) => {
     const order = { Yes: 0, No: 1, '-': 2 };
     return (order[a] ?? 99) - (order[b] ?? 99);
@@ -570,6 +1110,17 @@ export default function FailedTestcaseAnalysis() {
     }
   };
 
+  const toggleSelectGroup = (groupIds) => {
+    const ids = (groupIds || []).filter(Boolean);
+    if (ids.length === 0) return;
+    const allSelected = ids.every(id => selectedRows.includes(id));
+    if (allSelected) {
+      setSelectedRows(prev => prev.filter(id => !ids.includes(id)));
+    } else {
+      setSelectedRows(prev => [...new Set([...prev, ...ids])]);
+    }
+  };
+
   useEffect(() => {
     const el = selectAllCheckboxRef.current;
     if (!el) return;
@@ -632,13 +1183,19 @@ export default function FailedTestcaseAnalysis() {
     if (!testId) return;
     setCursorAiLoading(prev => ({ ...prev, [testId]: true }));
     try {
+      const glean = gleanSearchResults[testId] || firstLevelAiResults[testId] || {};
       const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase`, {
+        testcase_id: testId,
         testcase_name: result.testcase_name,
+        status: result.status,
         exception_summary: result.exception_summary,
         exception: result.exception,
         test_log_url: result.test_log_url,
         jira_tickets: result.jira_tickets || [],
         failure_stage: result.failure_stage,
+        triage_genie_ticket: tgTicketFromResult(result),
+        glean_tickets: glean.enriched_tickets || [],
+        glean_snippets: glean.glean_snippets || [],
       });
       if (resp.data?.success) {
         setCursorAiResults(prev => ({ ...prev, [testId]: resp.data.analysis }));
@@ -862,11 +1419,107 @@ export default function FailedTestcaseAnalysis() {
     setRetriggerOverrides({ ...RETRIGGER_DEFAULTS,
       nos: { ...RETRIGGER_DEFAULTS.nos },
       pc: { ...RETRIGGER_DEFAULTS.pc },
+      image: { ...RETRIGGER_DEFAULTS.image },
+      node_pools: [],
     });
+    setNodePoolSearch('');
+    setNodePoolResults([]);
+    setNodePoolLoading(false);
     setRetriggerResults(null);
+    setRetriggerCopied('');
     setRetriggerModalOpen(true);
+    const taskIds = [...new Set(
+      selectedRows
+        .map(id => results.find(r => r.testcase_id === id))
+        .filter(Boolean)
+        .map(r => r.agave_task_id)
+        .filter(Boolean)
+    )];
+    setRetriggerResourcePreview({ loading: true, tasks: [] });
+    api.post(`${API_BASE}/retrigger-preview`, { task_ids: taskIds })
+      .then((resp) => {
+        const tasks = resp.data?.tasks || [];
+        setRetriggerResourcePreview({ loading: false, tasks });
+        const first = tasks[0] || {};
+        setRetriggerOverrides(prev => ({
+          ...prev,
+          nos: { ...prev.nos, branch: first.nos_branch || prev.nos.branch },
+          resources_mode: first.resources_mode || prev.resources_mode,
+          resource_type: first.resource_type_key || prev.resource_type,
+          hypervisor: first.hypervisor || prev.hypervisor,
+          node_pools: Array.isArray(first.node_pools) ? [...first.node_pools] : [],
+          match_resource_spec: first.match_resource_spec !== false,
+        }));
+      })
+      .catch(() => {
+        setRetriggerResourcePreview({ loading: false, tasks: [] });
+      });
   };
 
+  const updateResourceOverride = (patch) => {
+    setRetriggerOverrides(prev => ({ ...prev, overrideResource: true, ...patch }));
+  };
+
+  const handleSearchRetriggerNodePools = (query) => {
+    setNodePoolSearch(query);
+    if (nodePoolDebounce.current) clearTimeout(nodePoolDebounce.current);
+    if (!query || query.length < 2) {
+      setNodePoolResults([]);
+      setNodePoolLoading(false);
+      return;
+    }
+    setNodePoolLoading(true);
+    nodePoolDebounce.current = setTimeout(async () => {
+      const reqId = ++nodePoolReqId.current;
+      try {
+        const response = await api.post(NODE_POOL_SEARCH_URL, { query });
+        if (reqId === nodePoolReqId.current) {
+          setNodePoolResults(Array.isArray(response.data?.pools) ? response.data.pools : []);
+        }
+      } catch (_) {
+        if (reqId === nodePoolReqId.current) setNodePoolResults([]);
+      } finally {
+        if (reqId === nodePoolReqId.current) setNodePoolLoading(false);
+      }
+    }, 300);
+  };
+
+  const addRetriggerNodePool = (pool) => {
+    const name = String(pool || '').trim();
+    if (!name) return;
+    const current = retriggerOverrides.node_pools || [];
+    updateResourceOverride({
+      node_pools: current.includes(name) ? current : [...current, name],
+    });
+    setNodePoolSearch('');
+    setNodePoolResults([]);
+  };
+
+  const removeRetriggerNodePool = (pool) => {
+    updateResourceOverride({
+      node_pools: (retriggerOverrides.node_pools || []).filter(p => p !== pool),
+    });
+  };
+
+  const selectedRetriggerRows = selectedRows
+    .map(id => results.find(r => r.testcase_id === id))
+    .filter(Boolean);
+  const selectedRetriggerTaskIds = [...new Set(selectedRetriggerRows.map(r => r.agave_task_id).filter(Boolean))];
+  const succeededRerunIds = (retriggerResults?.rerun_task_ids?.length
+    ? retriggerResults.rerun_task_ids
+    : (retriggerResults?.results || [])
+        .filter(r => r.success && r.rerun_task_id)
+        .map(r => r.rerun_task_id)
+  ).map(normalizeJitaTaskId).filter(Boolean);
+  const retriggerResultUrls = jitaResultsUrls(succeededRerunIds);
+  const pcBuildChanged = retriggerOverrides.updatePc && (
+    !!(retriggerOverrides.pc.commitId || '').trim() ||
+    !!(retriggerOverrides.pc.gbn || '').trim()
+  );
+  const pcBuildUrlsMissing = pcBuildChanged && (
+    !(retriggerOverrides.pc.buildUrl || '').trim() ||
+    !(retriggerOverrides.pc.qcow2Url || '').trim()
+  );
   const handleRetrigger = async () => {
     const selected = selectedRows.filter(Boolean);
     if (selected.length === 0) return;
@@ -889,33 +1542,63 @@ export default function FailedTestcaseAnalysis() {
     const overrides = {};
     if (retriggerOverrides.updateNos) {
       const n = retriggerOverrides.nos;
-      if (n.branch) overrides.nos_branch = n.branch.trim();
-      if (n.updateType === 'commit') {
-        if (n.commitId) overrides.nos_commit = n.commitId.trim();
-        if (n.gbn) overrides.nos_gbn = n.gbn.trim();
-      } else if (n.updateType === 'tag') {
-        if (n.tag) overrides.nos_tag = n.tag.trim();
-        if (n.buildType) overrides.nos_build_type = n.buildType.trim();
-      }
+      applyCommitOrTag(overrides, n.commitId, 'nos_commit', 'nos_tag');
+      if (n.gbn) overrides.nos_gbn = n.gbn.trim();
     }
     if (retriggerOverrides.updatePc) {
       const p = retriggerOverrides.pc;
       if (p.branch) overrides.pc_branch = p.branch.trim();
-      if (p.updateType === 'commit') {
-        if (p.commitId) overrides.pc_commit = p.commitId.trim();
-        if (p.gbn) overrides.pc_gbn = p.gbn.trim();
-      } else if (p.updateType === 'tag') {
-        if (p.tag) overrides.pc_tag = p.tag.trim();
-        if (p.buildType) overrides.pc_build_type = p.buildType.trim();
+      applyCommitOrTag(overrides, p.commitId, 'pc_commit', 'pc_tag');
+      if (p.gbn) overrides.pc_gbn = p.gbn.trim();
+      if (p.buildUrl) overrides.pc_build_url = p.buildUrl.trim();
+      if (p.qcow2Url) overrides.pc_build_url_qcow2 = p.qcow2Url.trim();
+    }
+    if (retriggerOverrides.updateImage) {
+      const im = retriggerOverrides.image;
+      if (im.branch) overrides.image_branch = im.branch.trim();
+      if (im.commitId) overrides.image_commit = im.commitId.trim();
+      if (im.gbn) overrides.image_gbn = im.gbn.trim();
+    }
+    if (retriggerOverrides.updateFramework) {
+      if (retriggerOverrides.nutest_branch) {
+        const branch = retriggerOverrides.nutest_branch.trim();
+        overrides.nutest_branch = branch;
+        overrides.test_branch = branch;
+      }
+      if (retriggerOverrides.patch_url) overrides.patch_url = retriggerOverrides.patch_url.trim();
+      if (retriggerOverrides.framework_patch_url) overrides.framework_patch_url = retriggerOverrides.framework_patch_url.trim();
+    }
+    if (retriggerOverrides.updateResource) {
+      overrides.override_resource_config = true;
+      overrides.resources_mode = retriggerOverrides.resources_mode;
+      overrides.resource_type = retriggerOverrides.resource_type;
+      overrides.node_pools = retriggerOverrides.node_pools;
+      overrides.hypervisor = (retriggerOverrides.hypervisor || '').trim();
+      overrides.match_resource_spec = !!retriggerOverrides.match_resource_spec;
+    } else if (retriggerOverrides.overridePool && retriggerOverrides.resource_pool.trim()) {
+      overrides.override_pool = true;
+      overrides.resource_pool = retriggerOverrides.resource_pool.trim();
+      if (retriggerOverrides.resource_type) {
+        overrides.resource_type = retriggerOverrides.resource_type;
       }
     }
-    if (retriggerOverrides.nutest_branch) overrides.nutest_branch = retriggerOverrides.nutest_branch.trim();
-    if (retriggerOverrides.patch_url) overrides.patch_url = retriggerOverrides.patch_url.trim();
-    if (retriggerOverrides.framework_patch_url) overrides.framework_patch_url = retriggerOverrides.framework_patch_url.trim();
-    if (retriggerOverrides.resource_pool) overrides.resource_pool = retriggerOverrides.resource_pool.trim();
+    if ((retriggerOverrides.label || '').trim()) {
+      overrides.label = retriggerOverrides.label.trim();
+    }
+    if ((retriggerOverrides.priority || '').trim()) {
+      overrides.priority = retriggerOverrides.priority.trim();
+    }
+    if ((retriggerOverrides.tester_tags || '').trim()) {
+      overrides.tester_tags = retriggerOverrides.tester_tags.trim();
+    }
+    if (retriggerOverrides.overrideScheduling) {
+      overrides.skip_resource_spec_match = !!retriggerOverrides.skip_resource_spec_match;
+      overrides.check_image_compatibility = !!retriggerOverrides.check_image_compatibility;
+    }
 
     setRetriggerLoading(true);
     setRetriggerResults(null);
+    setRetriggerCopied('');
 
     try {
       const resp = await api.post(`${API_BASE}/retrigger`, {
@@ -948,40 +1631,35 @@ export default function FailedTestcaseAnalysis() {
       return;
     }
 
-    const uniqueTaskIds = [...new Set(skippedRows.map(r => r.agave_task_id).filter(Boolean))];
-    if (uniqueTaskIds.length === 0) {
+    const tests = skippedRows
+      .filter(r => r.agave_task_id)
+      .map(r => ({
+        agave_task_id: r.agave_task_id,
+        testcase_id: r.testcase_id,
+        testcase_name: r.testcase_name,
+        deployment_id: r.deployment_id || r.rdm_info?.jita_deployment_id || '',
+      }));
+    if (tests.length === 0) {
       alert('Selected skipped testcases have no task IDs.');
       return;
     }
 
     setRdmAnalyzing(true);
     try {
-      const resp = await api.post(`${API_BASE}/rdm-analyze`, {
-        task_ids: uniqueTaskIds,
-      });
+      const resp = await api.post(`${API_BASE}/rdm-analyze`, { tests });
       if (resp.data?.success && resp.data.results) {
-        const rdmByTask = {};
+        const rdmByTest = {};
         for (const r of resp.data.results) {
-          rdmByTask[r.agave_task_id] = r;
+          if (r.testcase_id) rdmByTest[r.testcase_id] = r;
         }
         setResults(prev => prev.map(row => {
           if (!selected.includes(row.testcase_id)) return row;
-          const taskRdm = rdmByTask[row.agave_task_id];
+          const taskRdm = rdmByTest[row.testcase_id];
           if (!taskRdm || !taskRdm.rdm_found) return { ...row, rdm_info: { rdm_found: false } };
           return {
             ...row,
-            rdm_info: {
-              rdm_found: true,
-              rdm_message: taskRdm.rdm_message,
-              rdm_link: taskRdm.rdm_link,
-              rdm_category: taskRdm.rdm_category,
-              rdm_resolution: taskRdm.rdm_resolution,
-              failed_deployments: taskRdm.failed_deployments,
-              pattern_matched: taskRdm.pattern_matched,
-              generated_comment: taskRdm.generated_comment,
-              pattern_description: taskRdm.pattern_description,
-              pattern_jira: taskRdm.pattern_jira || '',
-            },
+            deployment_id: taskRdm.jita_deployment_id || row.deployment_id,
+            rdm_info: mapRdmAnalyzeFields(taskRdm),
           };
         }));
       }
@@ -993,33 +1671,266 @@ export default function FailedTestcaseAnalysis() {
     }
   };
 
-  const handleRdmApproveComment = async (testcaseId, comment, jiraTicket) => {
+  const applyRdmAnalysisSideEffects = (testcaseId, payload) => {
+    if (!payload?.failed_nodes && !payload?.suggested_next_action && !payload?.issue_category) return;
+    setResults(prev => prev.map(r =>
+      r.testcase_id === testcaseId
+        ? {
+            ...r,
+            rdm_info: {
+              ...r.rdm_info,
+              failed_nodes: payload.failed_nodes || r.rdm_info?.failed_nodes || [],
+              next_action: payload.suggested_next_action || r.rdm_info?.next_action || '',
+              pattern_category: payload.suggested_next_action === 'disable_node_and_rerun'
+                ? 'INFRA_NODE'
+                : (payload.issue_category || r.rdm_info?.pattern_category || ''),
+            },
+          }
+        : r
+    ));
+  };
+
+  const handleRdmAiAnalyze = async (result) => {
+    const testId = result.testcase_id;
+    const rdm = result.rdm_info || {};
+    setRdmAiLoading(prev => ({ ...prev, [testId]: true }));
+    try {
+      const resp = await api.post(`${API_BASE}/rdm-analyze-ai`, {
+        task_id: result.agave_task_id,
+        testcase_id: testId,
+        deployment_id: result.deployment_id || rdm.jita_deployment_id || '',
+        rdm_message: rdm.rdm_message,
+        testcase_name: result.testcase_name,
+      });
+      if (resp.data?.success) {
+        setRdmAiResults(prev => ({ ...prev, [testId]: resp.data }));
+        applyRdmAnalysisSideEffects(testId, resp.data);
+      } else {
+        alert(resp.data?.error || 'First Level Analysis failed');
+      }
+    } catch (err) {
+      console.error('RDM First Level Analysis failed:', err);
+      alert('First Level Analysis failed: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setRdmAiLoading(prev => ({ ...prev, [testId]: false }));
+    }
+  };
+
+  const handleRdmSkillAnalyze = async (result) => {
+    const testId = result.testcase_id;
+    const rdm = result.rdm_info || {};
+    setRdmSkillLoading(prev => ({ ...prev, [testId]: true }));
+    try {
+      const resp = await api.post(`${API_BASE}/rdm-skill-analyze`, {
+        task_id: result.agave_task_id,
+        testcase_id: testId,
+        testcase_name: result.testcase_name,
+        deployment_id: result.deployment_id || rdm.jita_deployment_id || '',
+        rdm_message: rdm.rdm_message,
+        rdm_link: rdm.rdm_link || '',
+        jira_tickets: result.jira_tickets || [],
+        failure_stage: result.failure_stage,
+        triage_genie_ticket: tgTicketFromResult(result),
+      }, { timeout: 620000 });
+      if (resp.data?.success) {
+        setRdmSkillResults(prev => ({ ...prev, [testId]: resp.data }));
+        applyRdmAnalysisSideEffects(testId, resp.data);
+      } else {
+        alert(resp.data?.error || 'AI Skill Analysis failed');
+      }
+    } catch (err) {
+      const data = err.response?.data || {};
+      if (data.require_key_setup) {
+        alert('Cursor API key required. Configure it in Settings.');
+      } else {
+        alert('AI Skill Analysis failed: ' + (data.error || err.message));
+      }
+    } finally {
+      setRdmSkillLoading(prev => ({ ...prev, [testId]: false }));
+    }
+  };
+
+  const openRdmSkillJiraCreate = async (skill) => {
+    const create = skill?.jira_create || {};
+    const text = [create.summary, create.description].filter(Boolean).join('\n\n');
+    try {
+      if (text && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      }
+    } catch (_) { /* clipboard optional */ }
+    window.open(create.url || 'https://jira.nutanix.com/secure/CreateIssue!default.jspa', '_blank', 'noopener,noreferrer');
+    alert(`Triage text copied. Create a ${create.project || 'DIAL'} ticket and paste the report, then Approve with the new ticket key.`);
+  };
+
+  const applyRdmApproveResult = (testcaseId, comment, mergedJira, respData) => {
+    setResults(prev => prev.map(r => {
+      if (r.testcase_id !== testcaseId) return r;
+      return {
+        ...r,
+        comments: comment,
+        jira_tickets: mergedJira,
+        rdm_info: {
+          ...r.rdm_info,
+          approved: !!respData?.triage_updated || !!respData?.success,
+          generated_comment: comment,
+          jarvis_results: respData?.jarvis_results || r.rdm_info?.jarvis_results,
+          retrigger: respData?.retrigger || r.rdm_info?.retrigger,
+          workflow_error: respData?.success === false ? (respData?.error || '') : '',
+        },
+      };
+    }));
+    if (comment) {
+      setCommentEdits(prev => ({ ...prev, [testcaseId]: comment }));
+    }
+  };
+
+  const handleRdmApproveComment = async (testcaseId, comment, jiraTicket, { retrigger = false } = {}) => {
     setRdmAiLoading(prev => ({ ...prev, [testcaseId]: true }));
     try {
       const row = results.find(r => r.testcase_id === testcaseId);
+      const rdm = row?.rdm_info || {};
       const existing = row?.jira_tickets || [];
       const merged = jiraTicket
         ? [...new Set([...existing, jiraTicket])]
         : existing;
-      const payload = {
-        test_id: testcaseId,
-        comment: comment,
-        ...(merged.length > 0 ? { jira_tickets: merged } : {}),
-      };
-      const resp = await api.put(`${API_BASE}/update-triage`, payload);
-      if (resp.data?.success) {
-        setResults(prev => prev.map(r =>
-          r.testcase_id === testcaseId
-            ? { ...r, comments: comment, jira_tickets: merged, rdm_info: { ...r.rdm_info, approved: true } }
-            : r
-        ));
+      const resp = await api.post(`${API_BASE}/rdm-approve`, {
+        testcase_id: testcaseId,
+        testcase_name: row?.testcase_name,
+        agave_task_id: row?.agave_task_id,
+        comment,
+        jira_tickets: merged,
+        rdm_link: rdm.rdm_link || '',
+        failed_nodes: rdm.failed_nodes || [],
+        pattern_category: rdm.pattern_category || '',
+        next_action: rdm.next_action || '',
+        retrigger,
+      });
+      if (resp.data) {
+        applyRdmApproveResult(testcaseId, comment, merged, resp.data);
+        if (resp.data.success === false) {
+          alert(resp.data.error || 'Approve completed with errors. Check RDM Analysis status.');
+        }
       } else {
-        alert('Failed to update: ' + (resp.data?.error || 'Unknown error'));
+        alert('Failed to update: Unknown error');
       }
     } catch (err) {
       alert('Update failed: ' + (err.response?.data?.error || err.message));
     } finally {
       setRdmAiLoading(prev => ({ ...prev, [testcaseId]: false }));
+    }
+  };
+
+  const handleRdmAutoWorkflow = async (rows, { requirePattern = true, parentTaskId = '' } = {}) => {
+    const parent = parentTaskId || resolveParentJitaTaskId(rows, inputMode, taskIds);
+    const tests = (rows || []).filter(Boolean).map(r => ({
+      testcase_id: r.testcase_id,
+      testcase_name: r.testcase_name,
+      agave_task_id: parent || r.agave_task_id,
+      deployment_id: r.deployment_id || r.rdm_info?.jita_deployment_id || '',
+      rdm_info: r.rdm_info || {},
+      jira_tickets: r.jira_tickets || [],
+    }));
+    if (tests.length === 0) {
+      alert('Select at least one skipped testcase.');
+      return;
+    }
+    const ids = tests.map(t => t.testcase_id);
+    setRdmWorkflowLoading(prev => {
+      const next = { ...prev };
+      ids.forEach(id => { next[id] = true; });
+      return next;
+    });
+    try {
+      const resp = await api.post(`${API_BASE}/rdm-auto-workflow`, {
+        tests,
+        retrigger: true,
+        parent_task_id: parent,
+      });
+      const wfResults = resp.data?.results || [];
+      setResults(prev => prev.map(row => {
+        const wr = wfResults.find(w => w.testcase_id === row.testcase_id);
+        if (!wr) return row;
+        const rdm = wr.rdm_info ? { ...row.rdm_info, ...wr.rdm_info } : (row.rdm_info || {});
+        return {
+          ...row,
+          comments: wr.comment || row.comments,
+          rdm_info: {
+            ...rdm,
+            approved: !!wr.triage_updated || !!wr.success,
+            generated_comment: wr.comment || rdm.generated_comment,
+            jarvis_results: wr.jarvis_results || rdm.jarvis_results,
+            retrigger: wr.retrigger || rdm.retrigger,
+            workflow_error: wr.success ? '' : (wr.error || ''),
+          },
+        };
+      }));
+      const unmatched = wfResults.filter(w => w.pattern_matched === false);
+      const failed = wfResults.filter(w => !w.success);
+      if (requirePattern && unmatched.length === wfResults.length) {
+        alert('Analyze, Fix & Re-run only runs for pattern-matched RDM failures. Run Analyze Skipped first, or add a pattern from First Level Analysis.');
+      } else if (failed.length > 0) {
+        alert(`${resp.data.succeeded || 0}/${resp.data.total || wfResults.length} succeeded. ${failed.length} failed — see RDM Analysis status.`);
+      }
+    } catch (err) {
+      alert('Workflow failed: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setRdmWorkflowLoading(prev => {
+        const next = { ...prev };
+        ids.forEach(id => { next[id] = false; });
+        return next;
+      });
+    }
+  };
+
+  const openAddPatternModal = (result, rdmAi) => {
+    const rdm = result?.rdm_info || {};
+    const suggested = rdmAi?.suggested_pattern || {};
+    setPatternModal({
+      testcase_id: result.testcase_id,
+      testcase_name: result.testcase_name,
+      id: suggested.id || '',
+      regex: suggested.regex || '',
+      comment_template: suggested.comment_template || rdmAi?.suggested_comment || 'regx_rerun',
+      category: suggested.category || (rdmAi?.failed_nodes?.length ? 'INFRA_NODE' : 'INFRA_INTERMITTENT'),
+      next_action: suggested.next_action || rdmAi?.suggested_next_action || 'rerun',
+      description: suggested.description || '',
+      example_failure: suggested.example_failure || rdm.rdm_message || '',
+      reference_task: suggested.reference_task || rdm.rdm_link || '',
+      jira: rdmAi?.jira_ticket || (rdmAi?.jira_refs && rdmAi.jira_refs[0]) || '',
+    });
+  };
+
+  const handleSavePattern = async () => {
+    if (!patternModal) return;
+    if (!patternModal.regex.trim() || !patternModal.comment_template.trim()) {
+      alert('Regex and comment template are required.');
+      return;
+    }
+    setPatternSaving(true);
+    try {
+      const resp = await api.post(`${API_BASE}/rdm-patterns/add`, {
+        pattern: {
+          id: patternModal.id,
+          regex: patternModal.regex,
+          comment_template: patternModal.comment_template,
+          category: patternModal.category,
+          next_action: patternModal.next_action,
+          description: patternModal.description,
+          example_failure: patternModal.example_failure,
+          reference_task: patternModal.reference_task,
+          jira: patternModal.jira,
+        },
+      });
+      if (resp.data?.success) {
+        setPatternModal(null);
+        alert(`Pattern saved (${resp.data.pattern?.id}). Future Analyze Skipped runs will use it.`);
+      } else {
+        alert(resp.data?.error || 'Failed to save pattern');
+      }
+    } catch (err) {
+      alert('Save pattern failed: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setPatternSaving(false);
     }
   };
 
@@ -1063,6 +1974,7 @@ export default function FailedTestcaseAnalysis() {
     setGleanSearchLoading(prev => ({ ...prev, [testId]: true }));
     try {
       const resp = await api.post(`${API_BASE}/glean-search-single`, {
+        testcase_id: testId,
         testcase_name: result.testcase_name,
         exception_summary: result.exception_summary || '',
         exception: result.exception || '',
@@ -1094,146 +2006,66 @@ export default function FailedTestcaseAnalysis() {
 
   // --------------- Intelligent Triage handlers ---------------
 
-  const handleIntelligentTriage = async (result) => {
+  const handleIntelligentTriage = (result) => {
     const testId = result.testcase_id;
     if (!testId) {
       alert('No test ID available for analysis');
       return;
     }
-    
-    setIntelligentTriageLoading(prev => ({ ...prev, [testId]: true }));
-    try {
-      console.log('Starting intelligent triage analysis for:', {
-        testId,
-        testName: result.testcase_name,
-        status: result.status
-      });
-
-      // Use the auto-analyze endpoint which is simpler and more reliable
-      const response = await api.post(`${API_BASE_URL}/api/agents/triage/auto-analyze`, {
-        test_result: {
-          testcase_id: testId,
-          testcase_name: result.testcase_name,
-          status: result.status,
-          failure_stage: result.failure_stage,
-          exception_summary: result.exception_summary,
-          agave_task_id: result.agave_task_id,
-          branch: currentBranch,
-          test_log_url: result.test_log_url
-        },
-        user_requested_ai: true
-      });
-      
-      console.log('Intelligent triage response:', response.data);
-      
-      if (response.data.success) {
-        setIntelligentTriageResults(prev => ({
-          ...prev,
-          [testId]: {
-            analysis_type: response.data.analysis_result?.analysis_type || "pattern_analysis",
-            confidence: response.data.analysis_result?.confidence || 0.8,
-            pattern_matched: response.data.pattern_matched || false,
-            requires_first_level_ai: !response.data.pattern_matched,
-            requires_deep_ai_analysis: true,
-            data: response.data.analysis_result?.data || response.data
-          }
-        }));
-      } else {
-        throw new Error(response.data.error || 'Analysis failed');
-      }
-    } catch (error) {
-      console.error('Intelligent triage analysis failed:', error);
-      const errorMessage = error.response?.data?.error || error.message || 'Unknown error occurred';
-      
-      // For now, provide a fallback simulation if the endpoint isn't ready
-      if (error.response?.status === 404 || errorMessage.includes('not available')) {
-        console.log('Using fallback simulation for intelligent triage');
-        setIntelligentTriageResults(prev => ({
-          ...prev,
-          [testId]: {
-            analysis_type: "pattern_analysis_simulation",
-            confidence: 0.7,
-            pattern_matched: false,
-            requires_first_level_ai: true,
-            requires_deep_ai_analysis: true,
-            data: {
-              failure_type: result.failure_stage || "test_execution",
-              simulation_mode: true,
-              message: "Simulation mode - intelligent triage analysis"
-            }
-          }
-        }));
-        return;
-      }
-      
-      alert(`Intelligent triage analysis failed: ${errorMessage}`);
-    } finally {
-      setIntelligentTriageLoading(prev => ({ ...prev, [testId]: false }));
-    }
+    setIntelligentTriageResults(prev => ({
+      ...prev,
+      [testId]: {
+        analysis_type: 'ready',
+        requires_first_level_ai: true,
+        requires_deep_ai_analysis: true,
+      },
+    }));
   };
 
   const handleFirstLevelAiAnalysis = async (result) => {
     const testId = result.testcase_id;
     if (!testId) return;
-    
+
     setFirstLevelAiLoading(prev => ({ ...prev, [testId]: true }));
     try {
-      console.log('Starting First Level AI analysis for:', result.testcase_name);
-      
-      const response = await api.post(`${API_BASE_URL}/api/agents/triage/first-level-ai`, {
-        test_result: {
-          testcase_id: testId,
-          testcase_name: result.testcase_name,
-          status: result.status,
-          failure_stage: result.failure_stage,
-          exception_summary: result.exception_summary,
-          agave_task_id: result.agave_task_id,
-          branch: currentBranch,
-          test_log_url: result.test_log_url
-        },
-        user_requested_ai: true
+      const response = await api.post(`${API_BASE}/first-level-ai`, {
+        test_result: buildFailedAnalysisTestResult(result),
+        user_requested_ai: true,
       });
-      
-      console.log('First Level AI response:', response.data);
-      
-      if (response.data.success) {
-        setFirstLevelAiResults(prev => ({
+      const data = response.data || {};
+      if (!data.success) {
+        throw new Error(data.error || 'Analysis failed');
+      }
+      const stored = {
+        ...data,
+        analysis_type: data.analysis_type || 'first_level_ai',
+        confidence: data.analysis_result?.confidence || 0.8,
+        existing_issues: data.enriched_tickets || data.existing_issues || [],
+      };
+      setFirstLevelAiResults(prev => ({ ...prev, [testId]: stored }));
+      if (data.enriched_tickets || data.glean_snippets) {
+        setGleanSearchResults(prev => ({
           ...prev,
           [testId]: {
-            analysis_type: response.data.analysis_result?.analysis_type || "first_level_ai",
-            confidence: response.data.analysis_result?.confidence || 0.8,
-            existing_issues: response.data.existing_issues || [],
-            glean_results: response.data.glean_results,
-            jita_analysis: response.data.jita_analysis,
-            data: response.data.analysis_result || response.data
-          }
+            ...(prev[testId] || {}),
+            success: true,
+            issue_type: data.issue_type,
+            enriched_tickets: data.enriched_tickets || [],
+            glean_snippets: data.glean_snippets || [],
+            glean_jira_refs: data.glean_jira_refs || [],
+            search_source: data.search_source,
+            glean_ok: data.glean_ok,
+          },
         }));
-      } else {
-        throw new Error(response.data.error || 'Analysis failed');
       }
+      setTriageAnalysisModal({
+        kind: 'first_level',
+        testcase_name: result.testcase_name,
+        testcase_id: testId,
+        ...stored,
+      });
     } catch (error) {
-      console.error('First Level AI analysis failed:', error);
       const errorMessage = error.response?.data?.error || error.message || 'Unknown error occurred';
-      
-      // For now, provide a fallback simulation if the endpoint isn't ready
-      if (error.response?.status === 404 || errorMessage.includes('not available')) {
-        console.log('Using fallback simulation for First Level AI');
-        setFirstLevelAiResults(prev => ({
-          ...prev,
-          [testId]: {
-            analysis_type: "first_level_ai_simulation",
-            confidence: 0.85,
-            existing_issues: [
-              { ticket: "ENG-12345", summary: "Similar test failure pattern", status: "Open" }
-            ],
-            glean_results: { found_patterns: 2, confidence: 0.8 },
-            jita_analysis: { stage_analysis: "Test execution failure detected" },
-            data: { simulation_mode: true }
-          }
-        }));
-        return;
-      }
-      
       alert(`First Level AI analysis failed: ${errorMessage}`);
     } finally {
       setFirstLevelAiLoading(prev => ({ ...prev, [testId]: false }));
@@ -1243,27 +2075,31 @@ export default function FailedTestcaseAnalysis() {
   const handleDeepAiAnalysis = async (result) => {
     const testId = result.testcase_id;
     if (!testId) return;
-    
+
     setDeepAiLoading(prev => ({ ...prev, [testId]: true }));
     try {
-      // Use Cursor AI analysis as Deep AI Analysis since there's no separate deep-analysis endpoint
-      const response = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/analyze`, {
-        testcase_id: testId,
-        testcase_name: result.testcase_name,
-        failure_stage: result.failure_stage,
-        exception_summary: result.exception_summary,
-        test_log_url: result.test_log_url,
-        user_requested: true
+      const glean = gleanSearchResults[testId] || firstLevelAiResults[testId] || {};
+      const response = await api.post(`${API_BASE}/deep-ai`, {
+        test_result: buildFailedAnalysisTestResult(result),
+        glean_tickets: glean.enriched_tickets || [],
+        glean_snippets: glean.glean_snippets || [],
+        user_requested: true,
       });
-      
-      if (response.data.success) {
-        setDeepAiResults(prev => ({
-          ...prev,
-          [testId]: response.data
-        }));
+      const data = response.data || {};
+      if (!data.success) {
+        throw new Error(data.error || 'Deep AI analysis failed');
       }
+      setDeepAiResults(prev => ({ ...prev, [testId]: data }));
+      if (data.session_id) {
+        setCursorAiSessions(prev => ({ ...prev, [testId]: data.session_id }));
+      }
+      setTriageAnalysisModal({
+        kind: 'deep',
+        testcase_name: result.testcase_name,
+        testcase_id: testId,
+        ...data,
+      });
     } catch (error) {
-      console.error('Deep AI analysis failed:', error);
       alert(`Deep AI analysis failed: ${error.response?.data?.error || error.message}`);
     } finally {
       setDeepAiLoading(prev => ({ ...prev, [testId]: false }));
@@ -1411,6 +2247,19 @@ export default function FailedTestcaseAnalysis() {
     switch (colId) {
       case 'testcase_name':
         return <td key={colId} className="testcase-name" title={result.testcase_name}>{result.testcase_name || '-'}</td>;
+      case 'jita_task': {
+        const taskId = result.agave_task_id || '';
+        const href = taskId ? jitaResultsUrl(taskId) : '';
+        return (
+          <td key={colId} className="jita-task-cell">
+            {href ? (
+              <a href={href} target="_blank" rel="noopener noreferrer" className="jita-task-link" title={taskId}>
+                {taskId}
+              </a>
+            ) : '-'}
+          </td>
+        );
+      }
       case 'regression_owner':
         return <td key={colId} className="owner-cell">{result.regression_owner || 'Unknown'}</td>;
       case 'status': {
@@ -1420,6 +2269,7 @@ export default function FailedTestcaseAnalysis() {
           : s === 'skipped' || s === 'skip' ? 'badge-skipped'
           : s === 'warning' || s === 'warn' ? 'badge-warning'
           : s === 'killed' || s === 'terminated' || s === 'cancelled' ? 'badge-killed'
+          : s === 'pending' || s === 'waiting' || s === 'running' || s === 'started' ? 'badge-pending'
           : 'badge-failed';
         return <td key={colId}><span className={`badge ${badgeCls}`}>{statusLabel}</span></td>;
       }
@@ -1506,6 +2356,24 @@ export default function FailedTestcaseAnalysis() {
         const rdm = result.rdm_info;
         const rdmAi = rdmAiResults[result.testcase_id];
         const rdmAiLoad = rdmAiLoading[result.testcase_id];
+        const rdmSkill = rdmSkillResults[result.testcase_id];
+        const rdmSkillLoad = rdmSkillLoading[result.testcase_id];
+        const wfLoad = rdmWorkflowLoading[result.testcase_id];
+        const jarvisResults = rdm?.jarvis_results || [];
+        const renderJarvisStatus = () => (
+          jarvisResults.length > 0 ? (
+            <div className="rdm-jarvis-status">
+              {jarvisResults.map((jr, idx) => (
+                <div key={jr.node_id || jr.node_name || idx} className={jr.success ? 'rdm-jarvis-ok' : 'rdm-jarvis-fail'}>
+                  {jr.success
+                    ? `Jarvis: ${jr.node_name} disabled (is_enabled=${String(jr.is_enabled)})`
+                    : `Jarvis disable failed for ${jr.node_name || 'node'}: ${jr.error || 'unknown error'}`}
+                </div>
+              ))}
+            </div>
+          ) : null
+        );
+        const rerunTaskId = rdm?.retrigger?.results?.[0]?.rerun_task_id;
         return (
           <td key={colId} className="rdm-cell">
             {!rdm ? (
@@ -1516,14 +2384,27 @@ export default function FailedTestcaseAnalysis() {
               <div className="rdm-approved">
                 <span className="rdm-badge rdm-badge-approved">Approved</span>
                 <code className="rdm-approved-comment">{rdm.generated_comment || result.comments}</code>
+                {renderJarvisStatus()}
+                {rerunTaskId && (
+                  <a href={jitaResultsUrl(rerunTaskId)} target="_blank" rel="noopener noreferrer" className="rdm-link">
+                    Rerun task {rerunTaskId}
+                  </a>
+                )}
+                {rdm.workflow_error && <div className="rdm-jarvis-fail">{rdm.workflow_error}</div>}
                 {rdm.rdm_link && <a href={rdm.rdm_link} target="_blank" rel="noopener noreferrer" className="rdm-link">RDM Details</a>}
               </div>
             ) : rdm.pattern_matched ? (
               <div className="rdm-matched">
                 <span className="rdm-badge rdm-badge-matched">Pattern Matched</span>
+                {rdm.pattern_id && <span className="rdm-pattern-id">{rdm.pattern_id}</span>}
                 <div className="rdm-comment-preview">
                   <strong>Comment:</strong> <code>{rdm.generated_comment}</code>
                 </div>
+                {rdm.failed_nodes && rdm.failed_nodes.length > 0 && (
+                  <div className="rdm-failed-nodes">
+                    <strong>Nodes:</strong> {rdm.failed_nodes.join(', ')}
+                  </div>
+                )}
                 {rdm.pattern_jira && (
                   <div className="rdm-pattern-jira">
                     <strong>Jira:</strong>{' '}
@@ -1531,15 +2412,34 @@ export default function FailedTestcaseAnalysis() {
                   </div>
                 )}
                 <div className="rdm-desc">{rdm.pattern_description}</div>
+                {renderJarvisStatus()}
                 <div className="rdm-actions">
                   <button
                     type="button"
                     className="btn-rdm-approve"
-                    disabled={rdmAiLoad}
+                    disabled={rdmAiLoad || wfLoad}
                     onClick={() => handleRdmApproveComment(result.testcase_id, rdm.generated_comment, rdm.pattern_jira || '')}
+                    title={rdmNeedsNodeDisable(rdm)
+                      ? 'Update JITA comment and disable failed node(s) in Jarvis'
+                      : 'Update JITA comment'}
                   >
-                    {rdmAiLoad ? 'Updating…' : 'Approve & Update'}
+                    {rdmAiLoad
+                      ? 'Updating…'
+                      : rdmNeedsNodeDisable(rdm)
+                        ? 'Approve & Disable Node'
+                        : 'Approve & Update'}
                   </button>
+                  {rdmNeedsRerun(rdm) && (
+                    <button
+                      type="button"
+                      className="btn-rdm-workflow"
+                      disabled={rdmAiLoad || wfLoad}
+                      onClick={() => handleRdmAutoWorkflow([result], { parentTaskId: result.agave_task_id })}
+                      title="Pattern-matched workflow: update comment, disable node if needed, then re-run the test"
+                    >
+                      {wfLoad ? 'Running…' : 'Analyze, Fix & Re-run'}
+                    </button>
+                  )}
                 </div>
                 {rdm.rdm_link && <a href={rdm.rdm_link} target="_blank" rel="noopener noreferrer" className="rdm-link">RDM Details</a>}
               </div>
@@ -1549,7 +2449,27 @@ export default function FailedTestcaseAnalysis() {
                 <div className="rdm-msg-preview" title={rdm.rdm_message}>
                   {(rdm.rdm_message || '').substring(0, 150)}
                 </div>
-                {rdmAi ? (
+                <div className="rdm-analyze-actions">
+                  <button
+                    type="button"
+                    className="btn-rdm-analyze"
+                    disabled={rdmAiLoad || rdmSkillLoad}
+                    onClick={() => handleRdmAiAnalyze(result)}
+                    title="First Level Analysis: Glean search of the RDM error message"
+                  >
+                    {rdmAiLoad ? 'Analyzing…' : rdmAi ? 'Re-run First Level' : 'First Level Analysis'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-rdm-skill-analyze"
+                    disabled={rdmAiLoad || rdmSkillLoad}
+                    onClick={() => handleRdmSkillAnalyze(result)}
+                    title="Triage via triage-rdm-deployment-failure skill (RDM logs, ENG/DIAL tickets)"
+                  >
+                    {rdmSkillLoad ? 'Skill analyzing…' : rdmSkill ? 'Re-run Skill Analysis' : 'AI Skill Analysis'}
+                  </button>
+                </div>
+                {rdmAi && (
                   <div className="rdm-ai-result">
                     <div className="rdm-ai-summary">{rdmAi.ai_summary}</div>
                     {rdmAi.jira_refs && rdmAi.jira_refs.length > 0 && (
@@ -1566,38 +2486,100 @@ export default function FailedTestcaseAnalysis() {
                           type="button"
                           className="btn-rdm-approve btn-rdm-approve-sm"
                           disabled={rdmAiLoad}
-                          onClick={() => handleRdmApproveComment(result.testcase_id, rdmAi.suggested_comment, rdmAi.jira_ticket || '')}
+                          onClick={() => handleRdmApproveComment(
+                            result.testcase_id,
+                            rdmAi.suggested_comment,
+                            rdmAi.jira_ticket || rdmAi.jira_refs?.[0] || '',
+                          )}
                         >
                           {rdmAiLoad ? '…' : 'Approve'}
                         </button>
                       </div>
                     )}
+                    <button
+                      type="button"
+                      className="btn-rdm-add-pattern"
+                      onClick={() => openAddPatternModal(result, rdmAi)}
+                      title="Save this analysis as a pattern for future auto-triage and next actions"
+                    >
+                      Add Pattern
+                    </button>
                   </div>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn-rdm-analyze"
-                    disabled={rdmAiLoad}
-                    onClick={async () => {
-                      setRdmAiLoading(prev => ({ ...prev, [result.testcase_id]: true }));
-                      try {
-                        const resp = await api.post(`${API_BASE}/rdm-analyze-ai`, {
-                          task_id: result.agave_task_id,
-                          rdm_message: rdm.rdm_message,
+                )}
+                {rdmSkill && (
+                  <div className="rdm-skill-result">
+                    <div className="rdm-skill-header">
+                      <span className="rdm-badge rdm-badge-skill">Skill</span>
+                      <span className="rdm-skill-name">{rdmSkill.skill_used || 'triage-rdm-deployment-failure'}</span>
+                      {(rdmSkill.issue_category || rdmSkill.classification) && (
+                        <span className="rdm-skill-category">{rdmSkill.issue_category || rdmSkill.classification}</span>
+                      )}
+                    </div>
+                    <div className="rdm-ai-summary">{rdmSkill.root_cause || rdmSkill.ai_summary}</div>
+                    {rdmSkill.recommended_action && (
+                      <div className="rdm-skill-action">
+                        Action: <code>{rdmSkill.recommended_action}</code>
+                      </div>
+                    )}
+                    {rdmSkill.jira_refs && rdmSkill.jira_refs.length > 0 && (
+                      <div className="rdm-ai-jiras">
+                        {rdmSkill.jira_refs.map(j => (
+                          <a key={j} href={`${JIRA_URL}${j}`} target="_blank" rel="noopener noreferrer" className="jira-link">{j}</a>
+                        ))}
+                      </div>
+                    )}
+                    {rdmSkill.suggested_comment && (
+                      <div className="rdm-ai-suggest">
+                        <strong>Suggested:</strong> <code>{rdmSkill.suggested_comment}</code>
+                        <button
+                          type="button"
+                          className="btn-rdm-approve btn-rdm-approve-sm"
+                          disabled={rdmAiLoad}
+                          onClick={() => handleRdmApproveComment(
+                            result.testcase_id,
+                            rdmSkill.suggested_comment,
+                            rdmSkill.jira_ticket || rdmSkill.jira_refs?.[0] || '',
+                          )}
+                        >
+                          {rdmAiLoad ? '…' : 'Approve comment'}
+                        </button>
+                      </div>
+                    )}
+                    <div className="rdm-skill-actions">
+                      {rdmSkill.jira_create?.needed && (
+                        <button
+                          type="button"
+                          className="btn-rdm-create-jira"
+                          onClick={() => openRdmSkillJiraCreate(rdmSkill)}
+                          title="Copy triage report and open Jira create"
+                        >
+                          Create {rdmSkill.suggested_jira_project || rdmSkill.jira_create?.project || 'Jira'} ticket
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn-view-analysis"
+                        onClick={() => setTriageAnalysisModal({
+                          kind: 'rdm_skill',
                           testcase_name: result.testcase_name,
-                        });
-                        if (resp.data?.success) {
-                          setRdmAiResults(prev => ({ ...prev, [result.testcase_id]: resp.data }));
-                        }
-                      } catch (err) {
-                        console.error('RDM AI analysis failed:', err);
-                      } finally {
-                        setRdmAiLoading(prev => ({ ...prev, [result.testcase_id]: false }));
-                      }
-                    }}
-                  >
-                    {rdmAiLoad ? 'Analyzing…' : 'AI Analyze'}
-                  </button>
+                          testcase_id: result.testcase_id,
+                          ...rdmSkill,
+                          jira_duplicates: rdmSkill.jira_duplicates || rdmSkill.jira_refs || [],
+                          best_matching_ticket: rdmSkill.jira_ticket,
+                        })}
+                      >
+                        View report
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-rdm-add-pattern"
+                        onClick={() => openAddPatternModal(result, rdmSkill)}
+                        title="Save this skill analysis as a pattern"
+                      >
+                        Add Pattern
+                      </button>
+                    </div>
+                  </div>
                 )}
                 {rdm.rdm_link && <a href={rdm.rdm_link} target="_blank" rel="noopener noreferrer" className="rdm-link">RDM Details</a>}
               </div>
@@ -1617,6 +2599,24 @@ export default function FailedTestcaseAnalysis() {
             ) : '-'}
           </td>
         );
+      case 'triage_genie_review': {
+        const reviewUrl = triageGenieReviewUrl(result);
+        return (
+          <td key={colId}>
+            {reviewUrl ? (
+              <a
+                href={reviewUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-tg-review"
+                title="Open Triage Genie Review"
+              >
+                Review
+              </a>
+            ) : '-'}
+          </td>
+        );
+      }
       case 'glean_search': {
         const gleanLoading = gleanSearchLoading[result.testcase_id];
         const gleanRes = gleanSearchResults[result.testcase_id];
@@ -1726,71 +2726,99 @@ export default function FailedTestcaseAnalysis() {
         );
       }
       case 'intelligent_triage': {
-        const triageLoading = intelligentTriageLoading[result.testcase_id];
         const triageResult = intelligentTriageResults[result.testcase_id];
         const firstLevelLoading = firstLevelAiLoading[result.testcase_id];
         const firstLevelResult = firstLevelAiResults[result.testcase_id];
         const deepAiLoadingState = deepAiLoading[result.testcase_id];
         const deepAiResult = deepAiResults[result.testcase_id];
-        
+        const tgValidation = firstLevelResult?.tg_ticket_validation || deepAiResult?.tg_ticket_validation;
+
         return (
           <td key={colId} className="intelligent-triage-cell">
-            {triageLoading ? (
-              <span className="triage-loading">Analyzing...</span>
-            ) : triageResult ? (
+            {triageResult ? (
               <div className="triage-results">
-                {triageResult.requires_first_level_ai && !firstLevelResult && (
+                <div className="triage-action-row">
                   <button
                     type="button"
                     className="btn-first-level-ai"
                     disabled={firstLevelLoading}
                     onClick={() => handleFirstLevelAiAnalysis(result)}
-                    title="First Level AI Analysis with JITA API and Glean"
+                    title="First Level AI: failure analysis plus Triage Genie ticket validation"
                   >
-                    {firstLevelLoading ? 'Analyzing...' : 'First Level AI'}
+                    {firstLevelLoading ? 'Analyzing...' : firstLevelResult ? 'Re-run First Level' : 'First Level AI'}
                   </button>
-                )}
-                {triageResult.requires_deep_ai_analysis && (
                   <button
                     type="button"
                     className="btn-deep-ai-analysis"
                     disabled={deepAiLoadingState}
                     onClick={() => handleDeepAiAnalysis(result)}
-                    title="Deep AI Analysis (No Credit Limits)"
+                    title="Deep AI: skill-based log triage (triage-cdp-test-failure / triage-rdm-deployment-failure)"
                   >
-                    {deepAiLoadingState ? 'Analyzing...' : 'Deep AI Analysis'}
+                    {deepAiLoadingState ? 'Analyzing...' : deepAiResult ? 'Re-run Deep AI' : 'Deep AI Analysis'}
                   </button>
-                )}
+                </div>
                 {firstLevelResult && (
                   <div className="first-level-result">
-                    <span className={`badge triage-badge-${firstLevelResult.confidence > 0.7 ? 'high' : 'medium'}`}>
-                      {firstLevelResult.analysis_type}
+                    <span className={`badge glean-issue-badge glean-issue-${(firstLevelResult.issue_type || '').replace(/\s+/g, '-').toLowerCase()}`}>
+                      {firstLevelResult.issue_type || 'First Level AI'}
                     </span>
-                    {firstLevelResult.existing_issues && firstLevelResult.existing_issues.length > 0 && (
-                      <span className="existing-issues-count">
-                        {firstLevelResult.existing_issues.length} existing issue(s)
+                    {tgValidation && (
+                      <span className={`badge ${tgVerdictClass(tgValidation.verdict)}`}>
+                        TG {tgValidation.verdict || 'Missing'}
+                        {tgValidation.ticket ? ` ${tgValidation.ticket}` : ''}
                       </span>
                     )}
+                    {(firstLevelResult.enriched_tickets || firstLevelResult.existing_issues || []).length > 0 && (
+                      <span className="existing-issues-count">
+                        {(firstLevelResult.enriched_tickets || firstLevelResult.existing_issues).length} existing ticket(s)
+                      </span>
+                    )}
+                    {firstLevelResult.analysis && (
+                      <div className="first-level-analysis-preview" title={firstLevelResult.analysis}>
+                        {firstLevelResult.analysis}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="btn-view-analysis"
+                      onClick={() => setTriageAnalysisModal({
+                        kind: 'first_level',
+                        testcase_name: result.testcase_name,
+                        testcase_id: result.testcase_id,
+                        ...firstLevelResult,
+                      })}
+                    >
+                      View First Level
+                    </button>
                   </div>
                 )}
                 {deepAiResult && (
                   <div className="deep-ai-result">
-                    <span className={`badge triage-badge-${deepAiResult.confidence > 0.8 ? 'high' : 'medium'}`}>
-                      Deep AI Complete
+                    <span className={`badge triage-badge-${String(deepAiResult.confidence || '').toLowerCase() === 'high' || deepAiResult.confidence > 0.8 ? 'high' : 'medium'}`}>
+                      Deep AI {deepAiResult.classification || 'Complete'}
                     </span>
+                    {deepAiResult.skill_used && (
+                      <span className="deep-ai-skill" title={deepAiResult.skill_used}>
+                        {deepAiResult.skill_used}
+                      </span>
+                    )}
                     {deepAiResult.root_cause && (
                       <div className="deep-ai-summary" title={deepAiResult.root_cause}>
                         {deepAiResult.root_cause}
                       </div>
                     )}
-                  </div>
-                )}
-                {triageResult.rdm_fix_approval && (
-                  <div className="rdm-fix-section">
-                    <span className="rdm-fix-status">{triageResult.rdm_fix_approval.action}</span>
-                    {triageResult.rdm_fix_approval.success && (
-                      <span className="rdm-fix-success">✓ Node disabled & retriggered</span>
-                    )}
+                    <button
+                      type="button"
+                      className="btn-view-analysis"
+                      onClick={() => setTriageAnalysisModal({
+                        kind: 'deep',
+                        testcase_name: result.testcase_name,
+                        testcase_id: result.testcase_id,
+                        ...deepAiResult,
+                      })}
+                    >
+                      View Deep AI
+                    </button>
                   </div>
                 )}
               </div>
@@ -1799,7 +2827,7 @@ export default function FailedTestcaseAnalysis() {
                 type="button"
                 className="btn-intelligent-triage"
                 onClick={() => handleIntelligentTriage(result)}
-                title="Intelligent Triage Analysis"
+                title="Open First Level AI and Deep AI Analysis"
               >
                 Analyze
               </button>
@@ -2012,8 +3040,13 @@ export default function FailedTestcaseAnalysis() {
           </div>
         ) : (
           <div className="form-group">
-            <label>Task IDs (comma-separated) <span className="required">*</span></label>
-            <textarea value={taskIds} onChange={e => setTaskIds(e.target.value)} placeholder="e.g., 697aeae32bc0c49968d713f7" rows={3} />
+            <label>Task IDs (comma or newline separated, or JITA URL) <span className="required">*</span></label>
+            <textarea
+              value={taskIds}
+              onChange={e => setTaskIds(e.target.value)}
+              placeholder="Paste 24-char JITA task IDs (comma or newline separated) or a JITA results URL"
+              rows={3}
+            />
           </div>
         )}
         <div className="form-group status-filter-group">
@@ -2033,7 +3066,22 @@ export default function FailedTestcaseAnalysis() {
         </div>
       </div>
 
-      {error && <div className="error-message"><strong>Error:</strong> {error}</div>}
+      {error && (
+        <div className="error-message">
+          <strong>Error:</strong> {error}
+          {statusMismatch?.optionIds?.length > 0 && (
+            <div className="error-message-actions">
+              <button
+                type="button"
+                className="btn-analyze-found-statuses"
+                onClick={() => handleAnalyze(statusMismatch.optionIds)}
+              >
+                Analyze found statuses ({statusMismatch.optionIds.join(', ')})
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {loading && !analyzing && (
         <div className="loading">
           <div className="spinner" />
@@ -2057,7 +3105,9 @@ export default function FailedTestcaseAnalysis() {
         <div className="results-container">
           <div className="results-header">
             <h2>
-              Analysis Results ({filteredResults.length} of {results.length} testcases)
+              Analysis Results ({filteredResults.length} of {results.length} testcases
+              {rdmGroupCount > 0 ? `, ${rdmGroupCount} RDM group${rdmGroupCount === 1 ? '' : 's'}` : ''}
+              {exceptionGroupCount > 0 ? `, ${exceptionGroupCount} exception group${exceptionGroupCount === 1 ? '' : 's'}` : ''})
               {analyzing && totalExpected > 0 && (
                 <span className="stream-progress-inline">
                   &nbsp;— Loading {results.length} of {totalExpected}…
@@ -2204,8 +3254,24 @@ export default function FailedTestcaseAnalysis() {
                 onChange={e => setFilterComment(e.target.value)}
               />
             </div>
-            {(filterOwner || filterFailureStage || filterIntermittent || filterComment.trim() || filterTestStatus.length < ALL_STATUS_GROUPS.length) && (
-              <button onClick={() => { setFilterTestStatus([...ALL_STATUS_GROUPS]); setFilterOwner(''); setFilterFailureStage(''); setFilterIntermittent(''); setFilterComment(''); }} className="btn-clear-filters">Clear Filters</button>
+            <div className="filter-group filter-group-exception">
+              <label htmlFor="filter-exception">Filter by Exception Summary:</label>
+              <select
+                id="filter-exception"
+                value={filterException}
+                onChange={e => setFilterException(e.target.value)}
+                className="filter-select"
+              >
+                <option value="">All Exception Summaries</option>
+                {uniqueExceptionGroups.map(g => (
+                  <option key={g.key || EMPTY_EXCEPTION_KEY} value={g.key || EMPTY_EXCEPTION_KEY}>
+                    {g.count}× {g.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {(filterOwner || filterFailureStage || filterIntermittent || filterComment.trim() || filterException || filterTestStatus.length < ALL_STATUS_GROUPS.length) && (
+              <button onClick={() => { setFilterTestStatus([...ALL_STATUS_GROUPS]); setFilterOwner(''); setFilterFailureStage(''); setFilterIntermittent(''); setFilterComment(''); setFilterException(''); }} className="btn-clear-filters">Clear Filters</button>
             )}
           </div>
           <div className="results-table-toolbar">
@@ -2267,6 +3333,40 @@ export default function FailedTestcaseAnalysis() {
               >
                 {rdmAnalyzing ? 'Analyzing RDM…' : `Analyze Skipped (${selectedRows.length})`}
               </button>
+              <button
+                type="button"
+                className="btn-rdm-workflow-bulk"
+                disabled={selectedRows.length === 0 || Object.values(rdmWorkflowLoading).some(Boolean)}
+                onClick={() => {
+                  const selectedSkipped = selectedRows
+                    .map(id => results.find(r => r.testcase_id === id))
+                    .filter(isSkippedRow);
+                  if (selectedSkipped.length === 0) {
+                    alert('Select skipped testcases. Analyze, Fix & Re-run only applies to pattern-matched RDM failures.');
+                    return;
+                  }
+                  const parentTaskId = resolveParentJitaTaskId(selectedSkipped, inputMode, taskIds);
+                  const selectedTaskIds = new Set(selectedSkipped.map(r => r.agave_task_id).filter(Boolean));
+                  const rows = selectedTaskIds.size === 1
+                    ? expandSkippedRowsByJitaTask(selectedSkipped, results)
+                    : selectedSkipped;
+                  const extra = rows.length - selectedSkipped.length;
+                  if (extra > 0) {
+                    setSelectedRows(prev => [...new Set([
+                      ...prev,
+                      ...rows.map(r => r.testcase_id).filter(Boolean),
+                    ])]);
+                    alert(
+                      `Same JITA task: included ${extra} more skipped testcase${extra === 1 ? '' : 's'} `
+                      + `(${rows.length} total). Re-run will use parent ${parentTaskId || 'task'} once.`
+                    );
+                  }
+                  handleRdmAutoWorkflow(rows, { parentTaskId });
+                }}
+                title="Pattern-matched only: approve/disable selected skipped tests, then re-run them once on the parent JITA task"
+              >
+                {Object.values(rdmWorkflowLoading).some(Boolean) ? 'Running workflow…' : `Analyze, Fix & Re-run (${selectedRows.length})`}
+              </button>
               {cursorAiBatchStatus && (
                 <span className="cursor-ai-batch-status">
                   {cursorAiBatchStatus.status === 'done'
@@ -2297,20 +3397,72 @@ export default function FailedTestcaseAnalysis() {
                 </tr>
               </thead>
               <tbody>
-                {filteredResults.map((result, index) => (
-                  <tr key={result.testcase_id || index}>
-                    <td className="col-select">
-                      <input
-                        type="checkbox"
-                        checked={!!result.testcase_id && selectedRows.includes(result.testcase_id)}
-                        onChange={() => toggleRowSelect(result.testcase_id)}
-                        disabled={!result.testcase_id}
-                        aria-label={`Select row ${result.testcase_name || index + 1}`}
-                      />
-                    </td>
-                    {COLUMNS.filter(c => visibleColumns.includes(c.id)).map(c => renderCell(c.id, result, index))}
-                  </tr>
-                ))}
+                {resultGroups.map((group) => {
+                  const groupIds = group.rows.map(r => r.testcase_id).filter(Boolean);
+                  const selectedInGroup = groupIds.filter(id => selectedRows.includes(id)).length;
+                  const allGroupSelected = groupIds.length > 0 && selectedInGroup === groupIds.length;
+                  const sharedRdmLink = group.kind === 'rdm'
+                    ? [...new Set(group.rows.map(r => r.rdm_info?.rdm_link).filter(Boolean))]
+                    : [];
+                  return (
+                    <React.Fragment key={group.key || EMPTY_EXCEPTION_KEY}>
+                      <tr className={group.kind === 'rdm' ? 'rdm-group-header' : 'exception-group-header'}>
+                        <td className="col-select">
+                          <input
+                            type="checkbox"
+                            checked={allGroupSelected}
+                            ref={el => {
+                              if (el) el.indeterminate = selectedInGroup > 0 && selectedInGroup < groupIds.length;
+                            }}
+                            onChange={() => toggleSelectGroup(groupIds)}
+                            disabled={groupIds.length === 0}
+                            aria-label={`Select all ${group.rows.length} testcases in this ${group.kind === 'rdm' ? 'RDM' : 'exception'} group`}
+                            title={`Select all testcases in this ${group.kind === 'rdm' ? 'RDM failure' : 'exception'} group`}
+                          />
+                        </td>
+                        <td colSpan={Math.max(visibleColumns.length, 1)}>
+                          <div className="exception-group-meta">
+                            <span
+                              className={`exception-group-count${group.kind === 'rdm' ? ' rdm-group-count' : ''}`}
+                              title={`${group.rows.length} testcase${group.rows.length === 1 ? '' : 's'} share this ${group.kind === 'rdm' ? 'RDM failure' : 'exception'}`}
+                            >
+                              {group.rows.length}
+                            </span>
+                            {group.kind === 'rdm' && <span className="rdm-group-badge">RDM</span>}
+                            <span className="exception-group-label" title={group.preview || group.label}>
+                              {group.label}
+                            </span>
+                            {sharedRdmLink.length === 1 && (
+                              <a
+                                href={sharedRdmLink[0]}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="rdm-link rdm-group-link"
+                                onClick={e => e.stopPropagation()}
+                              >
+                                RDM Details
+                              </a>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                      {group.rows.map((result, index) => (
+                        <tr key={result.testcase_id || `${group.key}-${index}`}>
+                          <td className="col-select">
+                            <input
+                              type="checkbox"
+                              checked={!!result.testcase_id && selectedRows.includes(result.testcase_id)}
+                              onChange={() => toggleRowSelect(result.testcase_id)}
+                              disabled={!result.testcase_id}
+                              aria-label={`Select row ${result.testcase_name || index + 1}`}
+                            />
+                          </td>
+                          {COLUMNS.filter(c => visibleColumns.includes(c.id)).map(c => renderCell(c.id, result, index))}
+                        </tr>
+                      ))}
+                    </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -2443,14 +3595,14 @@ export default function FailedTestcaseAnalysis() {
                     disabled={followUpLoading}
                     title="Follow-up AI mode"
                   >
-                    <option value="ask">Ask</option>
-                    <option value="agent">Agent</option>
+                    <option value="ask">Ask (fast)</option>
+                    <option value="agent">Agent (deep)</option>
                     <option value="plan">Plan</option>
                   </select>
                   <input
                     type="text"
                     className="cursor-ai-followup-input"
-                    placeholder="Ask a follow-up question about this analysis..."
+                    placeholder="Ask a follow-up (Ask mode is fastest)..."
                     value={followUpInput}
                     onChange={e => setFollowUpInput(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter' && !followUpLoading) handleFollowUp(); }}
@@ -2471,6 +3623,152 @@ export default function FailedTestcaseAnalysis() {
                 </span>
               )}
               <button type="button" className="btn-secondary" onClick={() => setCursorAiDetailModal(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {triageAnalysisModal && (
+        <div className="modal-overlay" onClick={() => setTriageAnalysisModal(null)}>
+          <div className="modal-content glean-detail-modal triage-analysis-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>
+                {triageAnalysisModal.kind === 'rdm_skill'
+                  ? 'AI Skill Analysis (RDM)'
+                  : triageAnalysisModal.kind === 'deep'
+                  ? 'Deep AI Analysis'
+                  : 'First Level AI Analysis'}
+              </h3>
+              <button type="button" className="modal-close" onClick={() => setTriageAnalysisModal(null)}>×</button>
+            </div>
+            <div className="modal-body glean-detail-body">
+              <div className="glean-tc-name">{triageAnalysisModal.testcase_name}</div>
+
+              <div className="glean-section">
+                <h4>Failure Classification</h4>
+                <span className={`badge glean-issue-badge glean-issue-${((triageAnalysisModal.issue_type || triageAnalysisModal.classification) || '').replace(/\s+/g, '-').toLowerCase()}`}>
+                  {triageAnalysisModal.issue_type || triageAnalysisModal.classification || 'Unknown'}
+                </span>
+                {triageAnalysisModal.skill_used && (
+                  <span className="deep-ai-skill">Skill: {triageAnalysisModal.skill_used}</span>
+                )}
+                {triageAnalysisModal.search_source && (
+                  <span className="search-source-hint">
+                    Ticket search: {triageAnalysisModal.search_source}
+                    {triageAnalysisModal.glean_ok === false ? ' (Glean unavailable, Jira fallback used)' : ''}
+                  </span>
+                )}
+              </div>
+
+              <div className="glean-section">
+                <h4>Triage Genie Ticket Validation</h4>
+                <TgValidationBlock validation={triageAnalysisModal.tg_ticket_validation} />
+              </div>
+
+              {(triageAnalysisModal.analysis || triageAnalysisModal.root_cause) && (
+                <div className="glean-section">
+                  <h4>{triageAnalysisModal.kind === 'deep' ? 'Root Cause' : 'Analysis'}</h4>
+                  <div className="glean-ai-analysis">
+                    {triageAnalysisModal.analysis || triageAnalysisModal.root_cause}
+                  </div>
+                </div>
+              )}
+
+              {triageAnalysisModal.recommended_action && (
+                <div className="glean-section">
+                  <h4>Recommended Action</h4>
+                  <div className="glean-ai-analysis">
+                    {typeof triageAnalysisModal.recommended_action === 'string' &&
+                    ['link_existing', 'create_jira', 'rerun', 'disable_node_and_rerun'].includes(triageAnalysisModal.recommended_action)
+                      ? `${triageAnalysisModal.recommended_action}${triageAnalysisModal.suggested_comment ? ` — ${triageAnalysisModal.suggested_comment}` : ''}`
+                      : triageAnalysisModal.recommended_action}
+                  </div>
+                </div>
+              )}
+
+              {triageAnalysisModal.suggested_fix && (
+                <div className="glean-section">
+                  <h4>Suggested Fix</h4>
+                  <div className="glean-ai-analysis">{triageAnalysisModal.suggested_fix}</div>
+                </div>
+              )}
+
+              {triageAnalysisModal.failing_code && (triageAnalysisModal.failing_code.file || triageAnalysisModal.failing_code.snippet) && (
+                <div className="glean-section">
+                  <h4>Failing Code</h4>
+                  <div className="failing-code-block">
+                    {triageAnalysisModal.failing_code.file && (
+                      <div className="failing-code-file">
+                        {triageAnalysisModal.failing_code.file}
+                        {triageAnalysisModal.failing_code.line_range ? `:${triageAnalysisModal.failing_code.line_range}` : ''}
+                      </div>
+                    )}
+                    {triageAnalysisModal.failing_code.snippet && (
+                      <pre>{triageAnalysisModal.failing_code.snippet}</pre>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {triageAnalysisModal.best_matching_ticket && (
+                <div className="glean-section">
+                  <h4>Best Matching Ticket</h4>
+                  <a
+                    href={`${JIRA_URL}${triageAnalysisModal.best_matching_ticket}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="jira-link"
+                  >
+                    {triageAnalysisModal.best_matching_ticket}
+                  </a>
+                </div>
+              )}
+
+              {triageAnalysisModal.jira_duplicates && triageAnalysisModal.jira_duplicates.length > 0 && (
+                <div className="glean-section">
+                  <h4>Jira Duplicates</h4>
+                  <div className="glean-jira-list">
+                    {triageAnalysisModal.jira_duplicates.map((ticket) => (
+                      <a key={ticket} href={`${JIRA_URL}${ticket}`} target="_blank" rel="noopener noreferrer" className="jira-link">{ticket}</a>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {triageAnalysisModal.enriched_tickets && triageAnalysisModal.enriched_tickets.length > 0 && (
+                <div className="glean-section">
+                  <h4>Existing Tickets from Error Search ({triageAnalysisModal.enriched_tickets.length})</h4>
+                  <EnrichedTicketTable tickets={triageAnalysisModal.enriched_tickets} />
+                </div>
+              )}
+
+              {triageAnalysisModal.glean_snippets && triageAnalysisModal.glean_snippets.length > 0 && (
+                <div className="glean-section">
+                  <h4>Product Knowledge / Glean Results</h4>
+                  <div className="glean-snippets-list">
+                    {triageAnalysisModal.glean_snippets.map((s, i) => (
+                      <div key={i} className="glean-snippet-item">
+                        {s.url ? (
+                          <a href={s.url} target="_blank" rel="noopener noreferrer" className="glean-snippet-title">{s.title || 'Untitled'}</a>
+                        ) : (
+                          <span className="glean-snippet-title">{s.title || 'Untitled'}</span>
+                        )}
+                        {s.snippet && <div className="glean-snippet-text">{s.snippet}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {triageAnalysisModal.triage_report && (
+                <div className="glean-section">
+                  <h4>Skill Triage Report</h4>
+                  <div className="glean-ai-analysis triage-report-block">{triageAnalysisModal.triage_report}</div>
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn-secondary" onClick={() => setTriageAnalysisModal(null)}>Close</button>
             </div>
           </div>
         </div>
@@ -2574,6 +3872,102 @@ export default function FailedTestcaseAnalysis() {
         </div>
       )}
 
+      {patternModal && (
+        <div className="modal-overlay" onClick={() => !patternSaving && setPatternModal(null)}>
+          <div className="modal-content rdm-pattern-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Add RDM Pattern</h3>
+              <button type="button" className="modal-close" onClick={() => !patternSaving && setPatternModal(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <p className="rdm-pattern-modal-hint">
+                Save this approved analysis as a pattern so future similar RDM failures auto-match
+                and apply the selected next action (disable node and/or re-run).
+              </p>
+              <div className="rdm-pattern-field">
+                <label>Pattern ID</label>
+                <input
+                  type="text"
+                  value={patternModal.id}
+                  onChange={e => setPatternModal(prev => ({ ...prev, id: e.target.value }))}
+                />
+              </div>
+              <div className="rdm-pattern-field">
+                <label>Regex</label>
+                <textarea
+                  rows={3}
+                  value={patternModal.regex}
+                  onChange={e => setPatternModal(prev => ({ ...prev, regex: e.target.value }))}
+                />
+              </div>
+              <div className="rdm-pattern-field">
+                <label>Comment template</label>
+                <input
+                  type="text"
+                  value={patternModal.comment_template}
+                  onChange={e => setPatternModal(prev => ({ ...prev, comment_template: e.target.value }))}
+                />
+              </div>
+              <div className="rdm-pattern-row">
+                <div className="rdm-pattern-field">
+                  <label>Category</label>
+                  <select
+                    value={patternModal.category}
+                    onChange={e => setPatternModal(prev => ({ ...prev, category: e.target.value }))}
+                  >
+                    <option value="INFRA_NODE">INFRA_NODE</option>
+                    <option value="INFRA_INTERMITTENT">INFRA_INTERMITTENT</option>
+                    <option value="INFRA_RESOURCE">INFRA_RESOURCE</option>
+                    <option value="INFRA_BUG">INFRA_BUG</option>
+                  </select>
+                </div>
+                <div className="rdm-pattern-field">
+                  <label>Next action</label>
+                  <select
+                    value={patternModal.next_action}
+                    onChange={e => setPatternModal(prev => ({ ...prev, next_action: e.target.value }))}
+                  >
+                    <option value="disable_node_and_rerun">Disable node &amp; re-run</option>
+                    <option value="rerun">Re-run only</option>
+                    <option value="comment_only">Comment only</option>
+                  </select>
+                </div>
+              </div>
+              <div className="rdm-pattern-field">
+                <label>Description</label>
+                <textarea
+                  rows={2}
+                  value={patternModal.description}
+                  onChange={e => setPatternModal(prev => ({ ...prev, description: e.target.value }))}
+                />
+              </div>
+              <div className="rdm-pattern-field">
+                <label>Reference RDM</label>
+                <input
+                  type="text"
+                  value={patternModal.reference_task}
+                  onChange={e => setPatternModal(prev => ({ ...prev, reference_task: e.target.value }))}
+                />
+              </div>
+              <div className="rdm-pattern-field">
+                <label>Jira (optional)</label>
+                <input
+                  type="text"
+                  value={patternModal.jira}
+                  onChange={e => setPatternModal(prev => ({ ...prev, jira: e.target.value }))}
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn-secondary" disabled={patternSaving} onClick={() => setPatternModal(null)}>Cancel</button>
+              <button type="button" className="btn-primary" disabled={patternSaving} onClick={handleSavePattern}>
+                {patternSaving ? 'Saving…' : 'Save Pattern'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {retriggerModalOpen && (
         <div className="modal-overlay" onClick={() => !retriggerLoading && setRetriggerModalOpen(false)}>
           <div className="modal-content retrigger-modal" onClick={e => e.stopPropagation()}>
@@ -2583,14 +3977,30 @@ export default function FailedTestcaseAnalysis() {
             </div>
             <div className="modal-body retrigger-modal-body">
               <p className="retrigger-summary">
-                <strong>{selectedRows.length}</strong> testcase(s) selected for re-trigger.
-                Leave fields blank to use original task defaults.
+                <strong>{selectedRetriggerRows.length}</strong> selected testcase(s) across{' '}
+                <strong>{selectedRetriggerTaskIds.length}</strong>{' '}
+                Jita task(s) will be re-triggered (one rerun per task).
+                Blank fields keep the original values.
               </p>
+              <ul className="retrigger-selected-tests">
+                {selectedRetriggerRows.map(row => (
+                  <li key={row.testcase_id} title={row.testcase_name || row.testcase_id}>
+                    <span>{row.testcase_name || row.testcase_id}</span>
+                    {row.agave_task_id && (
+                      <span className="retrigger-selected-task">task {row.agave_task_id}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
 
-              {/* Component Selection Checkboxes */}
               <div className="retrigger-component-select">
                 <span className="retrigger-component-label">Select Components to Override</span>
                 <div className="retrigger-component-checks">
+                  <label className="retrigger-check-label retrigger-check-all">
+                    <input type="checkbox" checked={allComponentsOverride}
+                      onChange={e => toggleAllComponentOverrides(e.target.checked)} />
+                    <span>Override All</span>
+                  </label>
                   <label className="retrigger-check-label">
                     <input type="checkbox" checked={retriggerOverrides.updateNos}
                       onChange={e => setRetriggerOverrides(prev => ({ ...prev, updateNos: e.target.checked }))} />
@@ -2601,185 +4011,346 @@ export default function FailedTestcaseAnalysis() {
                       onChange={e => setRetriggerOverrides(prev => ({ ...prev, updatePc: e.target.checked }))} />
                     <span>Prism Central Build</span>
                   </label>
+                  <label className="retrigger-check-label">
+                    <input type="checkbox" checked={retriggerOverrides.updateImage}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, updateImage: e.target.checked }))} />
+                    <span>Image Build</span>
+                  </label>
+                  <label className="retrigger-check-label">
+                    <input type="checkbox" checked={retriggerOverrides.updateFramework}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, updateFramework: e.target.checked }))} />
+                    <span>Nutest / Framework Branch</span>
+                  </label>
+                  <label className="retrigger-check-label">
+                    <input type="checkbox" checked={retriggerOverrides.updateResource}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, updateResource: e.target.checked }))} />
+                    <span>Resource Requirement Configuration</span>
+                  </label>
                 </div>
               </div>
 
-              {/* Side-by-side NOS / PC panels */}
+              {(retriggerOverrides.updateNos || retriggerOverrides.updatePc || retriggerOverrides.updateImage) && (
               <div className="retrigger-panels">
                 {retriggerOverrides.updateNos && (
                   <div className="retrigger-panel">
                     <h4 className="retrigger-panel-title">NOS Build</h4>
+                    <p className="retrigger-pool-hint">NOS branch is taken from the original Jita task and cannot be changed. Commit and GBN are passed through if you enter them.</p>
                     <div className="retrigger-form-group">
-                      <label>Branch</label>
-                      <input type="text" placeholder="e.g. ganges-7.6-stable"
+                      <label>NOS Branch</label>
+                      <input type="text" readOnly disabled
+                        className="retrigger-readonly"
+                        placeholder="from original Jita task"
                         value={retriggerOverrides.nos.branch}
+                      />
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Commit ID</label>
+                      <input type="text" placeholder="commit id, or Latest Smoke Passed"
+                        value={retriggerOverrides.nos.commitId}
                         onChange={e => setRetriggerOverrides(prev => ({
-                          ...prev, nos: { ...prev.nos, branch: e.target.value }
+                          ...prev, nos: { ...prev.nos, commitId: e.target.value }
                         }))} />
                     </div>
                     <div className="retrigger-form-group">
-                      <label>Update Type</label>
-                      <div className="retrigger-radio-group">
-                        <label><input type="radio" value="tag"
-                          checked={retriggerOverrides.nos.updateType === 'tag'}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, nos: { ...prev.nos, updateType: e.target.value }
-                          }))} /> By Tag</label>
-                        <label><input type="radio" value="commit"
-                          checked={retriggerOverrides.nos.updateType === 'commit'}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, nos: { ...prev.nos, updateType: e.target.value }
-                          }))} /> By Commit</label>
-                      </div>
-                    </div>
-                    <div className="retrigger-form-group">
-                      <label>Build Type</label>
-                      <select value={retriggerOverrides.nos.buildType}
+                      <label>GBN</label>
+                      <input type="text" placeholder="optional; leave blank to keep original"
+                        value={retriggerOverrides.nos.gbn}
                         onChange={e => setRetriggerOverrides(prev => ({
-                          ...prev, nos: { ...prev.nos, buildType: e.target.value }
-                        }))}>
-                        <option value="">-- Select Build Type --</option>
-                        <option value="release">release</option>
-                        <option value="opt">opt</option>
-                      </select>
+                          ...prev, nos: { ...prev.nos, gbn: e.target.value }
+                        }))} />
                     </div>
-                    {retriggerOverrides.nos.updateType === 'tag' && (
-                      <div className="retrigger-form-group">
-                        <label>Tag</label>
-                        <select value={retriggerOverrides.nos.tag}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, nos: { ...prev.nos, tag: e.target.value }
-                          }))}>
-                          <option value="">-- Select Tag --</option>
-                          <option value="Latest Smoke Passed">Latest Smoke Passed</option>
-                          <option value="Latest DIAL Passed">Latest DIAL Passed</option>
-                        </select>
-                      </div>
-                    )}
-                    {retriggerOverrides.nos.updateType === 'commit' && (
-                      <>
-                        <div className="retrigger-form-group">
-                          <label>Commit ID</label>
-                          <input type="text" placeholder="e.g. b8b1696d55a4..."
-                            value={retriggerOverrides.nos.commitId}
-                            onChange={e => setRetriggerOverrides(prev => ({
-                              ...prev, nos: { ...prev.nos, commitId: e.target.value }
-                            }))} />
-                        </div>
-                        <div className="retrigger-form-group">
-                          <label>GBN</label>
-                          <input type="text" placeholder="e.g. 1779293625"
-                            value={retriggerOverrides.nos.gbn}
-                            onChange={e => setRetriggerOverrides(prev => ({
-                              ...prev, nos: { ...prev.nos, gbn: e.target.value }
-                            }))} />
-                        </div>
-                      </>
-                    )}
+
                   </div>
                 )}
 
                 {retriggerOverrides.updatePc && (
                   <div className="retrigger-panel">
                     <h4 className="retrigger-panel-title">Prism Central Build</h4>
+                    <p className="retrigger-pool-hint">Build Url and Build QCOW2 URL are required when changing PC commit or GBN.</p>
                     <div className="retrigger-form-group">
-                      <label>Branch</label>
-                      <input type="text" placeholder="e.g. master"
+                      <label>PC Branch</label>
+                      <input type="text" placeholder="e.g. ganges-7.6.0.6-stable-pc"
                         value={retriggerOverrides.pc.branch}
                         onChange={e => setRetriggerOverrides(prev => ({
                           ...prev, pc: { ...prev.pc, branch: e.target.value }
                         }))} />
                     </div>
                     <div className="retrigger-form-group">
-                      <label>Update Type</label>
-                      <div className="retrigger-radio-group">
-                        <label><input type="radio" value="tag"
-                          checked={retriggerOverrides.pc.updateType === 'tag'}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, pc: { ...prev.pc, updateType: e.target.value }
-                          }))} /> By Tag</label>
-                        <label><input type="radio" value="commit"
-                          checked={retriggerOverrides.pc.updateType === 'commit'}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, pc: { ...prev.pc, updateType: e.target.value }
-                          }))} /> By Commit</label>
-                      </div>
+                      <label>Commit ID</label>
+                      <input type="text" placeholder="commit id, or Latest Smoke Passed"
+                        value={retriggerOverrides.pc.commitId}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, pc: { ...prev.pc, commitId: e.target.value }
+                        }))} />
                     </div>
                     <div className="retrigger-form-group">
-                      <label>Build Type</label>
-                      <select value={retriggerOverrides.pc.buildType}
+                      <label>GBN</label>
+                      <input type="text" placeholder="optional; leave blank to keep original"
+                        value={retriggerOverrides.pc.gbn}
                         onChange={e => setRetriggerOverrides(prev => ({
-                          ...prev, pc: { ...prev.pc, buildType: e.target.value }
-                        }))}>
-                        <option value="">-- Select Build Type --</option>
-                        <option value="release">release</option>
-                        <option value="opt">opt</option>
-                      </select>
+                          ...prev, pc: { ...prev.pc, gbn: e.target.value }
+                        }))} />
                     </div>
-                    {retriggerOverrides.pc.updateType === 'tag' && (
-                      <div className="retrigger-form-group">
-                        <label>Tag</label>
-                        <select value={retriggerOverrides.pc.tag}
-                          onChange={e => setRetriggerOverrides(prev => ({
-                            ...prev, pc: { ...prev.pc, tag: e.target.value }
-                          }))}>
-                          <option value="">-- Select Tag --</option>
-                          <option value="Latest Smoke Passed">Latest Smoke Passed</option>
-                          <option value="Latest DIAL Passed">Latest DIAL Passed</option>
-                        </select>
-                      </div>
-                    )}
-                    {retriggerOverrides.pc.updateType === 'commit' && (
-                      <>
-                        <div className="retrigger-form-group">
-                          <label>Commit ID</label>
-                          <input type="text" placeholder="e.g. 49326d5419bb..."
-                            value={retriggerOverrides.pc.commitId}
-                            onChange={e => setRetriggerOverrides(prev => ({
-                              ...prev, pc: { ...prev.pc, commitId: e.target.value }
-                            }))} />
-                        </div>
-                        <div className="retrigger-form-group">
-                          <label>GBN</label>
-                          <input type="text" placeholder="e.g. 1779293332"
-                            value={retriggerOverrides.pc.gbn}
-                            onChange={e => setRetriggerOverrides(prev => ({
-                              ...prev, pc: { ...prev.pc, gbn: e.target.value }
-                            }))} />
-                        </div>
-                      </>
+                    <div className="retrigger-form-group">
+                      <label>Build Url {pcBuildChanged && <span className="retrigger-required">*</span>}</label>
+                      <input type="text" placeholder="http://vendor.dyn.nutanix.com/.../opt/"
+                        value={retriggerOverrides.pc.buildUrl}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, pc: { ...prev.pc, buildUrl: e.target.value }
+                        }))} />
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Build QCOW2 URL {pcBuildChanged && <span className="retrigger-required">*</span>}</label>
+                      <input type="text" placeholder="http://vendor.dyn.nutanix.com/.../publish_pc_image_internal/"
+                        value={retriggerOverrides.pc.qcow2Url}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, pc: { ...prev.pc, qcow2Url: e.target.value }
+                        }))} />
+                    </div>
+                    {pcBuildUrlsMissing && (
+                      <p className="retrigger-pool-hint retrigger-url-required-hint">
+                        Enter both Build Url and Build QCOW2 URL for the new PC GBN (same fields as the Jita rerun form).
+                      </p>
                     )}
                   </div>
                 )}
-              </div>
 
-              {/* Common fields */}
+                {retriggerOverrides.updateImage && (
+                  <div className="retrigger-panel">
+                    <h4 className="retrigger-panel-title">Image Build</h4>
+                    <p className="retrigger-pool-hint">If the original JP used the same branch for NOS and image (Jita default), leave this unchecked so image stays a copy of NOS.</p>
+                    <div className="retrigger-form-group">
+                      <label>Image Branch</label>
+                      <input type="text" placeholder="e.g. ganges-7.6.0.6-stable"
+                        value={retriggerOverrides.image.branch}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, image: { ...prev.image, branch: e.target.value }
+                        }))} />
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Image Commit</label>
+                      <input type="text" placeholder="e.g. fd96efb85c11ac75f282d51dce06e04a279bad2d"
+                        value={retriggerOverrides.image.commitId}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, image: { ...prev.image, commitId: e.target.value }
+                        }))} />
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Image GBN</label>
+                      <input type="text" placeholder="optional; leave blank to keep original"
+                        value={retriggerOverrides.image.gbn}
+                        onChange={e => setRetriggerOverrides(prev => ({
+                          ...prev, image: { ...prev.image, gbn: e.target.value }
+                        }))} />
+                    </div>
+                  </div>
+                )}
+              </div>
+              )}
+
+              {retriggerOverrides.updateFramework && (
+                <div className="retrigger-section">
+                  <h4>Nutest / Framework Branch</h4>
+                  <p className="retrigger-pool-hint">
+                    Framework and Nutest-py3-tests commits are left empty so Jita picks the latest on this branch.
+                  </p>
+                  <div className="retrigger-fields">
+                    <div className="retrigger-field">
+                      <label>Branch</label>
+                      <input type="text" placeholder="e.g. ganges-7.6-stable"
+                        value={retriggerOverrides.nutest_branch}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, nutest_branch: e.target.value }))} />
+                    </div>
+
+                    <div className="retrigger-field retrigger-field-wide">
+                      <label>Test Patch URL</label>
+                      <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
+                        value={retriggerOverrides.patch_url}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, patch_url: e.target.value }))} />
+                    </div>
+                    <div className="retrigger-field retrigger-field-wide">
+                      <label>Framework Patch URL</label>
+                      <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
+                        value={retriggerOverrides.framework_patch_url}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, framework_patch_url: e.target.value }))} />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {retriggerOverrides.updateResource && (
               <div className="retrigger-section">
-                <h4>Common Options</h4>
+                <h4>Resource Requirement Configuration</h4>
+                <p className="retrigger-pool-hint">
+                  Pre-filled from the original Jita task. Edit these the same way you would on Jita; the rerun uses the values shown here.
+                </p>
+                {retriggerResourcePreview.loading && (
+                  <p className="retrigger-pool-hint">Loading Jita resource config…</p>
+                )}
+                {!retriggerResourcePreview.loading && retriggerResourcePreview.tasks.length === 0 && (
+                  <p className="retrigger-pool-hint">Could not load Jita resource config. Edits you make here still apply to the rerun.</p>
+                )}
+                {selectedRetriggerTaskIds.length > 1 && (
+                  <div className="retrigger-warning">
+                    Selected testcases belong to multiple Jita tasks. These resource values apply to every rerun.
+                  </div>
+                )}
+                <div className="retrigger-resource-card">
+                  <div className="retrigger-resource-grid">
+                    <div className="retrigger-form-group">
+                      <label>Resources</label>
+                      <select
+                        value={retriggerOverrides.resources_mode}
+                        onChange={e => updateResourceOverride({ resources_mode: e.target.value })}
+                      >
+                        {RESOURCE_MODE_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Resource Type</label>
+                      <select
+                        value={retriggerOverrides.resource_type}
+                        onChange={e => updateResourceOverride({ resource_type: e.target.value })}
+                      >
+                        {RESOURCE_TYPE_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label>Hypervisor</label>
+                      <select
+                        value={retriggerOverrides.hypervisor}
+                        onChange={e => updateResourceOverride({ hypervisor: e.target.value })}
+                      >
+                        <option value="">Keep original</option>
+                        {[...new Set([...HYPERVISOR_OPTIONS, retriggerOverrides.hypervisor].filter(Boolean))].map(h => (
+                          <option key={h} value={h}>{h}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="retrigger-form-group">
+                      <label className="retrigger-check-label">
+                        <input
+                          type="checkbox"
+                          checked={!!retriggerOverrides.match_resource_spec}
+                          onChange={e => updateResourceOverride({ match_resource_spec: e.target.checked })}
+                        />
+                        <span>Match Resources to Resource Spec</span>
+                      </label>
+                    </div>
+                  </div>
+                  {retriggerOverrides.resources_mode !== 'global_pool' && (
+                    <div className="retrigger-form-group">
+                      <label>{retriggerOverrides.resources_mode === 'node_pool' ? 'Node Pools' : 'Clusters / Names'}</label>
+                      <input
+                        type="text"
+                        value={nodePoolSearch}
+                        onChange={e => handleSearchRetriggerNodePools(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            addRetriggerNodePool(nodePoolSearch);
+                          }
+                        }}
+                        placeholder="Type to search or press Enter to add"
+                      />
+                      {nodePoolLoading && <p className="retrigger-pool-hint">Searching…</p>}
+                      {nodePoolSearch.length >= 2 && !nodePoolLoading && nodePoolResults.length === 0 && (
+                        <p className="retrigger-pool-hint">No matches. Press Enter to add &quot;{nodePoolSearch}&quot;.</p>
+                      )}
+                      {nodePoolResults.length > 0 && (
+                        <div className="retrigger-pool-results">
+                          {nodePoolResults.map(pool => {
+                            const selected = retriggerOverrides.node_pools.includes(pool);
+                            return (
+                              <button
+                                key={pool}
+                                type="button"
+                                className={`retrigger-pool-result${selected ? ' selected' : ''}`}
+                                onClick={() => addRetriggerNodePool(pool)}
+                              >
+                                {pool}
+                                {selected ? ' (selected)' : ''}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <div className="retrigger-pool-tags">
+                        {retriggerOverrides.node_pools.length === 0 && (
+                          <span className="retrigger-pool-hint">None selected</span>
+                        )}
+                        {retriggerOverrides.node_pools.map(pool => (
+                          <span key={pool} className="retrigger-pool-tag retrigger-pool-tag-edit">
+                            {pool}
+                            <button type="button" onClick={() => removeRetriggerNodePool(pool)} title="Remove">&times;</button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              )}
+
+              <div className="retrigger-section">
+                <h4>Task / Infra Options</h4>
                 <div className="retrigger-fields">
                   <div className="retrigger-field">
-                    <label>Nutest Branch Name</label>
-                    <input type="text" placeholder="e.g. ganges-7.6-stable"
-                      value={retriggerOverrides.nutest_branch}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, nutest_branch: e.target.value }))} />
+                    <label>Label</label>
+                    <input type="text" placeholder="original label + -rerun"
+                      value={retriggerOverrides.label}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, label: e.target.value }))} />
                   </div>
                   <div className="retrigger-field">
-                    <label>Test Patch URL</label>
-                    <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
-                      value={retriggerOverrides.patch_url}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, patch_url: e.target.value }))} />
+                    <label>Priority</label>
+                    <input type="text" placeholder="e.g. 10"
+                      value={retriggerOverrides.priority}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, priority: e.target.value }))} />
                   </div>
-                  <div className="retrigger-field">
-                    <label>Framework Patch URL</label>
-                    <input type="text" placeholder="e.g. https://nugerrit.ntnxdpro.com/changes/..."
-                      value={retriggerOverrides.framework_patch_url}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, framework_patch_url: e.target.value }))} />
+                  <div className="retrigger-field retrigger-field-wide">
+
+                    <label>Tester Tags</label>
+                    <textarea
+                      rows={2}
+                      placeholder="comma-separated tags; jita3 is always added"
+                      value={retriggerOverrides.tester_tags}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, tester_tags: e.target.value }))}
+                    />
                   </div>
-                  <div className="retrigger-field">
-                    <label>Resource Pool</label>
-                    <input type="text" placeholder="e.g. Regression_cdp_special_config"
-                      value={retriggerOverrides.resource_pool}
-                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, resource_pool: e.target.value }))} />
+                </div>
+              </div>
+
+              <div className="retrigger-section">
+                <h4>Scheduling</h4>
+                <div className="retrigger-fields">
+                  <div className="retrigger-field retrigger-field-wide">
+                    <label className="retrigger-check-label retrigger-override-toggle">
+                      <input type="checkbox" checked={retriggerOverrides.overrideScheduling}
+                        onChange={e => setRetriggerOverrides(prev => ({ ...prev, overrideScheduling: e.target.checked }))} />
+                      <span>Override skip_resource_spec_match / check_image_compatibility</span>
+                    </label>
+                    {retriggerOverrides.overrideScheduling && (
+                      <div className="retrigger-inline-checks">
+                        <label className="retrigger-check-label">
+                          <input type="checkbox" checked={retriggerOverrides.skip_resource_spec_match}
+                            onChange={e => setRetriggerOverrides(prev => ({
+                              ...prev, skip_resource_spec_match: e.target.checked
+                            }))} />
+                          <span>skip_resource_spec_match</span>
+                        </label>
+                        <label className="retrigger-check-label">
+                          <input type="checkbox" checked={retriggerOverrides.check_image_compatibility}
+                            onChange={e => setRetriggerOverrides(prev => ({
+                              ...prev, check_image_compatibility: e.target.checked
+                            }))} />
+                          <span>check_image_compatibility</span>
+                        </label>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2796,12 +4367,75 @@ export default function FailedTestcaseAnalysis() {
                           <span className="retrigger-stat retrigger-stat-fail">{retriggerResults.failed} failed</span>
                         )}
                       </div>
+                      {succeededRerunIds.length > 0 && (
+                        <div className="retrigger-merged-link">
+                          <div className="retrigger-merged-link-label">
+                            New Jita task IDs ({succeededRerunIds.length})
+                          </div>
+                          <div className="retrigger-id-list">
+                            {succeededRerunIds.map((id) => (
+                              <a key={id} href={jitaResultsUrl(id)} target="_blank" rel="noopener noreferrer">{id}</a>
+                            ))}
+                          </div>
+                          <div className="retrigger-merged-link-row">
+                            <button
+                              type="button"
+                              className="retrigger-copy-link"
+                              onClick={() => {
+                                copyTextToClipboard(succeededRerunIds.join(',')).then(() => {
+                                  setRetriggerCopied('ids');
+                                  setTimeout(() => setRetriggerCopied(''), 2000);
+                                }).catch(() => {});
+                              }}
+                            >
+                              {retriggerCopied === 'ids' ? 'Copied IDs' : 'Copy IDs'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {retriggerResultUrls.length > 0 && (
+                        <div className="retrigger-merged-link">
+                          <div className="retrigger-merged-link-label">
+                            {retriggerResultUrls.length > 1
+                              ? `Jita links (${retriggerResultUrls.length} parts — URL too long for one GET)`
+                              : succeededRerunIds.length > 1
+                                ? `Single Jita link for all ${succeededRerunIds.length} new tasks`
+                                : 'Jita link for the new task'}
+                          </div>
+                          {retriggerResultUrls.map((url, i) => (
+                            <div key={url} className="retrigger-merged-link-row">
+                              <a href={url} target="_blank" rel="noopener noreferrer">
+                                {retriggerResultUrls.length > 1 ? `Part ${i + 1}: ${url}` : url}
+                              </a>
+                              <button
+                                type="button"
+                                className="retrigger-copy-link"
+                                onClick={() => {
+                                  copyTextToClipboard(url).then(() => {
+                                    setRetriggerCopied(`link-${i}`);
+                                    setTimeout(() => setRetriggerCopied(''), 2000);
+                                  }).catch(() => {});
+                                }}
+                              >
+                                {retriggerCopied === `link-${i}` ? 'Copied' : 'Copy'}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       {retriggerResults.results && retriggerResults.results.map((r, i) => (
                         <div key={i} className={`retrigger-result-row ${r.success ? 'retrigger-result-ok' : 'retrigger-result-fail'}`}>
-                          <span className="retrigger-result-task">Task: {r.agave_task_id}</span>
+                          <span className="retrigger-result-task">Source: {r.agave_task_id}</span>
                           {r.success ? (
                             <span className="retrigger-result-new-id">
-                              Rerun ID: <a href={`https://jita.eng.nutanix.com/api/v2/agave_tasks/${r.rerun_task_id}`} target="_blank" rel="noopener noreferrer">{r.rerun_task_id}</a>
+                              Rerun:{' '}
+                              <a href={jitaResultsUrl(r.rerun_task_id)} target="_blank" rel="noopener noreferrer">{r.rerun_task_id}</a>
+                              {r.triggered_as && (
+                                <span className="retrigger-triggered-as"> as {r.triggered_as}</span>
+                              )}
+                              {r.job_profile_name && (
+                                <span className="retrigger-jp-name"> ({r.job_profile_name})</span>
+                              )}
                               {r.message && <span> — {r.message}</span>}
                             </span>
                           ) : (
@@ -2818,7 +4452,7 @@ export default function FailedTestcaseAnalysis() {
               <button
                 type="button"
                 className="btn-primary btn-retrigger-submit"
-                disabled={retriggerLoading}
+                disabled={retriggerLoading || pcBuildUrlsMissing}
                 onClick={handleRetrigger}
               >
                 {retriggerLoading ? 'Re-triggering…' : 'Re-trigger'}

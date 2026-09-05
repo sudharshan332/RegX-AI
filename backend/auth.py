@@ -1,4 +1,6 @@
 import os
+import base64
+import json
 import logging
 import functools
 from datetime import datetime, timedelta, timezone
@@ -10,27 +12,83 @@ from flask import request, jsonify, g
 
 logger = logging.getLogger(__name__)
 
+
+def _persisted_secret_key():
+    """Load (or create) a stable JWT signing key under data/.
+
+    Keeps user sessions valid across backend restarts even when no SECRET_KEY
+    env var is set. Mirrors the persisted Fernet-key pattern in user_keys.py.
+    Set SECRET_KEY / REGX_SECRET_KEY to override.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(os.path.dirname(here), "data")
+    path = os.path.join(data_dir, "jwt_secret.key")
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                stored = fh.read().strip()
+            if stored:
+                return base64.urlsafe_b64decode(stored.encode("utf-8"))
+        os.makedirs(data_dir, exist_ok=True)
+        secret = os.urandom(32)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(base64.urlsafe_b64encode(secret).decode("utf-8"))
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        logger.info("Created stable JWT secret at %s", path)
+        return secret
+    except Exception as exc:
+        logger.warning(
+            "Could not persist JWT secret (%s). Using an in-memory random key; "
+            "sessions will not survive restart.",
+            exc,
+        )
+        return os.urandom(32)
+
+
 # ---------------------------------------------------------------------------
-# Secret key — stable in production, random fallback in dev
+# Secret key — env override, else a stable persisted key (survives restarts)
 # ---------------------------------------------------------------------------
 _secret_key = os.environ.get("SECRET_KEY") or os.environ.get("REGX_SECRET_KEY")
 if _secret_key:
     SECRET_KEY = _secret_key
 else:
-    _debug = os.environ.get("FLASK_DEBUG", "").lower()
-    _env = os.environ.get("FLASK_ENV", "").lower()
-    _is_dev = _debug in ("1", "true", "yes", "on") or _env in ("development", "dev")
-    if not _is_dev:
-        # In production without a key, generate a random one but warn loudly.
-        # This means tokens won't survive a restart — set SECRET_KEY for prod.
-        logger.warning(
-            "SECRET_KEY not set. Generating a random key — sessions will not "
-            "persist across restarts. Set SECRET_KEY env var for production."
-        )
-    SECRET_KEY = os.urandom(32)
+    SECRET_KEY = _persisted_secret_key()
 
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = int(os.environ.get("JWT_EXPIRY_HOURS", "24"))
+
+
+# ---------------------------------------------------------------------------
+# Team Configuration
+# ---------------------------------------------------------------------------
+def load_teams_config():
+    """Load teams configuration from teams.json at the project root."""
+    # abspath so un-normalized import paths (e.g. backend/tests/../auth.py)
+    # still resolve to <repo>/teams.json rather than backend/tests/teams.json.
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    teams_file = os.path.join(project_root, "teams.json")
+    try:
+        with open(teams_file, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load teams.json: {e}")
+        return {"teams": [], "default_team": None}
+
+
+def validate_team(team_id):
+    """Check if team_id is valid"""
+    config = load_teams_config()
+    valid_ids = [t["id"] for t in config.get("teams", [])]
+    return team_id in valid_ids
+
+
+def get_default_team():
+    """Get the default team from configuration"""
+    config = load_teams_config()
+    return config.get("default_team") or "CDP_FT"
 
 
 # ---------------------------------------------------------------------------
@@ -108,11 +166,18 @@ class LDAPAuth:
 # ---------------------------------------------------------------------------
 # JWT helpers
 # ---------------------------------------------------------------------------
-def create_jwt(username, display_name="", email=""):
+def create_jwt(username, display_name="", email="", team=None):
+    """Create JWT with user info and team"""
+    if not team:
+        team = get_default_team()
+    if not validate_team(team):
+        team = get_default_team()
+    
     payload = {
         "sub": username,
         "name": display_name,
         "email": email,
+        "team": team,
         "iat": datetime.now(timezone.utc),
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
     }
@@ -138,6 +203,7 @@ def jwt_required(fn):
     """Decorator that enforces a valid JWT on the request.
 
     Sets ``g.current_user`` with the decoded payload on success.
+    Sets ``g.team`` with the team from the JWT payload.
     Returns 401 JSON on missing / invalid / expired token.
     """
 
@@ -153,6 +219,12 @@ def jwt_required(fn):
             return jsonify({"error": "Invalid or expired token"}), 401
 
         g.current_user = payload
+        g.team = payload.get("team", get_default_team())
+        
+        # Validate team
+        if not validate_team(g.team):
+            g.team = get_default_team()
+        
         return fn(*args, **kwargs)
 
     return wrapper

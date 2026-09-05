@@ -1244,6 +1244,7 @@ async def test_after_fix():
 
 @agents_bp.route('/jarvis/node/disable', methods=['POST'])
 @jwt_required
+@async_route
 async def jarvis_disable_node():
     """Disable a node in JARVIS due to RDM failure."""
     try:
@@ -1256,6 +1257,8 @@ async def jarvis_disable_node():
         node_name = data.get('node_name')
         rdm_link = data.get('rdm_link')
         reason = data.get('reason', 'Auto-disabled due to RDM failure')
+        user = getattr(g, 'current_user', None) or {}
+        disabled_by = data.get('disabled_by') or user.get('email') or user.get('sub') or ''
         
         if not node_name:
             return jsonify({
@@ -1268,7 +1271,8 @@ async def jarvis_disable_node():
         result = await jarvis_service.disable_node(
             node_name=node_name,
             rdm_link=rdm_link,
-            reason=reason
+            reason=reason,
+            disabled_by=disabled_by,
         )
         
         return jsonify({

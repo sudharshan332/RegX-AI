@@ -953,7 +953,8 @@ class IntelligentTriageAgent(BaseAgent):
             disable_result = await jarvis_service.disable_node(
                 node_name=node_name,
                 rdm_link=rdm_link,
-                reason=f"Auto-disabled due to RDM failure: {rdm_analysis.get('root_cause', 'Node failure detected')}"
+                reason=f"Auto-disabled due to RDM failure: {rdm_analysis.get('root_cause', 'Node failure detected')}",
+                disabled_by=rdm_analysis.get("disabled_by") or "",
             )
             
             result = {

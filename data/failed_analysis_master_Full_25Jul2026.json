@@ -1,0 +1,876 @@
+{
+  "tag": "master|Full|25Jul2026",
+  "results": [
+    {
+      "agave_task_id": "6a64de788e79ce054bf959a2",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [
+        "DIAL-22822"
+      ],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71ed133602363c8baec715",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Failed to enable sudo access. Error encountered: Authentication Error. Bad authentication type; allowed types: ['publickey', 'gssapi-keyex', 'gssapi-with-mic']. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71ed133602363c8baec715",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Thanuja",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a64de788e79ce054bf959a2/6a64de788e79ce054bf959a6.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a64de788e79ce054bf959a6",
+      "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_mixed_io_integrity_with_iser"
+    },
+    {
+      "agave_task_id": "6a64de788e79ce054bf959a2",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [
+        "DIAL-22822"
+      ],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71ed133602363c8baec715",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Failed to enable sudo access. Error encountered: Authentication Error. Bad authentication type; allowed types: ['publickey', 'gssapi-keyex', 'gssapi-with-mic']. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71ed133602363c8baec715",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Thanuja",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a64de788e79ce054bf959a2/6a64de788e79ce054bf959aa.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a64de788e79ce054bf959aa",
+      "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_vmotion_with_iser"
+    },
+    {
+      "agave_task_id": "6a64de788e79ce054bf959a2",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [
+        "DIAL-22822"
+      ],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71ed133602363c8baec715",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Failed to enable sudo access. Error encountered: Authentication Error. Bad authentication type; allowed types: ['publickey', 'gssapi-keyex', 'gssapi-with-mic']. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71ed133602363c8baec715",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Thanuja",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a64de788e79ce054bf959a2/6a64de788e79ce054bf959a9.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a64de788e79ce054bf959a9",
+      "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_mixed_snapshot_integrity_ei_with_iser"
+    },
+    {
+      "agave_task_id": "6a64de788e79ce054bf959a2",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [
+        "DIAL-22822"
+      ],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71ed133602363c8baec715",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Failed to enable sudo access. Error encountered: Authentication Error. Bad authentication type; allowed types: ['publickey', 'gssapi-keyex', 'gssapi-with-mic']. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71ed133602363c8baec715",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Thanuja",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a64de788e79ce054bf959a2/6a64de788e79ce054bf959a7.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a64de788e79ce054bf959a7",
+      "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_mixed_error_injected_io_integrity_with_iser"
+    },
+    {
+      "agave_task_id": "6a64de788e79ce054bf959a2",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [
+        "DIAL-22822"
+      ],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71ed133602363c8baec715",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Failed to enable sudo access. Error encountered: Authentication Error. Bad authentication type; allowed types: ['publickey', 'gssapi-keyex', 'gssapi-with-mic']. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71ed133602363c8baec715",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Thanuja",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a64de788e79ce054bf959a2/6a64de788e79ce054bf959ab.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a64de788e79ce054bf959ab",
+      "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_ei_vmotion_with_iser"
+    },
+    {
+      "agave_task_id": "6a64de788e79ce054bf959a2",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [
+        "DIAL-22822"
+      ],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71ed133602363c8baec715",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Failed to enable sudo access. Error encountered: Authentication Error. Bad authentication type; allowed types: ['publickey', 'gssapi-keyex', 'gssapi-with-mic']. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71ed133602363c8baec715",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Thanuja",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a64de788e79ce054bf959a2/6a64de788e79ce054bf959a8.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a64de788e79ce054bf959a8",
+      "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_mixed_snapshot_integrity_with_iser"
+    },
+    {
+      "agave_task_id": "6a64de788e79ce054bf959a2",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [
+        "DIAL-22822"
+      ],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71ed133602363c8baec715",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Failed to enable sudo access. Error encountered: Authentication Error. Bad authentication type; allowed types: ['publickey', 'gssapi-keyex', 'gssapi-with-mic']. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71ed133602363c8baec715",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Thanuja",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a64de788e79ce054bf959a2/6a64de788e79ce054bf959ac.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a64de788e79ce054bf959ac",
+      "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_data_integrity_with_cvm_reboots"
+    },
+    {
+      "agave_task_id": "6a64de788e79ce054bf959a2",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [
+        "DIAL-22822"
+      ],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71ed133602363c8baec715",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Failed to enable sudo access. Error encountered: Authentication Error. Bad authentication type; allowed types: ['publickey', 'gssapi-keyex', 'gssapi-with-mic']. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71ed133602363c8baec715",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Thanuja",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a64de788e79ce054bf959a2/6a64de788e79ce054bf959ad.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a64de788e79ce054bf959ad",
+      "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_data_integrity_with_host_reboots"
+    },
+    {
+      "agave_task_id": "6a64de788e79ce054bf959a2",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [
+        "DIAL-22822"
+      ],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71ed133602363c8baec715",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Failed to enable sudo access. Error encountered: Authentication Error. Bad authentication type; allowed types: ['publickey', 'gssapi-keyex', 'gssapi-with-mic']. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71ed133602363c8baec715",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Thanuja",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a64de788e79ce054bf959a2/6a64de788e79ce054bf959ae.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a64de788e79ce054bf959ae",
+      "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_data_integrity_with_node_add_removal"
+    },
+    {
+      "agave_task_id": "6a655c532bc0c4bf7b824a1d",
+      "comments": "nested1.0",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "PRODUCT",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a655d2836023613aa689e37",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Nested CVM Nested-CVM-6a655d2836023613aa689e38-1 creation failed: VM Nested-CVM-6a655d2836023613aa689e38-1 failed to come up with a valid IP.Possible reasons: \na) VLAN tagged to the node(s) does not have DHCP enabled. \nb) Invalid VLAN passed by test/user which is not actually tagged to the nodes.\nc) The build that has been consumed to boot up the VM is faulty. Please use DIAL qualified[master]/Latest smoke passed[non-master] bui",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/Nested+AHV+Troubleshooting.\nYou can also go through https://confluence.eng.nutanix.com:8443/display/~kranti.yadhati/Debugging+Nested+AHV+deployment+failures for debugging common Nested AHV failures"
+      },
+      "regression_owner": "Swapnil",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a655c532bc0c4bf7b824a1d/6a655c532bc0c4bf7b824a1e.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a655c532bc0c4bf7b824a1e",
+      "testcase_name": "cdp.stargate.mixed_capacity_support.test_mixed_cap.MixedCapacitySupportTest.test_multiple_disk_replacement___higher_capacity_ssd_capacity_upgrade"
+    },
+    {
+      "agave_task_id": "6a699f4c8e79ce0549214e72",
+      "comments": "Rerun-36",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a72dd7392fce9ef4298ae38",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Failed to enable sudo access. Error encountered: Authentication Error. Bad authentication type; allowed types: ['publickey', 'gssapi-keyex', 'gssapi-with-mic']. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a72dd7392fce9ef4298ae38",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Thanuja",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a699f4c8e79ce0549214e72/6a699f4c8e79ce0549214e77.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a699f4c8e79ce0549214e77",
+      "testcase_name": "cdp.stargate.rdma.test_io_integrity_rdma.RDMAIOIntegrityTest.test_io_integrity___switch"
+    },
+    {
+      "agave_task_id": "6a715efc2bc0c439c64156d9",
+      "comments": "Rerun-36",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a715ff2360236aa8483ab0e",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Traceback (most recent call last):\n  File \"/toolbox/bhishma/plugins_py3/prism_central/pc_deploy_plugin.py\", line 1563, in pre_deploy\n    self.static_ip_helper.reserve_static_ips()\n  File \"/toolbox/bhishma/plugins_py3/lib/static_ip_helper.py\", line 605, in reserve_static_ips\n    raise e\n  File \"/toolbox/bhishma/plugins_py3/lib/static_ip_helper.py\", line 602, in reserve_static_ips\n    self.static_ip_reservation_helper.reserve_stat",
+        "rdm_resolution": "Please check the PC deployment logs for more information regarding the error"
+      },
+      "regression_owner": "Suryaprabha",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a715efc2bc0c439c64156d9/6a715efc2bc0c439c64156da.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a715efc2bc0c439c64156da",
+      "testcase_name": "manageability.api.enhanced_pc_rbac.containers.test_rbac_containers.TestRbacContainers.test_rbac_containers___lpe_esx"
+    },
+    {
+      "agave_task_id": "6a71a2972bc0c439ca84f720",
+      "comments": "Test passed: 6a6c547cd24d8219d366a91d",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 6,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71a4ae7298f62735a569aa",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is External storage configuration failed due to exception: post request failed for https://10.44.240.191:9440/api/nutanix/external_storage/create with status code 404. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71a4ae7298f62735a569aa",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Shilpa",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a71a2972bc0c439ca84f720/6a71a2972bc0c439ca84f721.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a71a2972bc0c439ca84f721",
+      "testcase_name": "cdp.external_storage.test_external_storage_smokes.TestExternalStorageSmokes~~~purestorage.test_smokes___IOint_resize_snapshot_restore_ei"
+    },
+    {
+      "agave_task_id": "6a71a2972bc0c439ca84f720",
+      "comments": "Not in LST or TCMS",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 6,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71a4ae7298f62735a569aa",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is External storage configuration failed due to exception: post request failed for https://10.44.240.191:9440/api/nutanix/external_storage/create with status code 404. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71a4ae7298f62735a569aa",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Shilpa",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a71a2972bc0c439ca84f720/6a71a2982bc0c439ca84f723.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a71a2982bc0c439ca84f723",
+      "testcase_name": "cdp.external_storage.stargate.scalability.test_external_storage_scale.TestExternalStorageScale~~~PureStorage.test_scale_io_integrity_snapshot_restore___remove_add_node"
+    },
+    {
+      "agave_task_id": "6a71a2972bc0c439ca84f720",
+      "comments": "Not in LST or TCMS",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 6,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71a4ae7298f62735a569aa",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is External storage configuration failed due to exception: post request failed for https://10.44.240.191:9440/api/nutanix/external_storage/create with status code 404. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71a4ae7298f62735a569aa",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Shilpa",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a71a2972bc0c439ca84f720/6a71a2982bc0c439ca84f725.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a71a2982bc0c439ca84f725",
+      "testcase_name": "cdp.external_storage.stargate.scalability.test_external_storage_scale.TestExternalStorageScale~~~PureStorage.test_scale_io_integrity_snapshot_restore___mixed_ei"
+    },
+    {
+      "agave_task_id": "6a71a2972bc0c439ca84f720",
+      "comments": "Not in LST or TCMS",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 6,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Resource allocation/provisioning failure - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "DEVPROD_SERVICE",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71a4ae7298f62735a569aa",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is External storage configuration failed due to exception: post request failed for https://10.44.240.191:9440/api/nutanix/external_storage/create with status code 404. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71a4ae7298f62735a569aa",
+        "rdm_resolution": "Please visit the plugin troubleshooting guide for more details. https://confluence.eng.nutanix.com:8443/display/DPRO/NOS+Cluster+Troubleshooting"
+      },
+      "regression_owner": "Shilpa",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a71a2972bc0c439ca84f720/6a71a2982bc0c439ca84f726.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a71a2982bc0c439ca84f726",
+      "testcase_name": "cdp.external_storage.stargate.scalability.test_external_storage_scale.TestExternalStorageScale~~~PureStorage.test_scale_io_integrity_snapshot_restore___vmotion"
+    },
+    {
+      "agave_task_id": "6a71cd822bc0c439b21c4c86",
+      "comments": "new handover",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 1,
+        "generated_comment": "",
+        "pattern_description": "",
+        "pattern_jira": "",
+        "pattern_matched": false,
+        "rdm_category": "USER",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a71ce6a92fce9ef4c3b222c",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is Invalid NOS URL passed: The NOS build URL for Nested AHV 2.0 deployment should be a tar.gz file. \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a71ce6a92fce9ef4c3b222c",
+        "rdm_resolution": "Reach out on #ask-tools for further clarification"
+      },
+      "regression_owner": "Unknown",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a71cd822bc0c439b21c4c86/6a71cd822bc0c439b21c4c87.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a71cd822bc0c439b21c4c87",
+      "testcase_name": "cdp.hades.new_zk_partition.test_new_zk_partition.TestNewZkPartition.test_zk_raid_mdadm_conf"
+    },
+    {
+      "agave_task_id": "6a7319288e79ce7eeab33a9e",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 3,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Foundation/imaging failure without specific node - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "PRODUCT",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a731a9992fce97bf8878d08",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is \nMain imaging process failed, error: Status returned for node 10.49.24.149 is 1. Output Error: Unable to establish IPMI v2 / RMCP+ session:- . \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a731a9992fce97bf8878d08",
+        "rdm_resolution": "Please verify the imaging parameters. In case of hardware issues, please work with IT to get them resolved."
+      },
+      "regression_owner": "Sudharshan",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a7319288e79ce7eeab33a9e/6a7319288e79ce7eeab33a9f.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a7319288e79ce7eeab33a9f",
+      "testcase_name": "cdp.stargate.tilting.test_merged_vblocks.MergedVblockTests.test_io_integrity_on_cloned_vms___snapshot_mixed_esx_linked_clones_with_ei"
+    },
+    {
+      "agave_task_id": "6a7319288e79ce7eeab33a9e",
+      "comments": "Could not fetch resource spec. Error: Command: nutest find cdp.stargate.erasure_code.test_ec_mixed_snapshot_io_integrity.ECMixedSnapshotIOIntegrityTest~~~AES.test_io_integrity___ctr_encryption -vv --json. Result {'status': 1, 'stderr': '2026-08-05 11:11:04,858Z WARN  nutest_error.py:64  The exception message is\\n\\nUser specified class variation not found.\\n2026-08-05 11:11:04,860Z WARN  nutest_error.py:64  PID-1061 : Thread-3 (_handle_results) : The exception message is\\n\\nUser specified class variation not found.\\nmultiprocessing.pool.RemoteTraceback: \\n\"\"\"\\nTraceback (most recent call last):\\n  File \"/usr/local/lib/python3.12/multiprocessing/pool.py\", line 125, in worker\\n    result = (True, func(*args, **kwds))\\n                    ^^^^^^^^^^^^^^^^^^^\\n  File \"/usr/local/lib/python3.12/multiprocessing/pool.py\", line 48, in mapstar\\n    return list(map(*args))\\n           ^^^^^^^^^^^^^^^^\\n  File \"/nutest-py3/framework/test_driver/nutest_loader.py\", line 257, in _parallel_get_tests\\n    _get_tests_helper(ncp, module_names_temp,\\n  File \"/nutest-py3/framework/test_driver/nutest_loader.py\", line 963, in _get_tests_helper\\n    raise NuTestError(\"\\\\nUser specified class variation not found.\",\\nframework.exceptions.nutest_error.NuTestError: \\nUser specified class variation not found.\\n\"\"\"\\n\\nThe above exception was the direct cause of the following exception:\\n\\nTraceback (most recent call last):\\n  File \"/nutest-py3/bin/nutest\", line 40, in <module>\\n    CLIENT.parse_arguments(sys.argv[1:])\\n  File \"/nutest-py3/framework/test_driver/nutest_client.py\", line 113, in parse_arguments\\n    self.args.func()\\n  File \"/nutest-py3/framework/test_driver/nutest_client.py\", line 958, in _process_find\\n    tests = test_loader.get_test_names(test_prefix=params.get(\\'test_prefix\\'),\\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \"/nutest-py3/framework/test_driver/nutest_loader.py\", line 672, in get_test_names\\n    tests = tests.get(10800)\\n            ^^^^^^^^^^^^^^^^\\n  File \"/usr/local/lib/python3.12/multiprocessing/pool.py\", line 774, in get\\n    raise self._value\\nframework.exceptions.nutest_error.NuTestError: \\nUser specified class variation not found.\\n', 'stdout': ''}",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 3,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Foundation/imaging failure without specific node - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "PRODUCT",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a731a9992fce97bf8878d08",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is \nMain imaging process failed, error: Status returned for node 10.49.24.149 is 1. Output Error: Unable to establish IPMI v2 / RMCP+ session:- . \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a731a9992fce97bf8878d08",
+        "rdm_resolution": "Please verify the imaging parameters. In case of hardware issues, please work with IT to get them resolved."
+      },
+      "regression_owner": "Shilpa",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a7319288e79ce7eeab33a9e.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a7319288e79ce7eeab33aa0",
+      "testcase_name": "cdp.stargate.erasure_code.test_ec_mixed_snapshot_io_integrity.ECMixedSnapshotIOIntegrityTest~~~AES.test_io_integrity___ctr_encryption"
+    },
+    {
+      "agave_task_id": "6a7319288e79ce7eeab33a9e",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 3,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Foundation/imaging failure without specific node - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "PRODUCT",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a731a9992fce97bf8878d08",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is \nMain imaging process failed, error: Status returned for node 10.49.24.149 is 1. Output Error: Unable to establish IPMI v2 / RMCP+ session:- . \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a731a9992fce97bf8878d08",
+        "rdm_resolution": "Please verify the imaging parameters. In case of hardware issues, please work with IT to get them resolved."
+      },
+      "regression_owner": "Sudharshan",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a7319288e79ce7eeab33a9e/6a7319288e79ce7eeab33aa1.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a7319288e79ce7eeab33aa1",
+      "testcase_name": "stargate.nfs_metadata_improvement.test_nfs_metadata.NFSMetaDataTests.test_vm_basic_ops___inp_multi_disk_linked_clone_EI"
+    },
+    {
+      "agave_task_id": "6a7319288e79ce7eeab33a9e",
+      "comments": "",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 3,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Foundation/imaging failure without specific node - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "PRODUCT",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a731a9992fce97bf8878d08",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is \nMain imaging process failed, error: Status returned for node 10.49.24.149 is 1. Output Error: Unable to establish IPMI v2 / RMCP+ session:- . \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a731a9992fce97bf8878d08",
+        "rdm_resolution": "Please verify the imaging parameters. In case of hardware issues, please work with IT to get them resolved."
+      },
+      "regression_owner": "Sudharshan",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a7319288e79ce7eeab33a9e.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a7319288e79ce7eeab33aa2",
+      "testcase_name": "stargate.nfs_metadata_improvement.test_nfs_metadata.NFSMetaDataTests.test_vm_basic_ops___multi_disk_linked_clone_EI"
+    },
+    {
+      "agave_task_id": "6a7319288e79ce7eeab33a9e",
+      "comments": "Could not fetch resource spec. Error: Command: nutest find cdp.stargate.erasure_code.test_ec_on_decode_encrypt_recode_io_integrity.ErasureOnDecodeEncryptRecodeIOIntegrityTest~~~AES.test_ec_on_decode_encrypt_recode_io_integrity -vv --json. Result {'status': 1, 'stderr': '2026-08-05 11:11:29,446Z WARN  nutest_error.py:64  The exception message is\\n\\nUser specified class variation not found.\\n2026-08-05 11:11:29,449Z WARN  nutest_error.py:64  PID-1116 : Thread-3 (_handle_results) : The exception message is\\n\\nUser specified class variation not found.\\nmultiprocessing.pool.RemoteTraceback: \\n\"\"\"\\nTraceback (most recent call last):\\n  File \"/usr/local/lib/python3.12/multiprocessing/pool.py\", line 125, in worker\\n    result = (True, func(*args, **kwds))\\n                    ^^^^^^^^^^^^^^^^^^^\\n  File \"/usr/local/lib/python3.12/multiprocessing/pool.py\", line 48, in mapstar\\n    return list(map(*args))\\n           ^^^^^^^^^^^^^^^^\\n  File \"/nutest-py3/framework/test_driver/nutest_loader.py\", line 257, in _parallel_get_tests\\n    _get_tests_helper(ncp, module_names_temp,\\n  File \"/nutest-py3/framework/test_driver/nutest_loader.py\", line 963, in _get_tests_helper\\n    raise NuTestError(\"\\\\nUser specified class variation not found.\",\\nframework.exceptions.nutest_error.NuTestError: \\nUser specified class variation not found.\\n\"\"\"\\n\\nThe above exception was the direct cause of the following exception:\\n\\nTraceback (most recent call last):\\n  File \"/nutest-py3/bin/nutest\", line 40, in <module>\\n    CLIENT.parse_arguments(sys.argv[1:])\\n  File \"/nutest-py3/framework/test_driver/nutest_client.py\", line 113, in parse_arguments\\n    self.args.func()\\n  File \"/nutest-py3/framework/test_driver/nutest_client.py\", line 958, in _process_find\\n    tests = test_loader.get_test_names(test_prefix=params.get(\\'test_prefix\\'),\\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \"/nutest-py3/framework/test_driver/nutest_loader.py\", line 672, in get_test_names\\n    tests = tests.get(10800)\\n            ^^^^^^^^^^^^^^^^\\n  File \"/usr/local/lib/python3.12/multiprocessing/pool.py\", line 774, in get\\n    raise self._value\\nframework.exceptions.nutest_error.NuTestError: \\nUser specified class variation not found.\\n', 'stdout': ''}",
+      "exception": "",
+      "exception_summary": "",
+      "failure_stage": "Test Body",
+      "intermittent_rerun": "No",
+      "jira_tickets": [],
+      "rdm_info": {
+        "failed_deployments": 3,
+        "generated_comment": "regx_rerun",
+        "pattern_description": "Foundation/imaging failure without specific node - intermittent rerun",
+        "pattern_jira": "",
+        "pattern_matched": true,
+        "rdm_category": "PRODUCT",
+        "rdm_found": true,
+        "rdm_link": "https://rdm.eng.nutanix.com/scheduled_deployments/6a731a9992fce97bf8878d08",
+        "rdm_message": "Failed to provision the resources and the error message from RDM is \nMain imaging process failed, error: Status returned for node 10.49.24.149 is 1. Output Error: Unable to establish IPMI v2 / RMCP+ session:- . \nFor more details, please go to http://rdm.eng.nutanix.com/drill_view/6a731a9992fce97bf8878d08",
+        "rdm_resolution": "Please verify the imaging parameters. In case of hardware issues, please work with IT to get them resolved."
+      },
+      "regression_owner": "Shilpa",
+      "status": "Skipped",
+      "test_log_url": "https://jita.eng.nutanix.com/api/v2/log?log_type=scheduler_log&url=/scheduler_logs/6a7319288e79ce7eeab33a9e.txt&lab=phx1-services&infra=cdp",
+      "testcase_id": "6a7319288e79ce7eeab33aa5",
+      "testcase_name": "cdp.stargate.erasure_code.test_ec_on_decode_encrypt_recode_io_integrity.ErasureOnDecodeEncryptRecodeIOIntegrityTest~~~AES.test_ec_on_decode_encrypt_recode_io_integrity"
+    }
+  ],
+  "current_branch": "master",
+  "cursor_ai": {
+    "results": {
+      "6a64de78b5e475229b535b75": {
+        "error": "Bridge error: Default local agent storage requires the built-in node:sqlite module (Node >= 22.13, or another runtime that implements node:sqlite). Upgrade Node, or configure a custom store: Cursor.configure({ local: { store: new JsonlLocalAgentStore(rootDir) } }) or pass local.store / store on Agent.create and Agent.resume."
+      },
+      "6a64de78b5e475229b535b79": {
+        "error": "Bridge error: CURSOR_API_KEY not configured on bridge"
+      },
+      "6a64de78b5e475229b535b7a": {
+        "error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start"
+      },
+      "6a64de78b5e475229b535b7c": {
+        "error": "Bridge error: CURSOR_API_KEY not configured on bridge"
+      },
+      "6a64de78b5e475229b535b7d": {
+        "error": "Bridge error: CURSOR_API_KEY not configured on bridge"
+      },
+      "6a64de78b5e475229b535b7e": {
+        "error": "Bridge error: CURSOR_API_KEY not configured on bridge"
+      },
+      "6a64de78b5e475229b535b7f": {
+        "error": "Bridge error: CURSOR_API_KEY not configured on bridge"
+      },
+      "6a64de78b5e475229b535b80": {
+        "classification": "Unknown",
+        "confidence": "Low",
+        "failing_code": null,
+        "related_components": [],
+        "root_cause": "",
+        "suggested_fix": ""
+      },
+      "6a64de78b5e475229b535b84": {
+        "classification": "Infra Issue",
+        "confidence": "High",
+        "failing_code": {
+          "file": "/home/nutanix/rpc/rpc_helpers/rpc_protos.py",
+          "line_range": "100-104",
+          "snippet": "def _execute_command(cmd):\n    ...\n    raise ValueError(\"Failed to execute command %s, out %s, err %s\" % (\n        cmd, stdout, stderr))\n\n# Called from _get_zeus_config (line 623) -> get_zeus_config (line 503)\n# which is invoked by cassandra_ring_changer.py:wait_for_cassandra_status()\n# -> _get_cassandra_status_from_zeus() during ring scrambling"
+        },
+        "jira_duplicates": [],
+        "related_components": [
+          "Zookeeper",
+          "Cassandra",
+          "zeus_config_printer",
+          "narsil",
+          "hera",
+          "pithos",
+          "guru_aux",
+          "vip_monitor",
+          "stargate",
+          "prism_monitor"
+        ],
+        "root_cause": "Observed: At 02:22:46 UTC on 2026-07-26, zeus_config_printer on CVM 10.40.176.247 emitted QFATAL 'Timed out waiting for Zookeeper session establishment' (pid 274875), causing _execute_command() in rpc_protos.py to raise ValueError. This terminated the test's wait_for_cassandra_status() polling loop in cassandra_ring_changer.py during test Setup step 42 ('Violating rack awareness in metadata ring'). Observed: errors.txt confirms a cluster-wide Zookeeper outage across all 6 CVMs (10.40.176.239-249) starting from 02:22:46 and cascading through 02:25:56 \u2014 narsil SIGABRT on every CVM at 02:23:41 (zk: connection closed), ZK sessions 0x19f9c1d25f0001d/1e expired on .239/.243 at 02:24:17/18, pithos reporting 'not talked to ZK for 13861ms (>12000ms session timeout)' at 02:24:18, guru_aux reporting 20488ms > 20000ms timeout at 02:24:18, prism_monitor reporting 'Zeus op running >30s' on all CVMs at 02:23:55\u201302:24:17, hera session expired on .239 at 02:24:05 and .241 at 02:24:06, vip_monitor sessions expired on .239 at 02:24:26, and stargate fail-fast on .239/.241/.243/.245/.247 at 02:25:21\u201302:25:56. Observed: OOM kills of service_proxy and go_guru_aux_ser in the guru_aux cgroup on CVM 10.40.176.245 at 02:25:20, indicating memory exhaustion on the nested cluster. Inferred: Cassandra ring scrambling (set_token() operations changing token assignments at step 42 starting 02:19:03) generated sufficient metadata traffic and resource pressure on the nested AHV cluster to exhaust ZK heartbeat capacity, triggering cluster-wide ZK quorum loss ~3m44s after ring scrambling began. The nested cluster (6 CVMs, lab phx1) lacked the resource headroom to sustain ZK heartbeat intervals under the load of ring disruption, leading to the simultaneous ZK session failure across all nodes. The test's wait_for_cassandra_status() does not catch ValueError from zeus_config_printer subprocess failure, so the ZK outage surfaced as an uncaught exception in test Setup.",
+        "suggested_fix": "1. (Immediate/Test-level) In cassandra_ring_changer.py, wrap the _get_cassandra_status_from_zeus() call inside wait_for_cassandra_status() to catch ValueError raised when zeus_config_printer fails due to transient ZK unavailability \u2014 treat it as a retryable condition rather than a fatal error, since the test intentionally disrupts the cluster ring and ZK can be transiently unreachable during scramble. 2. (Infrastructure) Investigate why the nested AHV cluster in phx1 lab lost ZK quorum under Cassandra ring scramble load. Check host-level resource allocation for the nested cluster VMs \u2014 if CVM VMs are undersized (CPU/RAM), ZK heartbeat timeouts become probable under any sustained metadata operation. Consider increasing VM resources or reducing concurrency of ring-change operations. 3. (Monitoring) Verify that the phx1 nested lab cluster is sized according to domain-awareness test requirements, particularly since this test runs SPDK and sets up 2-rack domain topology before scrambling.",
+        "triage_report": "h2. Triage Report: test_da_ring_fixer___auto_rack_aware \u2014 Infra Issue (Cluster-wide ZK Outage)\n\nh3. Test Details\n|| Field || Value ||\n| Testcase | cdp.stargate.domain_awareness.ring_fixer_tests.test_ring_fixer.RingFixerTests.test_da_ring_fixer___auto_rack_aware |\n| Failure Stage | Test Setup (step 42: Violating rack awareness in metadata ring) |\n| Log URL | https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e475229b535b74/6a64de78b5e475229b535b84&lab=phx1&infra=cdp |\n| Cluster | auto_cluster_nested_6a64e02736023613c37e7b88 (Nested AHV, 6 CVMs: 10.40.176.239\u2013249) |\n| GBN | 1785032567 |\n| Branch | master |\n\nh3. Exception\n{noformat}\nValueError: Failed to execute command zeus_config_printer -raw_output_file=/tmp/tmpknwn9sm1, out b'', err b'F20260726 02:22:46.208161Z 274875 zeus.cc:2778] QFATAL Timed out waiting for Zookeeper session establishment\n*** Check failure stack trace: ***\nFirst FATAL tid: 274875\nInstalled ExitTimer with timeout 120 secs and interval 5 secs\nLeak checks complete\nFlushed log files\nStack trace collection is disabled'\n{noformat}\nCall chain: rpc_protos.py:get_zeus_config (line 503) \u2192 _get_zeus_config (line 623) \u2192 _execute_command (line 104) \u2192 raises ValueError\nThis was invoked by cassandra_ring_changer.py:wait_for_cassandra_status() \u2192 _get_cassandra_status_from_zeus() during ring scrambling.\n\nh3. Timeline\n|| Timestamp (UTC) || Event ||\n| 02:19:03 | Step 42 starts: 'Violating rack awareness in metadata ring' \u2014 cassandra_ring_changer.scramble_ring() begins set_token() operations |\n| 02:22:46 | zeus_config_printer QFATAL: 'Timed out waiting for Zookeeper session establishment' on CVM 10.40.176.247 \u2014 *test fails here* |\n| 02:23:41 | Narsil SIGABRT cluster-wide (all 6 CVMs): 'Unable to create zknode: zk: connection closed', 'capability_tracker: zk: connection closed' |\n| 02:23:55\u201302:24:17 | Prism monitor on all CVMs: 'Zeus op running >30 seconds' |\n| 02:24:05\u201302:24:06 | Hera session expired on CVMs .239 and .241 |\n| 02:24:16\u201302:24:18 | ZK watcher sessions 0x19f9c1d25f0001d/1e expired on CVMs .239 and .243; zeus.cc:2456 'Session expired on server' |\n| 02:24:18 | Pithos: 'not talked to ZK for 13861ms > 12000ms session timeout'; guru_aux: '20488ms > 20000ms timeout' |\n| 02:24:26 | vip_monitor session 0x39f9c1d300200c3 expired on CVM .239 |\n| 02:24:40\u201302:24:41 | ZK session 0x29f9c1d25f80014 expired on CVM .241 |\n| 02:25:20 | OOM kill of service_proxy (pid 231864) and go_guru_aux_ser (pid 231910) in guru_aux cgroup on CVM 10.40.176.245 |\n| 02:25:21\u201302:25:56 | Stargate fail-fast on .239/.241/.243/.245/.247: hung ops detected >60s |\n| 02:25:26\u201302:25:30 | prism_monitor core dumps on CVMs .239, .241, .243 |\n\nh3. Root Cause\n*Classification: Infra Issue \u2014 Cluster-wide Zookeeper quorum loss on nested AHV cluster during Cassandra ring scrambling*\n\nThe test's Setup intentionally scrambles the Cassandra ring (step 42) by issuing token reassignments via set_token(). Approximately 3m44s after ring scrambling began, the nested AHV cluster (6 CVMs in phx1 lab) experienced a cluster-wide ZK connectivity failure.\n\n*Evidence:*\n* ZK session establishment timed out simultaneously across all 6 CVMs \u2014 not a single-node or transient issue\n* Narsil crashed on every CVM with 'zk: connection closed' at 02:23:41\n* Multiple services (hera, pithos, guru_aux, vip_monitor, prism) all lost ZK connectivity within the same 2-minute window\n* OOM kill on CVM .245 indicates memory exhaustion on the nested cluster hosts\n* Stargate fail-fast on 5/6 CVMs confirms cluster instability extends beyond ZK alone\n\n*Inferred mechanism:* The Cassandra ring scrambling operation generates high metadata load. On a resource-constrained nested AHV cluster, this can starve ZK heartbeat threads of CPU/memory, causing ZK session timeouts to exceed the configured limits (12\u201320s). With ZK quorum lost, all dependent services fail in cascade. This is consistent with OOM evidence on .245 suggesting the nested cluster VMs were under memory pressure.\n\n*Test code observation:* cassandra_ring_changer.py:wait_for_cassandra_status() calls _get_cassandra_status_from_zeus() which runs zeus_config_printer as a subprocess. If the subprocess QFATALs due to ZK unavailability, the resulting ValueError is not caught and propagates as a test Setup failure. This is a secondary concern (test robustness) but the primary failure is infrastructure.\n\nh3. Failing Code\n{code:python}\n# /home/nutanix/rpc/rpc_helpers/rpc_protos.py, line 100-104\ndef _execute_command(cmd):\n    ...\n    raise ValueError(\"Failed to execute command %s, out %s, err %s\" % (\n        cmd, stdout, stderr))\n\n# rpc_protos.py line 623: _get_zeus_config() calls _execute_command(zeus_config_printer ...)\n# rpc_protos.py line 503: get_zeus_config() calls _get_zeus_config()\n# cassandra_ring_changer.py: wait_for_cassandra_status() \u2192 _get_cassandra_status_from_zeus() \u2192 rpc.NOSInfo.get_zeus_config()\n{code}\n\nh3. Suggested Actions\n# *(Infra \u2014 Immediate)* Check whether the phx1 nested lab cluster hosting auto_cluster_nested_6a64e02736023613c37e7b88 has sufficient CPU/RAM resources for domain-awareness ring-fixer tests, which require SPDK, rack topology setup, and active ring scrambling. OOM kills indicate memory pressure; ZK heartbeat loss indicates CPU starvation or network latency under load.\n# *(Test \u2014 Short-term)* Enhance cassandra_ring_changer.py:wait_for_cassandra_status() to catch ValueError from zeus_config_printer subprocess failure and treat it as a retryable ZK-transient error (with a finite retry limit and appropriate logging), rather than propagating it as a fatal Setup failure. This aligns with the test's existing expected_fatals: QFATAL configuration.\n# *(Infra \u2014 Investigation)* Review ZK session timeout configuration for the nested cluster. If ring scrambling is known to cause resource spikes, consider pre-warming or increasing ZK session timeout for domain-awareness tests.\n\nh3. Confidence\nHigh \u2014 cluster-wide ZK failure is clearly evidenced by simultaneous session expiration across all 6 CVMs in errors.txt, with corroborating OOM kills and Stargate fail-fasts. The causal link to ring scrambling is strongly inferred from the 3m44s window between scramble start (02:19:03) and first ZK failure (02:22:46).\n\nh3. Related Components\nZookeeper, Cassandra (ring_changer), zeus_config_printer, narsil, hera, pithos, guru_aux, vip_monitor, stargate, prism_monitor\n\nh3. JIRA Duplicates\nNo exact duplicate found for cluster-wide ZK outage during test_da_ring_fixer on nested AHV. Recommend creating a new ticket tagged with cdp-domain-awareness, infra-nested-cluster, zookeeper-session-loss."
+      },
+      "6a64de78b5e475229b535b88": {
+        "classification": "Infra Issue",
+        "confidence": "High",
+        "failing_code": {
+          "file": "workflows/workload_orchestrator/provision_manager/sub_pms/provision_uvms.py",
+          "line_range": "453-465",
+          "snippet": "def _wait_for_uvm_to_get_ip(self, uvm, ssh_up_timeout=600):\n    \"\"\"\n    This method is used to get IP address assigned to UVM.\n    Raises:\n      ValueError: If UVM fails to get IP address.\n    \"\"\"\n    if not uvm.ip:\n      raise ValueError(\"UVM %s is missing IP address.\" % uvm.name)"
+        },
+        "jira_duplicates": [
+          "ENG-940998",
+          "ENG-828653",
+          "ENG-674089"
+        ],
+        "related_components": [
+          "UVM provisioning (provision_uvms.py)",
+          "ParallelExecutor (parallel_executor.py)",
+          "AHV hypervisor 10.40.177.32 (PHX1 nested-AHV lab)",
+          "JITA lab DHCP/IPAM (vlan0, external, ipam_enabled=false)"
+        ],
+        "root_cause": "OBSERVED: UVM internal_pm_uvm_8_1785118491 was created successfully on AHV host 10.40.177.32 (VmCreate task completed at 02:15:04Z, progress_status=Succeeded), but the VM failed to receive a DHCP IP address within the wait_for_ip_retries=3 budget. The VM's NIC was attached to vlan0 (network_uuid=a5c61ffb-612a-4c5e-8d2a-8b8a82eb7264, ipam_enabled=false), which uses an external DHCP server. At 02:18:27Z, provision_uvms._wait_for_uvm_to_get_ip() checked uvm.ip and found it still None, immediately raising ValueError('UVM internal_pm_uvm_8_1785118491 is missing IP address.'). INFERRED: A transient DHCP failure in the PHX1 JITA nested-AHV lab prevented the external DHCP relay or server from servicing the VM's DISCOVER requests on that specific hypervisor. No CVM-level fatal errors, signal errors, or cores were recorded in errors.json, confirming the cluster itself was healthy. This failure pattern is structurally identical to ENG-940998 (closed Not a bug, Jun 2026 \u2014 DHCP DISCOVER went unanswered for 22 minutes on two hosts in the same PHX1 infra) and ENG-674089 (closed Not a bug, Jun 2024).",
+        "suggested_fix": "1) Re-run the test \u2013 this is a transient lab DHCP flake and will likely pass on a clean re-queue. 2) If failure repeats, file an infra ticket against the PHX1 JITA team to check the external DHCP relay/pool health for the nested-AHV VLAN serving hosts 10.40.177.32 and verify vlan0 DHCP path is healthy. 3) No product code change is needed. There is no indication of a product bug.",
+        "triage_report": "h1. Triage Report \u2013 test_da_enable_da_multiple_transformations___rack_aware\n\nh2. Summary\n\nTest *cdp.stargate.domain_awareness.test_da.DATest.test_da_enable_da_multiple_transformations___rack_aware* failed during *Test Setup* because UVM {{internal_pm_uvm_8_1785118491}}, placed on hypervisor {{10.40.177.32}} in the PHX1 nested-AHV lab, never received a DHCP IP address. The VM was created and powered on successfully; the failure is a transient DHCP infrastructure flake in the JITA lab. *No product defect is involved.*\n\n----\n\nh2. Cluster / Build\n\n|| Field || Value ||\n| AOS Branch / Commit | {{master}} @ {{45b246ed6a16bec046f604ef0e1fc44a0f5baf54}} |\n| GBN | 1784943914 |\n| AOS Version | el9-opt-master (built 2026-07-21 03:29:48 UTC) |\n| Hypervisor | AHV (nested, PHX1 JITA lab) |\n| Cluster | {{auto_cluster_nested_6a64e00b36023613b6fd1911}} (12-node, 8 CPU / 32 GB SVM) |\n| Log Bundle | [6a64de78b5e475229b535b74/6a64de78b5e475229b535b88|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e475229b535b74/6a64de78b5e475229b535b88&lab=phx1&infra=cdp] |\n\n----\n\nh2. Failure Timeline\n\n|| Timestamp (UTC) || Event ||\n| 02:12:50 | UVM provisioning begins \u2014 ncli container create for {{internal_pm_uvm_container}} |\n| 02:14:51 | VmCreate REST calls dispatched in parallel for 12 UVMs ({{internal_pm_uvm_0}} \u2013 {{internal_pm_uvm_11}}) across 12 AHV hosts |\n| 02:15:04 | All 12 VmCreate tasks reported {{progress_status: Succeeded}} (including UVM 8 on 10.40.177.32) |\n| 02:15:05 | VM power-on begins; {{_wait_for_uvm_to_get_ip}} enters DHCP polling loop (retries=3, timeout=600 s) |\n| 02:18:27 | {{_wait_for_uvm_to_get_ip}} checks {{uvm.ip}} for {{internal_pm_uvm_8_1785118491}} \u2014 still {{None}} \u2014 raises {{ValueError}} |\n| 02:18:27 | {{ParallelExecutor.check_results()}} cascades into {{NuTestError}} in {{provision_manager.py:842}} and test is marked FAILED |\n\n----\n\nh2. Root Cause Analysis\n\nh3. Phase 1 \u2014 Ingest\n\n* *errors.json*: Empty \u2014 no CVM-level fatals, signal errors, or cores on any node. Cluster was healthy.\n* *build_info.yml*: AOS master GBN 1784943914, commit {{45b246ed}}, built 2026-07-21.\n* *base_config.json*: 12-node AHV nested cluster, rack-aware (6 racks). Each UVM is a CentOS 7.5 VM (4 GB RAM, 6 vCPU) cloned from {{Centos7.5-1.0/CentOS7.6.img}}.\n\nh3. Phase 2 \u2014 Extract\n\n* Traceback root exception: {{ValueError('UVM internal_pm_uvm_8_1785118491 is missing IP address.')}}\n* Raised at {{provision_uvms.py:465}}:\n{code:python}\ndef _wait_for_uvm_to_get_ip(self, uvm, ssh_up_timeout=600):\n    if not uvm.ip:\n        raise ValueError(\"UVM %s is missing IP address.\" % uvm.name)\n{code}\n* Call chain: {{nutest_test_runner.__execute_test_setup}} \u2192 {{test_da.setup}} \u2192 {{WorkloadOrchestrator.setup_workloads}} \u2192 {{ProvisionManager.configure_cluster_test_entities}} \u2192 {{ParallelExecutor}} \u2192 {{_uvm_creator}} \u2192 {{create_uvms_from_spec}} \u2192 {{create_uvms}} \u2192 {{pe.check_results()}}\n* UVM 8 was assigned to hypervisor {{10.40.177.32}} with {{wait_for_ip: True, wait_for_ip_retries: 3}}.\n* AHV REST API confirmed VmCreate task for UVM 8 succeeded ({{progress_status: Succeeded}}) at 02:15:05Z (task UUID {{f62c5607-b129-49ac-99ed-c69a87b0dd16}}).\n\nh3. Phase 3 \u2014 Investigate\n\n* All 12 VMs were created on separate AHV hypervisors. 11/12 VMs obtained IPs; only UVM 8 on {{10.40.177.32}} did not.\n* Network {{vlan0}} (UUID {{a5c61ffb-612a-4c5e-8d2a-8b8a82eb7264}}) has {{ipam_enabled: false}} \u2014 AHV/AOS is *not* in the DHCP-serving path. IP must come from an external DHCP relay/server on the lab physical network.\n* No CVM service fatals. No evidence of Stargate, Acropolis, or Cassandra issues.\n* The 3.5-minute window between VM creation (02:15:04) and error (02:18:27) matches the 3-retry \u00d7 ~45-second DHCP transaction pattern seen in ENG-940998.\n* Identical prior incidents: *ENG-940998* (Jun 2026, PHX1 lab, 13/20 UVMs missing IP, DHCP DISCOVER unanswered, closed Not a Bug); *ENG-674089* (Jun 2024, same code path, closed Not a Bug); *ENG-828653* (Sep 2025, same ValueError pattern, cdp_regression label, still open).\n\n----\n\nh2. Classification\n\n*Infra Issue* \u2014 Transient DHCP failure in PHX1 JITA nested-AHV lab. The DHCP relay or pool serving the VLAN on which host {{10.40.177.32}} is connected did not respond to the guest VM's DISCOVER within the test framework's 3-retry window. No Nutanix product code is defective.\n\n----\n\nh2. Evidence Summary\n\n|| Signal || Source || Value ||\n| VmCreate succeeded | nutest_test.log:76157 | {{progress_status: Succeeded}} for UVM 8 at 02:15:04Z |\n| IP field at failure | provision_uvms.py:464 | {{uvm.ip == None}} after 3 retries |\n| CVM fatals | errors.json | Empty \u2013 no fatals, signals, or cores |\n| Network DHCP mode | vlan0 REST response | {{ipam_enabled: false}} (external DHCP) |\n| Precedent | ENG-940998 | Same error, DHCP DISCOVER unanswered, closed Not a Bug |\n\n----\n\nh2. Suggested Fix\n\n# *Re-run the test immediately* \u2014 transient DHCP flakes are self-resolving once the DHCP server recovers or the VM is re-placed on a healthy host.\n# If it fails again on the same lab/cluster, raise an *Infra ticket* against the PHX1 JITA team to investigate the DHCP relay/pool health for the VLAN serving {{10.40.177.32}}.\n# No product code change or JIRA product bug is warranted.\n\n----\n\nh2. JIRA Duplicates / References\n\n* [ENG-940998|https://jira.nutanix.com/browse/ENG-940998] \u2014 UVM is missing IP address (PHX1 lab, closed Not a Bug, Jun 2026) *(most similar)*\n* [ENG-828653|https://jira.nutanix.com/browse/ENG-828653] \u2014 UVM internal_pm_uvm_1 is missing IP address (cdp_regression, Open, Sep 2025)\n* [ENG-674089|https://jira.nutanix.com/browse/ENG-674089] \u2014 UVM internal_pm_uvm_2 is missing IP address (closed Not a Bug, Jun 2024)\n\n----\n\nh2. Telemetry Tags\n\n{{classification: infra_issue | component: uvm_provisioning | error: uvm_missing_ip | lab: phx1_nested_ahv | dhcp: external_unmanaged | confidence: high}}"
+      },
+      "6a64de78b5e47522a15fe833": {
+        "classification": "Product Issue",
+        "confidence": "High",
+        "failing_code": {
+          "file": "cdp/server/stargate/content_cache/cache_stats_html.cc",
+          "line_range": "51-51",
+          "snippet": "CHECK(sizeof(color) / sizeof(string) >= type_name.size()) << \"size of color[] should be greater than or equal to ContentCache::kNumDataTypes\"; // color[] has 10 entries but kNumDataTypes==13"
+        },
+        "follow_up_answer": "JIRA credentials are not configured on this machine (JIRA_URL / JIRA_PERSONAL_TOKEN env vars absent; no 'atlassian' server in ~/.cursor/mcp.json). Ticket cannot be auto-created. To create it, export your PAT and run the commands below.\n\nNOTE: Since this is a confirmed duplicate of ENG-957251 (already RESOLVED/fixed), the recommended action is NOT to create a standalone new ticket, but to update ENG-957251 with this repro evidence using update-existing. However, if a new tracking ticket is required (e.g. for this test run's regression record), use the create + merge-duplicate flow below.\n\n--- OPTION A: Update ENG-957251 directly with this repro (preferred) ---\n\nexport JIRA_URL='https://jira.nutanix.com'\nexport JIRA_PERSONAL_TOKEN='<your-PAT>'\nJIRA_HELPER='/home/sudharshan.musali/internal_project/regx/.cursor/skills/triage-cdp-test-failure/jira_helper.py'\n\npython3 \"$JIRA_HELPER\" update-existing \\\n  --issue ENG-957251 \\\n  --report-file /tmp/jira_report.txt \\\n  --append-environment 'https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e47522a15fe831/6a64de78b5e47522a15fe833&lab=phx1&infra=cdp' \\\n  --add-labels backup_to_shrek \\\n  --add-test-case-name 'cdp.blockstore.infrastructure.test_blockstore_infrastructure.TestBlockstoreInfrastructure~~~nvme_serviceability.test_blockstore_remove_add_disk'\n\n--- OPTION B: Create new ticket + immediately link as duplicate of ENG-957251 ---\n\n# Step 1: Write report to temp file (see triage_report field below)\ncat > /tmp/jira_report.txt << 'REPORT_EOF'\n<paste triage_report content here>\nREPORT_EOF\n\n# Step 2: Create the ticket\npython3 \"$JIRA_HELPER\" create \\\n  --project ENG \\\n  --summary '[master] Stargate FATAL cache_stats_html.cc:51 color[] size 10 < kNumDataTypes 13 \u2013 test_blockstore_remove_add_disk (dup ENG-957251)' \\\n  --type Bug \\\n  --description-file /tmp/jira_report.txt \\\n  --components 'Stargate' \\\n  --fields '{\"customfield_15160\": {\"value\": \"Stargate\"}, \"customfield_18060\": [\"cdp.blockstore.infrastructure.test_blockstore_infrastructure.TestBlockstoreInfrastructure~~~nvme_serviceability.test_blockstore_remove_add_disk\"], \"customfield_13260\": {\"value\": \"No\"}, \"customfield_10011\": [{\"value\": \"Functional\"}], \"versions\": [{\"name\": \"master\"}], \"fixVersions\": [{\"name\": \"Triage\"}], \"environment\": \"https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e47522a15fe831/6a64de78b5e47522a15fe833&lab=phx1&infra=cdp\", \"labels\": [\"backup_to_shrek\"]}'\n\n# Step 3: After creation, note the new key (e.g. ENG-XXXXXX), then link as duplicate\npython3 \"$JIRA_HELPER\" merge-duplicate \\\n  --dup ENG-XXXXXX \\\n  --orig ENG-957251 \\\n  --report-file /tmp/jira_report.txt \\\n  --add-labels backup_to_shrek",
+        "jira_duplicates": [
+          "ENG-957251",
+          "ENG-960212",
+          "ENG-960203"
+        ],
+        "related_components": [
+          "Stargate",
+          "ContentCache",
+          "BlockstoreInfrastructure"
+        ],
+        "root_cause": "Stargate crash loop on all 4 CVMs caused by a missing `color[]` array entry in `cache_stats_html.cc:51`. The static `color[]` array has 10 entries but `ContentCache::kNumDataTypes` is 13 \u2014 three new ContentCache data types were added without updating the color array in `ContentCacheStats::GenerateBarGraph()`. Every ~10-minute HTTP stats collection request to `/h/cache_stats_html` triggers `CHECK(sizeof(color)/sizeof(string) >= type_name.size())` \u2192 stargate FATAL + core. The test body itself completed successfully (all 14 disk remove/add cycles with blockstore verification passed; IO integrity and AES validation passed). The test was marked FAILED solely because `error_patterns.py` log scanning (step 45, TT phase) detected the accumulated stargate fatals in `error_patterns_ragusa/PE/errors.json`. The build under test (GBN 1784943914, commit 45b246ed6a16bec046f604ef0e1fc44a0f5baf54) predates the fix committed on 2026-07-23 for ENG-957251.",
+        "suggested_fix": "Duplicate of ENG-957251 (already fixed by commit 31a670988c4a0824b82784612b3ad04ae501e7a7 on 2026-07-23, merged to ntnxdb-master). The fix is to add 3 missing entries to the `color[]` array in `cache_stats_html.cc` to match `ContentCache::kNumDataTypes=13`. Re-run the test on a build that includes GBN > the fix commit date (post-2026-07-23).",
+        "triage_report": "h2. Bug Report: Stargate FATAL \u2013 cache_stats_html.cc:51 color[] array size mismatch (ContentCache::kNumDataTypes=13 > 10) \u2014 Duplicate of ENG-957251\n\nh3. Test Information\n* *Testcase*: cdp.blockstore.infrastructure.test_blockstore_infrastructure.TestBlockstoreInfrastructure~~~nvme_serviceability.test_blockstore_remove_add_disk\n* *Cluster*: ragusa (4-node NVMe AHV, blockstore enabled)\n* *NOS Version*: master (el9-opt)\n* *Build Commit*: 45b246ed6a16bec046f604ef0e1fc44a0f5baf54\n* *GBN*: 1784943914\n* *Date*: 2026-07-26\n* *Failure Stage*: TEST_TEARDOWN (log scanning)\n\nh3. Cluster Configuration\n{code:python}\n{'cluster': 'ragusa', 'node_count': 4, 'hypervisor': 'ahv', 'blockstore_enabled': True, 'disk_type': 'NVMe', 'nos_branch': 'master', 'build_commit': '45b246ed6a16bec046f604ef0e1fc44a0f5baf54', 'gbn': '1784943914'}\n{code}\n\nh3. Failure Summary\nThe test body *completed successfully*: all 14 disk remove/add cycles with blockstore verification passed, IO integrity and AES validation passed. The test was marked FAILED solely because the log scanner (error_patterns.py, step 45 of teardown) detected repeated stargate fatals.\n\nRoot cause: Stargate on all 4 CVMs hit a crash loop from ~2026-07-26 15:29 onward:\n{code}\ncache_stats_html.cc:51] Check failed: sizeof(color) / sizeof(string) >= type_name.size() (10 vs. 13)\nsize of color[] should be greater than or equal to ContentCache::kNumDataTypes\n{code}\n\nThe static `color[]` array in `ContentCacheStats::GenerateBarGraph()` has 10 entries. `ContentCache::kNumDataTypes` is 13 (3 new types added without updating `color[]`). Every ~10 minutes, the NuTest HTTP poller hits `/h/cache_stats_html`, the CHECK fires, stargate crashes. All 4 CVMs (10.40.225.22, .27, .32, .37) each have >=1 core dump.\n\n*This is a duplicate of ENG-957251.* Fix is already committed (31a670988c4a0824b82784612b3ad04ae501e7a7, 2026-07-23). The build under test predates the fix.\n\nh3. Stack Trace\n{code}\n#3  google::LogMessage::Fail() at logging.cc:1332\n#7  nutanix::content_cache::ContentCacheStats::GenerateBarGraph(...) at cache_stats_html.cc:51\n#8  nutanix::content_cache::ContentCache::HitRateStats() at content_cache.cc:6622\n#9  nutanix::content_cache::ContentCache::DisplayCacheStats(bool) at content_cache.cc:6566\n#10 nutanix::stargate::StargateStats::ContentCacheStats(...) at stargate_stats.cc:7050\n{code}\n\nh3. Cores Recorded\n* 10.40.225.22 \u2014 stargate PID 262179 @ 2026-07-26 15:39:40\n* 10.40.225.27 \u2014 stargate PID 558562 @ 2026-07-26 17:29:33\n* 10.40.225.32 \u2014 stargate PID 680785 @ 2026-07-26 18:19:26\n* 10.40.225.37 \u2014 stargate PID 474797 @ 2026-07-26 17:09:26\n\nh3. Related Tickets\n* *ENG-957251* \u2014 Root fix (same fatal, committed 2026-07-23) \u2014 RESOLVED\n* *ENG-960212* \u2014 Closed as duplicate of ENG-957251\n* *ENG-960203* \u2014 Closed as duplicate of ENG-957251\n\nh3. Links\n* [Log Bundle|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e47522a15fe831/6a64de78b5e47522a15fe833&lab=phx1&infra=cdp]\n* [ENG-957251 (root fix)|https://jira.nutanix.com/browse/ENG-957251]\n\nh3. Disposition\nProduct bug in the build under test. Re-run on a post-2026-07-23 build to confirm green. Close this ticket as Duplicate of ENG-957251."
+      },
+      "6a64de78b5e47522a15fe834": {
+        "error": "Cursor API key required. Please configure your API keys in Settings."
+      },
+      "6a64de78b5e47522a15fe837": {
+        "error": "Bridge error: CURSOR_API_KEY not configured on bridge"
+      },
+      "6a64de78b5e47522a15fe838": {
+        "classification": "Product Issue",
+        "confidence": "High",
+        "failing_code": {
+          "file": "cache_stats_html.cc",
+          "line_range": "51-51",
+          "snippet": "CHECK(sizeof(color) / sizeof(string) >= type_name.size())  // color[] has 10 entries but ContentCache::kNumDataTypes is 13"
+        },
+        "jira_duplicates": [
+          "ENG-960212"
+        ],
+        "related_components": [
+          "Stargate",
+          "ContentCache",
+          "Stargate-Content Cache"
+        ],
+        "root_cause": "Stargate crash loop on all 4 active CVMs caused by a product bug in cache_stats_html.cc:51 \u2014 the static `color[]` array in ContentCacheStats::GenerateBarGraph() has 10 entries but ContentCache::kNumDataTypes is now 13. When DumpStargateHtmlStats (background job running every ~10 minutes) requests the ContentCache stats HTTP page, stargate hits the CHECK failure `sizeof(color)/sizeof(string) >= type_name.size() (10 vs. 13)` and crashes. Stargate restarts, runs successfully for ~10 minutes, then crashes again on the same CHECK \u2014 a persistent crash loop from the first crash at 2026-07-27 06:24:20 UTC through the end of the test. The crash loop caused the IntegrityTesterShellWorkload-legacy to detect errors, and the cumulative disruption prevented the test workload from completing within the 18000-second timeout, resulting in NuTestRunnerTimeoutError after 20199 seconds. The node power cycle of CVM 10.40.225.32 (observed at ~06:45:30 UTC) occurred AFTER the crash loop was already underway and is not the cause. This is a product bug: a new ContentCache data type was added (kNumDataTypes went from 10 to 13) but the color[] array in cache_stats_html.cc was not updated to match.",
+        "suggested_fix": "Add 3 missing color entries to the static color[] array in cache_stats_html.cc to match the updated ContentCache::kNumDataTypes (13 types). Alternatively, use a static_assert or derive the array size from kNumDataTypes directly so future additions do not break this invariant. This issue is tracked and already closed in ENG-960212 on the same build (GBN 1784943914) \u2014 confirm whether the fix has been merged and check if this test run can be re-run on a newer build.",
+        "triage_report": "h2. Bug Report: Stargate FATAL \u2014 cache_stats_html.cc:51 color[] array undersize (10 vs. kNumDataTypes=13) \u2014 Crash Loop Causes Test Timeout\n\nh3. Test Information\n* *Testcase*: cdp.stargate.power_cycling.test_io_integrity_power_cycling.PowerCyclingIOIntegrityTest~~~nvme_serviceability.test_io_integrity___node_power_cycle\n* *Cluster*: ragusa\n* *NOS Version*: el9-opt-master-45b246ed6a16bec046f604ef0e1fc44a0f5baf54\n* *Build Commit*: 45b246ed6a16bec046f604ef0e1fc44a0f5baf54\n* *GBN*: 1784943914\n* *Date*: 2026-07-27\n* *Runtime*: ~5.6 hours (20199s elapsed vs. 18000s timeout)\n* *Ops Completed*: 17/24\n* *Archived Logs*: filesv3.cdp.nutanix.com:/volume1/270726-060820_57DE92\n\nh3. Cluster Configuration\n{code:python}\n# From errors.json CVM IPs and build_info.yml\n{'cluster_name': 'ragusa',\n 'nos_version': 'el9-opt-master-45b246ed6a16bec046f604ef0e1fc44a0f5baf54',\n 'gbn': '1784943914',\n 'commit_id': '45b246ed6a16bec046f604ef0e1fc44a0f5baf54',\n 'branch': 'master',\n 'platform': 'el9',\n 'build_type': 'opt',\n 'cvms_with_fatals': ['10.40.225.22', '10.40.225.27', '10.40.225.32', '10.40.225.37'],\n 'cvms_clean': ['10.40.225.21', '10.40.225.26', '10.40.225.31', '10.40.225.36']}\n{code}\n\nh3. Failure Summary\n*Observed*: Stargate on all 4 active CVMs (10.40.225.22, .27, .32, .37) entered a crash loop beginning at 2026-07-27 06:24 UTC. The loop continued for the entire ~5.6-hour test run, with stargate crashing and restarting approximately every 10 minutes on every node (errors.json, stargate.out.20260727-061518Z).\n\n*Observed*: The crash is a CHECK failure at cache_stats_html.cc:51:\n{noformat}\nF20260727 06:24:35.625874Z 215591 cache_stats_html.cc:51] Check failed: sizeof(color) / sizeof(string) >= type_name.size() (10 vs. 13) size of color[] should be greater than or equal to ContentCache::kNumDataTypes\n{noformat}\n\n*Observed (stack trace)*: The crash is triggered by the ContentCache stats HTTP endpoint being requested by the DumpStargateHtmlStats background job (every ~10 minutes). The call chain is:\n- StargateStats::ContentCacheStats() (stargate_stats.cc:7050)\n- ContentCache::DisplayCacheStats() (content_cache.cc:6566)\n- ContentCache::HitRateStats() (content_cache.cc:6622)\n- *ContentCacheStats::GenerateBarGraph()* (cache_stats_html.cc:51) \u2014 CHECK FAILURE HERE\n\n*Root cause*: The static `color[]` array in cache_stats_html.cc has 10 entries, but `ContentCache::kNumDataTypes` is 13. This means 3 new ContentCache data type enum values were added without a corresponding update to the color[] array. The CHECK `sizeof(color)/sizeof(string) >= type_name.size()` fails every time the cache stats page is rendered.\n\n*Inferred*: The repeated stargate crash loops degraded cluster stability sufficiently that the IntegrityTesterShellWorkload-legacy detected errors (nutest.log: \"Monitor Util detected errors in one or more processes: ['IntegrityTesterShellWorkload-legacy']\"). This appears to be consistent with IO disruptions caused by repeated stargate restarts across all nodes simultaneously.\n\n*Observed*: Test timed out after 20199 seconds (timeout=18000s) with NuTestRunnerTimeoutError during the verify_workload phase (results.json). 17 of 24 operations completed before the timeout.\n\n*Observed*: The Node_Power_Cycle background job cycled CVM 10.40.225.32 at approximately 06:45:30 UTC (Node_Power_Cycle_FULL.log). This occurred AFTER the crash loop started at 06:24 and is not the trigger.\n\n*Disposition*: Product bug \u2014 the color[] array in cache_stats_html.cc was not updated when kNumDataTypes was increased from 10 to 13. This is a duplicate of ENG-960212 which was filed on the same build (GBN 1784943914) and is now Closed \u2014 a fix may already be available in a newer build.\n\nh3. Error Injection Timeline\n{code}\nStartTime            EndTime              Source               Component\n2026-07-27 06:39:37  -                    Node_Power_Cycle     Background job started (600s sleep before first cycle)\n2026-07-27 06:44:31  2026-07-27 06:45:30  Node_Power_Cycle     Power cycling SVM 10.40.225.32; Setting up SVM after power cycle\n{code}\n\nh3. Fatal Error / Signal Error / Core\n*CVMs Affected*: 10.40.225.22, 10.40.225.27, 10.40.225.32, 10.40.225.37\n*Service*: stargate\n*Time (first occurrence)*: 2026-07-27 06:24:20 (CVM 10.40.225.32), 06:24:22 (.27), 06:24:35 (.37), 06:24:39 (.22)\n*Type*: Fatal (crash loop, ~10 min interval) + Core\n*Cores*: .37 at 06:54:40, .27 at 10:10:04, .32 at 10:21:56, .22 at 11:15:26\n\n{code}\nF20260727 06:24:35.625874Z 215591 cache_stats_html.cc:51] Check failed: sizeof(color) / sizeof(string) >= type_name.size() (10 vs. 13) size of color[] should be greater than or equal to ContentCache::kNumDataTypes\n{code}\n\nAdditional fatal on CVM 10.40.225.32 (curator \u2014 consistent with stargate crash loop disrupting Medusa):\n{code}\ncurator.cc:2952] CuratorBaseOp started at 1785138614674471 usecs and is running for more than 60 seconds\n{code}\n\nh3. Stack Trace\n{code}\nObtained stack traces of threads responding to SIGPROF\n===== epoll_2/215591 =====\n#0  nutanix::net::GetStackTracesOfAllThreads() at http_server_handlers.cc:1985\n#1  nutanix::DumpStackTracesOfAllThreads() at init_nutanix.cc:1229\n#2  nutanix::DumpStackTracesAndTerminate() at log.cc:169\n#3  google::LogMessage::Fail() at logging.cc:1332\n#4  google::LogMessage::SendToLog() at logging.cc:1287\n#5  google::LogMessage::Flush() at logging.cc:1159\n#6  google::LogMessageFatal::~LogMessageFatal() at logging.cc:1829\n#7  nutanix::content_cache::ContentCacheStats::GenerateBarGraph(...) at cache_stats_html.cc:51\n#8  nutanix::content_cache::ContentCache::HitRateStats() at content_cache.cc:6622\n#9  nutanix::content_cache::ContentCache::DisplayCacheStats(bool) at content_cache.cc:6566\n#10 nutanix::stargate::StargateStats::ContentCacheStats(...) at stargate_stats.cc:7050\n#11 [FunctionDisabler::BindHelper dispatch]\n...\n#15 nutanix::net::HttpServerV2::HandlePacket(...) at http_server.cc:3269\n#16 nutanix::net::TcpConnection::ProcessBytesReceived() at tcp_connection.cc:506\n#17 nutanix::net::ssl::SecureTcpConnection::OnReadReady() at secure_tcp_connection.cc:315\n...\n{code}\n\nh3. Log Context\n{code}\n[~10 minutes before FATAL \u2014 stargate running normally, I/O proceeding]\nE20260727 06:15:22 arithmos_status_manager.cc] Failed to read zk node /appliance/logical/arithmos_status with error kNoNode\nE20260727 06:23:52 stargate_stats.cc:2516] Publishing raw VDisk stats failed for vdisk 328 with error kInternalError\nF20260727 06:24:35.625874Z 215591 cache_stats_html.cc:51] Check failed: sizeof(color) / sizeof(string) >= type_name.size() (10 vs. 13) size of color[] should be greater than or equal to ContentCache::kNumDataTypes\n*** Check failure stack trace: ***\nFirst FATAL tid: 215591\nInstalled ExitTimer with timeout 120 secs and interval 5 secs\nInvoking exit handler for stargate\nStargate Exit Handler done\n[Stargate restarts, next crash at 06:34:35, then 06:44:35, repeating every ~10 min]\n{code}\n\nh3. Related Tickets\n* *ENG-960212*: ECVmotionIOIntegrityTest.test_io_integrity_snapshot \u2013 Check failed: color array size (10) < required (13) in cache_stats_html.cc \u2014 *Disposition*: Duplicate (identical fatal signature, same build GBN 1784943914, same call path) \u2014 *Status*: Closed \u2014 filed 2026-07-27\n\nh3. Links\n* [Log Bundle|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e47522a15fe831/6a64de78b5e47522a15fe838&lab=phx1&infra=cdp]\n* [errors.json|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e47522a15fe831/6a64de78b5e47522a15fe838/cdp/stargate/power_cycling/test_io_integrity_power_cycling/PowerCyclingIOIntegrityTest~~~nvme_serviceability/test_io_integrity___node_power_cycle/error_patterns_ragusa/PE/errors.json&lab=phx1&infra=cdp]\n* [Archived CVM Logs|filesv3.cdp.nutanix.com:/volume1/270726-060820_57DE92]"
+      },
+      "6a64de78b5e47522a15fe839": {
+        "error": "Bridge error: Cursor API key required. Configure in Settings."
+      },
+      "6a64de798e79ce0549200c82": {
+        "error": "Network Error"
+      },
+      "6a64de7a8e79ce055281d41f": {
+        "error": "Bridge error: Cursor API key required. Configure in Settings."
+      },
+      "6a64de7a8e79ce055281d420": {
+        "error": "Bridge error: Cursor API key required. Configure in Settings."
+      },
+      "6a64de7a8e79ce055281d421": {
+        "error": "Bridge error: Cursor API key required. Configure in Settings."
+      },
+      "6a64de7a8e79ce055281d422": {
+        "error": "Bridge error: Cursor API key required. Configure in Settings."
+      },
+      "6a64de7a8e79ce055281d424": {
+        "error": "Bridge error: CURSOR_API_KEY not configured on bridge"
+      },
+      "6a64de7a8e79ce055281d44c": {
+        "classification": "Test Issue",
+        "confidence": "High",
+        "failing_code": {
+          "file": "framework/lib/photon/browser.py",
+          "line_range": "224-236",
+          "snippet": "if 'None' in str(webdriver_host):\n    INFO(\"Using PhantomJS\")\n    phantomjs = os.path.join(os.environ.get('NUTEST_PATH'), 'bin', 'phantomjs')\n    ...\n    self.driver = webdriver.PhantomJS(executable_path=phantomjs, service_args=service_args, port=9100)"
+        },
+        "jira_duplicates": [],
+        "related_components": [
+          "Prism UI Testing",
+          "NuTest Framework (browser.py)",
+          "Rack Awareness UI",
+          "Selenium WebDriver"
+        ],
+        "root_cause": "The test setup failed because no 'selenium_server' was provided in test_args (observed: test_args in nutest.log contains only gbn/upgrade_gbn/policy_interface/dumb_copy_logs/gflags keys \u2014 no 'selenium_server' key). In browser.py:start_webdriver(), the condition 'if \"None\" in str(webdriver_host)' evaluates to True when selenium_server is None, triggering the PhantomJS fallback path at browser.py:235. However, selenium.webdriver.PhantomJS was removed in Selenium 4.x, causing 'AttributeError: module \"selenium.webdriver\" has no attribute \"PhantomJS\"' (observed: steps.log full traceback). This exception propagated out of common_prism_test_setup() before self.browser could be assigned. The except-block in test_rack_awareness.py:96 then accessed 'if self.browser:' without a hasattr guard, raising a secondary 'AttributeError: \"RackAwarenessTest\" object has no attribute \"browser\"' (observed: steps.log). The test was misconfigured \u2014 selenium_server was not passed as a test arg, which triggered an obsolete PhantomJS fallback in the framework.",
+        "suggested_fix": "Two fixes required: (1) PRIMARY \u2014 in browser.py:start_webdriver(), remove or replace the PhantomJS fallback branch (lines 224-236). PhantomJS was removed from Selenium 4.x. The branch should raise a clear error if selenium_server is None/unconfigured, or be replaced with headless Chrome/Firefox. (2) SECONDARY \u2014 in test_rack_awareness.py:setup() exception handler at line 96, change 'if self.browser:' to 'if hasattr(self, \"browser\") and self.browser:' to prevent the cascading AttributeError. Additionally, the JITA task should be re-run with a valid 'selenium_server' test arg pointing to a working Selenium Grid server.",
+        "triage_report": "h2. Bug Report: RackAwarenessTest Test Setup Failure \u2014 selenium.webdriver has no attribute 'PhantomJS' (Selenium 4.x incompatibility)\n\nh3. Test Information\n* *Testcase*: manageability.ui.pe.rack_awareness.test_rack_awareness.RackAwarenessTest.test_verify_removing_a_node_from_hardware_page_displays_warning_message\n* *Cluster*: auto_cluster_prod_6a64de798e79ce055281d3fc_jita_e9deb1e7109a\n* *NOS GBN*: 1771865117 (upgrade_gbn: 1771879562)\n* *Framework Commit*: f342f46c0ebe3783ccc2a45c3705d8e9dcf01517 (2026-07-24)\n* *Test Commit*: 49bd0b39e4714750227bf4bbdee6fbe961f4f55e (2026-07-25)\n* *Date*: 2026-07-27\n* *Failure Stage*: TEST_SETUP\n\nh3. Cluster Configuration\n{code:python}\n{'cluster': 'auto_cluster_prod_6a64de798e79ce055281d3fc_jita_e9deb1e7109a',\n 'cluster_min_nodes': 6,\n 'gbn': 1771865117,\n 'upgrade_gbn': 1771879562,\n 'test_args': {'gbn': '1771865117',\n               'dumb_copy_logs': 'False',\n               'policy_interface': 'REST',\n               'gflags.scavenger.run_gdb_enabled': 'False',\n               'upgrade_gbn': '1771879562'\n               # NOTE: no 'selenium_server' key present\n               }}\n{code}\n\nh3. Failure Summary\nThe test failed in TEST_SETUP due to two chained exceptions, both observed in steps.log:\n\n*Chain (observed \u2014 steps.log):*\n\n1. *Primary failure:* {{common_prism_test_setup()}} in {{rack_awareness_helper.py:412}} called {{Browser.get_browser()}} with {{selenium_server=None}} (no 'selenium_server' key in test_args). This produced {{webdriver_host = \"http://None:4444/wd/hub\"}}. In {{browser.py:start_webdriver()}} at line 224, the check {{'None' in str(webdriver_host)}} evaluated to True, entering the PhantomJS fallback branch. At line 235, {{webdriver.PhantomJS(executable_path=phantomjs, ...)}} raised:\n{code}\nAttributeError: module 'selenium.webdriver' has no attribute 'PhantomJS'\n{code}\nSelenium 4.x removed the {{PhantomJS}} webdriver class. The {{common_prism_test_setup()}} function is decorated with {{@retry(retries=2)}} for {{WebDriverException}} and {{TimeoutException}}, but {{AttributeError}} is not in the retry list \u2014 so the exception propagated immediately without retry, and {{self.browser}} was never assigned.\n\n2. *Secondary (cascading) failure:* The {{except Exception}} handler in {{test_rack_awareness.py:setup()}} at line 92 caught the exception. At line 96, the handler attempted {{if self.browser:}} without first checking if the attribute was ever set. Since {{self.browser}} was never assigned, Python raised:\n{code}\nAttributeError: 'RackAwarenessTest' object has no attribute 'browser'\n{code}\nThis second {{AttributeError}} propagated out of {{setup()}} and was reported as the test failure.\n\n*Disposition:*\n* The test was misconfigured \u2014 no {{selenium_server}} test arg was supplied, triggering an obsolete fallback (Test Issue / Infra Issue).\n* The {{PhantomJS}} fallback in {{browser.py}} is broken on Selenium 4.x (Framework Bug).\n* The exception handler in {{test_rack_awareness.py}} is fragile \u2014 does not guard against {{self.browser}} being unset (Test Code Bug).\n\nh3. Stack Trace\n{code}\nTraceback (most recent call last):\n  File \"/nutest-py3-tests/testcases/manageability/ui/pe/rack_awareness/test_rack_awareness.py\", line 72, in setup\n    common_prism_test_setup(self.test_args,\n  File \"/nutest-py3/framework/lib/decorators.py\", line 303, in wrapper\n    ret_value = func(*func_args, **func_kwargs)\n  File \"/nutest-py3-tests/workflows/manageability/ui/pe/rack_awareness/rack_awareness_helper.py\", line 412, in common_prism_test_setup\n    browser = Browser.get_browser(selenium_server, browser_name, pe_url,\n  File \"/nutest-py3/framework/lib/photon/browser.py\", line 208, in get_browser\n    browser = Browser(selenium_server=selenium_server,\n  File \"/nutest-py3/framework/lib/photon/browser.py\", line 150, in __init__\n    self.start_webdriver(webdriver_host, self.capability)\n  File \"/nutest-py3/framework/lib/photon/browser.py\", line 235, in start_webdriver\n    self.driver = webdriver.PhantomJS(executable_path=phantomjs,\nAttributeError: module 'selenium.webdriver' has no attribute 'PhantomJS'\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/nutest-py3/framework/test_driver/nutest_test_runner.py\", line 313, in __execute_and_handle_exceptions\n    method_to_call()\n  File \"/nutest-py3/framework/test_driver/nutest_test_runner.py\", line 580, in __execute_test_setup\n    TimedExecutor.execute(self._setup_timeout, self._setup)\n  File \"/nutest-py3/framework/test_driver/timeout_listener.py\", line 128, in execute\n    output = functor(*args, **kwargs)\n  File \"/nutest-py3-tests/testcases/manageability/ui/pe/rack_awareness/test_rack_awareness.py\", line 96, in setup\n    if self.browser:\nAttributeError: 'RackAwarenessTest' object has no attribute 'browser'\n{code}\n\nh3. Related Tickets\n* None found\n\nh3. Links\n* [Log Bundle|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de798e79ce055281d3fc/6a64de7a8e79ce055281d44c&lab=phx1&infra=cdp]\n* [steps.log (JITA cdp_jita bundle)|/home/nutanix/jita_mount/cdp_jita/6a64de798e79ce055281d3fc/6a64de7a8e79ce055281d44c/manageability/ui/pe/rack_awareness/test_rack_awareness/RackAwarenessTest/test_verify_removing_a_node_from_hardware_page_displays_warning_message/steps.log]\n* [nutest_test.log (JITA cdp_jita bundle)|/home/nutanix/jita_mount/cdp_jita/6a64de798e79ce055281d3fc/6a64de7a8e79ce055281d44c/manageability/ui/pe/rack_awareness/test_rack_awareness/RackAwarenessTest/test_verify_removing_a_node_from_hardware_page_displays_warning_message/nutest_test.log]\n* [browser.py (framework)|nugerrit.ntnxdpro.com/nutest-py3/framework/lib/photon/browser.py]\n* [test_rack_awareness.py|nugerrit.ntnxdpro.com/nutest-py3-tests/testcases/manageability/ui/pe/rack_awareness/test_rack_awareness.py]"
+      },
+      "6a64de7ad24d82fa9467d96a": {
+        "error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start"
+      },
+      "6a64de7cb5e47522adfbaa5f": {
+        "classification": "Infra Issue",
+        "confidence": "High",
+        "failing_code": {
+          "file": "workflows/awsclusters/snap_to_s3_v4.py",
+          "line_range": "244-245",
+          "snippet": "pc_vm.execute(\"mspctl application apply snap-to-s3\"\n              \" --filepath ./clustermgmt-nc2.yaml -c msp\")"
+        },
+        "jira_duplicates": [],
+        "related_components": [
+          "MSP",
+          "mspctl",
+          "snap-to-s3",
+          "clustermgmt-nc2",
+          "Artifactory Registry",
+          "PrismCentral"
+        ],
+        "root_cause": "The `mspctl application apply snap-to-s3 --filepath ./clustermgmt-nc2.yaml -c msp` command blocked indefinitely in test CLASS_SETUP because the MSP controller on PC 10.96.96.158 could not pull the Docker image `artifactory.dyn.ntnxdpro.com/canaveral-legacy-docker/nutanix-core/ntnx-api-clustermgmt-nc2-pc:656` from Artifactory. Every attempt to pull the image returned `Error response from daemon: unauthorized: The client does not have permission for manifest` (observed in msp_controller.out.20260725-180905Z starting at 2026-07-25T19:00:10Z, with 25+ outer retries across the window 19:00:10\u201319:15:39). The image was also not present in the MSP local registry (digest of image not found in both nutanix/ntnx-api-clustermgmt-nc2-pc:656 and ntnx-api-clustermgmt-nc2-pc:656 path checks, observed). The `mspctl application apply` call is synchronous/blocking from the test's perspective \u2014 it waits for server-side deployment completion \u2014 and the 180-second NuTest SSH timeout expired before the MSP controller either succeeded or gave up, raising NuTestSSHTimeoutError. The test setup's docker login step (observed in snap_to_s3_v4.py:224\u2013226) only authenticates to `docker.dyn.ntnxdpro.com`, not `artifactory.dyn.ntnxdpro.com`, so the PC VM has no credentials for the registry that the MSP controller uses to fetch the specified image tag. The MSP cluster itself was healthy (msp_validator 41/41 SUCCEEDED, MSP deployment 100% complete with DepStatus:4, observed in msp_validator_from_logbay.out and msp_controller.out); the `snap-to-s3` application was never applied \u2014 only `ntnx-base` appears in the Applications list (observed). The PC node 10.96.96.158 (MSP leader) drove the apply operation. The authorization failure appears consistent with either: (a) the `clustermgmt-nc2.yaml` file specifying a release tag (:656) whose manifest is protected by credentials the PC Docker daemon does not hold, or (b) expiry/absence of Artifactory credentials in the MSP controller's registry configuration. The exact cause of the authorization failure \u2014 whether the PC lacks Artifactory credentials entirely, whether they have expired, or whether tag :656 no longer exists in that registry \u2014 cannot be determined from the available logs; that determination requires checking the MSP controller's Artifactory credential configuration or querying the Artifactory registry directly.",
+        "suggested_fix": "Investigate why `artifactory.dyn.ntnxdpro.com` returns `unauthorized` when the MSP controller on the PC tries to pull `ntnx-api-clustermgmt-nc2-pc:656`. Check: (1) whether the MSP controller's Artifactory credential configuration on the PC is valid/unexpired; (2) whether image tag :656 still exists in the `canaveral-legacy-docker/nutanix-core/` Artifactory repository; (3) whether the test setup's docker login to `docker.dyn.ntnxdpro.com` also needs to be applied to `artifactory.dyn.ntnxdpro.com` before calling `mspctl application apply`. A short-term workaround is to pre-push the `ntnx-api-clustermgmt-nc2-pc:656` image into the MSP local registry before running `mspctl application apply`, or update `clustermgmt-nc2.yaml` to reference an image tag accessible from `docker.dyn.ntnxdpro.com` (where the test already has credentials). Additionally, consider increasing the `mspctl application apply` SSH timeout beyond 180 seconds to reduce false timeouts during slow deployments.",
+        "triage_report": "h2. Bug Report: MSP Application Deploy Failure \u2014 mspctl application apply snap-to-s3 times out due to Artifactory unauthorized error pulling ntnx-api-clustermgmt-nc2-pc:656\n\nh3. Test Information\n* *Testcase*: awsclusters.snap2s3.rbac.test_snap2s3_rbac.TestSnap2S3RBAC~~~Cluster_Admin.test_snap2s3_rbac\n* *Failure Stage*: CLASS_SETUP\n* *PC*: 10.96.96.167 (MSP leader: 10.96.96.158)\n* *NOS Clusters*: auto_cluster_nested_6a64e01292fce9deaf0c3e65, auto_cluster_nested_6a64e01292fce9deaf0c3e66\n* *NOS Build*: GBN 1784943914, Branch: master (build_info.yml not collected \u2014 test failed before CVM log collection)\n* *MSP Controller Version*: 999.0.0.0, Build: 25786545a (2026-07-21)\n* *MSP Cluster Version*: 999.0.2.0, Platform: 1.34.1-2-ntnx-999.0.0.0\n* *NuTest Framework Commit*: f342f46c0ebe3783ccc2a45c3705d8e9dcf01517 (2026-07-24)\n* *NuTest Tests Commit*: 49bd0b39e4714750227bf4bbdee6fbe961f4f55e (2026-07-25)\n* *Task Label*: CDP_Regression_FullReg_Master_NAHV2.0_Cluster-AWS-(35), master|Full|25Jul2026\n* *Date*: 2026-07-25\n\nh3. Cluster Configuration\n{code:python}\n# MSP cluster state at logbay collection (19:03:07 UTC)\n{\n  'msp_cluster_uuid': 'ff91a2a2-a485-4091-49b7-d97592a49cf7',\n  'msp_cluster_version': '999.0.2.0',\n  'msp_platform_version': '1.34.1-2-ntnx-999.0.0.0',\n  'msp_controller_version': '999.0.0.0',\n  'msp_deployment_status': 'MSP Deployment completed (DepStatus=4, DepPercent=100)',\n  'msp_leader': '10.96.96.158',\n  'msp_upgrade_state': 'Succeeded',\n  'msp_master_ips': ['192.168.5.2'],\n  'msp_envoy_ips': ['10.96.96.158'],\n  'msp_applications_deployed': ['ntnx-base'],  # snap-to-s3 NOT deployed\n  'msp_registry': {'StoragePlugin': 'LOCAL_DISK'},\n  'msp_network_type': 'Ipv4',\n  'pc_ip': '10.96.96.167',\n}\n{code}\n\nh3. Failure Summary\n\nThe test failed in CLASS_SETUP when {{SnaptoS3.manual_steps_handler_onprem(self.pc)}} called {{mspctl application apply snap-to-s3 --filepath ./clustermgmt-nc2.yaml -c msp}} via SSH on PC VM 10.96.96.158. The SSH command timed out after 180 seconds with:\n\n{code}\nNuTestSSHTimeoutError: Timedout executing command source /etc/profile;\nmspctl application apply snap-to-s3 --filepath ./clustermgmt-nc2.yaml -c msp\nin 180 secs with error: TimeoutError()\n{code}\n\n*Root cause (observed):* The MSP controller failed to pull Docker image {{artifactory.dyn.ntnxdpro.com/canaveral-legacy-docker/nutanix-core/ntnx-api-clustermgmt-nc2-pc:656}} with a persistent authorization error starting at 2026-07-25T19:00:10Z ({{msp_controller.out.20260725-180905Z}}):\n\n{code}\n[ERROR] command failed: docker pull artifactory.dyn.ntnxdpro.com/canaveral-legacy-docker/\n        nutanix-core/ntnx-api-clustermgmt-nc2-pc:656. error: exit status 1.\n        output: Error response from daemon: unauthorized: The client does not have\n        permission for manifest\n{code}\n\nThe MSP controller made 5 inner retries per outer attempt and 26+ outer retries across the 19:00:10\u201319:15:39 window (observed in msp_controller.out \u2014 Retry #0 through #25 logged). The image was also absent from the MSP local registry at both namespace paths checked ({{nutanix/ntnx-api-clustermgmt-nc2-pc:656}} and {{ntnx-api-clustermgmt-nc2-pc:656}}, observed).\n\n*Causal chain:*\n# {{clustermgmt-nc2.yaml}} specifies image {{ntnx-api-clustermgmt-nc2-pc:656}} sourced from {{artifactory.dyn.ntnxdpro.com/canaveral-legacy-docker/nutanix-core/}} (observed via app_apply.go log lines).\n# MSP controller checks local MSP registry \u2192 image not present (observed: \"digest of image not found in registry\").\n# MSP controller falls back to pulling image locally via {{docker pull artifactory.dyn.ntnxdpro.com/...}} \u2192 *unauthorized* (observed).\n# {{mspctl application apply}} blocks waiting for server-side deployment completion.\n# NuTest SSH timeout (180s) expires \u2192 NuTestSSHTimeoutError raised in CLASS_SETUP.\n\n*Observed gap:* The test setup ({{snap_to_s3_v4.py:224\u2013226}}) authenticates Docker only to {{docker.dyn.ntnxdpro.com}} via a hardcoded {{docker login}} call, not to {{artifactory.dyn.ntnxdpro.com}}. The exact reason the PC VM lacks Artifactory credentials \u2014 whether credentials were never configured in the MSP controller, whether they expired, or whether tag {{:656}} no longer exists in that Artifactory repository \u2014 cannot be determined from the available logs alone.\n\n*MSP cluster health (observed):* The MSP cluster itself was healthy at logbay time: msp_validator ran 41/41 tests SUCCEEDED (msp_validator_from_logbay.out), MSP deployment 100% complete. Only {{ntnx-base}} is in the deployed applications list; {{snap-to-s3}} was never added.\n\n*Disposition:* Inferred as an infra/product configuration issue \u2014 the MSP controller (or the PC VM's Docker daemon) is not authorized to pull from {{artifactory.dyn.ntnxdpro.com}} for the image tag referenced in {{clustermgmt-nc2.yaml}}. Whether this is a test setup gap (missing docker login to Artifactory) or a product configuration gap (MSP controller registry credential not configured/expired) needs verification.\n\nh3. Related Tickets\n* None found (JIRA unavailable during triage \u2014 credentials not configured)\n\nh3. Links\n* [Log Bundle|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de7cb5e47522adfbaa5e/6a64de7cb5e47522adfbaa5f&lab=phx1&infra=cdp]\n* [MSP Controller Log|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de7cb5e47522adfbaa5e/6a64de7cb5e47522adfbaa5f/awsclusters/snap2s3/rbac/test_snap2s3_rbac/TestSnap2S3RBAC~~~Cluster_Admin/logbay_PC-10.96.96.167_1785006187/nutest_2026-07-25_19_03_07-2026-07-25-68588588006-10.96.96.158-CW/msp/msp_controller.out.20260725-180905Z&lab=phx1&infra=cdp]\n* [MSP Validator Log|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de7cb5e47522adfbaa5e/6a64de7cb5e47522adfbaa5f/awsclusters/snap2s3/rbac/test_snap2s3_rbac/TestSnap2S3RBAC~~~Cluster_Admin/logbay_PC-10.96.96.167_1785006187/nutest_2026-07-25_19_03_07-2026-07-25-68588588006-10.96.96.158-CW/msp/msp_validator_from_logbay.out&lab=phx1&infra=cdp]\n* [Test snap_to_s3_v4.py (manual_steps_handler_onprem)|https://sourcegraph.ntnxdpro.com/nugerrit.ntnxdpro.com/nutest-py3-tests/-/blob/workflows/awsclusters/snap_to_s3_v4.py?L149-248]\n* [Test snap2s3_grbac_helper.py|https://sourcegraph.ntnxdpro.com/nugerrit.ntnxdpro.com/nutest-py3-tests/-/blob/workflows/awsclusters/snap2s3_grbac_helper.py?L41-69]"
+      }
+    },
+    "sessions": {
+      "6a64de78b5e475229b535b80": "ses_1785390961470_ie5p9t",
+      "6a64de78b5e475229b535b84": "ses_1785259224528_8vt5x9",
+      "6a64de78b5e475229b535b88": "ses_1785386962675_bmp25a",
+      "6a64de78b5e47522a15fe833": "ses_1785300152741_0qspbi",
+      "6a64de78b5e47522a15fe838": "ses_1785311065157_u6r8n9",
+      "6a64de7a8e79ce055281d44c": "ses_1785234344257_0g8zh1",
+      "6a64de7cb5e47522adfbaa5f": "ses_1785322495069_cemrmr"
+    },
+    "follow_up_history_by_testcase": {
+      "6a64de78b5e475229b535b84": [
+        {
+          "mode": "agent",
+          "role": "user",
+          "text": "Create ENG Jira ticket"
+        }
+      ],
+      "6a64de78b5e47522a15fe833": [
+        {
+          "mode": "agent",
+          "role": "user",
+          "text": "create eng ticket for this"
+        },
+        {
+          "data": {
+            "classification": "Product Issue",
+            "confidence": "High",
+            "failing_code": {
+              "file": "cdp/server/stargate/content_cache/cache_stats_html.cc",
+              "line_range": "51-51",
+              "snippet": "CHECK(sizeof(color) / sizeof(string) >= type_name.size()) << \"size of color[] should be greater than or equal to ContentCache::kNumDataTypes\"; // color[] has 10 entries but kNumDataTypes==13"
+            },
+            "follow_up_answer": "No JIRA ticket creation MCP tool is available in the connected servers (gw-panacea, gw-jita, gw-glean, gw-sourcegraph, gw-supportgpt). The regx-data server is in an error state. The ticket content below is fully formatted and ready to paste directly into https://jira.nutanix.com/secure/CreateIssue.jspa \u2014 Project: ENG, Issue Type: Bug. Since ENG-957251 is already fixed, this ticket should be filed as a DUPLICATE of ENG-957251 immediately upon creation.\n\n--- JIRA TICKET CONTENT (READY TO PASTE) ---\n\nProject: ENG\nIssue Type: Bug\nPriority: P3 \u2013 Medium\nComponent/s: Stargate\nLabels: regression, stargate, content-cache, blockstore, master-branch\nAffects Version/s: master (el9-opt), GBN 1784943914\nFix Version/s: master (post-2026-07-23 build)\nLinked Issues: Duplicate of ENG-957251\n\nSummary:\n[master] Stargate FATAL cache_stats_html.cc:51 \u2013 color[] size 10 < kNumDataTypes 13 \u2013 test_blockstore_remove_add_disk (duplicate of ENG-957251)\n\nDescription (wiki markup, paste into JIRA Description field):\n\nh2. Bug Report: Stargate FATAL \u2013 cache_stats_html.cc:51 color[] array size mismatch (ContentCache::kNumDataTypes=13 > 10) \u2014 Duplicate of ENG-957251\n\nh3. Test Information\n* *Testcase*: cdp.blockstore.infrastructure.test_blockstore_infrastructure.TestBlockstoreInfrastructure~~~nvme_serviceability.test_blockstore_remove_add_disk\n* *Cluster*: ragusa (4-node NVMe AHV, blockstore enabled)\n* *NOS Version*: master (el9-opt)\n* *Build Commit*: 45b246ed6a16bec046f604ef0e1fc44a0f5baf54\n* *GBN*: 1784943914\n* *Date*: 2026-07-26\n* *Failure Stage*: TEST_TEARDOWN (log scanning)\n\nh3. Cluster Configuration\n{code:python}\n{'cluster': 'ragusa', 'node_count': 4, 'hypervisor': 'ahv', 'blockstore_enabled': True, 'disk_type': 'NVMe', 'nos_branch': 'master', 'build_commit': '45b246ed6a16bec046f604ef0e1fc44a0f5baf54', 'gbn': '1784943914'}\n{code}\n\nh3. Failure Summary\nThe test body *completed successfully*: all 14 disk remove/add cycles with blockstore verification passed, IO integrity and AES validation passed. The test was marked FAILED solely because the log scanner (error_patterns.py, step 45 of teardown) detected repeated stargate fatals.\n\nRoot cause: Stargate on all 4 CVMs hit a crash loop from ~2026-07-26 15:29 onward:\n{code}\ncache_stats_html.cc:51] Check failed: sizeof(color) / sizeof(string) >= type_name.size() (10 vs. 13)\nsize of color[] should be greater than or equal to ContentCache::kNumDataTypes\n{code}\n\nThe static `color[]` array in `ContentCacheStats::GenerateBarGraph()` has 10 entries. `ContentCache::kNumDataTypes` is 13 (3 new types added without updating `color[]`). Every ~10 minutes, the NuTest HTTP poller hits `/h/cache_stats_html`, the CHECK fires, stargate crashes. All 4 CVMs (10.40.225.22, .27, .32, .37) each have \u22651 core dump.\n\n*This is a duplicate of ENG-957251.* Fix is already committed (31a670988c4a0824b82784612b3ad04ae501e7a7, 2026-07-23). The build under test predates the fix.\n\nh3. Stack Trace\n{code}\n#3  google::LogMessage::Fail() at logging.cc:1332\n#7  nutanix::content_cache::ContentCacheStats::GenerateBarGraph(...) at cache_stats_html.cc:51\n#8  nutanix::content_cache::ContentCache::HitRateStats() at content_cache.cc:6622\n#9  nutanix::content_cache::ContentCache::DisplayCacheStats(bool) at content_cache.cc:6566\n#10 nutanix::stargate::StargateStats::ContentCacheStats(...) at stargate_stats.cc:7050\n{code}\n\nh3. Cores Recorded\n* 10.40.225.22 \u2014 stargate PID 262179 @ 2026-07-26 15:39:40\n* 10.40.225.27 \u2014 stargate PID 558562 @ 2026-07-26 17:29:33\n* 10.40.225.32 \u2014 stargate PID 680785 @ 2026-07-26 18:19:26\n* 10.40.225.37 \u2014 stargate PID 474797 @ 2026-07-26 17:09:26\n\nh3. Related Tickets\n* *ENG-957251* \u2014 Root fix (same fatal, committed 2026-07-23) \u2014 RESOLVED\n* *ENG-960212* \u2014 Closed as duplicate of ENG-957251\n* *ENG-960203* \u2014 Closed as duplicate of ENG-957251\n\nh3. Links\n* [Log Bundle|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e47522a15fe831/6a64de78b5e47522a15fe833&lab=phx1&infra=cdp]\n* [ENG-957251 (root fix)|https://jira.nutanix.com/browse/ENG-957251]\n\nh3. Disposition\nProduct bug in the build under test. Re-run on a post-2026-07-23 build to confirm green. Close this ticket as Duplicate of ENG-957251.",
+            "jira_duplicates": [
+              "ENG-957251",
+              "ENG-960212",
+              "ENG-960203"
+            ],
+            "related_components": [
+              "Stargate",
+              "ContentCache",
+              "BlockstoreInfrastructure"
+            ],
+            "root_cause": "Stargate crash loop on all 4 CVMs caused by a missing `color[]` array entry in `cache_stats_html.cc:51`. The static `color[]` array has 10 entries but `ContentCache::kNumDataTypes` is 13 \u2014 three new ContentCache data types were added without updating the color array in `ContentCacheStats::GenerateBarGraph()`. Every ~10-minute HTTP stats collection request to `/h/cache_stats_html` triggers `CHECK(sizeof(color)/sizeof(string) >= type_name.size())` \u2192 stargate FATAL + core. The test body itself completed successfully (all 14 disk remove/add cycles with blockstore verification passed; IO integrity and AES validation passed). The test was marked FAILED solely because `error_patterns.py` log scanning (step 45, TT phase) detected the accumulated stargate fatals in `error_patterns_ragusa/PE/errors.json`. The build under test (GBN 1784943914, commit 45b246ed6a16bec046f604ef0e1fc44a0f5baf54) predates the fix committed on 2026-07-23 for ENG-957251.",
+            "suggested_fix": "Duplicate of ENG-957251 (already fixed by commit 31a670988c4a0824b82784612b3ad04ae501e7a7 on 2026-07-23, merged to ntnxdb-master). Mark this occurrence as a duplicate of ENG-957251 and re-run the test on a build that includes GBN > the fix commit date (post-2026-07-23). The fix is to add 3 missing entries to the `color[]` array in `cache_stats_html.cc` to match `ContentCache::kNumDataTypes=13`.",
+            "triage_report": "h2. Bug Report: Stargate FATAL \u2013 cache_stats_html.cc:51 color[] array size mismatch (ContentCache::kNumDataTypes=13 > 10) \u2014 Duplicate of ENG-957251\n\nh3. Test Information\n* *Testcase*: cdp.blockstore.infrastructure.test_blockstore_infrastructure.TestBlockstoreInfrastructure~~~nvme_serviceability.test_blockstore_remove_add_disk\n* *Cluster*: ragusa (4-node NVMe AHV, blockstore enabled)\n* *NOS Version*: master (el9-opt)\n* *Build Commit*: 45b246ed6a16bec046f604ef0e1fc44a0f5baf54\n* *GBN*: 1784943914\n* *Date*: 2026-07-26\n* *Failure Stage*: TEST_TEARDOWN (log scanning)\n\nh3. Cluster Configuration\n{code:python}\n{'cluster': 'ragusa', 'node_count': 4, 'hypervisor': 'ahv', 'blockstore_enabled': True, 'disk_type': 'NVMe', 'nos_branch': 'master', 'build_commit': '45b246ed6a16bec046f604ef0e1fc44a0f5baf54', 'gbn': '1784943914'}\n{code}\n\nh3. Failure Summary\nThe test body *completed successfully*: all 14 disk remove/add cycles with blockstore verification passed, IO integrity and AES validation passed. The test was marked FAILED solely because the log scanner (error_patterns.py, step 45 of teardown) detected repeated stargate fatals.\n\nRoot cause: Stargate on all 4 CVMs hit a crash loop from ~2026-07-26 15:29 onward:\n{code}\ncache_stats_html.cc:51] Check failed: sizeof(color) / sizeof(string) >= type_name.size() (10 vs. 13)\nsize of color[] should be greater than or equal to ContentCache::kNumDataTypes\n{code}\n\nThe static `color[]` array in `ContentCacheStats::GenerateBarGraph()` has 10 entries. `ContentCache::kNumDataTypes` is 13 (3 new types added without updating `color[]`). Every ~10 minutes, the NuTest HTTP poller hits `/h/cache_stats_html`, the CHECK fires, stargate crashes. All 4 CVMs (10.40.225.22, .27, .32, .37) each have \u22651 core dump.\n\n*This is a duplicate of ENG-957251.* Fix is already committed (31a670988c4a0824b82784612b3ad04ae501e7a7, 2026-07-23). The build under test predates the fix.\n\nh3. Stack Trace\n{code}\n#3  google::LogMessage::Fail() at logging.cc:1332\n#7  nutanix::content_cache::ContentCacheStats::GenerateBarGraph(...) at cache_stats_html.cc:51\n#8  nutanix::content_cache::ContentCache::HitRateStats() at content_cache.cc:6622\n#9  nutanix::content_cache::ContentCache::DisplayCacheStats(bool) at content_cache.cc:6566\n#10 nutanix::stargate::StargateStats::ContentCacheStats(...) at stargate_stats.cc:7050\n{code}\n\nh3. Cores Recorded\n* 10.40.225.22 \u2014 stargate PID 262179 @ 2026-07-26 15:39:40\n* 10.40.225.27 \u2014 stargate PID 558562 @ 2026-07-26 17:29:33\n* 10.40.225.32 \u2014 stargate PID 680785 @ 2026-07-26 18:19:26\n* 10.40.225.37 \u2014 stargate PID 474797 @ 2026-07-26 17:09:26\n\nh3. Related Tickets\n* *ENG-957251* \u2014 Root fix (same fatal, committed 2026-07-23) \u2014 RESOLVED\n* *ENG-960212* \u2014 Closed as duplicate of ENG-957251\n* *ENG-960203* \u2014 Closed as duplicate of ENG-957251\n\nh3. Links\n* [Log Bundle|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e47522a15fe831/6a64de78b5e47522a15fe833&lab=phx1&infra=cdp]\n* [ENG-957251 (root fix)|https://jira.nutanix.com/browse/ENG-957251]\n\nh3. Disposition\nProduct bug in the build under test. Re-run on a post-2026-07-23 build to confirm green. Close this ticket as Duplicate of ENG-957251."
+          },
+          "mode": "agent",
+          "role": "assistant"
+        },
+        {
+          "mode": "agent",
+          "role": "user",
+          "text": "create eng ticket for this"
+        },
+        {
+          "data": {
+            "classification": "Product Issue",
+            "confidence": "High",
+            "failing_code": {
+              "file": "cdp/server/stargate/content_cache/cache_stats_html.cc",
+              "line_range": "51-51",
+              "snippet": "CHECK(sizeof(color) / sizeof(string) >= type_name.size()) << \"size of color[] should be greater than or equal to ContentCache::kNumDataTypes\"; // color[] has 10 entries but kNumDataTypes==13"
+            },
+            "follow_up_answer": "JIRA credentials are not configured on this machine (JIRA_URL / JIRA_PERSONAL_TOKEN env vars absent; no 'atlassian' server in ~/.cursor/mcp.json). Ticket cannot be auto-created. To create it, export your PAT and run the commands below.\n\nNOTE: Since this is a confirmed duplicate of ENG-957251 (already RESOLVED/fixed), the recommended action is NOT to create a standalone new ticket, but to update ENG-957251 with this repro evidence using update-existing. However, if a new tracking ticket is required (e.g. for this test run's regression record), use the create + merge-duplicate flow below.\n\n--- OPTION A: Update ENG-957251 directly with this repro (preferred) ---\n\nexport JIRA_URL='https://jira.nutanix.com'\nexport JIRA_PERSONAL_TOKEN='<your-PAT>'\nJIRA_HELPER='/home/sudharshan.musali/internal_project/regx/.cursor/skills/triage-cdp-test-failure/jira_helper.py'\n\npython3 \"$JIRA_HELPER\" update-existing \\\n  --issue ENG-957251 \\\n  --report-file /tmp/jira_report.txt \\\n  --append-environment 'https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e47522a15fe831/6a64de78b5e47522a15fe833&lab=phx1&infra=cdp' \\\n  --add-labels backup_to_shrek \\\n  --add-test-case-name 'cdp.blockstore.infrastructure.test_blockstore_infrastructure.TestBlockstoreInfrastructure~~~nvme_serviceability.test_blockstore_remove_add_disk'\n\n--- OPTION B: Create new ticket + immediately link as duplicate of ENG-957251 ---\n\n# Step 1: Write report to temp file (see triage_report field below)\ncat > /tmp/jira_report.txt << 'REPORT_EOF'\n<paste triage_report content here>\nREPORT_EOF\n\n# Step 2: Create the ticket\npython3 \"$JIRA_HELPER\" create \\\n  --project ENG \\\n  --summary '[master] Stargate FATAL cache_stats_html.cc:51 color[] size 10 < kNumDataTypes 13 \u2013 test_blockstore_remove_add_disk (dup ENG-957251)' \\\n  --type Bug \\\n  --description-file /tmp/jira_report.txt \\\n  --components 'Stargate' \\\n  --fields '{\"customfield_15160\": {\"value\": \"Stargate\"}, \"customfield_18060\": [\"cdp.blockstore.infrastructure.test_blockstore_infrastructure.TestBlockstoreInfrastructure~~~nvme_serviceability.test_blockstore_remove_add_disk\"], \"customfield_13260\": {\"value\": \"No\"}, \"customfield_10011\": [{\"value\": \"Functional\"}], \"versions\": [{\"name\": \"master\"}], \"fixVersions\": [{\"name\": \"Triage\"}], \"environment\": \"https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e47522a15fe831/6a64de78b5e47522a15fe833&lab=phx1&infra=cdp\", \"labels\": [\"backup_to_shrek\"]}'\n\n# Step 3: After creation, note the new key (e.g. ENG-XXXXXX), then link as duplicate\npython3 \"$JIRA_HELPER\" merge-duplicate \\\n  --dup ENG-XXXXXX \\\n  --orig ENG-957251 \\\n  --report-file /tmp/jira_report.txt \\\n  --add-labels backup_to_shrek",
+            "jira_duplicates": [
+              "ENG-957251",
+              "ENG-960212",
+              "ENG-960203"
+            ],
+            "related_components": [
+              "Stargate",
+              "ContentCache",
+              "BlockstoreInfrastructure"
+            ],
+            "root_cause": "Stargate crash loop on all 4 CVMs caused by a missing `color[]` array entry in `cache_stats_html.cc:51`. The static `color[]` array has 10 entries but `ContentCache::kNumDataTypes` is 13 \u2014 three new ContentCache data types were added without updating the color array in `ContentCacheStats::GenerateBarGraph()`. Every ~10-minute HTTP stats collection request to `/h/cache_stats_html` triggers `CHECK(sizeof(color)/sizeof(string) >= type_name.size())` \u2192 stargate FATAL + core. The test body itself completed successfully (all 14 disk remove/add cycles with blockstore verification passed; IO integrity and AES validation passed). The test was marked FAILED solely because `error_patterns.py` log scanning (step 45, TT phase) detected the accumulated stargate fatals in `error_patterns_ragusa/PE/errors.json`. The build under test (GBN 1784943914, commit 45b246ed6a16bec046f604ef0e1fc44a0f5baf54) predates the fix committed on 2026-07-23 for ENG-957251.",
+            "suggested_fix": "Duplicate of ENG-957251 (already fixed by commit 31a670988c4a0824b82784612b3ad04ae501e7a7 on 2026-07-23, merged to ntnxdb-master). The fix is to add 3 missing entries to the `color[]` array in `cache_stats_html.cc` to match `ContentCache::kNumDataTypes=13`. Re-run the test on a build that includes GBN > the fix commit date (post-2026-07-23).",
+            "triage_report": "h2. Bug Report: Stargate FATAL \u2013 cache_stats_html.cc:51 color[] array size mismatch (ContentCache::kNumDataTypes=13 > 10) \u2014 Duplicate of ENG-957251\n\nh3. Test Information\n* *Testcase*: cdp.blockstore.infrastructure.test_blockstore_infrastructure.TestBlockstoreInfrastructure~~~nvme_serviceability.test_blockstore_remove_add_disk\n* *Cluster*: ragusa (4-node NVMe AHV, blockstore enabled)\n* *NOS Version*: master (el9-opt)\n* *Build Commit*: 45b246ed6a16bec046f604ef0e1fc44a0f5baf54\n* *GBN*: 1784943914\n* *Date*: 2026-07-26\n* *Failure Stage*: TEST_TEARDOWN (log scanning)\n\nh3. Cluster Configuration\n{code:python}\n{'cluster': 'ragusa', 'node_count': 4, 'hypervisor': 'ahv', 'blockstore_enabled': True, 'disk_type': 'NVMe', 'nos_branch': 'master', 'build_commit': '45b246ed6a16bec046f604ef0e1fc44a0f5baf54', 'gbn': '1784943914'}\n{code}\n\nh3. Failure Summary\nThe test body *completed successfully*: all 14 disk remove/add cycles with blockstore verification passed, IO integrity and AES validation passed. The test was marked FAILED solely because the log scanner (error_patterns.py, step 45 of teardown) detected repeated stargate fatals.\n\nRoot cause: Stargate on all 4 CVMs hit a crash loop from ~2026-07-26 15:29 onward:\n{code}\ncache_stats_html.cc:51] Check failed: sizeof(color) / sizeof(string) >= type_name.size() (10 vs. 13)\nsize of color[] should be greater than or equal to ContentCache::kNumDataTypes\n{code}\n\nThe static `color[]` array in `ContentCacheStats::GenerateBarGraph()` has 10 entries. `ContentCache::kNumDataTypes` is 13 (3 new types added without updating `color[]`). Every ~10 minutes, the NuTest HTTP poller hits `/h/cache_stats_html`, the CHECK fires, stargate crashes. All 4 CVMs (10.40.225.22, .27, .32, .37) each have >=1 core dump.\n\n*This is a duplicate of ENG-957251.* Fix is already committed (31a670988c4a0824b82784612b3ad04ae501e7a7, 2026-07-23). The build under test predates the fix.\n\nh3. Stack Trace\n{code}\n#3  google::LogMessage::Fail() at logging.cc:1332\n#7  nutanix::content_cache::ContentCacheStats::GenerateBarGraph(...) at cache_stats_html.cc:51\n#8  nutanix::content_cache::ContentCache::HitRateStats() at content_cache.cc:6622\n#9  nutanix::content_cache::ContentCache::DisplayCacheStats(bool) at content_cache.cc:6566\n#10 nutanix::stargate::StargateStats::ContentCacheStats(...) at stargate_stats.cc:7050\n{code}\n\nh3. Cores Recorded\n* 10.40.225.22 \u2014 stargate PID 262179 @ 2026-07-26 15:39:40\n* 10.40.225.27 \u2014 stargate PID 558562 @ 2026-07-26 17:29:33\n* 10.40.225.32 \u2014 stargate PID 680785 @ 2026-07-26 18:19:26\n* 10.40.225.37 \u2014 stargate PID 474797 @ 2026-07-26 17:09:26\n\nh3. Related Tickets\n* *ENG-957251* \u2014 Root fix (same fatal, committed 2026-07-23) \u2014 RESOLVED\n* *ENG-960212* \u2014 Closed as duplicate of ENG-957251\n* *ENG-960203* \u2014 Closed as duplicate of ENG-957251\n\nh3. Links\n* [Log Bundle|https://jita.eng.nutanix.com/api/v2/log?log_type=test_log&url=/logs/6a64de78b5e47522a15fe831/6a64de78b5e47522a15fe833&lab=phx1&infra=cdp]\n* [ENG-957251 (root fix)|https://jira.nutanix.com/browse/ENG-957251]\n\nh3. Disposition\nProduct bug in the build under test. Re-run on a post-2026-07-23 build to confirm green. Close this ticket as Duplicate of ENG-957251."
+          },
+          "mode": "agent",
+          "role": "assistant"
+        }
+      ]
+    }
+  },
+  "saved_at": "2026-08-25T06:44:20.192054Z",
+  "count": 22
+}

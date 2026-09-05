@@ -20,12 +20,61 @@ from collections import defaultdict
 from io import BytesIO
 from datetime import datetime, timedelta
 
-from flask import Flask, jsonify, request, Response, stream_with_context, send_file, g
+from flask import Flask, jsonify, request, Response, stream_with_context, send_file, g, has_request_context
 from flask_cors import CORS
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from auth import LDAPAuth, create_jwt, decode_jwt, jwt_required
+from auth import (
+    LDAPAuth,
+    create_jwt,
+    decode_jwt,
+    jwt_required,
+    load_teams_config,
+    validate_team,
+    get_default_team,
+)
+from owner_triage_report import (
+    build_owner_status_table,
+    resolve_task_ids_from_payload,
+)
+from regression_owners import (
+    UNKNOWN_OWNER,
+    load_owner_mapping,
+    resolve_owner as resolve_regression_owner,
+)
+from tag_extra_task_ids import (
+    append_extras_for_tag,
+    classify_task_ids_against_tag,
+    get_extras_for_tag,
+    merge_unique_ids,
+    normalize_task_id_list,
+    plan_accept_after_tagging,
+    remove_extras_for_tag,
+)
+from user_keys import (
+    get_user_key,
+    get_user_keys_masked,
+    upsert_user_keys,
+    store_login_credential,
+    get_login_credential,
+    clear_login_credential,
+)
+
+# ======================================================
+# Load environment variables from a .env file (GLEAN_TOKEN, etc.).
+# Jira auth prefers User Settings → Atlassian Jira Personal Token (see user_keys).
+# Looks in the project root and the backend/ directory. Existing real env vars
+# always win. No-op if python-dotenv isn't installed.
+# ======================================================
+try:
+    from dotenv import load_dotenv
+
+    _here = os.path.dirname(os.path.abspath(__file__))
+    load_dotenv(os.path.join(os.path.dirname(_here), ".env"))  # <repo>/.env
+    load_dotenv(os.path.join(_here, ".env"))                    # <repo>/backend/.env
+except ImportError:
+    pass
 
 # ======================================================
 # In-memory credential cache (stores LDAP passwords for Jita calls)
@@ -55,6 +104,62 @@ def _get_user_credentials(username):
         return None
 
 
+# Corporate email domain used to construct a personal email from a sAMAccountName
+# when LDAP did not return a `mail` attribute (JWT `email` is then empty).
+CORP_EMAIL_DOMAIN = os.getenv("CORP_EMAIL_DOMAIN", "nutanix.com").strip().lstrip("@") or "nutanix.com"
+
+
+def _personal_identity_from_jwt():
+    """Resolve the personal login of the user who accessed the tool from the JWT.
+
+    Returns ``(email, username)`` for the logged-in human. Entities the tool
+    creates in JITA are authenticated as a shared service account, so JITA
+    stamps ``created_by`` = svc account. To keep the *manager/owner* attributed
+    to the real person, we record their identity in the JP's ``emails``/``user``
+    fields (the same place the delete-ownership logic reads the human requester
+    for service-account-created entities).
+
+    Falls back to ``<username>@CORP_EMAIL_DOMAIN`` when LDAP had no ``mail`` so a
+    personal identity is always stamped instead of leaving only the svc account.
+    """
+    payload = getattr(g, "current_user", None)
+    if not isinstance(payload, dict):
+        return "", ""
+    raw_username = (payload.get("sub") or payload.get("username") or "").strip()
+    email = (payload.get("email") or "").strip()
+    if not email and raw_username and "@" not in raw_username:
+        email = f"{raw_username}@{CORP_EMAIL_DOMAIN}"
+    elif not email and "@" in raw_username:
+        email = raw_username
+    # JITA's owner/"Created by" uses the bare sAMAccountName (firstname.lastname),
+    # never an email — strip any domain so `username` matches that pattern.
+    username = raw_username.split("@")[0] if raw_username else ""
+    return email, username
+
+
+def _current_user_jita_auth():
+    """Return the logged-in user's cached LDAP ``(username, password)`` for JITA
+    basic auth, or ``None`` if unavailable.
+
+    JITA attributes ``created_by`` to whoever authenticates the POST. When we
+    have the user's cached credentials (captured at login), creating entities as
+    the user makes JITA's native ``created_by`` = the real person instead of the
+    shared service account. Returns ``None`` when the cache is empty/expired
+    (e.g. token still valid but backend restarted), so callers can fall back to
+    the service account and never fail the operation.
+    """
+    payload = getattr(g, "current_user", None)
+    if not isinstance(payload, dict):
+        return None
+    username = (payload.get("sub") or payload.get("username") or "").strip()
+    if not username:
+        return None
+    creds = _get_user_credentials(username)
+    if creds:
+        return creds  # (username, password)
+    return None
+
+
 # ======================================================
 # Flask App
 # ======================================================
@@ -79,6 +184,38 @@ logger = logging.getLogger(__name__)
 # Constants
 # ======================================================
 JITA_BASE = "https://jita.eng.nutanix.com/api/v2"
+# JITA v1 exposes user records: GET /api/v1/users/<oid> resolves a created_by
+# ObjectId to {user_name, email, display_name, roles}. Used to enforce JP delete
+# ownership (only the real owner / created_by may delete a JP — same as JITA UI).
+JITA_V1_BASE = "https://jita.eng.nutanix.com/api/v1"
+# Optional allowlist of usernames permitted to delete ANY JP/TS (e.g. team admins),
+# in addition to the entity's real owner. Comma-separated sAMAccountNames.
+JP_DELETE_ADMIN_USERS = {
+    u.strip().lower() for u in os.getenv("JP_DELETE_ADMIN_USERS", "").split(",") if u.strip()
+}
+
+# The RegX tool stamps every entity it creates with this JITA user group, so the tag
+# marks an entity as "managed by RegX". JITA has no queryable per-user group
+# membership, so the group roster is configured here (comma-separated sAMAccountNames,
+# overridable via CDP_REG_JARVIS_MEMBERS). Any member may create or delete any
+# RegX-managed (tagged) entity regardless of individual ownership; entities that are
+# NOT tagged with the group (created outside RegX) still require true ownership.
+CDP_REG_JARVIS_GROUP = "cdp_reg_jarvis"
+# Default roster is the CDP regression team; override/extend via CDP_REG_JARVIS_MEMBERS
+# env (comma-separated sAMAccountNames). Env fully replaces the default when set.
+_CDP_REG_JARVIS_DEFAULT_MEMBERS = {
+    "swapnil.wankhede",
+    "shilpa.sattigeri",
+    "thanuja.c",
+    "sudharshan.musali",
+}
+_cdp_reg_jarvis_env = {
+    u.strip().lower() for u in os.getenv("CDP_REG_JARVIS_MEMBERS", "").split(",") if u.strip()
+}
+CDP_REG_JARVIS_MEMBERS = _cdp_reg_jarvis_env or _CDP_REG_JARVIS_DEFAULT_MEMBERS
+# Name-regex searches are unindexed on JITA and scale with the result limit, so the
+# search endpoint needs a longer read timeout than the default one-shot GETs.
+JITA_SEARCH_TIMEOUT = int(os.getenv("JITA_SEARCH_TIMEOUT", "30"))
 # QMS coupon service (used by JITA's Provider page "Validate" button for global pool).
 QMS_BASE_URL = os.getenv("QMS_BASE_URL", "https://qms-api.nucloud.ntnxdpro.com").rstrip("/")
 # JITA manage UI: /manage/job_profiles/<id> often 404s. Open the list and pre-fill name search (filter bar syntax).
@@ -163,9 +300,9 @@ BRANCH_SHORT_NAME_MAP = {
     "ganges-7.5.1-stable": "7.5.1",
 }
 
-# AI Endpoint for failure summary
-AI_BASE = "https://hkn12.ai.nutanix.com/enterpriseai/v1"
-AI_API_KEY = "ddb2b793-1004-49a1-b005-4ddf4c2ade8c"
+# AI Endpoint for failure summary (override via env when the embedded key expires)
+AI_BASE = os.getenv("AI_BASE", "https://hkn12.ai.nutanix.com/enterpriseai/v1")
+AI_API_KEY = os.getenv("AI_API_KEY", "ddb2b793-1004-49a1-b005-4ddf4c2ade8c")
 
 # SSL context for AI endpoint (skip TLS verify)
 SSL_CTX = ssl.create_default_context()
@@ -186,7 +323,27 @@ HEADERS = {
 manual_tasks_store = {}
 
 # Run Plan storage file
-RUN_PLAN_STORAGE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "run_plans.json")
+# Production file by default. For isolated feature testing set:
+#   REGX_RUN_PLANS_FILE=/path/to/run_plans_test.json
+# so dummy plans never write into production run_plans.json.
+_RUN_PLANS_DEFAULT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "run_plans.json")
+RUN_PLAN_STORAGE = os.environ.get("REGX_RUN_PLANS_FILE") or _RUN_PLANS_DEFAULT
+
+
+def _is_dummy_run_plan(run_plan):
+    """Dummy/test plans must not auto-trigger into production schedules."""
+    if not isinstance(run_plan, dict):
+        return False
+    if run_plan.get("is_dummy") is True:
+        return True
+    name = (run_plan.get("name") or "").strip()
+    tag = (run_plan.get("tag_name") or "").strip()
+    for value in (name, tag):
+        upper = value.upper()
+        if upper.startswith("[TEST]") or upper.startswith("DUMMY_") or upper.startswith("DUMMY-"):
+            return True
+    return False
+
 
 def load_run_plans():
     """Load run plans from JSON file, backfilling missing fields on older entries."""
@@ -204,6 +361,9 @@ def load_run_plans():
                     dirty = True
                 if "service_account" not in rp:
                     rp["service_account"] = ""
+                    dirty = True
+                if "is_dummy" not in rp:
+                    rp["is_dummy"] = _is_dummy_run_plan(rp)
                     dirty = True
             if dirty:
                 save_run_plans(data)
@@ -242,9 +402,8 @@ def _trigger_scheduled_run_plan(run_plan, data):
         logger.warning(f"[scheduler] Run plan '{rp_name}' has no valid job profiles — skipping")
         return
 
-    svc_name = run_plan.get("service_account", "")
-    trigger_auth = RUN_PLAN_SERVICE_ACCOUNTS.get(svc_name, JITA_SVC_AUTH) if svc_name else JITA_SVC_AUTH
-    logger.info(f"[scheduler] Triggering '{rp_name}' ({len(job_profile_ids)} JP(s)) via {'svc:' + svc_name if svc_name else 'default svc account'}")
+    trigger_auth, triggered_by = _resolve_run_plan_trigger_auth(run_plan, allow_ldap=False)
+    logger.info(f"[scheduler] Triggering '{rp_name}' ({len(job_profile_ids)} JP(s)) via {triggered_by}")
     task_ids = []
     failed_jobs = []
 
@@ -286,7 +445,7 @@ def _trigger_scheduled_run_plan(run_plan, data):
         "id": str(int(time.time() * 1000)),
         "run_plan_id": rp_id,
         "triggered_at": now_iso,
-        "triggered_by": "scheduler (service account)",
+        "triggered_by": f"scheduler ({triggered_by})",
         "task_ids": task_ids,
         "failed_jobs": failed_jobs,
         "status": "success" if not failed_jobs else "partial"
@@ -305,6 +464,9 @@ def _run_plan_scheduler_loop():
                 now = datetime.now()
                 triggered_any = False
                 for rp in data.get("run_plans", []):
+                    if _is_dummy_run_plan(rp):
+                        # Never auto-trigger dummy/test plans into JITA production runs
+                        continue
                     sched = rp.get("schedule_date")
                     if not sched:
                         continue
@@ -368,13 +530,16 @@ def load_regression_config():
                 else:
                     config["default_tag"] = None
             config["added_tags"] = added
+            if not isinstance(config.get("tag_extra_task_ids"), dict):
+                config["tag_extra_task_ids"] = {}
             return config
         return {
             "input_mode": "tag",
             "tag": "cdp_master_full_reg",
             "default_tag": "cdp_master_full_reg",
             "added_tags": ["cdp_master_full_reg"],
-            "task_ids": []
+            "task_ids": [],
+            "tag_extra_task_ids": {},
         }
     except Exception as e:
         logger.error(f"Error loading regression config: {e}")
@@ -383,7 +548,8 @@ def load_regression_config():
             "tag": "cdp_master_full_reg",
             "default_tag": "cdp_master_full_reg",
             "added_tags": ["cdp_master_full_reg"],
-            "task_ids": []
+            "task_ids": [],
+            "tag_extra_task_ids": {},
         }
 
 def save_regression_config(data):
@@ -422,8 +588,20 @@ def load_triage_accuracy_data(tag=None):
     try:
         path = _triage_accuracy_path(tag)
         if os.path.exists(path):
-            with open(path, 'r') as f:
-                return json.load(f)
+            try:
+                with open(path, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError as e:
+                logger.error(
+                    "Corrupt triage accuracy cache %s: %s — deleting so next load can recompute",
+                    path,
+                    e,
+                )
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                return None
         # Migration: copy legacy triage_accuracy_data.json to per-tag file if tag matches
         if tag:
             legacy_path = os.path.join(TRIAGE_ACCURACY_DATA_DIR, "triage_accuracy_data.json")
@@ -444,10 +622,20 @@ def save_triage_accuracy_data(data, tag=None):
     try:
         path = _triage_accuracy_path(tag)
         os.makedirs(TRIAGE_ACCURACY_DATA_DIR, exist_ok=True)
-        with open(path, 'w') as f:
+        # Atomic write: avoid corrupt JSON if two requests save at once
+        tmp_path = f"{path}.tmp.{os.getpid()}"
+        with open(tmp_path, 'w') as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
     except Exception as e:
         logger.error(f"Error saving triage accuracy data: {e}")
+        try:
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
         raise
 
 def invalidate_triage_accuracy_cache(tag=None):
@@ -519,29 +707,7 @@ def delete_failed_analysis_results(tag):
     except Exception as e:
         logger.warning(f"Could not delete failed analysis cache for tag '{tag}': {e}")
 
-# Load regression owners mapping from CSV
-CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "regression_owners.csv")
-owner_mapping = {}
-
-def load_owner_mapping():
-    """Load test prefix to owner mapping from CSV"""
-    global owner_mapping
-    try:
-        if os.path.exists(CSV_PATH):
-            df = pd.read_csv(CSV_PATH, header=0)
-            # CSV format: "Test Area,Regression Owner"
-            for _, row in df.iterrows():
-                test_prefix = str(row.iloc[0]).strip()
-                owner = str(row.iloc[1]).strip() if len(row) > 1 else "Unknown"
-                if test_prefix and owner and test_prefix != "Test Area":  # Skip header row
-                    owner_mapping[test_prefix] = owner
-            logger.info(f"Loaded {len(owner_mapping)} owner mappings from CSV")
-        else:
-            logger.warning(f"CSV file not found at {CSV_PATH}")
-    except Exception as e:
-        logger.error(f"Error loading owner mapping: {e}")
-
-# Load owner mapping on startup
+# Load regression owners mapping from team-scoped data/<TEAM>/regression_owners.csv
 load_owner_mapping()
 
 # ======================================================
@@ -607,59 +773,74 @@ def process_failed_tests(task_id, agave_task):
 # ======================================================
 # API-1: Fetch Regression Tasks
 # ======================================================
-def fetch_regression_tasks(tag=None, task_ids=None):
-    """
-    Fetch regression tasks either by tag or by task IDs
-    
-    Args:
-        tag: Tag name to filter tasks
-        task_ids: List of task IDs to fetch
-    
-    Returns:
-        List of task data
-    """
-    if task_ids:
-        # Fetch tasks by task IDs
-        raw_query = {
-            "_id": {
-                "$in": [{"$oid": tid} for tid in task_ids]
-            }
-        }
-    elif tag:
-        # Fetch tasks by tag (original behavior)
-        raw_query = {
-            "$or": [
-                {"created_by": {
-                    "$in": ["shilpa.sattigeri", "sudharshan.musali"]
-                    }
-                },
-                {"user_groups": {"$in": ["cdp_reg_jarvis"]}}
-            ],
-            "tester_tags": {"$in": [tag]},
-            "system_under_test.component": "main"
-        }
-    else:
-        raise ValueError("Either tag or task_ids must be provided")
+# JITA GET /tasks?raw_query=... blows up with 414 when $in list is huge.
+_JITA_TASK_ID_BATCH = 40
 
-    params = {
-        "limit": 2000,
-        "start": 0,
-        "sort": "-_id",
-        "only": (
-            "label,branch,status,created_by,test_result_count,"
-            "created_at,end_time"
-        ),
-        "raw_query": json.dumps(raw_query)
-    }
+
+def _fetch_regression_tasks_raw(tag=None, task_ids=None, only=None):
+    """Low-level JITA task list fetch (no tag-extra merge). Batches large task_id lists."""
+    only_fields = only or (
+        "label,branch,status,created_by,test_result_count,"
+        "created_at,end_time,tester_tags"
+    )
+
+    def _one_get(raw_query):
+        params = {
+            "limit": 2000,
+            "start": 0,
+            "sort": "-_id",
+            "only": only_fields,
+            "raw_query": json.dumps(raw_query),
+        }
+        # Tag queries can be slow; 30s caused empty coverage when cache missing
+        resp = session.get(f"{JITA_BASE}/tasks", params=params, timeout=90)
+        resp.raise_for_status()
+        return resp.json().get("data", []) or []
 
     try:
-        resp = session.get(
-            f"{JITA_BASE}/tasks",
-            params=params,
-            timeout=30
-        )
-        resp.raise_for_status()
-        return resp.json().get("data", [])
+        if task_ids:
+            normalized = [str(t).strip() for t in task_ids if str(t).strip()]
+            if not normalized:
+                return []
+            # Chunk to avoid 414 Request-URI Too Long on JITA
+            if len(normalized) <= _JITA_TASK_ID_BATCH:
+                return _one_get({"_id": {"$in": [{"$oid": tid} for tid in normalized]}})
+            merged = []
+            seen = set()
+            for i in range(0, len(normalized), _JITA_TASK_ID_BATCH):
+                chunk = normalized[i : i + _JITA_TASK_ID_BATCH]
+                logger.info(
+                    "JITA tasks fetch batch %s–%s / %s",
+                    i + 1,
+                    min(i + _JITA_TASK_ID_BATCH, len(normalized)),
+                    len(normalized),
+                )
+                for t in _one_get({"_id": {"$in": [{"$oid": tid} for tid in chunk]}}):
+                    oid = (t.get("_id") or {}).get("$oid")
+                    key = str(oid).lower() if oid else None
+                    if key and key in seen:
+                        continue
+                    if key:
+                        seen.add(key)
+                    merged.append(t)
+            return merged
+
+        if tag:
+            raw_query = {
+                "$or": [
+                    {
+                        "created_by": {
+                            "$in": ["shilpa.sattigeri", "sudharshan.musali"]
+                        }
+                    },
+                    {"user_groups": {"$in": ["cdp_reg_jarvis"]}},
+                ],
+                "tester_tags": {"$in": [tag]},
+                "system_under_test.component": "main",
+            }
+            return _one_get(raw_query)
+
+        raise ValueError("Either tag or task_ids must be provided")
     except requests.exceptions.ConnectionError as e:
         logger.error(f"Connection error fetching regression tasks: {e}")
         raise ConnectionError(f"Failed to connect to JITA API. Please check your network connection and ensure 'jita.eng.nutanix.com' is accessible.")
@@ -669,6 +850,84 @@ def fetch_regression_tasks(tag=None, task_ids=None):
     except requests.exceptions.RequestException as e:
         logger.error(f"Request error fetching regression tasks: {e}")
         raise Exception(f"Error fetching regression tasks: {str(e)}")
+
+
+def fetch_regression_tasks(tag=None, task_ids=None, include_tag_extras=True):
+    """
+    Fetch regression tasks either by tag or by task IDs.
+
+    When tag is used, also merges manually appended task IDs stored under
+    config tag_extra_task_ids[tag] so "+" additions are not lost on next tag fetch.
+
+    If both tag and task_ids are provided, tag wins (selected dashboard job).
+    Pass tag=None for explicit task_ids-only queries.
+    """
+    if tag and task_ids:
+        logger.info(
+            "fetch_regression_tasks: tag=%s provided with %s task_ids — using tag (+ extras)",
+            tag,
+            len(task_ids) if hasattr(task_ids, "__len__") else "?",
+        )
+        task_ids = None
+
+    if task_ids:
+        normalized = normalize_task_id_list(task_ids)
+        return _fetch_regression_tasks_raw(task_ids=normalized) if normalized else []
+
+    if not tag:
+        raise ValueError("Either tag or task_ids must be provided")
+
+    tasks = _fetch_regression_tasks_raw(tag=tag) or []
+    if not include_tag_extras:
+        return tasks
+
+    try:
+        config = load_regression_config()
+        extras = get_extras_for_tag(config, tag)
+    except Exception as e:
+        logger.warning(f"Could not load tag_extra_task_ids for '{tag}': {e}")
+        extras = []
+
+    if not extras:
+        return tasks
+
+    found_ids = set()
+    for t in tasks:
+        oid = (t.get("_id") or {}).get("$oid")
+        if oid:
+            found_ids.add(str(oid).lower())
+
+    missing = [tid for tid in extras if tid not in found_ids]
+    if not missing:
+        logger.info(
+            "Tag '%s': all %s extra task_ids already present in tag query",
+            tag, len(extras),
+        )
+        return tasks
+
+    logger.info(
+        "Tag '%s': merging %s extra task_ids (%s missing from tag query)",
+        tag, len(extras), len(missing),
+    )
+    try:
+        extra_tasks = _fetch_regression_tasks_raw(task_ids=missing) or []
+    except Exception as e:
+        logger.error(f"Failed fetching tag extra task_ids for '{tag}': {e}")
+        return tasks
+
+    # Dedupe by oid, preserve tag-query order then extras
+    merged = []
+    seen = set()
+    for t in list(tasks) + list(extra_tasks):
+        oid = (t.get("_id") or {}).get("$oid")
+        if not oid:
+            continue
+        key = str(oid).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(t)
+    return merged
 
 
 # ======================================================
@@ -685,20 +944,20 @@ def fetch_agave_task(task_id):
 # ======================================================
 # Flask Endpoint
 # ======================================================
-def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120):
+def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120, merge=True):
     """
     Fetch test results for multiple tasks in batch.
-    Always uses merge=True to get merged results across all tasks.
-    Fetches all results in a single request with limit=2000.
-    
+
     Args:
         task_ids: List of task IDs to fetch results for
         limit: Number of results to fetch (default: 2000)
         timeout: Request timeout in seconds (default: 120)
-    
+        merge: If True (default), JITA merges duplicate testcases across tasks.
+               Handover / JITA analysis needs merge=False to count per-run passes.
+
     Returns:
-        List of merged test results
-    
+        List of test results
+
     Raises:
         requests.exceptions.Timeout: If request times out
         requests.exceptions.RequestException: For other request errors
@@ -710,10 +969,12 @@ def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120):
     if len(task_ids) > 50:
         timeout = max(timeout, 180)  # At least 3 minutes for large sets
     
-    logger.info(f"Fetching test results for {len(task_ids)} tasks (timeout: {timeout}s, limit: {limit})")
+    logger.info(
+        f"Fetching test results for {len(task_ids)} tasks "
+        f"(timeout: {timeout}s, limit: {limit}, merge={bool(merge)})"
+    )
     
-    # Correct payload structure for merged test results
-    # Verified format: raw_query at top level with agave_task_id query, merge at top level
+    # Correct payload structure: raw_query + merge at top level
     payload = {
         "raw_query": {
             "agave_task_id": {
@@ -727,7 +988,7 @@ def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120):
         "start": 0,
         "limit": limit,
         "sort": "agave_task_id,status",
-        "merge": True  # Must be at top level to get merged results
+        "merge": bool(merge),
     }
     
     # Log payload for verification
@@ -777,14 +1038,28 @@ def fetch_test_results_batch_with_pagination(task_ids, limit=2000, timeout=120):
 # ======================================================
 # Auth Routes (no @jwt_required)
 # ======================================================
+@app.route("/mcp/regression/teams", methods=["GET"])
+def get_teams():
+    """Return available teams for the login dropdown (no auth required)."""
+    config = load_teams_config()
+    return jsonify({
+        "teams": config.get("teams", []),
+        "default_team": config.get("default_team") or get_default_team(),
+    })
+
+
 @app.route("/mcp/regression/auth/login", methods=["POST"])
 def auth_login():
     data = request.get_json(silent=True) or {}
     username = data.get("username", "").strip()
     password = data.get("password", "")
+    team = (data.get("team") or "").strip() or get_default_team()
 
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
+
+    if not validate_team(team):
+        return jsonify({"error": "Invalid team selected"}), 400
 
     ldap_auth = LDAPAuth()
     user_info = ldap_auth.authenticate(username, password)
@@ -798,14 +1073,43 @@ def auth_login():
         user_info["username"],
         user_info.get("displayName", ""),
         user_info.get("email", ""),
+        team=team,
     )
-    return jsonify({"token": token, "user": user_info})
+    # Return a stable shape for FE (login LDAP keys + JWT-style aliases)
+    username = user_info.get("username") or ""
+    display_name = user_info.get("displayName") or username
+    email = user_info.get("email") or ""
+    return jsonify({
+        "token": token,
+        "user": {
+            "username": username,
+            "displayName": display_name,
+            "email": email,
+            "sub": username,
+            "name": display_name,
+            "team": team,
+        },
+    })
 
 
 @app.route("/mcp/regression/auth/me", methods=["GET"])
 @jwt_required
 def auth_me():
-    return jsonify({"user": g.current_user})
+    payload = g.current_user or {}
+    username = payload.get("sub") or payload.get("username") or ""
+    display_name = payload.get("name") or payload.get("displayName") or username
+    email = payload.get("email") or ""
+    team = payload.get("team") or get_default_team()
+    return jsonify({
+        "user": {
+            "username": username,
+            "displayName": display_name,
+            "email": email,
+            "sub": username,
+            "name": display_name,
+            "team": team,
+        },
+    })
 
 
 @app.route("/mcp/regression/auth/logout", methods=["POST"])
@@ -1260,12 +1564,21 @@ def save_regression_config_endpoint():
         if not isinstance(added_tags, list):
             added_tags = []
         
+        existing = load_regression_config()
+        # Preserve per-tag appended task IDs across config saves
+        preserved_extras = existing.get("tag_extra_task_ids") or {}
+        if not isinstance(preserved_extras, dict):
+            preserved_extras = {}
+        if isinstance(data.get("tag_extra_task_ids"), dict):
+            preserved_extras = data.get("tag_extra_task_ids")
+
         config = {
             "input_mode": input_mode,
             "default_tag": default_tag if default_tag else None,
             "added_tags": [str(t).strip() for t in added_tags if t and str(t).strip()],
             "tag": (default_tag or "").strip() if input_mode == "tag" else "",
-            "task_ids": data.get("task_ids", []) if input_mode == "task_ids" else []
+            "task_ids": data.get("task_ids", []) if input_mode == "task_ids" else [],
+            "tag_extra_task_ids": preserved_extras,
         }
         
         # Validate based on input mode
@@ -1286,6 +1599,506 @@ def save_regression_config_endpoint():
         return jsonify(config)
     except Exception as e:
         logger.error(f"Error saving regression config: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def _jita_task_oid(task):
+    """Extract 24-char task oid from JITA task dict (_id as {$oid} or plain string)."""
+    if not isinstance(task, dict):
+        return ""
+    oid = task.get("_id")
+    if isinstance(oid, dict):
+        return str(oid.get("$oid") or "").strip().lower()
+    if oid is not None:
+        return str(oid).strip().lower()
+    return ""
+
+
+def _classify_task_ids_for_tag(task_ids, expected_tag):
+    """
+    Fetch tasks from JITA and classify whether each has expected tester_tag.
+    Returns classify_task_ids_against_tag(...) dict.
+    """
+    normalized = normalize_task_id_list(task_ids)
+    if not normalized:
+        return {"matched": [], "wrong_tag": [], "not_found": []}
+
+    tasks = _fetch_regression_tasks_raw(
+        task_ids=normalized,
+        only="tester_tags,label,branch,status",
+    ) or []
+    meta = {}
+    for t in tasks:
+        oid = _jita_task_oid(t)
+        if not oid:
+            continue
+        meta[oid] = {"tester_tags": t.get("tester_tags") or []}
+    return classify_task_ids_against_tag(normalized, expected_tag, meta)
+
+
+def _add_tester_tag_to_task(task_id, tag_name):
+    """
+    Ensure tester_tag exists on a JITA task.
+
+    Important: JITA rejects full-document PUT on AgaveTask ("list index out of range").
+    Only PUT {"tester_tags": [...]} (partial update) succeeds.
+    Auth is required — unauthenticated PUT returns 403.
+    """
+    task_id = (task_id or "").strip().lower()
+    tag_name = (tag_name or "").strip()
+    if not task_id or not tag_name:
+        return {"task_id": task_id, "success": False, "error": "task_id and tag required"}
+
+    # Resolved at call time (JITA_SVC_AUTH is assigned later in this module).
+    auth = globals().get("JITA_SVC_AUTH")
+    if not auth:
+        return {
+            "task_id": task_id,
+            "success": False,
+            "error": "JITA service auth not configured (restart backend)",
+        }
+
+    headers = {"Content-Type": "application/json"}
+    get_url = f"{JITA_BASE}/tasks/{task_id}"
+    try:
+        get_resp = requests.get(
+            get_url, headers=headers, auth=auth, verify=False, timeout=30
+        )
+        if get_resp.status_code != 200:
+            return {
+                "task_id": task_id,
+                "success": False,
+                "error": f"Failed to fetch task: HTTP {get_resp.status_code}",
+            }
+        existing = get_resp.json().get("data") or {}
+        if not existing:
+            return {"task_id": task_id, "success": False, "error": "Empty task data"}
+
+        tester_tags = existing.get("tester_tags") or []
+        if not isinstance(tester_tags, list):
+            tester_tags = []
+        if tag_name in tester_tags:
+            return {"task_id": task_id, "success": True, "message": "Tag already exists"}
+
+        new_tags = list(tester_tags) + [tag_name]
+        # Partial PUT only — full-document PUT breaks AgaveTask updates on JITA
+        put_resp = requests.put(
+            f"{JITA_BASE}/tasks/{task_id}",
+            headers=headers,
+            json={"tester_tags": new_tags},
+            auth=auth,
+            verify=False,
+            timeout=30,
+        )
+        resp_json = {}
+        try:
+            resp_json = put_resp.json() if put_resp.content else {}
+        except Exception:
+            resp_json = {}
+        msg = (resp_json.get("message") or "").strip()
+        put_ok = put_resp.status_code == 200 and (
+            resp_json.get("success") is True
+            or "successfully updated" in msg.lower()
+            or (resp_json.get("success") is not False and resp_json.get("data") is not None
+                and "failed" not in msg.lower())
+        )
+        if put_resp.status_code == 200 and resp_json.get("success") is False:
+            return {
+                "task_id": task_id,
+                "success": False,
+                "error": msg or "Update failed",
+            }
+        if put_resp.status_code == 200 and "failed" in msg.lower():
+            return {"task_id": task_id, "success": False, "error": msg}
+        if not put_ok:
+            error_msg = msg or (put_resp.text[:200] if put_resp.text else f"HTTP {put_resp.status_code}")
+            return {"task_id": task_id, "success": False, "error": error_msg}
+
+        # Verify tag actually present (JITA can report success without applying)
+        verify = requests.get(
+            get_url, headers=headers, auth=auth, verify=False, timeout=30
+        )
+        if verify.status_code == 200:
+            verified_tags = (verify.json().get("data") or {}).get("tester_tags") or []
+            if tag_name not in (verified_tags if isinstance(verified_tags, list) else []):
+                return {
+                    "task_id": task_id,
+                    "success": False,
+                    "error": f"PUT reported success but tag '{tag_name}' not on task after update",
+                }
+        return {"task_id": task_id, "success": True, "message": "Tag added"}
+    except Exception as e:
+        logger.error(f"Exception adding tester_tag to task {task_id}: {e}", exc_info=True)
+        return {"task_id": task_id, "success": False, "error": str(e)}
+
+
+def _ensure_tester_tag_on_tasks(task_ids, tag_name):
+    """Add tester_tag on each task in parallel. Returns (succeeded_ids, failed_ids, details)."""
+    ids = normalize_task_id_list(task_ids)
+    if not ids:
+        return [], [], []
+    succeeded, failed, details = [], [], []
+    with ThreadPoolExecutor(max_workers=min(5, len(ids))) as executor:
+        futures = {executor.submit(_add_tester_tag_to_task, tid, tag_name): tid for tid in ids}
+        for future in as_completed(futures):
+            result = future.result()
+            details.append(result)
+            tid = result.get("task_id")
+            if result.get("success"):
+                succeeded.append(tid)
+            else:
+                failed.append(tid)
+    return succeeded, failed, details
+
+
+def _remove_tester_tag_from_task(task_id, tag_name):
+    """
+    Remove tester_tag from a JITA task (partial PUT of tester_tags only).
+    """
+    task_id = (task_id or "").strip().lower()
+    tag_name = (tag_name or "").strip()
+    if not task_id or not tag_name:
+        return {"task_id": task_id, "success": False, "error": "task_id and tag required"}
+
+    auth = globals().get("JITA_SVC_AUTH")
+    if not auth:
+        return {
+            "task_id": task_id,
+            "success": False,
+            "error": "JITA service auth not configured (restart backend)",
+        }
+
+    headers = {"Content-Type": "application/json"}
+    get_url = f"{JITA_BASE}/tasks/{task_id}"
+    try:
+        get_resp = requests.get(
+            get_url, headers=headers, auth=auth, verify=False, timeout=30
+        )
+        if get_resp.status_code != 200:
+            return {
+                "task_id": task_id,
+                "success": False,
+                "error": f"Failed to fetch task: HTTP {get_resp.status_code}",
+            }
+        existing = get_resp.json().get("data") or {}
+        if not existing:
+            return {"task_id": task_id, "success": False, "error": "Empty task data"}
+
+        tester_tags = existing.get("tester_tags") or []
+        if not isinstance(tester_tags, list):
+            tester_tags = []
+        if tag_name not in tester_tags:
+            return {"task_id": task_id, "success": True, "message": "Tag already absent"}
+
+        new_tags = [t for t in tester_tags if t != tag_name]
+        put_resp = requests.put(
+            f"{JITA_BASE}/tasks/{task_id}",
+            headers=headers,
+            json={"tester_tags": new_tags},
+            auth=auth,
+            verify=False,
+            timeout=30,
+        )
+        resp_json = {}
+        try:
+            resp_json = put_resp.json() if put_resp.content else {}
+        except Exception:
+            resp_json = {}
+        msg = (resp_json.get("message") or "").strip()
+        if put_resp.status_code == 200 and resp_json.get("success") is False:
+            return {"task_id": task_id, "success": False, "error": msg or "Update failed"}
+        if put_resp.status_code == 200 and "failed" in msg.lower():
+            return {"task_id": task_id, "success": False, "error": msg}
+        put_ok = put_resp.status_code == 200 and (
+            resp_json.get("success") is True
+            or "successfully updated" in msg.lower()
+            or (resp_json.get("success") is not False and "failed" not in msg.lower())
+        )
+        if not put_ok:
+            error_msg = msg or (put_resp.text[:200] if put_resp.text else f"HTTP {put_resp.status_code}")
+            return {"task_id": task_id, "success": False, "error": error_msg}
+
+        verify = requests.get(
+            get_url, headers=headers, auth=auth, verify=False, timeout=30
+        )
+        if verify.status_code == 200:
+            verified_tags = (verify.json().get("data") or {}).get("tester_tags") or []
+            if tag_name in (verified_tags if isinstance(verified_tags, list) else []):
+                return {
+                    "task_id": task_id,
+                    "success": False,
+                    "error": f"PUT reported success but tag '{tag_name}' still on task",
+                }
+        return {"task_id": task_id, "success": True, "message": "Tag removed"}
+    except Exception as e:
+        logger.error(f"Exception removing tester_tag from task {task_id}: {e}", exc_info=True)
+        return {"task_id": task_id, "success": False, "error": str(e)}
+
+
+def _ensure_tester_tag_removed_from_tasks(task_ids, tag_name):
+    """Remove tester_tag on each task in parallel. Returns (succeeded_ids, failed_ids, details)."""
+    ids = normalize_task_id_list(task_ids)
+    if not ids:
+        return [], [], []
+    succeeded, failed, details = [], [], []
+    with ThreadPoolExecutor(max_workers=min(5, len(ids))) as executor:
+        futures = {
+            executor.submit(_remove_tester_tag_from_task, tid, tag_name): tid for tid in ids
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            details.append(result)
+            tid = result.get("task_id")
+            if result.get("success"):
+                succeeded.append(tid)
+            else:
+                failed.append(tid)
+    return succeeded, failed, details
+
+
+@app.route("/mcp/regression/config/tag-extra-task-ids", methods=["GET", "POST", "DELETE"])
+@app.route("/api/mcp/regression/config/tag-extra-task-ids", methods=["GET", "POST", "DELETE"])
+@jwt_required
+def tag_extra_task_ids_endpoint():
+    """
+    Persist / read / remove manually appended JITA task IDs for a regression tag.
+
+    GET  ?tag=...
+    POST { "tag": "...", "task_ids": ["...", "..."], "validate_tag": true }
+         — if a task is missing the tester_tag, add the tag on JITA then persist
+    DELETE / POST action=remove
+         { "tag": "...", "task_ids": ["..."], "remove_tag_from_jita": true }
+         — strip tester_tag on JITA (default), drop from tag_extra_task_ids if present.
+           Client also drops IDs from the regression JITA link.
+    """
+    try:
+        if request.method == "GET":
+            tag = (request.args.get("tag") or "").strip()
+            if not tag:
+                return jsonify({"error": "tag is required"}), 400
+            config = load_regression_config()
+            extras = get_extras_for_tag(config, tag)
+            return jsonify({
+                "tag": tag,
+                "task_ids": extras,
+                "count": len(extras),
+            })
+
+        body = request.get_json(silent=True) or {}
+        action = (body.get("action") or "").strip().lower()
+        if request.method == "DELETE" or action in ("remove", "delete"):
+            tag = (body.get("tag") or request.args.get("tag") or "").strip()
+            task_ids = body.get("task_ids")
+            if task_ids is None and request.args.get("task_ids"):
+                task_ids = request.args.get("task_ids")
+            # Mirror add: strip tag on JITA by default
+            remove_tag_from_jita = body.get("remove_tag_from_jita", True)
+            if isinstance(remove_tag_from_jita, str):
+                remove_tag_from_jita = remove_tag_from_jita.strip().lower() in (
+                    "1", "true", "yes",
+                )
+            if not tag:
+                return jsonify({"error": "tag is required"}), 400
+            incoming = normalize_task_id_list(task_ids)
+            if not incoming:
+                return jsonify({
+                    "error": "No valid 24-char JITA task IDs provided",
+                    "type": "validation_error",
+                }), 400
+
+            tag_stripped = []
+            tag_strip_failed = []
+            tag_strip_errors = []
+            if remove_tag_from_jita:
+                tag_stripped, tag_strip_failed, details = _ensure_tester_tag_removed_from_tasks(
+                    incoming, tag
+                )
+                tag_strip_errors = [
+                    f"{d.get('task_id')}: {d.get('error') or d.get('message')}"
+                    for d in details
+                    if d and not d.get("success")
+                ]
+            else:
+                # No JITA strip — still allow dropping from extras / link
+                tag_stripped = list(incoming)
+
+            # Drop from extras for IDs we successfully untagged (or all if strip skipped)
+            drop_from_extras = list(tag_stripped) if remove_tag_from_jita else list(incoming)
+            config = load_regression_config()
+            removed_from_extras = []
+            remaining = get_extras_for_tag(config, tag)
+            if drop_from_extras:
+                try:
+                    updated, remaining, removed_from_extras = remove_extras_for_tag(
+                        config, tag, drop_from_extras
+                    )
+                    if removed_from_extras:
+                        save_regression_config(updated)
+                except ValueError as ve:
+                    return jsonify({"error": str(ve), "type": "validation_error"}), 400
+
+            if not tag_stripped and tag_strip_failed:
+                return jsonify({
+                    "success": False,
+                    "error": (
+                        f"Could not remove tester_tag '{tag}' from any task. "
+                        "Nothing changed on JITA / extras."
+                        + (f" Details: {'; '.join(tag_strip_errors[:5])}" if tag_strip_errors else "")
+                    ),
+                    "type": "untag_failed",
+                    "tag": tag,
+                    "removed": [],
+                    "removed_from_extras": [],
+                    "untagged_now": [],
+                    "untag_failed": tag_strip_failed,
+                    "tag_strip_errors": tag_strip_errors,
+                    "task_ids": remaining,
+                    "count": len(remaining),
+                }), 400
+
+            logger.info(
+                "tag_extra_task_ids | REMOVE tag=%s | untagged=%s | extras_removed=%s | "
+                "remaining_extras=%s | strip_failed=%s",
+                tag, len(tag_stripped), len(removed_from_extras), len(remaining),
+                len(tag_strip_failed),
+            )
+            # Full regression link changed → stale triage-accuracy / TG coverage cache
+            try:
+                invalidate_triage_accuracy_cache(tag)
+            except Exception as inv_err:
+                logger.warning("Failed to invalidate triage accuracy cache after remove: %s", inv_err)
+            return jsonify({
+                "success": True,
+                "tag": tag,
+                "task_ids": remaining,
+                # IDs safe to drop from regression JITA link (tag stripped / already absent)
+                "removed": tag_stripped,
+                "removed_from_extras": removed_from_extras,
+                "untagged_now": tag_stripped,
+                "untag_failed": tag_strip_failed,
+                "tag_strip_errors": tag_strip_errors,
+                "count": len(remaining),
+            })
+
+        tag = (body.get("tag") or "").strip()
+        task_ids = body.get("task_ids")
+        validate_tag = body.get("validate_tag", True)
+        add_missing_tag = body.get("add_missing_tag", True)
+        if isinstance(validate_tag, str):
+            validate_tag = validate_tag.strip().lower() in ("1", "true", "yes")
+        if isinstance(add_missing_tag, str):
+            add_missing_tag = add_missing_tag.strip().lower() in ("1", "true", "yes")
+        if not tag:
+            return jsonify({"error": "tag is required"}), 400
+
+        incoming = normalize_task_id_list(task_ids)
+        if not incoming:
+            return jsonify({
+                "error": "No valid 24-char JITA task IDs provided",
+                "type": "validation_error",
+            }), 400
+
+        tagged_now = []
+        rejected_tag_failed = []
+        rejected_not_found = []
+        tag_apply_details = []
+        accepted = list(incoming)
+
+        if validate_tag:
+            try:
+                classification = _classify_task_ids_for_tag(incoming, tag)
+            except Exception as e:
+                logger.error(f"Tag validation failed for extras under '{tag}': {e}", exc_info=True)
+                return jsonify({
+                    "error": f"Failed to validate task tags against JITA: {e}",
+                    "type": "jita_validation_error",
+                }), 502
+
+            needs_tag = classification["wrong_tag"]
+            rejected_not_found = classification["not_found"]
+
+            tag_apply_details = []
+            if needs_tag and add_missing_tag:
+                logger.info(
+                    "tag_extra_task_ids | adding tester_tag '%s' on %s task(s)",
+                    tag, len(needs_tag),
+                )
+                succeeded, failed, tag_apply_details = _ensure_tester_tag_on_tasks(needs_tag, tag)
+                tagged_now = succeeded
+                rejected_tag_failed = failed
+            elif needs_tag:
+                rejected_tag_failed = list(needs_tag)
+
+            planned = plan_accept_after_tagging(
+                classification,
+                successfully_tagged=tagged_now,
+                failed_to_tag=rejected_tag_failed,
+            )
+            accepted = planned["accepted"]
+            tagged_now = planned["tagged_now"]
+            rejected_tag_failed = planned["rejected_tag_failed"]
+            rejected_not_found = planned["rejected_not_found"]
+
+        if not accepted:
+            fail_msgs = [
+                f"{d.get('task_id')}: {d.get('error') or d.get('message')}"
+                for d in (tag_apply_details if validate_tag else [])
+                if d and not d.get("success")
+            ]
+            detail = ("; ".join(fail_msgs[:5]) if fail_msgs else "")
+            return jsonify({
+                "success": False,
+                "error": (
+                    f"Could not add any task IDs under tag '{tag}'. "
+                    "Tasks were not found or tag could not be applied."
+                    + (f" Details: {detail}" if detail else "")
+                ),
+                "type": "tag_mismatch",
+                "tag": tag,
+                "newly_added": [],
+                "tagged_now": [],
+                "rejected_wrong_tag": rejected_tag_failed,
+                "rejected_not_found": rejected_not_found,
+                "tag_apply_errors": fail_msgs,
+                "task_ids": get_extras_for_tag(load_regression_config(), tag),
+                "count": len(get_extras_for_tag(load_regression_config(), tag)),
+            }), 400
+
+        config = load_regression_config()
+        try:
+            updated, merged, newly_added = append_extras_for_tag(config, tag, accepted)
+        except ValueError as ve:
+            return jsonify({"error": str(ve), "type": "validation_error"}), 400
+
+        save_regression_config(updated)
+        tag_apply_errors = [
+            f"{d.get('task_id')}: {d.get('error') or d.get('message')}"
+            for d in (tag_apply_details if validate_tag else [])
+            if d and not d.get("success")
+        ]
+        logger.info(
+            "tag_extra_task_ids | tag=%s | added=%s | tagged_now=%s | total=%s | tag_failed=%s | not_found=%s",
+            tag, len(newly_added), len(tagged_now), len(merged),
+            len(rejected_tag_failed), len(rejected_not_found),
+        )
+        # Full regression link grew → force TG coverage / triage-accuracy recompute
+        try:
+            invalidate_triage_accuracy_cache(tag)
+        except Exception as inv_err:
+            logger.warning("Failed to invalidate triage accuracy cache after add: %s", inv_err)
+        return jsonify({
+            "success": True,
+            "tag": tag,
+            "task_ids": merged,
+            "newly_added": newly_added,
+            "tagged_now": tagged_now,
+            "rejected_wrong_tag": rejected_tag_failed,
+            "rejected_not_found": rejected_not_found,
+            "tag_apply_errors": tag_apply_errors,
+            "count": len(merged),
+        })
+    except Exception as e:
+        logger.error(f"Error in tag_extra_task_ids endpoint: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -1341,6 +2154,10 @@ def delete_config_tag():
         if config.get("default_tag") == tag:
             config["default_tag"] = None
             config["tag"] = ""
+        extras_map = config.get("tag_extra_task_ids") or {}
+        if isinstance(extras_map, dict) and tag in extras_map:
+            del extras_map[tag]
+            config["tag_extra_task_ids"] = extras_map
         save_regression_config(config)
         
         invalidate_triage_accuracy_cache(tag)
@@ -1383,17 +2200,6 @@ def get_branches_from_tag():
 
 
 # ---------------------------------------------------
-# Helper: Resolve Owner from Test Name
-# ---------------------------------------------------
-def resolve_owner(test_name):
-    """Resolve owner from test name using prefix mapping"""
-    for prefix, owner in owner_mapping.items():
-        if test_name.startswith(prefix):
-            return owner
-    return "Unknown"
-
-
-# ---------------------------------------------------
 # Helper: Fetch Test Results (POST API – batch)
 # NOTE: This function is deprecated. Use fetch_test_results_batch_with_pagination() instead.
 # Kept for backward compatibility but redirects to pagination version.
@@ -1427,7 +2233,7 @@ def calculate_bulk_issues_qi_impact(bulk_issues, test_data, tag=None):
     milestone = "7.5.1"  # Default milestone
     if tag:
         # Try to extract milestone from tag (e.g., "cdp_master_full_reg" -> "master", "7.5.1" -> "7.5.1")
-        milestone_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', tag)
+        milestone_match = re.search(r'(\d+(?:\.\d+)+)', tag)
         if milestone_match:
             milestone = milestone_match.group(1)
         elif "master" in tag.lower():
@@ -1553,7 +2359,9 @@ def fetch_qi_from_tcms(testcase_name, milestone="7.5.1"):
         float: QI value (operation_success_percentage) or None if not found/error
     """
     try:
-        # Construct payload based on the provided example
+        # Match TCMS UI per-testcase lookup (no SYSTEST_LONGEVITY/LIMITED_RUNS exclusion).
+        # Those tags belong on overall-QI aggregates only; excluding them here makes
+        # TCMS miss the test, fall back to JITA failed-status 0, and inflate QI impact.
         # Use more flexible matching - try exact name match first, then regex
         payload = [{
             "$match": {
@@ -1561,7 +2369,6 @@ def fetch_qi_from_tcms(testcase_name, milestone="7.5.1"):
                     {"target_milestone": milestone},
                     {"last_result": {"$elemMatch": {"pass_name": "overall"}}},
                     {"deleted": False},
-                    {"test_case.metadata.tags": {"$nin": ["SYSTEST_LONGEVITY", "LIMITED_RUNS"]}},
                     {
                         "$or": [
                             {"test_case.name": testcase_name},  # Exact match first
@@ -1936,8 +2743,8 @@ def get_triage_count():
         logger.info(f"[START] Triage Count | task_ids={len(task_ids)} tasks")
     
     try:
-        # Reload owner mapping in case it was updated
-        load_owner_mapping()
+        # Reload team-scoped owners from data/<TEAM>/regression_owners.csv
+        load_owner_mapping(team=getattr(g, "team", None))
 
         try:
             tasks = fetch_regression_tasks(tag=tag, task_ids=task_ids)
@@ -2057,7 +2864,7 @@ def get_triage_count():
             
             seen_tests.add(test_name)
             tickets = test.get("jira_tickets", [])
-            owner = resolve_owner(test_name)
+            owner = resolve_regression_owner(test_name)
             
             # Summary stats
             summary[owner]["Total Failed"] += 1
@@ -2074,16 +2881,22 @@ def get_triage_count():
         # Identify bulk issues (tickets with >5 testcases)
         # Convert sets to lists for JSON serialization
         bulk_issues = {ticket: list(tests) for ticket, tests in ticket_case_map.items() if len(tests) > 5}
-        
-        # Calculate QI impact for bulk issues only if requested (to speed up triage count)
+        # Full ticket -> testcases map (every triaged ticket, not just bulk ones).
+        all_tickets_map = {ticket: list(tests) for ticket, tests in ticket_case_map.items()}
+
+        # Calculate QI impact only if requested (to speed up triage count).
+        # QI is computed for EVERY ticket (ticket_qi_map); bulk_issues_with_qi is the
+        # subset for tickets with >5 testcases, kept for the bulk-issue tables.
         include_bulk_qi = request.args.get("include_bulk_qi", "false").lower() == "true"
         bulk_issues_with_qi = {}
-        if include_bulk_qi and bulk_issues:
-            logger.info("Calculating QI impact for bulk issues (this may take longer)...")
-            qi_calculation_result = calculate_bulk_issues_qi_impact(bulk_issues, test_data, tag)
-            bulk_issues_with_qi = qi_calculation_result["bulk_issues_with_qi"]
+        ticket_qi_map = {}
+        if include_bulk_qi and all_tickets_map:
+            logger.info(f"Calculating QI impact for all {len(all_tickets_map)} triaged tickets (this may take longer)...")
+            qi_calculation_result = calculate_bulk_issues_qi_impact(all_tickets_map, test_data, tag)
+            ticket_qi_map = qi_calculation_result["bulk_issues_with_qi"]
+            bulk_issues_with_qi = {t: ticket_qi_map[t] for t in bulk_issues if t in ticket_qi_map}
         else:
-            logger.info("Skipping bulk issues QI calculation for faster triage count response")
+            logger.info("Skipping QI calculation for faster triage count response")
         
         # Update bulk issues count - use total count of unique bulk tickets
         # (not per-owner, since the same ticket can be tagged on tests from multiple owners)
@@ -2110,6 +2923,7 @@ def get_triage_count():
             "owner_ticket_map": owner_ticket_dict,
             "bulk_issues": bulk_issues_dict,
             "bulk_issues_with_qi": bulk_issues_with_qi,
+            "ticket_qi_map": ticket_qi_map,
             "bulk_issues_count": total_bulk_issues_count,
             "pending_tests": inprogress_tests,
             "total_tests_processed": len(test_data)
@@ -2122,208 +2936,712 @@ def get_triage_count():
 
 
 # ---------------------------------------------------
+# Owner triage report (notebook Report 2 schema)
+# ---------------------------------------------------
+@app.route("/mcp/regression/owner-triage-report", methods=["POST"])
+@app.route("/api/mcp/regression/owner-triage-report", methods=["POST"])
+@jwt_required
+def owner_triage_report():
+    """
+    Aggregate untriaged counts per regression owner (Jupyter Report 2 columns).
+
+    JSON body:
+      - task_ids: array (or comma-separated string) of JITA task OIDs — full list each call
+      - execution_url: optional JITA results URL (used if task_ids omitted)
+      - tag: optional; resolve tasks via tag when no task_ids / execution_url
+
+    Response rows use exact keys:
+      Regression_owner | Total | Total untriaged | Failed | Skipped | Warning | Killed
+    """
+    start = time.time()
+    body = request.get_json(silent=True) or {}
+    tag = (body.get("tag") or "").strip() or None
+
+    try:
+        load_owner_mapping(team=getattr(g, "team", None))
+
+        task_ids, invalid_ids, resolve_err, source = resolve_task_ids_from_payload(
+            task_ids=body.get("task_ids"),
+            execution_url=body.get("execution_url"),
+        )
+
+        if not task_ids and tag:
+            try:
+                tasks = fetch_regression_tasks(tag=tag)
+            except TimeoutError as e:
+                return jsonify({"error": str(e), "type": "jita_timeout"}), 504
+            except ConnectionError as e:
+                return jsonify({"error": str(e), "type": "jita_connection_error"}), 503
+            task_ids = [
+                t.get("_id", {}).get("$oid")
+                for t in (tasks or [])
+                if t.get("_id", {}).get("$oid")
+            ]
+            source = "tag"
+            if not task_ids:
+                return jsonify({
+                    "error": f"No tasks found for tag '{tag}'",
+                    "type": "not_found",
+                    "tag": tag,
+                    "rows": [],
+                }), 404
+        elif resolve_err:
+            return jsonify({
+                "error": resolve_err,
+                "type": "validation_error",
+                "invalid_task_ids": invalid_ids,
+                "rows": [],
+            }), 400
+
+        logger.info(
+            "[START] Owner triage report | source=%s | tasks=%s | invalid=%s",
+            source, len(task_ids), len(invalid_ids),
+        )
+
+        try:
+            test_data = fetch_test_results_batch_with_pagination(task_ids, timeout=180)
+        except requests.exceptions.Timeout:
+            return jsonify({
+                "error": f"Timed out fetching test results for {len(task_ids)} tasks",
+                "type": "timeout_error",
+                "task_count": len(task_ids),
+                "rows": [],
+            }), 504
+        except requests.exceptions.RequestException as e:
+            return jsonify({
+                "error": f"Failed to fetch test results: {e}",
+                "type": "request_error",
+                "rows": [],
+            }), 500
+
+        result = build_owner_status_table(test_data, resolve_regression_owner)
+        elapsed = round(time.time() - start, 2)
+        logger.info(
+            "[END] Owner triage report | time=%ss | owners=%s",
+            elapsed, len(result["rows"]),
+        )
+
+        return jsonify({
+            "success": True,
+            "generated_at": datetime.utcnow().isoformat(),
+            "elapsed_seconds": elapsed,
+            "source": source,
+            "tag": tag,
+            "task_ids": task_ids,
+            "task_count": len(task_ids),
+            "invalid_task_ids": invalid_ids,
+            "duplicate_input_dropped": True,
+            "rows": result["rows"],
+            "unmapped_tests": result["unmapped_tests"],
+            "meta": result["meta"],
+        })
+    except Exception as e:
+        logger.error(f"Error in owner triage report: {e}", exc_info=True)
+        return jsonify({"error": str(e), "type": "server_error", "rows": []}), 500
+
+
+# ---------------------------------------------------
 # Triage Accuracy Analyzer Endpoint
 # ---------------------------------------------------
+def _sorted_task_id_fingerprint(task_ids):
+    """Lowercased sorted OID fingerprint for cache / Full-regression link compares."""
+    out = []
+    seen = set()
+    for t in task_ids or []:
+        s = str(t).strip().lower()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    out.sort()
+    return out
+
+
 def _config_matches_cached(cached, tag, task_ids):
-    """Check if cached data matches current tag/task_ids config."""
+    """
+    Check if cached triage-accuracy data matches current scope.
+
+    Full regression link (explicit task_ids) always wins: cache must have the same
+    task set. Tag-only requests also invalidate when tag_extra_task_ids change.
+    """
     if not cached:
         return False
     cached_tag = (cached.get("tag") or "").strip()
-    cached_task_ids = cached.get("task_ids") or []
+    cached_task_ids_sorted = _sorted_task_id_fingerprint(cached.get("task_ids") or [])
     req_tag = (tag or "").strip()
-    req_task_ids = sorted([str(t).strip() for t in (task_ids or []) if t and str(t).strip()])
-    cached_task_ids_sorted = sorted([str(t).strip() for t in cached_task_ids if t])
-    # Tag mode: match by tag only
+    req_task_ids = _sorted_task_id_fingerprint(task_ids)
+
+    # Explicit Full-regression / task_ids scope: require identical task set
+    if req_task_ids:
+        if cached_task_ids_sorted != req_task_ids:
+            return False
+        # If a tag is also provided, require tag match when cache has a tag
+        if req_tag and cached_tag and req_tag != cached_tag:
+            return False
+        return True
+
+    # Tag-only: tag name + persisted extras fingerprint must match
     if req_tag:
-        return req_tag == cached_tag
-    # Task IDs mode: match by task_ids
-    return req_task_ids == cached_task_ids_sorted
+        if req_tag != cached_tag:
+            return False
+        try:
+            extras_now = _sorted_task_id_fingerprint(
+                get_extras_for_tag(load_regression_config(), req_tag)
+            )
+        except Exception:
+            extras_now = []
+        cached_extras = _sorted_task_id_fingerprint(cached.get("tag_extra_task_ids") or [])
+        return extras_now == cached_extras
+
+    return False
 
 
-@app.route("/mcp/regression/triage-accuracy", methods=["GET"])
-@app.route("/api/mcp/regression/triage-accuracy", methods=["GET"])
-@jwt_required
-def get_triage_accuracy():
-    """Triage Accuracy Analyzer: fetch Failed+Warning testcases, compare Jira vs Triage Genie, store in JSON."""
-    start = time.time()
+def _empty_triage_accuracy_payload(tag=None, task_ids=None):
+    return {
+        "generated_time": datetime.utcnow().isoformat(),
+        "tag": tag or None,
+        "task_ids": list(task_ids) if task_ids else [],
+        "tag_extra_task_ids": [],
+        "testcases": [],
+        "triage_summary": {
+            "total_failed_warning_count": 0,
+            "triaged_count": 0,
+            "triage_genie_count": 0,
+            "total_triage_genie_count": 0,
+            "triage_completed_percent": 0,
+            "triage_genie_percent": 0,
+            "total_triage_genie_percent": 0,
+            "matched_count": 0,
+            "unmatched_count": 0,
+            "matched_percent": 0,
+            "unmatched_percent": 0,
+        },
+    }
+
+
+def _tg_ticket_map_from_cached_payload(cached):
+    """Reuse previously fetched TG tickets by testcase id / name (no network)."""
+    ticket_map = {}
+    if not cached or not isinstance(cached, dict):
+        return ticket_map
+    for tc in cached.get("testcases") or []:
+        if not isinstance(tc, dict):
+            continue
+        ticket = (tc.get("triage_genie_ticket") or "").strip()
+        if not ticket:
+            continue
+        name = (tc.get("testcase_name") or "").strip()
+        tid = (tc.get("testcase_id") or "").strip()
+        if name:
+            ticket_map[name] = ticket
+        if tid:
+            ticket_map[tid] = ticket
+    return ticket_map
+
+
+def _compute_triage_accuracy_payload(tag=None, task_ids=None, reload=False, skip_tg_lookup=False):
+    """
+    Compute (or load cached) triage-accuracy payload for tag / task_ids.
+    Shared by Triage Accuracy Analyzer and Triage Genie coverage moon dashboard.
+
+    skip_tg_lookup=True: skip slow per-testcase Triage Genie API calls; reuse TG
+    tickets from any prior cache by testcase name. Used by coverage Refresh so it
+    stays fast (JITA only). Full TG refresh remains on Triage Accuracy Reload.
+    """
+    tag = (tag or "").strip() or None
+    if isinstance(task_ids, str):
+        task_ids = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+    elif task_ids:
+        task_ids = [str(tid).strip() for tid in task_ids if str(tid).strip()]
+    else:
+        task_ids = None
+
+    if not tag and not task_ids:
+        raise ValueError("Either tag or task_ids is required")
+
+    load_owner_mapping(team=getattr(g, "team", None))
+    cache_tag = tag if tag else None
+    # Snapshot extras for this tag (used in cache key + payload)
+    try:
+        tag_extras = (
+            get_extras_for_tag(load_regression_config(), tag) if tag else []
+        )
+    except Exception:
+        tag_extras = []
+
+    # Always load prior cache for TG ticket reuse (even when reload skips hit)
+    prior_cache = load_triage_accuracy_data(cache_tag)
+
+    # On reload: skip reading cache but keep file until new payload saves.
+    # Deleting first left coverage/accuracy empty for 10–45+ min during TG lookups.
+    if reload:
+        cached = None
+        logger.info("[Triage Accuracy] Reload requested — skipping cache, keeping file until save")
+    else:
+        cached = prior_cache
+    if cached and _config_matches_cached(cached, tag, task_ids):
+        logger.info("[Triage Accuracy] Using cached data")
+        return cached
+
+    # Full regression link (task_ids) is source of truth when provided; else tag + extras
+    fetch_ids = None
+    if task_ids:
+        fetch_ids = list(task_ids)
+        if tag and tag_extras:
+            seen = {str(x).strip().lower() for x in fetch_ids}
+            for eid in tag_extras:
+                key = str(eid).strip().lower()
+                if key and key not in seen:
+                    fetch_ids.append(eid)
+                    seen.add(key)
+        tasks = fetch_regression_tasks(tag=None, task_ids=fetch_ids)
+    else:
+        tasks = fetch_regression_tasks(tag=tag, task_ids=None)
+
+    if not tasks:
+        result = _empty_triage_accuracy_payload(tag, task_ids or fetch_ids)
+        result["tag_extra_task_ids"] = list(tag_extras)
+        save_triage_accuracy_data(result, cache_tag)
+        return result
+
+    collected_task_ids = [t["_id"]["$oid"] for t in tasks]
+    logger.info(f"Fetching test results for {len(collected_task_ids)} tasks")
+    test_data = fetch_test_results_batch_with_pagination(collected_task_ids, timeout=180)
+
+    failed_warning = [
+        tr for tr in test_data
+        if tr.get("status", "").lower() in ("failed", "failure", "warning", "warn")
+    ]
+    seen_tests = set()
+    unique_results = []
+    for tr in failed_warning:
+        test_name = (tr.get("test") or {}).get("name", "") if isinstance(tr.get("test"), dict) else ""
+        if not test_name or test_name in seen_tests:
+            continue
+        seen_tests.add(test_name)
+        unique_results.append(tr)
+
+    _test_result_ids = []
+    for tr in unique_results:
+        _rid = tr.get("_id")
+        if isinstance(_rid, dict) and "$oid" in _rid:
+            _test_result_ids.append(_rid["$oid"])
+        elif _rid:
+            _test_result_ids.append(str(_rid))
+
+    if skip_tg_lookup:
+        tg_ticket_map = _tg_ticket_map_from_cached_payload(prior_cache)
+        logger.info(
+            "[Triage Accuracy] skip_tg_lookup — reused %s TG ticket(s) from cache (no TG API)",
+            len(tg_ticket_map),
+        )
+    else:
+        tg_ticket_map = build_triage_genie_ticket_map(_test_result_ids)
+
+    def process_one(tr):
+        try:
+            test_field = tr.get("test", {})
+            testcase_name = (test_field.get("name", "") if isinstance(test_field, dict) else
+                            str(test_field) if test_field else "")
+            status = tr.get("status", "Failed")
+            jira_tickets = tr.get("jira_tickets", [])
+            jira_ticket = (jira_tickets[0] if jira_tickets else "") or ""
+            if isinstance(jira_ticket, dict):
+                jira_ticket = jira_ticket.get("$oid", "") or str(jira_ticket)
+            jira_ticket = str(jira_ticket).strip() if jira_ticket else ""
+
+            testcase_id = None
+            if isinstance(tr.get("_id"), dict) and "$oid" in tr.get("_id", {}):
+                testcase_id = tr["_id"]["$oid"]
+            else:
+                testcase_id = str(tr.get("_id", "")) if tr.get("_id") else ""
+
+            triage_genie_ticket = ""
+            tg = (
+                tg_ticket_map.get(testcase_id)
+                or tg_ticket_map.get(testcase_name)
+            )
+            if tg:
+                triage_genie_ticket = str(tg).strip()
+
+            if jira_ticket and triage_genie_ticket:
+                match_status = "Matched" if jira_ticket.upper() == triage_genie_ticket.upper() else "Unmatched"
+            else:
+                match_status = "N/A" if not jira_ticket and not triage_genie_ticket else ("" if not (jira_ticket and triage_genie_ticket) else "N/A")
+
+            regression_owner = resolve_regression_owner(testcase_name) if testcase_name else "Unknown"
+            return {
+                "testcase_name": testcase_name,
+                "regression_owner": regression_owner,
+                "status": status,
+                "triage_genie_ticket": triage_genie_ticket,
+                "jira_ticket": jira_ticket,
+                "match_status": match_status,
+            }
+        except Exception as e:
+            logger.warning(f"Error processing test result for triage accuracy: {e}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        raw = list(executor.map(process_one, unique_results))
+        testcases = [tc for tc in raw if tc is not None]
+
+    total = len(testcases)
+    triaged_count = sum(1 for tc in testcases if tc.get("jira_ticket"))
+    triage_genie_count = sum(1 for tc in testcases if tc.get("jira_ticket") and tc.get("triage_genie_ticket"))
+    total_triage_genie_count = sum(1 for tc in testcases if tc.get("triage_genie_ticket"))
+    matched_count = sum(1 for tc in testcases if tc.get("match_status") == "Matched")
+    unmatched_count = sum(1 for tc in testcases if tc.get("match_status") == "Unmatched")
+
+    triage_completed_percent = round(100 * triaged_count / total, 1) if total else 0
+    triage_genie_percent = round(100 * triage_genie_count / triaged_count, 1) if triaged_count else 0
+    total_triage_genie_percent = round(100 * total_triage_genie_count / total, 1) if total else 0
+    denom = matched_count + unmatched_count
+    matched_percent = round(100 * matched_count / denom, 1) if denom else 0
+    unmatched_percent = round(100 * unmatched_count / denom, 1) if denom else 0
+
+    result = {
+        "generated_time": datetime.utcnow().isoformat(),
+        "tag": tag if tag else None,
+        "task_ids": collected_task_ids,
+        "tag_extra_task_ids": list(tag_extras),
+        "testcases": testcases,
+        "triage_summary": {
+            "total_failed_warning_count": total,
+            "triaged_count": triaged_count,
+            "triage_genie_count": triage_genie_count,
+            "total_triage_genie_count": total_triage_genie_count,
+            "triage_completed_percent": triage_completed_percent,
+            "triage_genie_percent": triage_genie_percent,
+            "total_triage_genie_percent": total_triage_genie_percent,
+            "matched_count": matched_count,
+            "unmatched_count": unmatched_count,
+            "matched_percent": matched_percent,
+            "unmatched_percent": unmatched_percent,
+        },
+    }
+    save_triage_accuracy_data(result, cache_tag)
+    return result
+
+
+def _job_jita_task_ids(job):
+    """Extract JITA task OIDs from a stored / API Triage Genie job record."""
+    if not isinstance(job, dict):
+        return []
+    if job.get("jita_task_id_list"):
+        return [str(x).strip().lower() for x in job["jita_task_id_list"] if str(x).strip()]
+    raw = job.get("jita_task_ids") or ""
+    if isinstance(raw, list):
+        return [str(x).strip().lower() for x in raw if str(x).strip()]
+    return [x.strip().lower() for x in str(raw).split(",") if x.strip()]
+
+
+def _find_best_triage_genie_job(task_ids):
+    """
+    Pick TG job for the selected Full regression task set only.
+
+    Reject weak overlap (e.g. 1 shared OID out of a large run) so Open Triage Genie
+    never deep-links into an unrelated stored job.
+    """
+    wanted = set(_sorted_task_id_fingerprint(task_ids))
+    if not wanted:
+        return None
+    try:
+        jobs = (load_triage_genie_jobs() or {}).get("jobs") or []
+    except Exception:
+        jobs = []
+    best = None
+    best_score = -1
+    for job in jobs:
+        ids = set(_job_jita_task_ids(job))
+        if not ids:
+            continue
+        overlap = len(wanted & ids)
+        if overlap == 0:
+            continue
+        # Exact match wins
+        if ids == wanted:
+            return job
+        cov_wanted = overlap / len(wanted)
+        cov_job = overlap / len(ids)
+        # Require strong agreement: majority of the selected job AND of the TG job
+        if cov_wanted < 0.5 or cov_job < 0.5:
+            continue
+        score = overlap * 1000
+        if wanted <= ids:
+            score += 250
+        elif ids <= wanted:
+            score += 100
+        score += int(min(cov_wanted, cov_job) * 100)
+        if score > best_score:
+            best_score = score
+            best = job
+    return best
+
+
+def _build_triage_genie_job_url(task_ids, tag=None):
+    """
+    Build the Triage Genie URL for this Full regression task set.
+
+    Always matches JITA → Tests → "View in Triage Genie":
+      http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=<Full_link_ids>
+
+    Optionally annotate an exact-match stored job id for display only.
+    """
+    ids_for_link = [str(t).strip() for t in (task_ids or []) if str(t).strip()]
+    if not ids_for_link:
+        return {
+            "triage_genie_url": "http://triage-genie.eng.nutanix.com/",
+            "triage_genie_job_id": None,
+            "triage_genie_job_name": tag or None,
+            "triage_genie_view_url": None,
+        }
+
+    view_in_tg_url = (
+        "http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids="
+        + ",".join(ids_for_link)
+    )
+    job_id = None
+    job_name = tag or None
+    job = _find_best_triage_genie_job(ids_for_link)
+    if job and job.get("id") is not None:
+        job_ids = set(_job_jita_task_ids(job))
+        wanted = set(_sorted_task_id_fingerprint(ids_for_link))
+        if job_ids and wanted and job_ids == wanted:
+            job_id = job.get("id")
+            job_name = job.get("name") or job_name
+
+    return {
+        "triage_genie_url": view_in_tg_url,
+        "triage_genie_job_id": job_id,
+        "triage_genie_job_name": job_name,
+        "triage_genie_view_url": view_in_tg_url,
+    }
+
+
+def _rollup_triage_genie_coverage(accuracy_payload):
+    """Build per-owner + summary coverage metrics from a triage-accuracy payload."""
+    testcases = accuracy_payload.get("testcases") or []
+    task_ids = accuracy_payload.get("task_ids") or []
+
+    def _blank_owner(name):
+        return {
+            "owner": name,
+            "total": 0,
+            "via_triage_genie": 0,
+            "jira_tagged": 0,
+            "remaining_need_tg": 0,
+            "manual_only": 0,
+            "pct_tg": 0.0,
+        }
+
+    by_owner = {}
+    for tc in testcases:
+        owner = (tc.get("regression_owner") or "Unknown").strip() or "Unknown"
+        row = by_owner.setdefault(owner, _blank_owner(owner))
+        row["total"] += 1
+        has_jira = bool((tc.get("jira_ticket") or "").strip())
+        has_tg = bool((tc.get("triage_genie_ticket") or "").strip())
+        if has_jira:
+            row["jira_tagged"] += 1
+        if has_tg:
+            row["via_triage_genie"] += 1
+        else:
+            row["remaining_need_tg"] += 1
+        if has_jira and not has_tg:
+            row["manual_only"] += 1
+
+    for row in by_owner.values():
+        row["pct_tg"] = round(100.0 * row["via_triage_genie"] / row["total"], 1) if row["total"] else 0.0
+
+    by_owner_list = sorted(
+        by_owner.values(),
+        key=lambda r: (-r["remaining_need_tg"], -r["total"], r["owner"].lower()),
+    )
+
+    total = len(testcases)
+    via_tg = sum(1 for tc in testcases if (tc.get("triage_genie_ticket") or "").strip())
+    jira_tagged = sum(1 for tc in testcases if (tc.get("jira_ticket") or "").strip())
+    remaining = total - via_tg
+    manual_only = sum(
+        1 for tc in testcases
+        if (tc.get("jira_ticket") or "").strip() and not (tc.get("triage_genie_ticket") or "").strip()
+    )
+
+    ids_for_link = [str(t).strip() for t in task_ids if str(t).strip()]
+    jita_results_url = None
+    if ids_for_link:
+        jita_results_url = (
+            "https://jita.eng.nutanix.com/results?task_ids="
+            + ",".join(ids_for_link)
+            + "&active_tab=1&merge_tests=true"
+        )
+
+    tg_link = _build_triage_genie_job_url(ids_for_link, tag=accuracy_payload.get("tag"))
+
+    return {
+        "generated_time": accuracy_payload.get("generated_time") or datetime.utcnow().isoformat(),
+        "tag": accuracy_payload.get("tag"),
+        "task_ids": ids_for_link,
+        "task_count": len(ids_for_link),
+        "summary": {
+            "total": total,
+            "via_triage_genie": via_tg,
+            "jira_tagged": jira_tagged,
+            "remaining_need_tg": remaining,
+            "manual_only": manual_only,
+            "pct_tg": round(100.0 * via_tg / total, 1) if total else 0.0,
+        },
+        "by_owner": by_owner_list,
+        "links": {
+            "jita_results_url": jita_results_url,
+            "triage_genie_url": tg_link.get("triage_genie_url"),
+            "triage_genie_view_url": tg_link.get("triage_genie_view_url"),
+            "triage_genie_home": "http://triage-genie.eng.nutanix.com/",
+            "triage_genie_job_id": tg_link.get("triage_genie_job_id"),
+            "triage_genie_job_name": tg_link.get("triage_genie_job_name"),
+        },
+    }
+
+
+def _normalize_task_ids_arg(raw):
+    """Normalize task_ids from query string, JSON list, or comma-separated string."""
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        out = [str(tid).strip() for tid in raw if str(tid).strip()]
+        return out or None
+    s = str(raw).strip()
+    if not s:
+        return None
+    out = [tid.strip() for tid in s.split(",") if tid.strip()]
+    return out or None
+
+
+def _resolve_triage_scope_from_request():
+    """
+    Parse tag/task_ids from query args or JSON body (POST), falling back to config.
+
+    Full-link task_ids (Regression_Run_Tasks) are the preferred analysis scope —
+    same set as JITA → View in Triage Genie.
+    """
+    body = {}
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+
     tag = request.args.get("tag")
+    if tag is None and "tag" in body:
+        tag = body.get("tag")
     if tag is not None:
         tag = (tag or "").strip() or None
-    task_ids_param = request.args.get("task_ids")
-    task_ids = None
-    if task_ids_param:
-        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
 
-    # Fall back to config if params missing
+    task_ids = _normalize_task_ids_arg(request.args.get("task_ids"))
+    if task_ids is None and "task_ids" in body:
+        task_ids = _normalize_task_ids_arg(body.get("task_ids"))
+
     if not tag and not task_ids:
         config = load_regression_config()
         if config.get("input_mode") == "tag":
             tag = config.get("default_tag") or config.get("tag", "") or ""
+            tag = (tag or "").strip() or None
         if not tag and config.get("input_mode") == "task_ids" and config.get("task_ids"):
             task_ids = config.get("task_ids", [])
+    return tag, task_ids
+
+
+def _request_wants_reload():
+    """reload flag from query (?reload=true) or JSON body ({reload: true})."""
+    q = request.args.get("reload", "false")
+    if str(q).lower() in ("true", "1", "yes"):
+        return True
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        v = body.get("reload", False)
+        if isinstance(v, bool):
+            return v
+        return str(v).lower() in ("true", "1", "yes")
+    return False
+
+
+@app.route("/mcp/regression/triage-accuracy", methods=["GET", "POST"])
+@app.route("/api/mcp/regression/triage-accuracy", methods=["GET", "POST"])
+@jwt_required
+def get_triage_accuracy():
+    """Triage Accuracy Analyzer: fetch Failed+Warning testcases, compare Jira vs Triage Genie, store in JSON."""
+    start = time.time()
+    tag, task_ids = _resolve_triage_scope_from_request()
 
     if not tag and not task_ids:
         return jsonify({"error": "Either tag or task_ids is required"}), 400
 
-    if tag:
-        logger.info(f"[START] Triage Accuracy | tag={tag}")
+    if task_ids:
+        logger.info(
+            f"[START] Triage Accuracy | task_ids={len(task_ids)} (Full link)"
+            + (f" | tag={tag}" if tag else "")
+        )
     else:
-        logger.info(f"[START] Triage Accuracy | task_ids={len(task_ids)} tasks")
+        logger.info(f"[START] Triage Accuracy | tag={tag}")
 
     try:
-        load_owner_mapping()
-        cache_tag = tag if tag else None
-        reload = request.args.get("reload", "false").lower() == "true"
-        if reload:
-            invalidate_triage_accuracy_cache(cache_tag)
-            cached = None
-            logger.info("[Triage Accuracy] Cache invalidated, fetching fresh data")
-        else:
-            cached = load_triage_accuracy_data(cache_tag)
-        if cached and _config_matches_cached(cached, tag, task_ids):
-            logger.info("[Triage Accuracy] Using cached data")
-            return jsonify(cached)
-
-        tasks = fetch_regression_tasks(tag=tag, task_ids=task_ids)
-        if not tasks:
-            result = {
-                "generated_time": datetime.utcnow().isoformat(),
-                "tag": tag or None,
-                "task_ids": list(task_ids) if task_ids else [],
-                "testcases": [],
-                "triage_summary": {
-                    "total_failed_warning_count": 0,
-                    "triaged_count": 0,
-                    "triage_genie_count": 0,
-                    "total_triage_genie_count": 0,
-                    "triage_completed_percent": 0,
-                    "triage_genie_percent": 0,
-                    "total_triage_genie_percent": 0,
-                    "matched_count": 0,
-                    "unmatched_count": 0,
-                    "matched_percent": 0,
-                    "unmatched_percent": 0,
-                },
-            }
-            save_triage_accuracy_data(result, cache_tag)
-            return jsonify(result)
-
-        collected_task_ids = [t["_id"]["$oid"] for t in tasks]
-        logger.info(f"Fetching test results for {len(collected_task_ids)} tasks")
-        test_data = fetch_test_results_batch_with_pagination(collected_task_ids, timeout=180)
-
-        # Filter Failed or Warning; deduplicate by test name
-        failed_warning = [
-            tr for tr in test_data
-            if tr.get("status", "").lower() in ("failed", "failure", "warning", "warn")
-        ]
-        seen_tests = set()
-        unique_results = []
-        for tr in failed_warning:
-            test_name = (tr.get("test") or {}).get("name", "") if isinstance(tr.get("test"), dict) else ""
-            if not test_name or test_name in seen_tests:
-                continue
-            seen_tests.add(test_name)
-            unique_results.append(tr)
-
-        # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
-        _test_result_ids = []
-        for tr in unique_results:
-            _rid = tr.get("_id")
-            if isinstance(_rid, dict) and "$oid" in _rid:
-                _test_result_ids.append(_rid["$oid"])
-            elif _rid:
-                _test_result_ids.append(str(_rid))
-        tg_ticket_map = build_triage_genie_ticket_map(_test_result_ids)
-
-        def process_one(tr):
-            try:
-                test_field = tr.get("test", {})
-                testcase_name = (test_field.get("name", "") if isinstance(test_field, dict) else
-                                str(test_field) if test_field else "")
-                status = tr.get("status", "Failed")
-                jira_tickets = tr.get("jira_tickets", [])
-                jira_ticket = (jira_tickets[0] if jira_tickets else "") or ""
-                if isinstance(jira_ticket, dict):
-                    jira_ticket = jira_ticket.get("$oid", "") or str(jira_ticket)
-                jira_ticket = str(jira_ticket).strip() if jira_ticket else ""
-
-                testcase_id = None
-                if isinstance(tr.get("_id"), dict) and "$oid" in tr.get("_id", {}):
-                    testcase_id = tr["_id"]["$oid"]
-                else:
-                    testcase_id = str(tr.get("_id", "")) if tr.get("_id") else ""
-
-                triage_genie_ticket = ""
-                tg = (
-                    tg_ticket_map.get(testcase_id)
-                    or tg_ticket_map.get(testcase_name)
-                )
-                if tg:
-                    triage_genie_ticket = str(tg).strip()
-
-                if jira_ticket and triage_genie_ticket:
-                    match_status = "Matched" if jira_ticket.upper() == triage_genie_ticket.upper() else "Unmatched"
-                else:
-                    match_status = "N/A" if not jira_ticket and not triage_genie_ticket else ("" if not (jira_ticket and triage_genie_ticket) else "N/A")
-
-                regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
-                return {
-                    "testcase_name": testcase_name,
-                    "regression_owner": regression_owner,
-                    "status": status,
-                    "triage_genie_ticket": triage_genie_ticket,
-                    "jira_ticket": jira_ticket,
-                    "match_status": match_status,
-                }
-            except Exception as e:
-                logger.warning(f"Error processing test result for triage accuracy: {e}")
-                return None
-
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            raw = list(executor.map(process_one, unique_results))
-            testcases = [tc for tc in raw if tc is not None]
-
-        total = len(testcases)
-        triaged_count = sum(1 for tc in testcases if tc.get("jira_ticket"))
-        # Triage Genie % = among triaged (JITA tagged), how many have Triage Genie ticket
-        triage_genie_count = sum(1 for tc in testcases if tc.get("jira_ticket") and tc.get("triage_genie_ticket"))
-        # Total Triage Genie Tagged = among ALL failed/warning, how many have Triage Genie ticket
-        total_triage_genie_count = sum(1 for tc in testcases if tc.get("triage_genie_ticket"))
-        matched_count = sum(1 for tc in testcases if tc.get("match_status") == "Matched")
-        unmatched_count = sum(1 for tc in testcases if tc.get("match_status") == "Unmatched")
-
-        triage_completed_percent = round(100 * triaged_count / total, 1) if total else 0
-        triage_genie_percent = round(100 * triage_genie_count / triaged_count, 1) if triaged_count else 0
-        total_triage_genie_percent = round(100 * total_triage_genie_count / total, 1) if total else 0
-        denom = matched_count + unmatched_count
-        matched_percent = round(100 * matched_count / denom, 1) if denom else 0
-        unmatched_percent = round(100 * unmatched_count / denom, 1) if denom else 0
-
-        result = {
-            "generated_time": datetime.utcnow().isoformat(),
-            "tag": tag if tag else None,
-            "task_ids": collected_task_ids,
-            "testcases": testcases,
-            "triage_summary": {
-                "total_failed_warning_count": total,
-                "triaged_count": triaged_count,
-                "triage_genie_count": triage_genie_count,
-                "total_triage_genie_count": total_triage_genie_count,
-                "triage_completed_percent": triage_completed_percent,
-                "triage_genie_percent": triage_genie_percent,
-                "total_triage_genie_percent": total_triage_genie_percent,
-                "matched_count": matched_count,
-                "unmatched_count": unmatched_count,
-                "matched_percent": matched_percent,
-                "unmatched_percent": unmatched_percent,
-            },
-        }
-        save_triage_accuracy_data(result, cache_tag)
-        logger.info(f"[END] Triage Accuracy | testcases={len(testcases)} | time={time.time() - start:.2f}s")
+        reload = _request_wants_reload()
+        result = _compute_triage_accuracy_payload(tag=tag, task_ids=task_ids, reload=reload)
+        logger.info(f"[END] Triage Accuracy | testcases={len(result.get('testcases') or [])} | time={time.time() - start:.2f}s")
         return jsonify(result)
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
     except Exception as e:
         logger.error(f"Error in triage accuracy: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/triage-genie-coverage", methods=["GET", "POST"])
+@app.route("/api/mcp/regression/triage-genie-coverage", methods=["GET", "POST"])
+@jwt_required
+def get_triage_genie_coverage():
+    """
+    Per-owner Triage Genie coverage for Regression_Run_Tasks (Full link) / tag.
+    Used by the Triage Genie coverage dashboard overlay.
+    """
+    start = time.time()
+    tag, task_ids = _resolve_triage_scope_from_request()
+    if not tag and not task_ids:
+        return jsonify({"error": "Either tag or task_ids is required (or set default tag in Configuration)"}), 400
+
+    try:
+        reload = _request_wants_reload()
+        if task_ids:
+            logger.info(
+                f"[START] Triage Genie Coverage | task_ids={len(task_ids)} (Full link)"
+                + (f" | tag={tag}" if tag else "")
+                + f" | reload={reload} | skip_tg_lookup=True"
+            )
+        else:
+            logger.info(
+                f"[START] Triage Genie Coverage | tag={tag} | reload={reload} | skip_tg_lookup=True"
+            )
+        # Coverage must stay fast: never do per-testcase TG API lookups here.
+        # Reuse cached TG tickets; full TG refresh is Triage Accuracy → Reload data.
+        accuracy = _compute_triage_accuracy_payload(
+            tag=tag, task_ids=task_ids, reload=reload, skip_tg_lookup=True
+        )
+        coverage = _rollup_triage_genie_coverage(accuracy)
+        logger.info(
+            "[END] Triage Genie Coverage | owners=%s remaining=%s | time=%.2fs",
+            len(coverage.get("by_owner") or []),
+            (coverage.get("summary") or {}).get("remaining_need_tg"),
+            time.time() - start,
+        )
+        return jsonify(coverage)
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except TimeoutError as e:
+        logger.error(f"Timeout in triage genie coverage: {e}")
+        return jsonify({
+            "error": str(e),
+            "hint": "JITA/TG lookups timed out. Retry without Refresh first (uses cache), or wait and Refresh once.",
+        }), 504
+    except Exception as e:
+        logger.error(f"Error in triage genie coverage: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -2592,13 +3910,18 @@ def _resolve_tcms_milestone(branch_name):
 
     Lookup order:
       1. Explicit entry in BRANCH_SHORT_NAME_MAP
-      2. Regex extraction of a version pattern like X.Y or X.Y.Z
+      2. Regex extraction of the FULL version token (any number of dotted
+         segments, e.g. ``7.6`` → ``7.6``, ``7.5.1`` → ``7.5.1``,
+         ``7.6.0.6`` → ``7.6.0.6``). The previous pattern capped the match at
+         three segments, so a branch like ``ganges-7.6.0.6-stable`` was
+         truncated to the invalid milestone ``7.6.0`` (which TCMS has no data
+         for), causing Current/Overall QI to render blank.
       3. Fall back to the original branch_name unchanged
     """
     if branch_name in BRANCH_SHORT_NAME_MAP:
         return BRANCH_SHORT_NAME_MAP[branch_name]
 
-    version_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', branch_name)
+    version_match = re.search(r'(\d+(?:\.\d+)+)', branch_name)
     if version_match:
         return version_match.group(1)
 
@@ -3512,6 +4835,33 @@ RUN_PLAN_SERVICE_ACCOUNTS = {
     "svc.cdp.regression": (JITA_SVC_USERNAME, JITA_SVC_PASSWORD),
 }
 
+
+def _resolve_run_plan_trigger_auth(run_plan, allow_ldap=True):
+    """Resolve JITA credentials for triggering a run plan.
+
+    Prefers the run plan's configured service account so Trigger Now,
+    bulk trigger, and the scheduler all run as the selected user.
+    Returns (auth_tuple, triggered_by_label). auth_tuple is None when
+    LDAP is required but the session cache has expired.
+    """
+    svc_name = (run_plan.get("service_account") or "").strip()
+    if svc_name and svc_name in RUN_PLAN_SERVICE_ACCOUNTS:
+        return RUN_PLAN_SERVICE_ACCOUNTS[svc_name], svc_name
+
+    if allow_ldap:
+        username = ""
+        try:
+            user = getattr(g, "current_user", None) or {}
+            username = (user.get("sub") or user.get("username") or "").strip()
+        except Exception:
+            username = ""
+        user_auth = _get_user_credentials(username) if username else None
+        if user_auth:
+            return user_auth, username
+        return None, username
+
+    return JITA_SVC_AUTH, "svc.cdp.regression"
+
 # User credentials for triggering (matching reference script)
 JITA_USERNAME = safe_b64decode("c3VkaGFyc2hhbi5tdXNhbGk=")
 JITA_PASSWORD = safe_b64decode("V29ya291dEAy")
@@ -3656,15 +5006,21 @@ def create_run_plan():
         
         # Create new run plan
         new_id = str(int(time.time() * 1000))
+        is_dummy = bool(req_data.get("is_dummy"))
+        name = req_data.get("name")
+        # Auto-mark dummy by name convention so test data stays out of scheduler
+        if not is_dummy:
+            is_dummy = _is_dummy_run_plan({"name": name, "tag_name": tag_name, "is_dummy": False})
         new_run_plan = {
             "id": new_id,
-            "name": req_data.get("name"),
+            "name": name,
             "branch": req_data.get("branch", ""),
             "job_profiles": job_profiles,
             "tag_name": tag_name,
             "schedule_date": req_data.get("schedule_date"),
             "schedule_triggered": False,
             "service_account": req_data.get("service_account", ""),
+            "is_dummy": is_dummy,
             "created_at": datetime.now().isoformat(),
             "last_triggered": None
         }
@@ -3696,7 +5052,7 @@ def update_run_plan(run_plan_id):
             if rp.get("id") == run_plan_id:
                 # Check if already triggered (restrict edits)
                 if rp.get("last_triggered"):
-                    # Only allow editing schedule_date, name, branch, service_account, and tag_name
+                    # Only allow editing schedule_date, name, branch, service_account, tag_name, is_dummy
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data["schedule_date"]
                         rp["schedule_triggered"] = False
@@ -3706,6 +5062,8 @@ def update_run_plan(run_plan_id):
                         rp["branch"] = req_data["branch"]
                     if "service_account" in req_data:
                         rp["service_account"] = req_data["service_account"]
+                    if "is_dummy" in req_data:
+                        rp["is_dummy"] = bool(req_data["is_dummy"])
                     if "tag_name" in req_data:
                         # Validate uniqueness
                         tag_name = req_data["tag_name"]
@@ -3720,6 +5078,10 @@ def update_run_plan(run_plan_id):
                         rp["branch"] = req_data["branch"]
                     if "service_account" in req_data:
                         rp["service_account"] = req_data["service_account"]
+                    if "is_dummy" in req_data:
+                        rp["is_dummy"] = bool(req_data["is_dummy"])
+                    elif "name" in req_data:
+                        rp["is_dummy"] = _is_dummy_run_plan(rp)
                     
                     # Validate and filter job profiles if provided
                     if "job_profiles" in req_data:
@@ -3829,21 +5191,18 @@ def trigger_run_plan(run_plan_id):
             logger.error(f"Run plan not found: {run_plan_id}")
             return jsonify({"error": "Run plan not found"}), 404
 
-        # Resolve credentials: prefer run-plan-level service account, fall back to LDAP
-        svc_name = run_plan.get("service_account", "")
-        if svc_name and svc_name in RUN_PLAN_SERVICE_ACCOUNTS:
-            user_auth = RUN_PLAN_SERVICE_ACCOUNTS[svc_name]
-            logger.info(f"Using service account '{svc_name}' for Jita trigger")
-        else:
-            current_username = g.current_user.get("sub", "")
-            user_auth = _get_user_credentials(current_username)
-            if not user_auth:
-                logger.warning(f"No cached credentials for user '{current_username}' — asking for re-auth")
-                return jsonify({
-                    "error": "Session credentials expired. Please re-login to trigger runs.",
-                    "code": "CREDENTIALS_EXPIRED"
-                }), 401
-            logger.info(f"Using LDAP credentials of '{current_username}' for Jita trigger")
+        # Prefer the run plan's selected service account; fall back to LDAP
+        user_auth, triggered_by = _resolve_run_plan_trigger_auth(run_plan, allow_ldap=True)
+        if not user_auth:
+            logger.warning(
+                f"No cached credentials for user '{triggered_by}' and no service account "
+                f"on run plan '{run_plan.get('name')}' — asking for re-auth"
+            )
+            return jsonify({
+                "error": "Session credentials expired. Please re-login to trigger runs.",
+                "code": "CREDENTIALS_EXPIRED"
+            }), 401
+        logger.info(f"Using '{triggered_by}' for Jita trigger of '{run_plan.get('name')}'")
         
         logger.info(f"Found run plan: {run_plan.get('name')} (ID: {run_plan_id})")
         
@@ -3919,8 +5278,7 @@ def trigger_run_plan(run_plan_id):
                             if update_resp.status_code != 200:
                                 logger.warning(f"Failed to update commit for {job_id}: {update_resp.text[:200]}")
                 
-                # Trigger using the logged-in user's LDAP credentials
-                logger.info(f"Triggering Job Profile ID: {job_id} as user '{user_auth[0]}'")
+                logger.info(f"Triggering Job Profile ID: {job_id} as user '{triggered_by}'")
                 resp = requests.post(
                     url,
                     headers=headers,
@@ -3978,7 +5336,7 @@ def trigger_run_plan(run_plan_id):
             "id": str(int(time.time() * 1000)),
             "run_plan_id": run_plan_id,
             "triggered_at": datetime.now().isoformat(),
-            "triggered_by": current_username,
+            "triggered_by": triggered_by,
             "task_ids": task_ids,
             "failed_jobs": failed_jobs,
             "status": "success" if not failed_jobs else "partial"
@@ -3990,11 +5348,11 @@ def trigger_run_plan(run_plan_id):
         
         save_run_plans(data)
         
-        logger.info(f"[END] Trigger Run Plan | run_plan_id={run_plan_id} | task_ids={len(task_ids)} | failed={len(failed_jobs)}")
+        logger.info(f"[END] Trigger Run Plan | run_plan_id={run_plan_id} | triggered_by={triggered_by} | task_ids={len(task_ids)} | failed={len(failed_jobs)}")
         
         return jsonify({
             "success": True,
-            "triggered_by": current_username,
+            "triggered_by": triggered_by,
             "task_ids": task_ids,
             "failed_jobs": failed_jobs,
             "total_triggered": len(task_ids),
@@ -4047,7 +5405,6 @@ def batch_update_job_profiles(run_plan_id):
         
         updated_count = 0
         failed_updates = []
-        
         def update_single_job(job_id):
             try:
                 # Fetch existing profile (use service account for fetching)
@@ -4269,7 +5626,7 @@ def batch_update_job_profiles(run_plan_id):
                         new_additional_tags = []
                     updated_profile["run_tests_with_additional_tags"] = new_additional_tags
                     logger.info(f"Overwriting run_tests_with_additional_tags for {job_id}: {new_additional_tags}")
-                
+
                 # Ensure JSON serializable (following reference script pattern)
                 serializable_payload = {}
                 for k, v in updated_profile.items():
@@ -4658,13 +6015,11 @@ def get_available_tags():
 @app.route("/mcp/regression/run-plan/bulk-trigger", methods=["POST"])
 @jwt_required
 def bulk_trigger_by_branch():
-    """Trigger all run plans that belong to a given branch."""
-    try:
-        current_username = g.current_user.get("sub", "")
-        user_auth = _get_user_credentials(current_username)
-        if not user_auth:
-            return jsonify({"error": "Session credentials expired. Please re-login.", "code": "CREDENTIALS_EXPIRED"}), 401
+    """Trigger all run plans that belong to a given branch.
 
+    Each plan is triggered with its own selected service account when set.
+    """
+    try:
         branch = (request.json or {}).get("branch", "")
         if not branch:
             return jsonify({"error": "branch is required"}), 400
@@ -4677,9 +6032,22 @@ def bulk_trigger_by_branch():
         results = []
         for rp in targets:
             rp_id = rp["id"]
+            user_auth, triggered_by = _resolve_run_plan_trigger_auth(rp, allow_ldap=True)
+            if not user_auth:
+                results.append({
+                    "run_plan_id": rp_id,
+                    "name": rp.get("name"),
+                    "triggered_by": triggered_by,
+                    "task_ids": [],
+                    "failed": 1,
+                    "error": "Session credentials expired and no service account configured"
+                })
+                continue
+
             job_profile_ids = [jp for jp in rp.get("job_profiles", []) if jp and isinstance(jp, str) and jp.strip()]
             task_ids = []
             failed_jobs = []
+            logger.info(f"[bulk-trigger] '{rp.get('name')}' via {triggered_by}")
             for jp_id in job_profile_ids:
                 try:
                     resp = requests.post(
@@ -4706,12 +6074,18 @@ def bulk_trigger_by_branch():
                 "id": str(int(time.time() * 1000)),
                 "run_plan_id": rp_id,
                 "triggered_at": rp["last_triggered"],
-                "triggered_by": current_username,
+                "triggered_by": triggered_by,
                 "task_ids": task_ids,
                 "failed_jobs": failed_jobs,
                 "status": "success" if not failed_jobs else "partial"
             })
-            results.append({"run_plan_id": rp_id, "name": rp.get("name"), "task_ids": task_ids, "failed": len(failed_jobs)})
+            results.append({
+                "run_plan_id": rp_id,
+                "name": rp.get("name"),
+                "triggered_by": triggered_by,
+                "task_ids": task_ids,
+                "failed": len(failed_jobs)
+            })
 
         save_run_plans(data)
         return jsonify({"success": True, "branch": branch, "results": results})
@@ -5016,13 +6390,62 @@ def create_triage_genie_job():
 JIRA_BASE = "https://jira.nutanix.com/rest/api/2"
 GLEAN_BASE = "https://nutanix-be.glean.com/api/v1"
 
-def get_jira_headers():
-    """Get Jira API headers with authentication"""
-    jira_token = os.getenv("JIRA_TOKEN", "")
+
+def _current_username():
+    """Logged-in username from JWT (g.current_user), if any."""
+    try:
+        user = getattr(g, "current_user", None) or {}
+        return (user.get("sub") or user.get("username") or "").strip()
+    except Exception:
+        return ""
+
+
+def _current_user_email():
+    """Login user email for Jarvis 'Disabled by' comments."""
+    try:
+        user = getattr(g, "current_user", None) or {}
+        email = (user.get("email") or "").strip()
+        if email:
+            return email
+        username = _current_username()
+        if username:
+            if "@" in username:
+                return username
+            return f"{username}@nutanix.com"
+    except Exception:
+        pass
+    return "unknown@nutanix.com"
+
+
+def resolve_jira_token(explicit_token=None):
+    """
+    Resolve Jira personal token for API calls.
+
+    Preference:
+      1. explicit_token (captured before thread-pool work)
+      2. User Settings → Atlassian Jira Personal Token (per logged-in user)
+      3. Legacy JIRA_TOKEN env (optional fallback only)
+    """
+    if explicit_token and str(explicit_token).strip():
+        return str(explicit_token).strip()
+    username = _current_username()
+    if username:
+        user_tok = get_user_key(username, "atlassian_jira_token")
+        if user_tok:
+            return user_tok.strip()
+    env_tok = (os.getenv("JIRA_TOKEN") or "").strip()
+    return env_tok or ""
+
+
+def get_jira_headers(token=None):
+    """Get Jira API headers with authentication."""
+    jira_token = resolve_jira_token(token)
     return {
+        "Accept": "application/json",
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {jira_token}" if jira_token else ""
+        "Authorization": f"Bearer {jira_token}" if jira_token else "",
     }
+
 
 def get_glean_headers():
     """Get Glean API headers with authentication"""
@@ -5032,18 +6455,30 @@ def get_glean_headers():
         "Authorization": f"Bearer {glean_token}" if glean_token else ""
     }
 
-def fetch_jira_ticket(ticket_id):
-    """Fetch Jira ticket details"""
+
+def fetch_jira_ticket(ticket_id, token=None, fields=None):
+    """Fetch Jira ticket details. Pass token when calling from worker threads.
+
+    ``fields`` is an optional comma-separated Jira field list (e.g.
+    ``status,issuetype``). When omitted, Jira returns the full issue payload.
+    """
     try:
-        if not os.getenv("JIRA_TOKEN"):
-            logger.warning("JIRA_TOKEN not set, skipping Jira API call")
+        jira_token = resolve_jira_token(token)
+        if not jira_token:
+            logger.warning(
+                "Jira token not available (set Atlassian Jira Personal Token in User Settings)"
+            )
             return None
-        
-        headers = get_jira_headers()
+
+        issue_key = _normalize_jira_issue_key(ticket_id) or ticket_id
+        headers = get_jira_headers(jira_token)
+        params = {"fields": fields} if fields else None
         resp = session.get(
-            f"{JIRA_BASE}/issue/{ticket_id}",
+            f"{JIRA_BASE}/issue/{issue_key}",
             headers=headers,
-            timeout=30
+            params=params,
+            timeout=30,
+            verify=False,
         )
         if resp.status_code == 200:
             return resp.json()
@@ -5053,6 +6488,7 @@ def fetch_jira_ticket(ticket_id):
     except Exception as e:
         logger.warning(f"Error fetching Jira ticket {ticket_id}: {e}")
         return None
+
 
 def search_glean(query_text):
     """Search Glean for similar issues"""
@@ -5209,7 +6645,16 @@ def _load_intermittent_patterns():
                 data = json.load(f)
             raw = data.get("intermittent_patterns", data) if isinstance(data, dict) else data
             if isinstance(raw, list) and raw:
-                return [re.compile(p, re.IGNORECASE) for p in raw]
+                # Supports both the legacy format (list of regex strings) and the
+                # structured format (list of {"regex"/"pattern": ..., ...} objects).
+                compiled = []
+                for p in raw:
+                    if isinstance(p, dict):
+                        p = p.get("regex") or p.get("pattern")
+                    if isinstance(p, str) and p:
+                        compiled.append(re.compile(p, re.IGNORECASE))
+                if compiled:
+                    return compiled
     except Exception as e:
         logger.warning(f"Could not load intermittent_patterns.json: {e}, using defaults")
     return [re.compile(p, re.IGNORECASE) for p in default_patterns]
@@ -5225,6 +6670,31 @@ def is_intermittent_rerun(exception_summary):
         if pattern.search(text):
             return "Yes"
     return "No"
+
+def _jira_field_text(value):
+    """Flatten a Jira field that may be a string or Atlassian document format."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        texts = []
+
+        def _walk(node):
+            if isinstance(node, dict):
+                text = node.get("text")
+                if text:
+                    texts.append(str(text))
+                for child in node.get("content") or []:
+                    _walk(child)
+            elif isinstance(node, list):
+                for child in node:
+                    _walk(child)
+
+        _walk(value)
+        return " ".join(texts)
+    return str(value)
+
 
 def classify_failure(exception_summary, exception, jira_data, glean_data):
     """Classify failure as Test Issue or Product Issue"""
@@ -5248,8 +6718,9 @@ def classify_failure(exception_summary, exception, jira_data, glean_data):
     
     # Check Jira ticket if available
     if jira_data:
-        jira_summary = jira_data.get("fields", {}).get("summary", "").lower()
-        jira_description = jira_data.get("fields", {}).get("description", "").lower()
+        fields = jira_data.get("fields") or {}
+        jira_summary = _jira_field_text(fields.get("summary")).lower()
+        jira_description = _jira_field_text(fields.get("description")).lower()
         jira_combined = f"{jira_summary} {jira_description}"
         
         if "test" in jira_combined and "fix" in jira_combined:
@@ -5276,8 +6747,8 @@ def validate_triage_genie_ticket(jira_ticket_id, exception_summary, exception):
     fields = jira_data.get("fields", {})
     ticket_status = fields.get("status", {}).get("name", "")
     resolution = fields.get("resolution", {}).get("name", "") if fields.get("resolution") else None
-    summary = fields.get("summary", "").lower()
-    description = fields.get("description", "").lower()
+    summary = _jira_field_text(fields.get("summary")).lower()
+    description = _jira_field_text(fields.get("description")).lower()
     
     # Check if ticket is resolved/closed
     if resolution or ticket_status in ["Closed", "Resolved", "Done"]:
@@ -5818,7 +7289,7 @@ def analyze_failed_testcases():
                             ai_summary = f"Error: {str(e)}"
                     
                     # Resolve regression owner
-                    regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
+                    regression_owner = resolve_regression_owner(testcase_name) if testcase_name else "Unknown"
                     
                     # Resolve agave_task_id for retrigger support
                     raw_atid = test_result.get("agave_task_id")
@@ -5828,6 +7299,12 @@ def analyze_failed_testcases():
                         agave_task_id = str(raw_atid)
                     else:
                         agave_task_id = None
+
+                    deployment_id = (
+                        _rdm_oid(test_result.get("deployment_id"))
+                        or _rdm_oid(detailed_result.get("deployment_id"))
+                        or None
+                    )
 
                     row = {
                         "testcase_id": testcase_id,
@@ -5852,6 +7329,8 @@ def analyze_failed_testcases():
                         row["triage_genie_ticket_id"] = triage_genie_ticket_id
                     if ai_summary is not None:
                         row["ai_summary"] = ai_summary
+                    if deployment_id:
+                        row["deployment_id"] = deployment_id
 
                     analysis_results.append(row)
                 
@@ -5904,6 +7383,24 @@ def analyze_failed_testcases():
         return jsonify({"error": str(e)}), 500
 
 
+def _normalize_test_status(status):
+    """Lowercased JITA test status string. Dicts (rare) use name/status."""
+    if isinstance(status, dict):
+        status = status.get("name") or status.get("status") or ""
+    try:
+        return str(status or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _count_test_statuses(results):
+    counts = {}
+    for tr in results or []:
+        key = _normalize_test_status(tr.get("status")) or "(empty)"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None):
     """Generator that yields SSE events: progress, start, then one 'row' per result, then 'done' or 'error'."""
     if status_set is None:
@@ -5913,7 +7410,15 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
 
         tasks = fetch_regression_tasks(tag=tag, task_ids=task_ids)
         if not tasks:
-            yield json.dumps({"type": "start", "total": 0, "current_branch": "", "tag": tag})
+            yield json.dumps({
+                "type": "start",
+                "total": 0,
+                "current_branch": "",
+                "tag": tag,
+                "status_counts": {},
+                "fetched_total": 0,
+                "task_count": 0,
+            })
             yield json.dumps({"type": "done"})
             return
         collected_task_ids = [task["_id"]["$oid"] for task in tasks]
@@ -5921,10 +7426,19 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
         yield json.dumps({"type": "progress", "phase": "fetching_results"})
 
         all_results = fetch_test_results_batch_with_pagination(collected_task_ids)
+        status_counts = _count_test_statuses(all_results)
         failed_results = [
             tr for tr in all_results
-            if tr.get("status", "").lower() in status_set
+            if _normalize_test_status(tr.get("status")) in status_set
         ]
+        logger.info(
+            "Failed analysis: tasks=%s fetched=%s matched=%s status_counts=%s filter=%s",
+            len(collected_task_ids),
+            len(all_results),
+            len(failed_results),
+            status_counts,
+            sorted(status_set),
+        )
         current_branch = (tasks[0].get("branch") or "") if tasks else ""
 
         # Batch pre-fetch Triage Genie tickets via direct /api/tasks/{id} lookups
@@ -5944,7 +7458,10 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
             "type": "start",
             "total": len(failed_results),
             "current_branch": current_branch,
-            "tag": tag or None
+            "tag": tag or None,
+            "status_counts": status_counts,
+            "fetched_total": len(all_results),
+            "task_count": len(collected_task_ids),
         })
 
         for test_result in failed_results:
@@ -6026,7 +7543,7 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
                     logger.error(f"Error generating AI summary for {testcase_name}: {e}", exc_info=True)
                     ai_summary = f"Error: {str(e)}"
             
-            regression_owner = resolve_owner(testcase_name) if testcase_name else "Unknown"
+            regression_owner = resolve_regression_owner(testcase_name) if testcase_name else "Unknown"
 
             raw_atid = test_result.get("agave_task_id")
             if isinstance(raw_atid, dict) and "$oid" in raw_atid:
@@ -6035,6 +7552,12 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
                 agave_task_id = str(raw_atid)
             else:
                 agave_task_id = None
+
+            deployment_id = (
+                _rdm_oid(test_result.get("deployment_id"))
+                or _rdm_oid(detailed_result.get("deployment_id"))
+                or None
+            )
 
             row = {
                 "testcase_id": testcase_id,
@@ -6059,6 +7582,8 @@ def _analyze_failed_testcases_stream(tag, task_ids, include_set, status_set=None
                 row["triage_genie_ticket_id"] = triage_genie_ticket_id
             if ai_summary is not None:
                 row["ai_summary"] = ai_summary
+            if deployment_id:
+                row["deployment_id"] = deployment_id
 
             yield json.dumps({"type": "row", "result": row})
         yield json.dumps({"type": "done"})
@@ -6077,10 +7602,10 @@ def analyze_failed_testcases_stream():
     include_set = {x.strip().lower() for x in include_param.split(",") if x.strip()} if include_param else set()
     if not include_set:
         include_set = {"basic", "exception_summary", "intermittent"}
-    task_ids = None
-    if task_ids_param:
-        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
+    task_ids = normalize_task_id_list(task_ids_param) if task_ids_param else None
     if not tag and not task_ids:
+        if task_ids_param:
+            return jsonify({"error": "No valid 24-char JITA task IDs provided"}), 400
         return jsonify({"error": "Either tag or task_ids is required"}), 400
 
     statuses_param = request.args.get("statuses", "")
@@ -6089,6 +7614,7 @@ def analyze_failed_testcases_stream():
         "skipped": ("skipped", "skip"),
         "warning": ("warning", "warn"),
         "killed": ("killed", "terminated", "cancelled"),
+        "pending": ("pending", "waiting", "running", "started"),
     }
     if statuses_param:
         requested = {s.strip().lower() for s in statuses_param.split(",") if s.strip()}
@@ -6166,14 +7692,84 @@ def update_triage_comments():
 # RDM Failure Analysis for Skipped Testcases
 # ======================================================
 
-RDM_PATTERNS_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "rdm_failure_patterns.json")
+_RDM_PATTERNS_DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+
+# Categories that auto-disable the failing node in Jarvis on approve / auto-workflow.
+RDM_NODE_DISABLE_CATEGORIES = {"INFRA_NODE"}
+RDM_RERUN_ACTIONS = {"disable_node_and_rerun", "rerun"}
+
+
+def _rdm_patterns_file(for_write=False):
+    """Team-scoped RDM pattern file; fall back to CDP_FT then legacy data/ path."""
+    team = ""
+    try:
+        if has_request_context():
+            team = (getattr(g, "team", None) or "").strip()
+    except Exception:
+        pass
+    candidates = []
+    if team:
+        candidates.append(os.path.join(_RDM_PATTERNS_DATA_ROOT, team, "rdm_failure_patterns.json"))
+    candidates.append(os.path.join(_RDM_PATTERNS_DATA_ROOT, "CDP_FT", "rdm_failure_patterns.json"))
+    candidates.append(os.path.join(_RDM_PATTERNS_DATA_ROOT, "rdm_failure_patterns.json"))
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    if for_write:
+        dest_dir = os.path.join(_RDM_PATTERNS_DATA_ROOT, team or "CDP_FT")
+        os.makedirs(dest_dir, exist_ok=True)
+        return os.path.join(dest_dir, "rdm_failure_patterns.json")
+    return candidates[0]
+
+
+# Back-compat alias used by older helpers / tests.
+RDM_PATTERNS_FILE = os.path.join(_RDM_PATTERNS_DATA_ROOT, "CDP_FT", "rdm_failure_patterns.json")
+
+
+def _pattern_next_action(pattern):
+    """Resolve next_action from explicit field or category."""
+    explicit = (pattern.get("next_action") or "").strip()
+    if explicit:
+        return explicit
+    cat = (pattern.get("category") or "").upper()
+    if cat in RDM_NODE_DISABLE_CATEGORIES:
+        return "disable_node_and_rerun"
+    if cat == "INFRA_INTERMITTENT":
+        return "rerun"
+    return "comment_only"
+
+
+def _strip_json_line_comments(text):
+    """Drop `//` comment lines so accidental JS-style comments do not break JSON."""
+    kept = []
+    for line in (text or "").splitlines():
+        if line.lstrip().startswith("//"):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _read_rdm_patterns_json(path):
+    """Read the patterns file; tolerate // comment lines in otherwise valid JSON."""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = json.loads(_strip_json_line_comments(text))
+    if not isinstance(data, dict):
+        return {"patterns": []}
+    if not isinstance(data.get("patterns"), list):
+        data["patterns"] = []
+    return data
+
 
 def _load_rdm_patterns():
     """Load RDM failure patterns from JSON file and compile regexes."""
     try:
-        if os.path.exists(RDM_PATTERNS_FILE):
-            with open(RDM_PATTERNS_FILE, "r") as f:
-                data = json.load(f)
+        path = _rdm_patterns_file()
+        if os.path.exists(path):
+            data = _read_rdm_patterns_json(path)
             patterns = data.get("patterns", [])
             compiled = []
             for p in patterns:
@@ -6185,6 +7781,8 @@ def _load_rdm_patterns():
                         "category": p.get("category", ""),
                         "description": p.get("description", ""),
                         "jira": p.get("jira", ""),
+                        "next_action": _pattern_next_action(p),
+                        "action": p.get("action", ""),
                     })
                 except re.error as e:
                     logger.warning(f"Invalid regex in RDM pattern '{p.get('id')}': {e}")
@@ -6215,99 +7813,288 @@ def _extract_node_names(message):
     return list(dict.fromkeys(all_nodes))
 
 
-def fetch_jita_deployments(task_id):
-    """Fetch JITA deployments for a given agave_task_id."""
-    payload = {
-        "raw_query": {"task_id": {"$oid": task_id}},
-        "start": 0,
-        "limit": 20,
-    }
-    try:
-        resp = session.post(
-            f"{JITA_BASE}/reports/deployments",
-            json=payload,
-            timeout=30,
+_RDM_SKILL_TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+_RDM_JIRA_CREATE_URL = "https://jira.nutanix.com/secure/CreateIssue!default.jspa"
+
+
+def _ticket_keys_from_rdm_skill(analysis):
+    """Collect ENG/DIAL (and other) Jira keys from skill JSON."""
+    analysis = analysis or {}
+    keys = []
+    for item in analysis.get("existing_tickets") or []:
+        if isinstance(item, dict):
+            key = item.get("ticket") or item.get("key") or ""
+        else:
+            key = str(item or "")
+        if key:
+            keys.append(key.strip())
+    for key in analysis.get("jira_duplicates") or []:
+        if key:
+            keys.append(str(key).strip())
+    for field in (
+        analysis.get("suggested_comment"),
+        analysis.get("root_cause"),
+        analysis.get("triage_report"),
+    ):
+        if field:
+            keys.extend(_RDM_SKILL_TICKET_RE.findall(str(field)))
+    seen = []
+    for key in keys:
+        if key and key not in seen:
+            seen.append(key)
+    return seen
+
+
+def _rdm_skill_jira_project(issue_category, tickets, suggested_project=""):
+    project = (suggested_project or "").strip().upper()
+    if project in ("DIAL", "ENG"):
+        return project
+    if tickets:
+        prefix = tickets[0].split("-", 1)[0].upper()
+        if prefix in ("DIAL", "ENG"):
+            return prefix
+    cat = (issue_category or "").upper()
+    if any(token in cat for token in ("FOUNDATION", "INFRA", "INTERMITTENT", "PLUGIN")):
+        return "DIAL"
+    if any(token in cat for token in ("PRODUCT", "CONFIG")):
+        return "ENG"
+    return "DIAL"
+
+
+def _normalize_rdm_skill_analysis(analysis, rdm_message=""):
+    """Map triage-rdm-deployment-failure JSON to RDM-cell actions."""
+    analysis = analysis or {}
+    issue_category = (
+        analysis.get("issue_category") or analysis.get("classification") or ""
+    ).strip()
+    recommended_action = (analysis.get("recommended_action") or "").strip().lower().replace("-", "_")
+    tickets = _ticket_keys_from_rdm_skill(analysis)
+    nodes = _extract_node_names(rdm_message or "")
+    cat_upper = issue_category.upper()
+
+    if recommended_action not in (
+        "link_existing",
+        "create_jira",
+        "rerun",
+        "disable_node_and_rerun",
+    ):
+        if tickets:
+            recommended_action = "link_existing"
+        elif nodes:
+            recommended_action = "disable_node_and_rerun"
+        elif any(token in cat_upper for token in ("INTERMITTENT", "FLAKY", "ONE-OFF", "ONE_OFF")):
+            recommended_action = "rerun"
+        else:
+            recommended_action = "create_jira"
+
+    suggested_comment = (analysis.get("suggested_comment") or "").strip()
+    if not suggested_comment:
+        if recommended_action == "link_existing" and tickets:
+            suggested_comment = "regx_rerun (%s)" % tickets[0]
+        elif recommended_action == "disable_node_and_rerun" and nodes:
+            suggested_comment = ", ".join(
+                "regx_rerun_disable-%s Rerun cause due to node issue" % n for n in nodes
+            )
+        else:
+            suggested_comment = "regx_rerun"
+
+    next_action = (
+        "disable_node_and_rerun"
+        if recommended_action == "disable_node_and_rerun" or (
+            nodes and recommended_action == "rerun"
         )
-        if resp.status_code == 200:
-            return resp.json().get("data", [])
-        logger.warning(f"JITA deployments fetch failed for task {task_id}: HTTP {resp.status_code}")
+        else "rerun"
+    )
+    jira_project = _rdm_skill_jira_project(
+        issue_category, tickets, analysis.get("suggested_jira_project") or ""
+    )
+    summary = (analysis.get("suggested_fix") or analysis.get("root_cause") or "RDM deployment failure")[:180]
+    return {
+        "issue_category": issue_category,
+        "recommended_action": recommended_action,
+        "suggested_comment": suggested_comment,
+        "jira_refs": tickets,
+        "jira_ticket": tickets[0] if tickets else "",
+        "failed_nodes": nodes,
+        "suggested_next_action": next_action,
+        "suggested_jira_project": jira_project,
+        "jira_create": {
+            "needed": recommended_action == "create_jira",
+            "project": jira_project,
+            "url": _RDM_JIRA_CREATE_URL,
+            "summary": "RDM: %s" % summary,
+            "description": analysis.get("triage_report") or analysis.get("root_cause") or "",
+        },
+    }
+
+
+def fetch_jita_deployments(task_id):
+    """Fetch JITA deployments for a given agave_task_id (paginated)."""
+    deployments = []
+    start = 0
+    limit = 100
+    try:
+        while True:
+            payload = {
+                "raw_query": {"task_id": {"$oid": task_id}},
+                "start": start,
+                "limit": limit,
+            }
+            resp = session.post(
+                f"{JITA_BASE}/reports/deployments",
+                json=payload,
+                auth=globals().get("JITA_SVC_AUTH"),
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    f"JITA deployments fetch failed for task {task_id}: HTTP {resp.status_code}"
+                )
+                break
+            batch = resp.json().get("data", []) or []
+            deployments.extend(batch)
+            if len(batch) < limit:
+                break
+            start += limit
+        return deployments
     except Exception as e:
         logger.warning(f"JITA deployments fetch error for task {task_id}: {e}")
-    return []
+        return deployments
 
 
-def get_rdm_failure_info(task_id):
+def _rdm_oid(val):
+    """Normalize Mongo/JSON id fields to a string."""
+    if not val:
+        return ""
+    if isinstance(val, dict):
+        return str(val.get("$oid") or val.get("$id") or "")
+    return str(val)
+
+
+def _rdm_info_from_deployments(deployments, deployment_id=None):
     """
-    Get RDM failure information for a task by inspecting its JITA deployments.
-    Returns a dict with rdm_message, rdm_link, provision_request_id, category, etc.
-    or None if no failed deployments found.
+    Build RDM failure info from JITA deployments.
+
+    When ``deployment_id`` (JITA deployment ``_id``) is set, use that
+    deployment's ``provision_request_id`` — a task can have many RDMs,
+    one per test. Do not fall back to another test's failed RDM.
     """
-    deployments = fetch_jita_deployments(task_id)
     if not deployments:
         return None
 
-    failed_deployments = [d for d in deployments if d.get("status") == "failed"]
-    if not failed_deployments:
-        return None
+    failed_deployments = [
+        d for d in deployments if (d.get("status") or "").lower() == "failed"
+    ]
+    chosen = None
+    if deployment_id:
+        want = str(deployment_id)
+        for dep in deployments:
+            if _rdm_oid(dep.get("_id")) == want:
+                chosen = dep
+                break
+        if chosen is None:
+            logger.warning(
+                f"JITA deployment_id {want} not found among {len(deployments)} deployments"
+            )
+            return None
+    else:
+        chosen = failed_deployments[0] if failed_deployments else None
+        if chosen is None:
+            return None
 
-    # Collect failure messages from status_transitions
-    all_reasons = []
-    rdm_ids = []
-    for dep in failed_deployments:
-        prov_id = ""
-        raw_prov = dep.get("provision_request_id")
-        if isinstance(raw_prov, dict) and "$oid" in raw_prov:
-            prov_id = raw_prov["$oid"]
-        elif raw_prov:
-            prov_id = str(raw_prov)
-        if prov_id:
-            rdm_ids.append(prov_id)
+    prov_id = _rdm_oid(chosen.get("provision_request_id"))
+    combined_message = ""
+    for transition in chosen.get("status_transitions") or []:
+        if (transition.get("status") or "").lower() == "failed":
+            reason = transition.get("reason") or ""
+            if reason:
+                combined_message = reason
+                break
 
-        for transition in dep.get("status_transitions", []):
-            if transition.get("status") == "failed":
-                reason = transition.get("reason", "")
-                if reason and "RDM" in reason:
-                    all_reasons.append(reason)
-
-    if not all_reasons and not rdm_ids:
-        return None
-
-    combined_message = all_reasons[0] if all_reasons else ""
-    primary_rdm_id = rdm_ids[0] if rdm_ids else ""
-
-    # Try fetching detailed RDM failure_analysis from the RDM API
     rdm_category = ""
     rdm_resolution = ""
     rdm_source = ""
-    if primary_rdm_id:
+    if prov_id:
         try:
             rdm_resp = session.get(
-                f"https://rdm.eng.nutanix.com/api/v1/scheduled_deployments/{primary_rdm_id}?expand=created_by",
+                f"https://rdm.eng.nutanix.com/api/v1/scheduled_deployments/{prov_id}?expand=created_by",
                 timeout=15,
             )
             if rdm_resp.status_code == 200:
-                rdm_data = rdm_resp.json().get("data", {})
+                rdm_data = rdm_resp.json().get("data", {}) or {}
                 rdm_msg = rdm_data.get("message", "")
-                if rdm_msg and not combined_message:
+                if rdm_msg:
                     combined_message = rdm_msg
-                fa = rdm_data.get("failure_analysis", {})
+                fa = rdm_data.get("failure_analysis") or {}
                 rdm_category = fa.get("category", "")
                 rdm_resolution = fa.get("resolution", "")
-                em = fa.get("error_metadata", {}).get("RDM", {})
+                em = (fa.get("error_metadata") or {}).get("RDM") or {}
                 rdm_source = em.get("source", "")
         except Exception as e:
-            logger.warning(f"RDM API fetch failed for {primary_rdm_id}: {e}")
+            logger.warning(f"RDM API fetch failed for {prov_id}: {e}")
+
+    if not combined_message and not prov_id:
+        return None
 
     return {
         "rdm_message": combined_message,
-        "rdm_link": f"https://rdm.eng.nutanix.com/scheduled_deployments/{primary_rdm_id}" if primary_rdm_id else "",
-        "provision_request_id": primary_rdm_id,
+        "rdm_link": (
+            f"https://rdm.eng.nutanix.com/scheduled_deployments/{prov_id}" if prov_id else ""
+        ),
+        "provision_request_id": prov_id,
+        "jita_deployment_id": _rdm_oid(chosen.get("_id")),
         "rdm_category": rdm_category,
         "rdm_resolution": rdm_resolution,
         "rdm_source": rdm_source,
         "failed_deployment_count": len(failed_deployments),
         "total_deployment_count": len(deployments),
     }
+
+
+def get_rdm_failure_info(task_id, deployment_id=None, testcase_id=None, deployments=None):
+    """
+    Get RDM failure information for a task / specific test.
+
+    Prefer the test result's ``deployment_id`` so each skipped test maps to
+    its own RDM scheduled-deployment, not the first failed RDM on the task.
+    """
+    if deployments is None:
+        deployments = fetch_jita_deployments(task_id)
+    if not deployments:
+        return None
+
+    if not deployment_id and testcase_id:
+        deployment_id = _jita_test_result_deployment_id(testcase_id) or None
+        if not deployment_id:
+            logger.warning(
+                "Could not resolve deployment_id for testcase %s; "
+                "not falling back to first failed RDM on the task",
+                testcase_id,
+            )
+            return None
+
+    return _rdm_info_from_deployments(deployments, deployment_id=deployment_id)
+
+
+def _jita_test_result_deployment_id(testcase_id):
+    """Resolve a test result's JITA deployment_id (PHX, then JITA)."""
+    if not testcase_id:
+        return ""
+    tr = fetch_detailed_test_result(testcase_id) or {}
+    did = _rdm_oid(tr.get("deployment_id"))
+    if did:
+        return did
+    try:
+        resp = session.get(
+            f"{JITA_BASE}/agave_test_results/{testcase_id}",
+            auth=globals().get("JITA_SVC_AUTH"),
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return _rdm_oid((resp.json().get("data") or {}).get("deployment_id"))
+    except Exception as e:
+        logger.warning(f"JITA test result fetch failed for {testcase_id}: {e}")
+    return ""
 
 
 def match_rdm_pattern(rdm_message):
@@ -6327,8 +8114,8 @@ def match_rdm_pattern(rdm_message):
             template = pattern["comment_template"]
             comment = template
 
+            nodes = _extract_node_names(rdm_message)
             if "{node_name}" in template:
-                nodes = _extract_node_names(rdm_message)
                 if nodes:
                     comment = ", ".join(
                         template.replace("{node_name}", n) for n in nodes
@@ -6341,12 +8128,153 @@ def match_rdm_pattern(rdm_message):
                 "category": pattern["category"],
                 "description": pattern["description"],
                 "generated_comment": comment,
-                "failed_nodes": nodes if "{node_name}" in template and nodes else [],
+                "failed_nodes": nodes or [],
                 "jira": pattern.get("jira", ""),
+                "next_action": _pattern_next_action(pattern),
                 "matched": True,
             }
 
     return None
+
+
+def _suggest_rdm_pattern_from_message(rdm_message, rdm_link="", nodes=None):
+    """Draft a reusable pattern from an unmatched RDM failure for user approval."""
+    nodes = nodes if nodes is not None else _extract_node_names(rdm_message or "")
+    snippet = (rdm_message or "").strip()
+    # Use the first ~6 non-empty lines as the signature, then escape.
+    lines = [ln.strip() for ln in snippet.splitlines() if ln.strip()][:6]
+    signature = " ".join(lines)[:400]
+    escaped = re.escape(signature)
+    for n in nodes:
+        escaped = escaped.replace(re.escape(n), r"([\w\-]+)")
+    regex = re.sub(r"(\\ )+", r"\\s+", escaped)
+    regex = regex.replace(r"\:", ":")
+    slug_src = (nodes[0] if nodes else "rdm") + "_" + (signature[:40] or "pattern")
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", slug_src).strip("_").lower()[:60]
+    next_action = "disable_node_and_rerun" if nodes else "rerun"
+    category = "INFRA_NODE" if nodes else "INFRA_INTERMITTENT"
+    comment = (
+        "regx_rerun_disable-{node_name} Rerun cause due to node issue"
+        if nodes else "regx_rerun"
+    )
+    return {
+        "id": f"learned_{slug}" if slug else f"learned_{int(time.time())}",
+        "regex": regex or r"Installer errors[:\s]+Nodes?:\s*([\w\-]+)",
+        "confidence": 0.9,
+        "comment_template": comment,
+        "category": category,
+        "next_action": next_action,
+        "description": "Learned from RDM AI analysis approval",
+        "action": (
+            "Disable failed node(s) in Jarvis and rerun"
+            if nodes else "Rerun the skipped test"
+        ),
+        "example_failure": snippet[:800],
+        "reference_task": rdm_link or "",
+    }
+
+
+_JARVIS_SERVICE_MOD = None
+
+
+def _jarvis_mod():
+    """Load Jarvis helpers without importing agents.base (requires PyYAML)."""
+    global _JARVIS_SERVICE_MOD
+    if _JARVIS_SERVICE_MOD is not None:
+        return _JARVIS_SERVICE_MOD
+    try:
+        from agents.services import jarvis_service as mod
+        _JARVIS_SERVICE_MOD = mod
+        return mod
+    except ModuleNotFoundError as e:
+        if getattr(e, "name", "") != "yaml" and "yaml" not in str(e):
+            raise
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents", "services", "jarvis_service.py")
+    spec = importlib.util.spec_from_file_location("regx_jarvis_service", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _JARVIS_SERVICE_MOD = mod
+    return mod
+
+
+def _jarvis_service():
+    return _jarvis_mod().JarvisNodeService(auth=JITA_SVC_AUTH)
+
+
+def _apply_jita_triage_update(test_id, comment, jira_tickets=None):
+    """Update JITA agave_test_result comments. Returns (ok, payload_or_error)."""
+    current_username = _current_username()
+    user_auth = _get_user_credentials(current_username)
+    if not user_auth:
+        return False, {
+            "error": "Session credentials expired. Please re-login to update triage.",
+            "code": "CREDENTIALS_EXPIRED",
+        }
+    update_fields = {
+        "comments": comment,
+        "triaged_by": current_username,
+    }
+    if jira_tickets is not None:
+        if isinstance(jira_tickets, str):
+            jira_tickets = [jira_tickets] if jira_tickets else []
+        update_fields["jira_tickets"] = jira_tickets
+    payload = {
+        "query": {"_id": {"$in": [{"$oid": test_id}]}},
+        "data": {"$set": update_fields},
+        "multi": True,
+    }
+    try:
+        resp = requests.put(
+            f"{JITA_BASE}/agave_test_results",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            auth=user_auth,
+            verify=False,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return True, {"success": True, "triaged_by": current_username, "comment": comment}
+        return False, {"error": resp.text or f"HTTP {resp.status_code}"}
+    except Exception as e:
+        logger.error(f"Error updating triage: {e}", exc_info=True)
+        return False, {"error": str(e)}
+
+
+def _disable_rdm_nodes(failed_nodes, rdm_link, disabled_by):
+    """Disable each hostname in Jarvis. Returns list of per-node results."""
+    results = []
+    if not failed_nodes:
+        return results
+    svc = _jarvis_service()
+    seen = set()
+    for node_name in failed_nodes:
+        name = (node_name or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        result = svc.disable_node_sync(
+            node_name=name,
+            rdm_link=rdm_link,
+            disabled_by=disabled_by,
+            reason="Rerun cause due to node issue",
+        )
+        results.append(result)
+    return results
+
+
+def _rdm_should_disable(category, next_action, failed_nodes):
+    action = (next_action or "").strip() or _pattern_next_action({"category": category, "next_action": next_action})
+    if action == "disable_node_and_rerun":
+        return True
+    if (category or "").upper() in RDM_NODE_DISABLE_CATEGORIES and failed_nodes:
+        return True
+    return False
+
+
+def _rdm_should_rerun(next_action, category):
+    action = (next_action or "").strip() or _pattern_next_action({"category": category, "next_action": next_action})
+    return action in RDM_RERUN_ACTIONS
 
 
 @app.route("/mcp/regression/failed-analysis/rdm-analyze", methods=["POST"])
@@ -6354,49 +8282,38 @@ def match_rdm_pattern(rdm_message):
 def rdm_analyze_skipped():
     """
     Analyze RDM failure for skipped testcases.
-    Accepts: { task_ids: [agave_task_id, ...] }
-    Returns RDM failure info with pattern-matched comments for each task.
+
+    Accepts either:
+      { tests: [{ agave_task_id, testcase_id, testcase_name, deployment_id }] }
+      { task_ids: [agave_task_id, ...] }  (legacy; one RDM per task)
+
+    Prefer ``tests`` so each testcase maps to its own JITA deployment / RDM.
     """
     try:
         data = request.get_json() or {}
+        tests = data.get("tests") or []
         task_ids = data.get("task_ids", [])
         if isinstance(task_ids, str):
             task_ids = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
-        if not task_ids:
-            return jsonify({"error": "task_ids is required"}), 400
+        if tests:
+            rows = tests
+        elif task_ids:
+            rows = [{"agave_task_id": tid} for tid in task_ids]
+        else:
+            return jsonify({"error": "tests or task_ids is required"}), 400
 
+        dep_cache = {}
         results = []
-        for task_id in task_ids:
-            rdm_info = get_rdm_failure_info(task_id)
-            if not rdm_info:
-                results.append({
-                    "agave_task_id": task_id,
-                    "rdm_found": False,
-                    "rdm_message": "",
-                    "generated_comment": "",
-                    "pattern_matched": False,
-                })
-                continue
-
-            pattern_result = match_rdm_pattern(rdm_info["rdm_message"])
-            results.append({
-                "agave_task_id": task_id,
-                "rdm_found": True,
-                "rdm_message": rdm_info["rdm_message"][:500],
-                "rdm_link": rdm_info["rdm_link"],
-                "rdm_category": rdm_info["rdm_category"],
-                "rdm_resolution": rdm_info["rdm_resolution"],
-                "rdm_source": rdm_info["rdm_source"],
-                "failed_deployments": rdm_info["failed_deployment_count"],
-                "total_deployments": rdm_info["total_deployment_count"],
-                "pattern_matched": bool(pattern_result),
-                "generated_comment": pattern_result["generated_comment"] if pattern_result else "",
-                "pattern_id": pattern_result["pattern_id"] if pattern_result else "",
-                "pattern_category": pattern_result["category"] if pattern_result else "",
-                "pattern_description": pattern_result["description"] if pattern_result else "",
-                "pattern_jira": pattern_result.get("jira", "") if pattern_result else "",
-                "failed_nodes": pattern_result.get("failed_nodes", []) if pattern_result else [],
-            })
+        for row in rows:
+            task_id = row.get("agave_task_id") or ""
+            if task_id and task_id not in dep_cache:
+                dep_cache[task_id] = fetch_jita_deployments(task_id)
+            results.append(_analyze_one_rdm_task(
+                task_id,
+                testcase_id=row.get("testcase_id"),
+                deployment_id=row.get("deployment_id"),
+                deployments=dep_cache.get(task_id),
+            ))
 
         return jsonify({"success": True, "results": results})
     except Exception as e:
@@ -6414,15 +8331,22 @@ def rdm_analyze_ai():
     try:
         data = request.get_json() or {}
         task_id = data.get("task_id", "")
+        testcase_id = data.get("testcase_id", "")
+        deployment_id = data.get("deployment_id", "")
         rdm_message = data.get("rdm_message", "")
         testcase_name = data.get("testcase_name", "")
 
         if not rdm_message and not task_id:
             return jsonify({"error": "task_id or rdm_message is required"}), 400
 
-        if not rdm_message and task_id:
-            rdm_info = get_rdm_failure_info(task_id)
-            if rdm_info:
+        rdm_info = None
+        if task_id:
+            rdm_info = get_rdm_failure_info(
+                task_id,
+                deployment_id=deployment_id or None,
+                testcase_id=testcase_id or None,
+            )
+            if not rdm_message and rdm_info:
                 rdm_message = rdm_info.get("rdm_message", "")
 
         if not rdm_message:
@@ -6474,19 +8398,570 @@ def rdm_analyze_ai():
         ai_summary = "\n".join(summary_parts)
 
         suggested_comment = "regx_rerun"
-        if jira_refs:
+        nodes = _extract_node_names(rdm_message)
+        if nodes:
+            suggested_comment = ", ".join(
+                f"regx_rerun_disable-{n} Rerun cause due to node issue" for n in nodes
+            )
+        elif jira_refs:
             suggested_comment = f"regx_rerun ({jira_refs[0]})"
+
+        rdm_link = (rdm_info or {}).get("rdm_link") or ""
+
+        suggested_pattern = _suggest_rdm_pattern_from_message(
+            rdm_message, rdm_link=rdm_link, nodes=nodes
+        )
 
         return jsonify({
             "success": True,
             "ai_summary": ai_summary,
             "jira_refs": jira_refs,
             "suggested_comment": suggested_comment,
+            "failed_nodes": nodes,
+            "suggested_next_action": "disable_node_and_rerun" if nodes else "rerun",
+            "suggested_pattern": suggested_pattern,
             "glean_results_count": len(glean_results) if glean_results else 0,
         })
     except Exception as e:
         logger.error(f"RDM AI analyze error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-skill-analyze", methods=["POST"])
+@jwt_required
+def rdm_skill_analyze():
+    """
+    Skill-based RDM triage for unmatched skipped tests.
+
+    Runs triage-rdm-deployment-failure via the Cursor bridge using the RDM
+    scheduled-deployment URL, then maps the result to a JITA comment
+    (link existing ENG/DIAL ticket, rerun, or draft a new Jira).
+    """
+    try:
+        data = request.get_json() or {}
+        task_id = data.get("task_id") or data.get("agave_task_id") or ""
+        testcase_id = data.get("testcase_id") or ""
+        deployment_id = data.get("deployment_id") or ""
+        rdm_message = data.get("rdm_message") or ""
+        rdm_link = data.get("rdm_link") or ""
+        testcase_name = data.get("testcase_name") or ""
+
+        if not testcase_name and not rdm_link and not task_id:
+            return jsonify({"success": False, "error": "testcase_name or rdm_link is required"}), 400
+
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        if not cursor_api_key:
+            return jsonify({
+                "success": False,
+                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "require_key_setup": True,
+            }), 403
+
+        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
+        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
+        atlassian_tokens = {}
+        if atlassian_jira_token:
+            atlassian_tokens["jira"] = atlassian_jira_token
+        if atlassian_confluence_token:
+            atlassian_tokens["confluence"] = atlassian_confluence_token
+
+        rdm_info = None
+        if task_id and (not rdm_link or not rdm_message):
+            rdm_info = get_rdm_failure_info(
+                task_id,
+                deployment_id=deployment_id or None,
+                testcase_id=testcase_id or None,
+            )
+            if rdm_info:
+                rdm_link = rdm_link or rdm_info.get("rdm_link") or ""
+                rdm_message = rdm_message or rdm_info.get("rdm_message") or ""
+
+        if not rdm_link and task_id:
+            rdm_link = "https://jita.eng.nutanix.com/results?task_ids=%s" % task_id
+
+        glean_tickets = []
+        glean_snippets = []
+        try:
+            search = search_existing_tickets_for_failure(
+                rdm_message, rdm_message, testcase_name
+            )
+            glean_tickets = _enrich_tickets_with_jira(search.get("tickets") or [])
+            glean_snippets = search.get("snippets") or []
+        except Exception as glean_err:
+            logger.warning("Glean search failed for RDM skill analysis: %s", glean_err)
+
+        payload = {
+            "testcase_name": testcase_name or "rdm_skipped_testcase",
+            "exception_summary": rdm_message[:500],
+            "exception": rdm_message,
+            "steps_log": "",
+            "nutest_test_log": "",
+            "test_log_url": rdm_link,
+            "rdm_url": rdm_link,
+            "rdm_message": rdm_message,
+            "jita_task_id": task_id,
+            "jira_tickets": data.get("jira_tickets") or [],
+            "failure_stage": data.get("failure_stage") or "DEPLOYMENT_FAILED",
+            "triage_genie_ticket": data.get("triage_genie_ticket") or "",
+            "glean_tickets": glean_tickets,
+            "glean_snippets": glean_snippets,
+            "analysis_type": "skipped",
+            "cursor_api_key": cursor_api_key,
+            "atlassian_tokens": atlassian_tokens,
+        }
+
+        resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/analyze-testcase",
+            json=payload,
+            timeout=600,
+        )
+        if resp.status_code != 200:
+            error_msg = (
+                resp.json().get("error", resp.text)
+                if resp.headers.get("content-type", "").startswith("application/json")
+                else resp.text
+            )
+            return jsonify({"success": False, "error": "Bridge error: %s" % error_msg}), 502
+
+        bridge = resp.json()
+        analysis = bridge.get("analysis") or {}
+        mapped = _normalize_rdm_skill_analysis(analysis, rdm_message=rdm_message)
+        suggested_pattern = _suggest_rdm_pattern_from_message(
+            rdm_message, rdm_link=rdm_link, nodes=mapped.get("failed_nodes") or []
+        )
+        if mapped.get("suggested_comment"):
+            suggested_pattern["comment_template"] = mapped["suggested_comment"]
+        if mapped.get("jira_ticket"):
+            suggested_pattern["jira"] = mapped["jira_ticket"]
+        if mapped.get("issue_category"):
+            suggested_pattern["description"] = mapped["issue_category"]
+
+        return jsonify({
+            "success": True,
+            "session_id": bridge.get("session_id", ""),
+            "skill_used": "triage-rdm-deployment-failure",
+            "rdm_link": rdm_link,
+            "analysis": analysis,
+            "root_cause": analysis.get("root_cause"),
+            "classification": analysis.get("classification") or mapped["issue_category"],
+            "confidence": analysis.get("confidence"),
+            "suggested_fix": analysis.get("suggested_fix"),
+            "triage_report": analysis.get("triage_report"),
+            "tg_ticket_validation": analysis.get("tg_ticket_validation"),
+            "enriched_tickets": glean_tickets,
+            "glean_snippets": glean_snippets,
+            "ai_summary": analysis.get("root_cause") or analysis.get("triage_report") or "",
+            "suggested_pattern": suggested_pattern,
+            **mapped,
+        })
+    except requests.exceptions.ConnectionError:
+        logger.error("Cursor bridge is not reachable at %s", CURSOR_BRIDGE_URL)
+        return jsonify({
+            "success": False,
+            "error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start",
+        }), 503
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "success": False,
+            "error": "AI Skill Analysis timed out (>600s).",
+        }), 504
+    except Exception as e:
+        logger.error("RDM skill analyze error: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _analyze_one_rdm_task(task_id, testcase_id=None, deployment_id=None, deployments=None):
+    """Return rdm_info + pattern match for a single test (or legacy per-task)."""
+    rdm_info = get_rdm_failure_info(
+        task_id,
+        deployment_id=deployment_id,
+        testcase_id=testcase_id,
+        deployments=deployments,
+    )
+    if not rdm_info:
+        return {
+            "agave_task_id": task_id or "",
+            "testcase_id": testcase_id or "",
+            "rdm_found": False,
+            "rdm_message": "",
+            "generated_comment": "",
+            "pattern_matched": False,
+            "failed_nodes": [],
+            "next_action": "",
+        }
+    pattern_result = match_rdm_pattern(rdm_info["rdm_message"])
+    return {
+        "agave_task_id": task_id or "",
+        "testcase_id": testcase_id or "",
+        "rdm_found": True,
+        "rdm_message": rdm_info["rdm_message"][:500],
+        "rdm_link": rdm_info["rdm_link"],
+        "rdm_category": rdm_info["rdm_category"],
+        "rdm_resolution": rdm_info["rdm_resolution"],
+        "rdm_source": rdm_info["rdm_source"],
+        "jita_deployment_id": rdm_info.get("jita_deployment_id", ""),
+        "failed_deployments": rdm_info["failed_deployment_count"],
+        "total_deployments": rdm_info["total_deployment_count"],
+        "pattern_matched": bool(pattern_result),
+        "generated_comment": pattern_result["generated_comment"] if pattern_result else "",
+        "pattern_id": pattern_result["pattern_id"] if pattern_result else "",
+        "pattern_category": pattern_result["category"] if pattern_result else "",
+        "pattern_description": pattern_result["description"] if pattern_result else "",
+        "pattern_jira": pattern_result.get("jira", "") if pattern_result else "",
+        "failed_nodes": pattern_result.get("failed_nodes", []) if pattern_result else [],
+        "next_action": pattern_result.get("next_action", "") if pattern_result else "",
+    }
+
+
+def _process_rdm_approve_and_fix(row, retrigger=False):
+    """
+    Approve JITA comment, optionally disable Jarvis nodes, optionally rerun.
+
+    row keys: testcase_id, testcase_name, agave_task_id, comment, jira_tickets,
+              rdm_link, failed_nodes, pattern_category, next_action,
+              pattern_matched (optional).
+    """
+    test_id = row.get("testcase_id") or row.get("test_id")
+    comment = row.get("comment") or row.get("generated_comment") or ""
+    jira_tickets = row.get("jira_tickets")
+    rdm_link = row.get("rdm_link") or ""
+    failed_nodes = row.get("failed_nodes") or []
+    category = row.get("pattern_category") or row.get("category") or ""
+    next_action = row.get("next_action") or ""
+    disabled_by = _current_user_email()
+
+    result = {
+        "testcase_id": test_id,
+        "testcase_name": row.get("testcase_name", ""),
+        "agave_task_id": row.get("agave_task_id", ""),
+        "comment": comment,
+        "disabled_by": disabled_by,
+        "jarvis_results": [],
+        "retrigger": None,
+        "triage_updated": False,
+    }
+
+    if test_id and comment:
+        ok, payload = _apply_jita_triage_update(test_id, comment, jira_tickets)
+        result["triage_updated"] = ok
+        result["triage"] = payload
+        if not ok:
+            result["success"] = False
+            result["error"] = payload.get("error", "JITA triage update failed")
+            return result
+    elif test_id and not comment:
+        result["success"] = False
+        result["error"] = "comment is required"
+        return result
+
+    if _rdm_should_disable(category, next_action, failed_nodes):
+        if not failed_nodes:
+            result["jarvis_error"] = "Pattern requires node disable but no node names were extracted"
+        else:
+            result["jarvis_results"] = _disable_rdm_nodes(failed_nodes, rdm_link, disabled_by)
+            if any(not jr.get("success") for jr in result["jarvis_results"]):
+                result["success"] = False
+                result["error"] = "One or more Jarvis node disable operations failed"
+                return result
+
+    if retrigger and _rdm_should_rerun(next_action, category):
+        tests = [{
+            "testcase_id": test_id,
+            "testcase_name": row.get("testcase_name", ""),
+            "agave_task_id": row.get("agave_task_id", ""),
+        }]
+        result["retrigger"] = _rerun_selected_tests(tests, overrides={})
+
+    jarvis_ok = all(jr.get("success") for jr in result["jarvis_results"]) if result["jarvis_results"] else True
+    retrigger_ok = True
+    if result["retrigger"] is not None:
+        retrigger_ok = bool(result["retrigger"].get("success"))
+    result["success"] = jarvis_ok and retrigger_ok
+    return result
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-approve", methods=["POST"])
+@jwt_required
+def rdm_approve_comment_and_fix():
+    """
+    Approve a pattern-matched RDM comment, disable failed nodes in Jarvis,
+    and optionally re-run the test.
+
+    Body: testcase_id, comment, jira_tickets?, rdm_link, failed_nodes[],
+          pattern_category, next_action, retrigger (bool)
+    """
+    try:
+        data = request.get_json() or {}
+        test_id = data.get("testcase_id") or data.get("test_id")
+        if not test_id:
+            return jsonify({"error": "testcase_id is required"}), 400
+        result = _process_rdm_approve_and_fix(data, retrigger=bool(data.get("retrigger")))
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"RDM approve error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-auto-workflow", methods=["POST"])
+@jwt_required
+def rdm_auto_workflow():
+    """
+    Pattern-matched complete workflow: analyze RDM failure, update JITA comment,
+    disable Jarvis node(s) when next_action is disable_node_and_rerun, then
+    rerun selected tests once on the parent JITA task (same as the JITA UI
+    rerun of the parent with those tests selected).
+
+    Body: tests[], retrigger (bool, default true), parent_task_id? (preferred
+    JITA task to POST /rerun against).
+
+    Only runs the fix/rerun steps when a pattern matches. Unmatched rows are
+    returned with pattern_matched=false and are not auto-fixed.
+    """
+    try:
+        data = request.get_json() or {}
+        tests = data.get("tests") or []
+        if not tests:
+            return jsonify({"error": "tests array is required"}), 400
+
+        retrigger = data.get("retrigger", True)
+        results = []
+        rerun_candidates = []
+        for row in tests:
+            task_id = row.get("agave_task_id")
+            rdm = row.get("rdm_info") or {}
+            if not rdm.get("pattern_matched"):
+                if not task_id:
+                    results.append({
+                        "testcase_id": row.get("testcase_id"),
+                        "success": False,
+                        "pattern_matched": False,
+                        "error": "agave_task_id is required to analyze RDM failure",
+                    })
+                    continue
+                rdm = _analyze_one_rdm_task(
+                    task_id,
+                    testcase_id=row.get("testcase_id"),
+                    deployment_id=row.get("deployment_id"),
+                )
+
+            if not rdm.get("pattern_matched"):
+                results.append({
+                    "testcase_id": row.get("testcase_id"),
+                    "testcase_name": row.get("testcase_name", ""),
+                    "agave_task_id": task_id,
+                    "success": False,
+                    "pattern_matched": False,
+                    "rdm_info": rdm,
+                    "error": "No pattern match — Analyze, Fix & Re-run only runs for pattern-matched failures",
+                })
+                continue
+
+            payload = {
+                "testcase_id": row.get("testcase_id"),
+                "testcase_name": row.get("testcase_name", ""),
+                "agave_task_id": task_id,
+                "comment": rdm.get("generated_comment") or row.get("comment") or "",
+                "jira_tickets": row.get("jira_tickets") or ([rdm.get("pattern_jira")] if rdm.get("pattern_jira") else None),
+                "rdm_link": rdm.get("rdm_link") or "",
+                "failed_nodes": rdm.get("failed_nodes") or [],
+                "pattern_category": rdm.get("pattern_category") or rdm.get("category") or "",
+                "next_action": rdm.get("next_action") or "",
+            }
+            # Approve / disable per test; one parent-task JITA rerun below.
+            processed = _process_rdm_approve_and_fix(payload, retrigger=False)
+            processed["pattern_matched"] = True
+            processed["rdm_info"] = rdm
+            results.append(processed)
+            if (
+                retrigger
+                and processed.get("success") is not False
+                and _rdm_should_rerun(payload.get("next_action"), payload.get("pattern_category"))
+                and task_id
+            ):
+                rerun_candidates.append({
+                    "testcase_id": row.get("testcase_id"),
+                    "testcase_name": row.get("testcase_name", ""),
+                    "agave_task_id": task_id,
+                })
+
+        if retrigger and rerun_candidates:
+            parent_task_id = _resolve_rerun_parent_task_id(
+                rerun_candidates,
+                data.get("parent_task_id") or data.get("agave_task_id"),
+            )
+            logger.info(
+                "[rdm-auto-workflow] One parent rerun on %s for %s test(s)",
+                parent_task_id,
+                len(rerun_candidates),
+            )
+            batch = _rerun_selected_tests(
+                rerun_candidates,
+                overrides={},
+                parent_task_id=parent_task_id,
+            )
+            task_rerun = (batch.get("results") or [None])[0]
+            candidate_keys = {
+                (c.get("testcase_id") or c.get("testcase_name") or "")
+                for c in rerun_candidates
+            }
+            for processed in results:
+                key = processed.get("testcase_id") or processed.get("testcase_name") or ""
+                if not task_rerun or key not in candidate_keys:
+                    continue
+                processed["retrigger"] = {
+                    "success": bool(task_rerun.get("success")),
+                    "total": 1,
+                    "succeeded": 1 if task_rerun.get("success") else 0,
+                    "failed": 0 if task_rerun.get("success") else 1,
+                    "parent_task_id": parent_task_id,
+                    "rerun_task_id": task_rerun.get("rerun_task_id"),
+                    "results": [task_rerun],
+                }
+                if processed.get("success") is not False:
+                    processed["success"] = bool(task_rerun.get("success"))
+                    if not task_rerun.get("success"):
+                        processed["error"] = task_rerun.get("error") or "JITA retrigger failed"
+
+        succeeded = sum(1 for r in results if r.get("success"))
+        return jsonify({
+            "success": succeeded == len(results) and len(results) > 0,
+            "total": len(results),
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
+            "results": results,
+        })
+    except Exception as e:
+        logger.error(f"RDM auto-workflow error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-patterns/suggest", methods=["POST"])
+@jwt_required
+def rdm_patterns_suggest():
+    """Draft a pattern from an RDM failure message for user review."""
+    try:
+        data = request.get_json() or {}
+        rdm_message = data.get("rdm_message") or ""
+        if not rdm_message:
+            return jsonify({"error": "rdm_message is required"}), 400
+        draft = _suggest_rdm_pattern_from_message(
+            rdm_message,
+            rdm_link=data.get("rdm_link") or "",
+            nodes=data.get("failed_nodes"),
+        )
+        return jsonify({"success": True, "pattern": draft})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/rdm-patterns/add", methods=["POST"])
+@jwt_required
+def rdm_patterns_add():
+    """Append one approved pattern to the team RDM pattern file."""
+    global RDM_PATTERNS
+    try:
+        data = request.get_json() or {}
+        pattern = data.get("pattern") or data
+        regex = (pattern.get("regex") or "").strip()
+        comment_template = (pattern.get("comment_template") or "").strip()
+        if not regex or not comment_template:
+            return jsonify({"error": "regex and comment_template are required"}), 400
+        try:
+            re.compile(regex)
+        except re.error as e:
+            return jsonify({"error": f"Invalid regex: {e}"}), 400
+
+        path = _rdm_patterns_file(for_write=True)
+        existing = {"patterns": []}
+        if os.path.exists(path):
+            existing = _read_rdm_patterns_json(path)
+        patterns = existing.get("patterns") or []
+        new_id = (pattern.get("id") or "").strip() or f"learned_{int(time.time())}"
+        if any(p.get("id") == new_id for p in patterns):
+            new_id = f"{new_id}_{int(time.time())}"
+        entry = {
+            "id": new_id,
+            "regex": regex,
+            "confidence": float(pattern.get("confidence") or 0.9),
+            "comment_template": comment_template,
+            "category": pattern.get("category") or "INFRA_INTERMITTENT",
+            "next_action": pattern.get("next_action") or _pattern_next_action(pattern),
+            "description": pattern.get("description") or "Learned from RDM AI analysis",
+            "action": pattern.get("action") or "",
+            "example_failure": pattern.get("example_failure") or "",
+            "reference_task": pattern.get("reference_task") or pattern.get("rdm_link") or "",
+            "jira": pattern.get("jira") or "",
+            "created_by": _current_user_email(),
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+        patterns.insert(0, entry)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({"patterns": patterns}, f, indent=2)
+        RDM_PATTERNS = _load_rdm_patterns()
+        return jsonify({"success": True, "pattern": entry, "count": len(RDM_PATTERNS), "file": path})
+    except Exception as e:
+        logger.error(f"Error adding RDM pattern: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/jarvis/nodes", methods=["GET"])
+@jwt_required
+def jarvis_search_nodes():
+    """GET Jarvis nodes by hostname search. Returns is_enabled and node id."""
+    try:
+        hostname = (request.args.get("search") or request.args.get("hostname") or "").strip()
+        if not hostname:
+            return jsonify({"error": "search (hostname) is required"}), 400
+        svc = _jarvis_service()
+        nodes, err = svc.search_nodes(hostname)
+        if err:
+            return jsonify({"success": False, "error": err, "nodes": []}), 502
+        jmod = _jarvis_mod()
+        summarized = []
+        for n in nodes:
+            summarized.append({
+                "node_id": jmod._node_id(n),
+                "hostname": jmod._node_hostname(n),
+                "is_enabled": jmod._is_enabled(n),
+                "raw": n,
+            })
+        return jsonify({"success": True, "nodes": summarized, "count": len(summarized)})
+    except Exception as e:
+        logger.error(f"Jarvis node search error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/jarvis/nodes", methods=["PUT"])
+@jwt_required
+def jarvis_set_node_enabled():
+    """Enable or disable a Jarvis node. Disabled-by is the logged-in user."""
+    try:
+        data = request.get_json() or {}
+        hostname = (data.get("hostname") or data.get("node_name") or data.get("search") or "").strip()
+        is_enabled = data.get("is_enabled")
+        if is_enabled is None:
+            return jsonify({"error": "is_enabled is required (true/false)"}), 400
+        if not hostname:
+            return jsonify({"error": "hostname is required"}), 400
+        rdm_link = data.get("rdm_link") or ""
+        user_email = _current_user_email()
+        svc = _jarvis_service()
+        if bool(is_enabled):
+            result = svc.enable_node_sync(hostname, rdm_link=rdm_link, enabled_by=user_email)
+        else:
+            result = svc.disable_node_sync(
+                hostname,
+                rdm_link=rdm_link,
+                disabled_by=user_email,
+                reason=data.get("reason") or "Rerun cause due to node issue",
+            )
+        status = 200 if result.get("success") else 400
+        return jsonify(result), status
+    except Exception as e:
+        logger.error(f"Jarvis node enable/disable error: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/mcp/regression/failed-analysis/ai-summary-single", methods=["POST"])
@@ -6550,85 +9025,28 @@ def glean_search_single_testcase():
         if not testcase_name:
             return jsonify({"success": False, "error": "testcase_name is required"}), 400
 
-        short_name = testcase_name.split(".")[-1] if "." in testcase_name else testcase_name
+        testcase_id = body.get("testcase_id") or ""
+        steps_log = body.get("steps_log") or ""
+        if testcase_id and (not exception_summary or not exception_text):
+            detailed = fetch_detailed_test_result(testcase_id)
+            exception_summary = exception_summary or detailed.get("exception_summary") or ""
+            exception_text = exception_text or detailed.get("exception") or ""
+            test_log_url = test_log_url or detailed.get("test_log_url") or ""
 
-        # ---- Multi-query Glean search strategy ----
+        if not steps_log and test_log_url and testcase_name:
+            logs = fetch_testcase_logs(testcase_name, test_log_url)
+            steps_log = logs.get("steps_log") or ""
 
-        all_glean_tickets = {}   # ticket_id -> metadata dict
-        all_glean_snippets = []
-        queries_used = []
-
-        # Query 1: exception summary (most specific error text)
-        q1 = (exception_summary or "")[:250].strip()
-        if q1:
-            queries_used.append(q1)
-            g1 = search_glean_jira(q1, max_results=10)
-            for t in _extract_jira_tickets_from_glean(g1):
-                all_glean_tickets.setdefault(t["ticket"], t)
-            all_glean_snippets.extend(_build_glean_snippets(g1))
-
-        # Query 2: testcase short name + condensed error keywords
-        error_keywords = _extract_error_keywords(exception_summary, exception_text)
-        q2 = f"{short_name} {error_keywords}"[:250].strip()
-        if q2 and q2 != q1:
-            queries_used.append(q2)
-            g2 = search_glean_jira(q2, max_results=10)
-            for t in _extract_jira_tickets_from_glean(g2):
-                all_glean_tickets.setdefault(t["ticket"], t)
-            all_glean_snippets.extend(_build_glean_snippets(g2))
-
-        # Query 3: AI summary as search input (if available and different)
-        if ai_summary:
-            q3 = ai_summary[:250].strip()
-            if q3 and q3 != q1 and q3 != q2:
-                queries_used.append(q3)
-                g3 = search_glean_jira(q3, max_results=5)
-                for t in _extract_jira_tickets_from_glean(g3):
-                    all_glean_tickets.setdefault(t["ticket"], t)
-                all_glean_snippets.extend(_build_glean_snippets(g3))
-
-        # De-dup snippets by URL
-        seen_urls = set()
-        deduped_snippets = []
-        for s in all_glean_snippets:
-            key = s.get("url") or s.get("title")
-            if key and key not in seen_urls:
-                seen_urls.add(key)
-                deduped_snippets.append(s)
-
-        # ---- Enrich top JIRA tickets via JIRA REST API ----
-
-        glean_ticket_list = list(all_glean_tickets.values())
-        enriched_tickets = []
-        for t_info in glean_ticket_list[:8]:
-            tid = t_info["ticket"]
-            jdata = fetch_jira_ticket(tid)
-            entry = {
-                "ticket": tid,
-                "url": t_info.get("url", f"https://jira.nutanix.com/browse/{tid}"),
-                "glean_title": t_info.get("title", ""),
-                "glean_snippet": t_info.get("snippet", ""),
-            }
-            if jdata:
-                fields = jdata.get("fields", {})
-                entry["jira_summary"] = fields.get("summary", "")
-                entry["jira_status"] = (fields.get("status") or {}).get("name", "Unknown")
-                resolution = fields.get("resolution")
-                entry["jira_resolution"] = (resolution.get("name", "") if isinstance(resolution, dict) else "") if resolution else ""
-                entry["jira_priority"] = (fields.get("priority") or {}).get("name", "")
-                entry["jira_type"] = (fields.get("issuetype") or {}).get("name", "")
-                entry["is_open"] = entry["jira_status"] not in ("Closed", "Resolved", "Done", "Won't Fix")
-            else:
-                entry["jira_summary"] = t_info.get("title", "")
-                entry["jira_status"] = "Unknown"
-                entry["jira_resolution"] = ""
-                entry["is_open"] = True
-            enriched_tickets.append(entry)
-
-        # Sort: open tickets first, then by whether title/snippet shares keywords with exception
-        enriched_tickets.sort(key=lambda e: (0 if e.get("is_open") else 1))
-
-        # Flat ref list for backward compat
+        search = search_existing_tickets_for_failure(
+            exception_summary,
+            exception_text,
+            testcase_name,
+            ai_summary=ai_summary,
+            steps_log=steps_log,
+        )
+        queries_used = search.get("queries") or []
+        deduped_snippets = search.get("snippets") or []
+        enriched_tickets = _enrich_tickets_with_jira(search.get("tickets") or [])
         glean_jira_refs = [t["ticket"] for t in enriched_tickets]
 
         # ---- Classify ----
@@ -6646,6 +9064,9 @@ def glean_search_single_testcase():
         ]
         if exception_text:
             prompt_parts.append(f"Traceback:\n```\n{exception_text[:3000]}\n```")
+        steps_errors = _extract_steps_log_errors(steps_log)
+        if steps_errors:
+            prompt_parts.append(f"steps.log error lines:\n```\n{steps_errors[:2000]}\n```")
         if ai_summary:
             prompt_parts.append(f"AI Failure Summary:\n{ai_summary[:1500]}")
         if failure_stage:
@@ -6727,22 +9148,41 @@ def glean_search_single_testcase():
             "glean_snippets": deduped_snippets[:5],
             "ai_analysis": ai_analysis,
             "search_queries": queries_used,
+            "glean_available": search.get("glean_available"),
+            "glean_ok": search.get("glean_ok"),
+            "search_source": search.get("source"),
         })
     except Exception as e:
         logger.error(f"Glean search single testcase error: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-def _extract_error_keywords(exception_summary, exception_text):
-    """Pull the most useful error keywords from exception text for search."""
-    import re as _re
-    text = f"{exception_summary or ''} {(exception_text or '')[:500]}"
-    # Extract class-style error names like NuTestError, TimeoutException, etc.
-    error_names = _re.findall(r'[A-Z][a-zA-Z]*(?:Error|Exception|Failure|Fault)', text)
-    # Extract key phrases: status codes, method names, short phrases
-    status_codes = _re.findall(r'\b[45]\d{2}\b', text)
-    keywords = list(dict.fromkeys(error_names + status_codes))
-    return " ".join(keywords[:5])
+def _extract_steps_log_errors(steps_log, max_lines=10):
+    """Keep the last ERROR/FATAL/Exception lines from steps.log for search and analysis."""
+    if not steps_log:
+        return ""
+    hits = []
+    pat = re.compile(r"(ERROR|FATAL|Exception|FAIL|Traceback|CRITICAL|AssertionError|NuTestError)", re.I)
+    for line in steps_log.splitlines():
+        if pat.search(line):
+            cleaned = re.sub(r"^\s*\d{4}-\d{2}-\d{2}[ T]\S+\s*", "", line).strip()
+            if cleaned:
+                hits.append(cleaned[:220])
+    return "\n".join(hits[-max_lines:])
+
+
+def _extract_error_keywords(exception_summary, exception_text, extra_text=""):
+    """Pull the most useful error keywords from exception text and steps.log."""
+    text = "%s %s %s" % (
+        exception_summary or "",
+        (exception_text or "")[:800],
+        (extra_text or "")[:800],
+    )
+    error_names = re.findall(r"[A-Z][a-zA-Z]*(?:Error|Exception|Failure|Fault)", text)
+    status_codes = re.findall(r"\b[45]\d{2}\b", text)
+    quoted = re.findall(r'"([^"]{8,80})"', text)
+    keywords = list(dict.fromkeys(error_names + status_codes + quoted[:3]))
+    return " ".join(keywords[:8])
 
 
 def _build_glean_snippets(glean_data):
@@ -6777,14 +9217,447 @@ def _build_glean_snippets(glean_data):
     return snippets
 
 
+def _glean_token_available():
+    return bool((os.getenv("GLEAN_TOKEN") or "").strip())
+
+
+def search_jira_similar_tickets(query_text, max_results=8, token=None):
+    """Jira JQL text search used when Glean is unavailable or returns nothing."""
+    jira_token = resolve_jira_token(token)
+    if not jira_token or not (query_text or "").strip():
+        return []
+    keywords = _extract_error_keywords(query_text, "") or " ".join((query_text or "").split()[:8])
+    escaped = keywords.replace("\\", "\\\\").replace('"', '\\"')[:180].strip()
+    if not escaped:
+        return []
+    jql = 'text ~ "%s" AND project = ENG ORDER BY updated DESC' % escaped
+    try:
+        resp = session.get(
+            f"{JIRA_BASE}/search",
+            headers=get_jira_headers(jira_token),
+            params={
+                "jql": jql,
+                "maxResults": max_results,
+                "fields": "summary,status,resolution,issuetype,priority",
+            },
+            timeout=30,
+            verify=False,
+        )
+        if resp.status_code != 200:
+            logger.warning("Jira similar-ticket search returned %s", resp.status_code)
+            return []
+        out = []
+        for issue in (resp.json() or {}).get("issues") or []:
+            key = issue.get("key") or ""
+            fields = issue.get("fields") or {}
+            if not key:
+                continue
+            out.append({
+                "ticket": key,
+                "title": fields.get("summary") or "",
+                "url": "https://jira.nutanix.com/browse/%s" % key,
+                "snippet": (fields.get("summary") or "")[:300],
+                "source": "jira",
+            })
+        return out
+    except Exception as e:
+        logger.warning("Jira similar-ticket search failed: %s", e)
+        return []
+
+
+def search_existing_tickets_for_failure(exception_summary, exception_text, testcase_name, ai_summary="", steps_log=""):
+    """Glean-first, Jira-fallback search for existing ENG tickets matching the failure."""
+    all_tickets = {}
+    snippets = []
+    queries = []
+    glean_used = False
+    glean_ok = False
+    source = "none"
+
+    short_name = testcase_name.split(".")[-1] if "." in (testcase_name or "") else (testcase_name or "")
+    steps_errors = _extract_steps_log_errors(steps_log)
+    q1 = (exception_summary or "")[:250].strip()
+    error_keywords = _extract_error_keywords(exception_summary, exception_text, steps_errors)
+    q2 = ("%s %s" % (short_name, error_keywords))[:250].strip()
+    q3 = (ai_summary or "")[:250].strip()
+    q4 = ""
+    if steps_errors:
+        q4 = steps_errors.strip().splitlines()[-1][:250].strip()
+    q5 = (exception_text or "").strip().splitlines()
+    q5 = next((line.strip()[:250] for line in reversed(q5) if line.strip() and "Error" in line), "")
+
+    if _glean_token_available():
+        glean_used = True
+        for query, limit in ((q1, 10), (q2, 10), (q4, 8), (q5, 8), (q3, 5)):
+            if not query or query in queries:
+                continue
+            queries.append(query)
+            data = search_glean_jira(query, max_results=limit)
+            if data:
+                glean_ok = True
+                for ticket in _extract_jira_tickets_from_glean(data):
+                    all_tickets.setdefault(ticket["ticket"], ticket)
+                snippets.extend(_build_glean_snippets(data))
+        if all_tickets:
+            source = "glean"
+
+    if not all_tickets:
+        for fallback_q in (q1, q2, q4, q5, q3):
+            if not fallback_q:
+                continue
+            if fallback_q not in queries:
+                queries.append(fallback_q)
+            for ticket in search_jira_similar_tickets(fallback_q, max_results=10):
+                all_tickets.setdefault(ticket["ticket"], ticket)
+            if all_tickets:
+                source = "jira_fallback"
+                break
+
+    seen = set()
+    deduped = []
+    for snippet in snippets:
+        key = snippet.get("url") or snippet.get("title")
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(snippet)
+
+    return {
+        "tickets": list(all_tickets.values()),
+        "snippets": deduped[:8],
+        "queries": queries,
+        "glean_available": _glean_token_available(),
+        "glean_used": glean_used,
+        "glean_ok": glean_ok,
+        "source": source,
+    }
+
+
+def _enrich_tickets_with_jira(ticket_infos, limit=8):
+    """Attach live Jira status/summary to Glean or Jira search hits."""
+    enriched = []
+    for t_info in (ticket_infos or [])[:limit]:
+        tid = t_info.get("ticket")
+        if not tid:
+            continue
+        jdata = fetch_jira_ticket(tid)
+        entry = {
+            "ticket": tid,
+            "url": t_info.get("url") or ("https://jira.nutanix.com/browse/%s" % tid),
+            "glean_title": t_info.get("title", ""),
+            "glean_snippet": t_info.get("snippet", ""),
+            "source": t_info.get("source", "glean"),
+        }
+        if jdata:
+            fields = jdata.get("fields") or {}
+            entry["jira_summary"] = fields.get("summary", "")
+            entry["jira_status"] = (fields.get("status") or {}).get("name", "Unknown")
+            resolution = fields.get("resolution")
+            entry["jira_resolution"] = (
+                resolution.get("name", "") if isinstance(resolution, dict) else ""
+            ) if resolution else ""
+            entry["jira_priority"] = (fields.get("priority") or {}).get("name", "")
+            entry["jira_type"] = (fields.get("issuetype") or {}).get("name", "")
+            entry["is_open"] = entry["jira_status"] not in ("Closed", "Resolved", "Done", "Won't Fix")
+        else:
+            entry["jira_summary"] = t_info.get("title", "")
+            entry["jira_status"] = "Unknown"
+            entry["jira_resolution"] = ""
+            entry["is_open"] = True
+        enriched.append(entry)
+    enriched.sort(key=lambda e: (0 if e.get("is_open") else 1))
+    return enriched
+
+
+_TG_STOP_WORDS = {
+    "the", "and", "for", "with", "from", "this", "that", "have", "will", "was",
+    "were", "been", "being", "into", "onto", "over", "under", "after", "before",
+    "during", "while", "than", "then", "also", "just", "only", "very", "more",
+    "most", "some", "any", "all", "not", "but", "are", "test", "failed", "error",
+    "exception", "none",
+}
+
+
+def _significant_failure_words(text):
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_]{3,}", (text or "").lower())
+    return [w for w in words if w not in _TG_STOP_WORDS]
+
+
+def validate_triage_genie_ticket_detailed(ticket_id, exception_summary, exception, glean_tickets=None):
+    """Decide whether the Triage Genie ticket matches this failure."""
+    ticket_id = _normalize_jira_issue_key(ticket_id) if ticket_id else ""
+    result = {
+        "ticket": ticket_id or "",
+        "verdict": "Missing",
+        "reason": "No Triage Genie ticket was suggested for this testcase.",
+        "jira_summary": "",
+        "jira_status": "",
+        "jira_type": "",
+        "jira_resolution": "",
+        "is_open": None,
+        "found_in_glean": False,
+        "overlap_score": 0,
+    }
+    if not ticket_id:
+        return result
+
+    glean_ids = {(t.get("ticket") or "").upper() for t in (glean_tickets or [])}
+    result["found_in_glean"] = ticket_id.upper() in glean_ids
+
+    jira_data = fetch_jira_ticket(ticket_id)
+    if not jira_data:
+        result["verdict"] = "Unknown"
+        result["reason"] = (
+            "Could not fetch %s from Jira (missing token or ticket not found), "
+            "so the suggestion cannot be confirmed from ticket fields."
+        ) % ticket_id
+        if result["found_in_glean"]:
+            result["verdict"] = "Correct"
+            result["reason"] = (
+                "%s also appeared in error-message search for this failure, "
+                "so it is likely the right suggested ticket. Jira details were unavailable."
+            ) % ticket_id
+        return result
+
+    fields = jira_data.get("fields") or {}
+    summary = _jira_field_text(fields.get("summary"))
+    description = _jira_field_text(fields.get("description"))
+    status = (fields.get("status") or {}).get("name", "")
+    resolution = fields.get("resolution")
+    resolution_name = resolution.get("name", "") if isinstance(resolution, dict) else ""
+    issue_type = (fields.get("issuetype") or {}).get("name", "")
+    result.update({
+        "jira_summary": summary,
+        "jira_status": status,
+        "jira_type": issue_type,
+        "jira_resolution": resolution_name,
+        "is_open": status not in ("Closed", "Resolved", "Done", "Won't Fix"),
+    })
+
+    fail_words = set(_significant_failure_words("%s %s" % (exception_summary or "", exception or "")))
+    ticket_words = set(_significant_failure_words("%s %s" % (summary, description[:2000])))
+    common = fail_words & ticket_words
+    result["overlap_score"] = len(common)
+    common_preview = ", ".join(sorted(common)[:8]) or "none"
+
+    if result["found_in_glean"] and len(common) >= 2:
+        result["verdict"] = "Correct"
+        result["reason"] = (
+            "%s matches this failure: it appeared in error-message search and "
+            "shares key terms (%s)."
+        ) % (ticket_id, common_preview)
+    elif len(common) >= 4:
+        result["verdict"] = "Correct"
+        result["reason"] = (
+            "%s summary/description matches the failure signature (shared terms: %s)."
+        ) % (ticket_id, common_preview)
+    elif result["found_in_glean"] or len(common) >= 2:
+        result["verdict"] = "Partial"
+        result["reason"] = (
+            "%s is related but not a strong match. Overlap is limited (%s). "
+            "Review before linking."
+        ) % (ticket_id, common_preview)
+    else:
+        result["verdict"] = "Incorrect"
+        result["reason"] = (
+            "%s does not match this failure. Ticket is '%s' (%s) and does not "
+            "share the error signature."
+        ) % (ticket_id, (summary or "no summary")[:160], status or "unknown status")
+    return result
+
+
+def _parse_first_level_ai_json(text):
+    """Extract a JSON object from an AI response, or return {}."""
+    if not text:
+        return {}
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    raw = fenced.group(1).strip() if fenced else text.strip()
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(raw[start:end + 1])
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
+    return {}
+
+
+def _run_first_level_ai_analysis(test_result, run_ai=True):
+    """Fast first-level analysis: Glean/Jira ticket hunt + TG ticket validation + AI summary."""
+    testcase_name = test_result.get("testcase_name") or ""
+    exception_summary = test_result.get("exception_summary") or ""
+    exception = test_result.get("exception") or ""
+    test_log_url = test_result.get("test_log_url") or ""
+    failure_stage = test_result.get("failure_stage") or ""
+    jira_tickets = test_result.get("jira_tickets") or []
+    tg_ticket = (
+        test_result.get("triage_genie_ticket_id")
+        or test_result.get("triage_genie_ticket")
+        or ""
+    )
+    testcase_id = test_result.get("testcase_id") or ""
+    ai_summary = test_result.get("ai_summary") or ""
+
+    if testcase_id and (not exception_summary or not exception):
+        detailed = fetch_detailed_test_result(testcase_id)
+        exception_summary = exception_summary or detailed.get("exception_summary") or ""
+        exception = exception or detailed.get("exception") or ""
+        test_log_url = test_log_url or detailed.get("test_log_url") or ""
+
+    steps_log = test_result.get("steps_log") or ""
+    if not steps_log and test_log_url and testcase_name:
+        logs = fetch_testcase_logs(testcase_name, test_log_url)
+        steps_log = logs.get("steps_log") or ""
+    steps_errors = _extract_steps_log_errors(steps_log)
+
+    if not tg_ticket and testcase_id:
+        try:
+            tg_ticket = fetch_triage_genie_ticket_id(testcase_id) or ""
+        except Exception as tg_err:
+            logger.warning("Could not fetch Triage Genie ticket for %s: %s", testcase_id, tg_err)
+
+    search = search_existing_tickets_for_failure(
+        exception_summary, exception, testcase_name, ai_summary=ai_summary, steps_log=steps_log
+    )
+    enriched = _enrich_tickets_with_jira(search["tickets"])
+    tg_validation = validate_triage_genie_ticket_detailed(
+        tg_ticket, exception_summary, exception, search["tickets"] + enriched
+    )
+
+    first_ticket = None
+    if jira_tickets:
+        first_ticket = jira_tickets[0]
+    elif tg_ticket:
+        first_ticket = tg_ticket
+    elif enriched:
+        first_ticket = enriched[0].get("ticket")
+    first_jira = fetch_jira_ticket(first_ticket) if first_ticket else None
+    issue_type = classify_failure(exception_summary, exception, first_jira, search["tickets"] or None)
+
+    analysis_text = ""
+    recommended_action = ""
+    best_ticket = ""
+    if run_ai:
+        ticket_lines = []
+        for t in enriched[:8]:
+            status_str = t.get("jira_status") or "Unknown"
+            if t.get("jira_resolution"):
+                status_str += " (%s)" % t["jira_resolution"]
+            ticket_lines.append(
+                "- %s [%s] %s — %s"
+                % (t["ticket"], status_str, t.get("jira_type") or "", t.get("jira_summary") or t.get("glean_title") or "")
+            )
+        tg_line = "None"
+        if tg_validation.get("ticket"):
+            tg_line = "%s [%s] %s — %s" % (
+                tg_validation["ticket"],
+                tg_validation.get("jira_status") or "unknown",
+                tg_validation.get("jira_type") or "",
+                tg_validation.get("jira_summary") or "",
+            )
+
+        user_content = "\n".join([
+            "Testcase: %s" % testcase_name,
+            "Failure Stage: %s" % (failure_stage or "Unknown"),
+            "Exception Summary: %s" % (exception_summary or "N/A"),
+            "Traceback:\n```\n%s\n```" % ((exception or "N/A")[:3000]),
+            "steps.log errors:\n```\n%s\n```" % (steps_errors[:2000] or "N/A"),
+            "Triage Genie suggested ticket: %s" % tg_line,
+            "Heuristic TG verdict: %s — %s" % (tg_validation.get("verdict"), tg_validation.get("reason")),
+            "Existing tickets from error-message search:\n%s" % ("\n".join(ticket_lines) or "None found"),
+            "",
+            "Return ONLY JSON with these keys:",
+            '{',
+            '  "issue_type": "Product Issue | Test Issue | Infrastructure Issue | Unknown / Needs Manual Review",',
+            '  "analysis": "2-4 sentence first-level analysis of the failure",',
+            '  "tg_verdict": "Correct | Incorrect | Partial | Missing",',
+            '  "tg_reason": "why the Triage Genie ticket is or is not the right ticket",',
+            '  "best_matching_ticket": "ENG-XXXX or empty",',
+            '  "recommended_action": "one concrete next step"',
+            '}',
+        ])
+        system_prompt = (
+            "You are a first-level regression failure analyst at Nutanix. "
+            "Classify the failure, validate whether the Triage Genie suggested JIRA ticket "
+            "is the correct ticket for THIS error (not merely open/closed), pick the best "
+            "matching existing ticket from the search results, and recommend the next action. "
+            "Be factual. Do not invent ticket IDs."
+        )
+        try:
+            ai_raw = _call_ai_chat(system_prompt, user_content, max_tokens=900)
+            parsed = _parse_first_level_ai_json(ai_raw)
+            if parsed:
+                analysis_text = (parsed.get("analysis") or "").strip()
+                recommended_action = (parsed.get("recommended_action") or "").strip()
+                best_ticket = (parsed.get("best_matching_ticket") or "").strip()
+                if parsed.get("issue_type"):
+                    issue_type = parsed["issue_type"]
+                ai_verdict = (parsed.get("tg_verdict") or "").strip()
+                if ai_verdict in ("Correct", "Incorrect", "Partial", "Missing"):
+                    tg_validation["verdict"] = ai_verdict
+                    if parsed.get("tg_reason"):
+                        tg_validation["reason"] = parsed["tg_reason"].strip()
+            else:
+                analysis_text = (ai_raw or "").strip()
+        except Exception as ai_err:
+            logger.warning("First Level AI chat failed: %s", ai_err)
+            analysis_text = (
+                "AI summary unavailable (%s). Heuristic classification is %s. "
+                "Triage Genie ticket verdict: %s."
+            ) % (str(ai_err)[:160], issue_type, tg_validation.get("verdict"))
+
+    if not analysis_text:
+        analysis_text = (
+            "Failure classified as %s. Triage Genie ticket %s is %s. %s"
+        ) % (
+            issue_type,
+            tg_validation.get("ticket") or "(none)",
+            tg_validation.get("verdict"),
+            tg_validation.get("reason") or "",
+        )
+    if not best_ticket and enriched:
+        best_ticket = enriched[0].get("ticket") or ""
+    if not recommended_action:
+        if tg_validation.get("verdict") == "Correct" and tg_validation.get("ticket"):
+            recommended_action = "Link this failure to %s and monitor the ticket." % tg_validation["ticket"]
+        elif best_ticket:
+            recommended_action = "Review %s as the closest existing ticket before filing a new one." % best_ticket
+        else:
+            recommended_action = "No strong existing ticket found. Review logs and file a new Jira if this is a product defect."
+
+    return {
+        "success": True,
+        "analysis_type": "first_level_ai",
+        "issue_type": issue_type,
+        "analysis": analysis_text,
+        "recommended_action": recommended_action,
+        "best_matching_ticket": best_ticket,
+        "tg_ticket_validation": tg_validation,
+        "enriched_tickets": enriched[:8],
+        "glean_jira_refs": [t["ticket"] for t in enriched[:10]],
+        "glean_snippets": search.get("snippets") or [],
+        "search_queries": search.get("queries") or [],
+        "glean_available": search.get("glean_available"),
+        "glean_ok": search.get("glean_ok"),
+        "search_source": search.get("source"),
+        "existing_issues": enriched[:8],
+        "test_log_url": test_log_url,
+        "failure_stage": failure_stage,
+    }
+
+
 @app.route("/mcp/regression/failed-analysis/rdm-patterns", methods=["GET"])
 @jwt_required
 def get_rdm_patterns():
     """Return current RDM failure patterns."""
     try:
-        if os.path.exists(RDM_PATTERNS_FILE):
-            with open(RDM_PATTERNS_FILE, "r") as f:
-                return jsonify(json.load(f))
+        path = _rdm_patterns_file()
+        if os.path.exists(path):
+            return jsonify(_read_rdm_patterns_json(path))
         return jsonify({"patterns": []})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -6800,7 +9673,9 @@ def update_rdm_patterns():
         patterns = data.get("patterns")
         if patterns is None:
             return jsonify({"error": "patterns array is required"}), 400
-        with open(RDM_PATTERNS_FILE, "w") as f:
+        path = _rdm_patterns_file(for_write=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
             json.dump({"patterns": patterns}, f, indent=2)
         RDM_PATTERNS = _load_rdm_patterns()
         return jsonify({"success": True, "count": len(RDM_PATTERNS)})
@@ -6964,6 +9839,392 @@ def save_saved_tag_results(tag_name):
 # Re-trigger failed testcases via Jita agave_tasks rerun API
 # ======================================================
 
+def _query_jita_commits(raw_query, auth):
+    """Return commit documents from Jita matching raw_query, or []."""
+    if not raw_query or not auth:
+        return []
+    try:
+        resp = requests.get(
+            "%s/commits" % JITA_BASE,
+            params={
+                "raw_query": json.dumps(raw_query),
+                "limit": 10,
+                "sort": "-date_added",
+            },
+            headers={"Accept": "application/json"},
+            auth=auth,
+            verify=False,
+            timeout=20,
+        )
+        body = resp.json() if resp.content else {}
+        if not resp.ok or not body.get("success", True):
+            logger.warning("[retrigger] commits lookup HTTP %s: %s", resp.status_code, str(body)[:300])
+            return []
+        data = body.get("data") or []
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        logger.warning("[retrigger] commits lookup failed: %s", exc)
+        return []
+
+
+def _lookup_jita_commit(commit_id, gbn=None, preferred_branch=None, auth=None):
+    """
+    Resolve a NOS commit in Jita.
+
+    Rerun validation requires branch + commit_id + gbn to match a Jita Commit
+    document. A new commit is often on a different branch than the original
+    task, so we look the commit up and return that document (branch/gbn).
+    """
+    commit_id = (commit_id or "").strip()
+    if not commit_id or commit_id.startswith("$"):
+        return None
+
+    gbn_int = None
+    if gbn not in (None, ""):
+        try:
+            gbn_int = int(gbn)
+        except (ValueError, TypeError):
+            gbn_int = None
+
+    query = {"commit_id": commit_id}
+    if gbn_int is not None:
+        query["gbn"] = gbn_int
+    records = _query_jita_commits(query, auth)
+    if not records and gbn_int is not None:
+        records = _query_jita_commits({"commit_id": commit_id}, auth)
+    if not records:
+        return None
+
+    if preferred_branch:
+        for rec in records:
+            if rec.get("branch") == preferred_branch:
+                if gbn_int is None or rec.get("gbn") == gbn_int:
+                    return rec
+    if gbn_int is not None:
+        for rec in records:
+            if rec.get("gbn") == gbn_int:
+                return rec
+    return records[0]
+
+
+def _resolve_nos_commit_override(overrides, auth, original_branch=None):
+    """Fill nos_branch (and gbn if missing) from Jita so rerun validation passes."""
+    if not overrides or overrides.get("nos_branch"):
+        return overrides
+    nos_commit = (overrides.get("nos_commit") or "").strip()
+    if not nos_commit or nos_commit.startswith("$") or overrides.get("nos_tag"):
+        return overrides
+    rec = _lookup_jita_commit(
+        nos_commit,
+        gbn=overrides.get("nos_gbn"),
+        preferred_branch=original_branch,
+        auth=auth,
+    )
+    if not rec:
+        logger.warning(
+            "[retrigger] NOS commit %s gbn=%s not found in Jita commits",
+            nos_commit, overrides.get("nos_gbn"),
+        )
+        return overrides
+    if rec.get("branch"):
+        overrides["nos_branch"] = rec["branch"]
+        logger.info("[retrigger] resolved NOS branch %s from commit %s", rec["branch"], nos_commit)
+    if not overrides.get("nos_gbn") and rec.get("gbn") not in (None, ""):
+        overrides["nos_gbn"] = rec["gbn"]
+    return overrides
+
+
+def _fetch_job_profile_name(jp_id, auth=None):
+    """Look up a Jita job profile name by id. Empty string on failure."""
+    if not jp_id:
+        return ""
+    try:
+        resp = requests.get(
+            f"{JITA_BASE}/job_profiles/{jp_id}",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            auth=auth or JITA_SVC_AUTH,
+            verify=False,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            logger.warning("[retrigger] JP lookup HTTP %s for %s", resp.status_code, jp_id)
+            return ""
+        data = resp.json().get("data") or {}
+        return str(data.get("name") or "").strip()
+    except Exception as exc:
+        logger.warning("[retrigger] JP lookup failed for %s: %s", jp_id, exc)
+        return ""
+
+
+def _summarize_jita_resource_config(task_data):
+    """Human-readable Resource Requirement Configuration from a Jita task."""
+    task_data = task_data or {}
+    hw = task_data.get("requested_hardware") if isinstance(task_data.get("requested_hardware"), dict) else {}
+    infra = hw.get("infra") if isinstance(hw.get("infra"), list) else task_data.get("infra")
+    if not isinstance(infra, list):
+        infra = []
+    first = infra[0] if infra and isinstance(infra[0], dict) else {}
+    itype = str(first.get("type") or "").strip().lower()
+    if itype == "node_pool":
+        resources = "By Node Pool"
+    elif itype in ("cluster", "cluster_pool"):
+        resources = "By Cluster Pool"
+    elif itype in ("physical", "nested", "nested_1"):
+        resources = "By Global Pool"
+    elif itype in ("name", "cluster_name"):
+        resources = "By Name"
+    else:
+        resources = "By Node Pool" if first.get("entries") else (itype or "Unknown")
+
+    nested = hw.get("nested_params") if isinstance(hw.get("nested_params"), dict) else {}
+    if nested.get("is_nested") or nested.get("version"):
+        ver = str(nested.get("version") or "")
+        resource_type = "NestedAHV 2.0" if ver.startswith("2") else "NestedAHV 1.0"
+    else:
+        resource_type = "Physical"
+
+    pools = [str(e).strip() for e in (first.get("entries") or []) if str(e).strip()]
+    skip_match = task_data.get("skip_resource_spec_match")
+    if skip_match is None:
+        sched = task_data.get("scheduling_options") or {}
+        skip_match = sched.get("skip_resource_spec_match") if isinstance(sched, dict) else False
+
+    if resource_type == "NestedAHV 2.0":
+        resource_type_key = "nested_2.0"
+    elif resource_type == "NestedAHV 1.0":
+        resource_type_key = "nested_1.0"
+    else:
+        resource_type_key = "physical"
+    if itype == "node_pool":
+        resources_mode = "node_pool"
+    elif itype in ("cluster", "cluster_pool"):
+        resources_mode = "cluster"
+    elif itype in ("name", "cluster_name"):
+        resources_mode = "name"
+    elif itype in ("physical", "nested", "nested_1"):
+        resources_mode = "global_pool"
+    else:
+        resources_mode = "node_pool" if pools else "global_pool"
+
+    return {
+        "resources": resources,
+        "resources_mode": resources_mode,
+        "resource_type": resource_type,
+        "resource_type_key": resource_type_key,
+        "node_pools": pools,
+        "match_resource_spec": not bool(skip_match),
+        "hypervisor": hw.get("hypervisor") or task_data.get("hypervisor") or "",
+        "nos_branch": task_data.get("branch") or "",
+    }
+
+
+RETAIN_DURATION_72H_MIN = 72 * 60  # Jita retain duration is minutes
+
+
+def _ensure_retain_duration(retain, duration=RETAIN_DURATION_72H_MIN):
+    """Keep original retain entity/options; set duration to 72 hours."""
+    import copy
+    retain = copy.deepcopy(retain) if isinstance(retain, dict) else {}
+    criteria = retain.get("criteria")
+    if not isinstance(criteria, dict):
+        criteria = {}
+    tf = criteria.get("TEST_FAILURE")
+    if not isinstance(tf, dict):
+        tf = {
+            "entity": "CONTAINER",
+            "type": "AFTER_EACH",
+            "params": {
+                "duration": duration,
+                "exceptions": [],
+                "states_to_track": ["Failed"],
+            },
+        }
+    else:
+        params = tf.get("params") if isinstance(tf.get("params"), dict) else {}
+        params["duration"] = duration
+        tf["params"] = params
+    criteria["TEST_FAILURE"] = tf
+    retain["criteria"] = criteria
+    return retain
+
+
+@app.route("/mcp/regression/failed-analysis/retrigger-preview", methods=["POST"])
+@jwt_required
+def retrigger_preview_resource_config():
+    """Return Jita Resource Requirement Configuration for selected tasks."""
+    data = request.get_json() or {}
+    task_ids = data.get("task_ids") or []
+    if isinstance(task_ids, str):
+        task_ids = [task_ids]
+    seen = []
+    for raw in task_ids:
+        tid = str(raw or "").strip()
+        if tid and tid not in seen:
+            seen.append(tid)
+    previews = []
+    for tid in seen[:8]:
+        try:
+            task_data = fetch_agave_task(tid) or {}
+        except Exception as exc:
+            logger.warning("[retrigger-preview] fetch failed for %s: %s", tid, exc)
+            task_data = {}
+        summary = _summarize_jita_resource_config(task_data)
+        summary["task_id"] = tid
+        previews.append(summary)
+    return jsonify({"success": True, "tasks": previews})
+
+def _jita_oid_str(value):
+    if isinstance(value, dict) and "$oid" in value:
+        return str(value.get("$oid") or "").strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _resolve_rerun_parent_task_id(tests, explicit_parent=None):
+    """
+    Pick the single JITA parent task to POST /rerun against.
+
+    Analyze, Fix & Re-run must create one child task for the selected tests,
+    matching the JITA UI: open the parent, select those tests, trigger once.
+    """
+    parent = _jita_oid_str(explicit_parent)
+    if parent:
+        return parent
+    ids = [_jita_oid_str(t.get("agave_task_id")) for t in (tests or [])]
+    ids = [tid for tid in ids if tid]
+    if not ids:
+        return ""
+    unique = list(dict.fromkeys(ids))
+    if len(unique) == 1:
+        return unique[0]
+    from collections import Counter
+    return Counter(ids).most_common(1)[0][0]
+
+
+def _group_tests_for_rerun(tests, parent_task_id=None):
+    """
+    Build {task_id: [test entries]} for JITA /rerun.
+
+    When parent_task_id is set, every selected test is attached to that one
+    parent so JITA creates a single rerun task.
+    """
+    parent = _jita_oid_str(parent_task_id)
+    tests_by_task = {}
+    for t in tests or []:
+        atid = parent or _jita_oid_str(t.get("agave_task_id"))
+        if not atid:
+            continue
+        name = (t.get("testcase_name") or t.get("name") or "").strip()
+        result_id = t.get("testcase_id") or t.get("test_result_id")
+        if not name and not result_id:
+            continue
+        entry = {}
+        if name:
+            entry["name"] = name
+        if result_id:
+            entry["test_result_id"] = result_id
+        tests_by_task.setdefault(atid, []).append(entry)
+    return tests_by_task
+
+
+def _rerun_selected_tests(tests, overrides=None, parent_task_id=None):
+    """
+    Re-run selected tests via JITA agave_tasks/{id}/rerun.
+    Returns a dict (not a Flask response) so other workflows can reuse it.
+
+    parent_task_id: when set, all tests are posted on that one parent task.
+    """
+    overrides = overrides or {}
+    if not tests:
+        return {"success": False, "error": "No tests provided", "results": []}
+
+    current_username = _current_username()
+    user_auth = _get_user_credentials(current_username)
+    if not user_auth:
+        return {
+            "success": False,
+            "error": "Session credentials expired. Please re-login to retrigger.",
+            "code": "CREDENTIALS_EXPIRED",
+            "results": [],
+        }
+
+    tests_by_task = _group_tests_for_rerun(tests, parent_task_id=parent_task_id)
+
+    if not tests_by_task:
+        return {
+            "success": False,
+            "error": "No valid agave_task_id found in selected tests",
+            "results": [],
+        }
+
+    rerun_results = []
+    for task_id, task_tests in tests_by_task.items():
+        try:
+            task_data = fetch_agave_task(task_id)
+            if not task_data:
+                rerun_results.append({
+                    "agave_task_id": task_id,
+                    "success": False,
+                    "error": "Could not fetch task details",
+                })
+                continue
+
+            payload = _build_rerun_payload(task_data, task_tests, overrides, current_username)
+            rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
+            logger.info(f"[retrigger] POST {rerun_url} with {len(task_tests)} test(s): {task_tests}")
+            resp = requests.post(
+                rerun_url,
+                data=json.dumps(payload),
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                auth=user_auth,
+                verify=False,
+                timeout=60,
+            )
+            resp_text = resp.text[:500]
+            logger.info(f"[retrigger] Response {resp.status_code} for task {task_id}: {resp_text}")
+            try:
+                resp_data = resp.json()
+            except Exception:
+                resp_data = {}
+
+            if resp_data.get("success") is True:
+                new_id = resp_data.get("_id")
+                if isinstance(new_id, dict) and "$oid" in new_id:
+                    new_id = new_id["$oid"]
+                rerun_results.append({
+                    "agave_task_id": task_id,
+                    "success": True,
+                    "rerun_task_id": new_id,
+                    "message": resp_data.get("message", ""),
+                })
+            else:
+                error_msg = resp_data.get("message") or resp_data.get("error") or f"HTTP {resp.status_code}: {resp_text}"
+                logger.warning(f"[retrigger] Failed for task {task_id}: {error_msg}")
+                rerun_results.append({
+                    "agave_task_id": task_id,
+                    "success": False,
+                    "error": error_msg,
+                })
+        except Exception as e:
+            logger.error(f"[retrigger] Error rerunning task {task_id}: {e}", exc_info=True)
+            rerun_results.append({
+                "agave_task_id": task_id,
+                "success": False,
+                "error": str(e),
+            })
+
+    succeeded = [r for r in rerun_results if r.get("success")]
+    failed = [r for r in rerun_results if not r.get("success")]
+    return {
+        "success": len(failed) == 0,
+        "total": len(rerun_results),
+        "succeeded": len(succeeded),
+        "failed": len(failed),
+        "results": rerun_results,
+    }
+
+
 @app.route("/mcp/regression/failed-analysis/retrigger", methods=["POST"])
 @jwt_required
 def retrigger_failed_testcases():
@@ -6974,11 +10235,9 @@ def retrigger_failed_testcases():
 
     Request body:
       tests: list of {testcase_id, testcase_name, agave_task_id}
-      overrides (all optional):
-        nos_commit, nos_branch, nos_gbn,
-        pc_commit, pc_branch, pc_gbn,
-        nutest_branch, nutest_commit,
-        patch_url, resource_pool, username
+      overrides (all optional): Jita rerun fields such as NOS/PC/image,
+        nutest/framework metadata, infra, tester_tags, label, priority,
+        skip_resource_spec_match, check_image_compatibility, retain_resources.
     """
     try:
         data = request.get_json() or {}
@@ -6996,22 +10255,35 @@ def retrigger_failed_testcases():
                 "code": "CREDENTIALS_EXPIRED"
             }), 401
 
-        # Group test names by agave_task_id (as {"name": ...} dicts for JITA)
+        # Group selected tests by agave_task_id. Jita prefers test_result_id
+        # (the failed-analysis testcase_id) so only the selected rows rerun.
         tests_by_task = {}
         for t in tests:
             atid = t.get("agave_task_id")
             if not atid:
                 continue
-            name = t.get("testcase_name", "")
+            name = (t.get("testcase_name") or t.get("name") or "").strip()
+            result_id = t.get("testcase_id") or t.get("test_result_id")
+            if not name and not result_id:
+                continue
+            entry = {}
             if name:
-                tests_by_task.setdefault(atid, []).append({"name": name})
+                entry["name"] = name
+            if result_id:
+                entry["test_result_id"] = result_id
+            tests_by_task.setdefault(atid, []).append(entry)
 
         if not tests_by_task:
             return jsonify({"error": "No valid agave_task_id found in selected tests"}), 400
 
+        import copy
+        base_overrides = copy.deepcopy(overrides) if isinstance(overrides, dict) else {}
+        jp_name_cache = {}
         rerun_results = []
 
         for task_id, task_tests in tests_by_task.items():
+            jp_name = ""
+            trigger_username = current_username
             try:
                 # Fetch original task details
                 task_data = fetch_agave_task(task_id)
@@ -7023,17 +10295,35 @@ def retrigger_failed_testcases():
                     })
                     continue
 
-                # Build rerun payload from original task, apply overrides
-                payload = _build_rerun_payload(task_data, task_tests, overrides, current_username)
+                # Isolate each task: mixed AHV/ESX selections must not share
+                # resolved NOS branch or a single Jita account.
+                task_overrides = copy.deepcopy(base_overrides)
+                jp_name = _resolve_rerun_jp_name(
+                    task_data,
+                    fetch_name=lambda jid: _fetch_job_profile_name(jid, JITA_SVC_AUTH),
+                    cache=jp_name_cache,
+                )
+                task_auth, trigger_username = _select_rerun_auth(
+                    jp_name, user_auth, current_username,
+                )
+                logger.info(
+                    "[retrigger] task %s jp=%r account=%s tests=%s",
+                    task_id, jp_name, trigger_username, len(task_tests),
+                )
 
-                # POST to rerun endpoint (use data=json.dumps per JITA API)
+                # Pass UI overrides through as entered. Do not look up commits
+                # or branches from the Jita commits API.
+                payload = _build_rerun_payload(task_data, task_tests, task_overrides, trigger_username)
+
+                # POST to rerun endpoint (raw JSON body, matching Jita UI)
                 rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
                 logger.info(f"[retrigger] POST {rerun_url} with {len(task_tests)} test(s): {task_tests}")
                 logger.info(f"[retrigger] Payload keys: {list(payload.keys())}")
                 resp = requests.post(
                     rerun_url,
                     data=json.dumps(payload),
-                    auth=user_auth,
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                    auth=task_auth,
                     verify=False,
                     timeout=60
                 )
@@ -7050,10 +10340,14 @@ def retrigger_failed_testcases():
                     new_id = resp_data.get("_id")
                     if isinstance(new_id, dict) and "$oid" in new_id:
                         new_id = new_id["$oid"]
+                    if new_id is not None:
+                        new_id = str(new_id)
                     rerun_results.append({
                         "agave_task_id": task_id,
                         "success": True,
                         "rerun_task_id": new_id,
+                        "job_profile_name": jp_name,
+                        "triggered_as": trigger_username,
                         "message": resp_data.get("message", ""),
                     })
                 else:
@@ -7062,6 +10356,8 @@ def retrigger_failed_testcases():
                     rerun_results.append({
                         "agave_task_id": task_id,
                         "success": False,
+                        "job_profile_name": jp_name,
+                        "triggered_as": trigger_username,
                         "error": error_msg
                     })
             except Exception as e:
@@ -7069,16 +10365,43 @@ def retrigger_failed_testcases():
                 rerun_results.append({
                     "agave_task_id": task_id,
                     "success": False,
+                    "job_profile_name": jp_name,
+                    "triggered_as": trigger_username,
                     "error": str(e)
                 })
 
         succeeded = [r for r in rerun_results if r.get("success")]
         failed = [r for r in rerun_results if not r.get("success")]
+        rerun_task_ids = [
+            str(r["rerun_task_id"]) for r in succeeded if r.get("rerun_task_id")
+        ]
+        def _jita_results_urls(ids):
+            """Split so each GET stays under Apache's ~8KB Request-URI limit."""
+            prefix = "https://jita.eng.nutanix.com/results?task_ids="
+            suffix = "&active_tab=1&merge_tests=true"
+            max_len = 7800
+            out, current = [], []
+            for tid in ids:
+                trial = current + [str(tid)]
+                url = prefix + ",".join(trial) + (suffix if len(trial) > 1 else "")
+                if current and len(url) > max_len:
+                    out.append(prefix + ",".join(current) + (suffix if len(current) > 1 else ""))
+                    current = [str(tid)]
+                else:
+                    current = trial
+            if current:
+                out.append(prefix + ",".join(current) + (suffix if len(current) > 1 else ""))
+            return out
+        jita_results_urls = _jita_results_urls(rerun_task_ids) if rerun_task_ids else []
+        jita_results_url = jita_results_urls[0] if jita_results_urls else ""
         return jsonify({
             "success": len(failed) == 0,
             "total": len(rerun_results),
             "succeeded": len(succeeded),
             "failed": len(failed),
+            "rerun_task_ids": rerun_task_ids,
+            "jita_results_url": jita_results_url,
+            "jita_results_urls": jita_results_urls,
             "results": rerun_results,
         })
 
@@ -7087,93 +10410,666 @@ def retrigger_failed_testcases():
         return jsonify({"error": str(e)}), 500
 
 
+def _rewrite_url_for_new_build(url, old_gbn=None, new_gbn=None, old_commit=None, new_commit=None):
+    """Keep the original NOS/image URL shape (tar.gz vs opt) for a new GBN/commit."""
+    if not url:
+        return url
+    out = str(url)
+    old_gbn_s = "" if old_gbn in (None, "") else str(old_gbn)
+    new_gbn_s = "" if new_gbn in (None, "") else str(new_gbn)
+    if old_gbn_s and new_gbn_s and old_gbn_s != new_gbn_s and old_gbn_s in out:
+        out = out.replace(old_gbn_s, new_gbn_s)
+    old_c = str(old_commit or "").strip()
+    new_c = str(new_commit or "").strip()
+    if old_c and new_c and old_c != new_c:
+        if old_c in out:
+            out = out.replace(old_c, new_c)
+        elif len(old_c) >= 7 and len(new_c) >= 7 and old_c[:7] in out:
+            out = out.replace(old_c[:7], new_c[:7])
+    return out
+
+
+def _original_imaging_options(task_data):
+    """NOS/hypervisor URLs Jita stored on the original task (from the JP)."""
+    import copy
+    task_data = task_data or {}
+    hw = task_data.get("requested_hardware") or {}
+    raw = hw.get("imaging_options") if isinstance(hw, dict) else None
+    if not isinstance(raw, dict):
+        raw = task_data.get("imaging_options")
+    if not isinstance(raw, dict):
+        return {}
+    return copy.deepcopy(raw)
+
+
+def _original_build_type(task_data, nos_url=""):
+    """Build type the original JP/task used (release tar vs opt)."""
+    task_data = task_data or {}
+    for key in ("build_type", "nos_build_type"):
+        val = task_data.get(key)
+        if val not in (None, ""):
+            return str(val).strip()
+    bs = task_data.get("build_selection") or {}
+    if isinstance(bs, dict) and bs.get("build_type"):
+        return str(bs.get("build_type")).strip()
+    url = str(nos_url or "").lower()
+    if ".tar.gz" in url:
+        return "release"
+    if "/opt/" in url or url.rstrip("/").endswith("/opt"):
+        return "opt"
+    return ""
+
+
+def _original_requested_hardware(task_data):
+    """Deep-copy Jita requested_hardware so Resource Requirement Configuration matches."""
+    import copy
+    hw = (task_data or {}).get("requested_hardware")
+    if not isinstance(hw, dict):
+        return {}
+    return copy.deepcopy(hw)
+
+
+def _normalize_override_pools(overrides):
+    raw = (overrides or {}).get("node_pools")
+    if raw in (None, ""):
+        raw = (overrides or {}).get("resource_pool")
+    if isinstance(raw, (list, tuple)):
+        return [str(e).strip() for e in raw if str(e).strip()]
+    return [e.strip() for e in str(raw or "").split(",") if e.strip()]
+
+
+def _apply_resource_requirement_overrides(requested_hw, infra, overrides):
+    """Apply Jita Resource Requirement Configuration edits onto copied hardware."""
+    import copy
+    requested_hw = copy.deepcopy(requested_hw) if isinstance(requested_hw, dict) else {}
+    infra = copy.deepcopy(infra) if isinstance(infra, list) else []
+    if not (overrides or {}).get("override_resource_config"):
+        return requested_hw, infra
+
+    mode = str(overrides.get("resources_mode") or "").strip().lower()
+    res_type = str(overrides.get("resource_type") or "").strip().lower()
+    pools = _normalize_override_pools(overrides)
+    existing = infra[0] if infra and isinstance(infra[0], dict) else {}
+    params = existing.get("params") if isinstance(existing.get("params"), dict) else None
+
+    if mode == "global_pool":
+        if res_type in ("nested_1.0", "nested_1"):
+            itype = "nested_1"
+        elif res_type in ("physical",):
+            itype = "physical"
+        else:
+            itype = "nested"
+        infra = [{
+            "type": itype,
+            "kind": "PRIVATE_CLOUD",
+            "params": params or {"category": "general"},
+        }]
+    elif mode in ("node_pool", "cluster", "name"):
+        itype = "node_pool" if mode == "node_pool" else ("cluster" if mode == "cluster" else "name")
+        entry = {
+            "kind": existing.get("kind") or "ON_PREM",
+            "type": itype,
+            "entries": pools,
+        }
+        if params:
+            entry["params"] = params
+        rest = copy.deepcopy(infra[1:]) if len(infra) > 1 else []
+        infra = [entry] + rest
+
+    if res_type == "physical":
+        requested_hw.pop("nested_params", None)
+    elif res_type in ("nested_2.0", "nested", "nested_2"):
+        requested_hw["nested_params"] = {"version": "2.0", "is_nested": True}
+    elif res_type in ("nested_1.0", "nested_1"):
+        requested_hw["nested_params"] = {"version": "1.0", "is_nested": True}
+
+    hyp = str(overrides.get("hypervisor") or "").strip()
+    if hyp:
+        requested_hw["hypervisor"] = hyp
+    return requested_hw, infra
+
+
+def _original_nested_params(task_data):
+    """Pass through nested_params from the original Jita task. Do not infer.
+
+    Nested AHV 2.0 vs physical is already on the source task. Guessing from the
+    JP name would attach nested_params to physical reruns.
+    """
+    import copy
+    task_data = task_data or {}
+    hw = task_data.get("requested_hardware") or {}
+    raw = hw.get("nested_params") if isinstance(hw, dict) else None
+    if not isinstance(raw, dict):
+        raw = task_data.get("nested_params")
+    if not isinstance(raw, dict):
+        return {}
+    out = {
+        k: v for k, v in copy.deepcopy(raw).items()
+        if v not in (None, "")
+    }
+    if not out.get("is_nested") and not out.get("version"):
+        return {}
+    return out
+
+
 def _build_rerun_payload(task_data, task_tests, overrides, username):
     """
-    Build a minimal rerun payload matching the JITA /rerun API contract.
-    task_tests is a list of {"name": "..."} dicts for the tests to rerun.
-    The JITA rerun API inherits most settings from the original task;
-    we only send tests, infra, and explicit user overrides.
-    """
-    # Infra from the original task's requested_hardware
-    requested_hw = task_data.get("requested_hardware", {})
-    infra = requested_hw.get("infra", [])
-    if overrides.get("resource_pool"):
-        infra = [{
-            "kind": "ON_PREM",
-            "type": "node_pool",
-            "entries": [overrides["resource_pool"]]
-        }]
+    Build a Jita /agave_tasks/{id}/rerun payload matching the official UI.
 
-    payload = {
-        "tests": task_tests,
-        "infra": infra,
+    Jita copies the original task and applies this body. Selected tests must
+    include test_result_id (and name) so only those rows are rerun. Remaining
+    fields are copied from the original task, then user overrides are applied.
+    """
+    import copy
+
+    overrides = overrides or {}
+    task_data = task_data or {}
+    TAG_TO_COMMIT = {
+        "Latest Smoke Passed": "$LATEST_SMOKE_PASSED",
+        "Latest DIAL Passed": "$LATEST_SMOKE_PASSED",
+        "latest_smoke_passed": "$LATEST_SMOKE_PASSED",
+        "$LATEST_SMOKE_PASSED": "$LATEST_SMOKE_PASSED",
     }
 
-    # --- NOS overrides ---
-    if overrides.get("nos_branch"):
-        payload["branch"] = overrides["nos_branch"]
-    if overrides.get("nos_commit"):
-        payload["commit_id"] = overrides["nos_commit"]
-    if overrides.get("nos_gbn"):
+    def _as_int(val):
         try:
-            payload["gbn"] = int(overrides["nos_gbn"])
-            payload["image_gbn"] = int(overrides["nos_gbn"])
+            if val is None or val == "":
+                return None
+            return int(val)
         except (ValueError, TypeError):
-            pass
-    if overrides.get("nos_tag"):
-        payload["tag"] = overrides["nos_tag"]
-    if overrides.get("nos_build_type"):
-        payload["build_type"] = overrides["nos_build_type"]
+            return None
 
-    # --- Nutest overrides ---
-    if overrides.get("nutest_branch"):
-        payload["nutest-py3-tests_branch"] = overrides["nutest_branch"]
-    if overrides.get("nutest_commit"):
-        payload["nutest-py3-tests_commit"] = overrides["nutest_commit"]
+    def _first(*vals):
+        for val in vals:
+            if val is not None and val != "":
+                return val
+        return None
 
-    # --- PC overrides (resource_manager_json) ---
-    pc_keys = ("pc_commit", "pc_branch", "pc_gbn", "pc_tag", "pc_build_type")
-    if any(overrides.get(k) for k in pc_keys):
+    def _bool_from_task(key, default):
+        if key in task_data and task_data.get(key) is not None:
+            return bool(task_data.get(key))
+        sched = task_data.get("scheduling_options") or {}
+        if isinstance(sched, dict) and key in sched and sched.get(key) is not None:
+            return bool(sched.get(key))
+        return default
+
+    tests = []
+    for item in task_tests or []:
+        if not isinstance(item, dict):
+            if item:
+                tests.append({"name": str(item)})
+            continue
+        entry = {}
+        name = item.get("name") or item.get("testcase_name")
+        result_id = item.get("test_result_id") or item.get("testcase_id")
+        if name:
+            entry["name"] = name
+        if result_id:
+            entry["test_result_id"] = result_id
+        if entry:
+            tests.append(entry)
+
+    requested_hw = _original_requested_hardware(task_data)
+    infra = requested_hw.get("infra")
+    if not isinstance(infra, list) or not infra:
+        infra = copy.deepcopy(task_data.get("infra") or [])
+    if not isinstance(infra, list):
+        infra = []
+    else:
+        infra = copy.deepcopy(infra)
+    # Keep the original task pool unless the user explicitly overrides it.
+    # Only replace entries so kind/type/params (By Node Pool, Physical, etc.) stay Jita's.
+    if overrides.get("override_pool") and overrides.get("resource_pool"):
+        entries = [e.strip() for e in str(overrides["resource_pool"]).split(",") if e.strip()]
+        if entries:
+            if infra and isinstance(infra[0], dict):
+                updated = copy.deepcopy(infra[0])
+                updated["entries"] = entries
+                updated.setdefault("kind", "ON_PREM")
+                updated.setdefault("type", "node_pool")
+                infra = [updated] + copy.deepcopy(infra[1:])
+            else:
+                infra = [{"kind": "ON_PREM", "type": "node_pool", "entries": entries}]
+    requested_hw, infra = _apply_resource_requirement_overrides(requested_hw, infra, overrides)
+
+    nos_commit = overrides.get("nos_commit")
+    if not nos_commit and overrides.get("nos_tag"):
+        nos_commit = TAG_TO_COMMIT.get(overrides["nos_tag"], overrides["nos_tag"])
+
+    branch = _first(overrides.get("nos_branch"), task_data.get("branch"))
+    commit_id = _first(nos_commit, task_data.get("commit_id"))
+    gbn = _first(_as_int(overrides.get("nos_gbn")), _as_int(task_data.get("gbn")), task_data.get("gbn"))
+
+    orig_nos_branch = str(task_data.get("branch") or "").strip()
+    orig_image_branch = str(task_data.get("image_branch") or "").strip()
+    orig_nos_commit = str(task_data.get("commit_id") or "").strip()
+    orig_image_commit = str(task_data.get("image_commit") or "").strip()
+    # Jita default: image is a copy of NOS when branches match, when the original
+    # image commit already equalled NOS, or when image fields were left unset.
+    if orig_image_branch and orig_nos_branch:
+        image_follows_nos = orig_image_branch == orig_nos_branch
+    elif orig_image_commit and orig_nos_commit:
+        image_follows_nos = orig_image_commit == orig_nos_commit
+    else:
+        image_follows_nos = not orig_image_branch and not orig_image_commit
+
+    if overrides.get("image_branch"):
+        image_branch = overrides.get("image_branch")
+    elif image_follows_nos:
+        image_branch = branch
+    else:
+        image_branch = _first(task_data.get("image_branch"), branch)
+
+    if overrides.get("image_commit"):
+        image_commit = overrides.get("image_commit")
+    elif image_follows_nos:
+        # Unchecked Image Build: use the new NOS commit, not the previous image commit.
+        image_commit = commit_id
+    else:
+        image_commit = _first(
+            task_data.get("image_commit"),
+            commit_id if nos_commit else None,
+        )
+
+    if overrides.get("image_gbn") not in (None, ""):
+        image_gbn = _as_int(overrides.get("image_gbn"))
+    elif image_follows_nos:
+        image_gbn = gbn
+    else:
+        image_gbn = _first(
+            _as_int(task_data.get("image_gbn")),
+            gbn if overrides.get("nos_gbn") else None,
+            task_data.get("image_gbn"),
+        )
+
+    test_framework = task_data.get("test_framework") or "nutest-py3-tests"
+    fw_branch_key = "%s_branch" % test_framework
+    fw_commit_key = "%s_commit" % test_framework
+    tfm = copy.deepcopy(task_data.get("test_framework_metadata") or {})
+    if not isinstance(tfm, dict):
+        tfm = {}
+    test_meta = dict(tfm.get("test") or {})
+    fw_meta = dict(tfm.get("framework") or {})
+
+    nutest_branch = _first(
+        overrides.get("nutest_branch"),
+        overrides.get("framework_branch"),
+        task_data.get(fw_branch_key),
+        fw_meta.get("branch"),
+    )
+    # Leave nutest/framework commits empty unless the user typed them so Jita
+    # picks the latest on the branch instead of pinning the original SHAs.
+    nutest_commit = (
+        str(overrides.get("nutest_commit") or overrides.get("framework_commit") or "").strip()
+        or None
+    )
+    test_branch = _first(overrides.get("test_branch"), test_meta.get("branch"), nutest_branch)
+    test_commit = str(overrides.get("test_commit") or "").strip() or None
+
+    if nutest_branch:
+        fw_meta["branch"] = nutest_branch
+    fw_meta.pop("commit", None)
+    if nutest_commit:
+        fw_meta["commit"] = nutest_commit
+    if test_branch:
+        test_meta["branch"] = test_branch
+    test_meta.pop("commit", None)
+    if test_commit:
+        test_meta["commit"] = test_commit
+    if overrides.get("patch_url"):
+        test_meta["patch_url"] = str(overrides["patch_url"]).strip()
+    if overrides.get("framework_patch_url"):
+        fw_meta["patch_url"] = str(overrides["framework_patch_url"]).strip()
+    tfm["test"] = test_meta
+    tfm["framework"] = fw_meta
+
+    label = overrides.get("label") or task_data.get("label") or ""
+    if label and not str(label).endswith("-rerun"):
+        label = "%s-rerun" % label
+
+    if overrides.get("tester_tags") not in (None, ""):
+        raw_tags = overrides.get("tester_tags")
+        if isinstance(raw_tags, list):
+            tester_tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()]
+        else:
+            tester_tags = [tag.strip() for tag in str(raw_tags).split(",") if tag.strip()]
+    else:
+        tester_tags = list(task_data.get("tester_tags") or [])
+    if overrides.get("patch_url"):
+        patch_tag = "patch_url__%s" % str(overrides["patch_url"]).strip()
+        if patch_tag not in tester_tags:
+            tester_tags.append(patch_tag)
+    if overrides.get("framework_patch_url"):
+        fw_tag = "framework_patch_url__%s" % str(overrides["framework_patch_url"]).strip()
+        if fw_tag not in tester_tags:
+            tester_tags.append(fw_tag)
+    if "jita3" not in tester_tags:
+        tester_tags.append("jita3")
+    if overrides.get("override_pool") and resource_type in nested_resource_types:
+        if "rdm__virtual" not in tester_tags:
+            tester_tags.append("rdm__virtual")
+    elif overrides.get("override_pool") and resource_type in physical_resource_types:
+        tester_tags = [tag for tag in tester_tags if tag != "rdm__virtual"]
+
+    if "match_resource_spec" in overrides and overrides.get("match_resource_spec") is not None:
+        skip_match = not bool(overrides.get("match_resource_spec"))
+    elif "skip_resource_spec_match" in overrides and overrides.get("skip_resource_spec_match") is not None:
+        skip_match = bool(overrides.get("skip_resource_spec_match"))
+    else:
+        skip_match = _bool_from_task("skip_resource_spec_match", False)
+
+    if "check_image_compatibility" in overrides and overrides.get("check_image_compatibility") is not None:
+        check_compat = bool(overrides.get("check_image_compatibility"))
+    else:
+        check_compat = _bool_from_task("check_image_compatibility", True)
+
+    priority = _first(_as_int(overrides.get("priority")), _as_int(task_data.get("priority")), 10)
+
+    # Jita rm_json_schema rejects extra keys such as tag/build_type anywhere
+    # in resource_manager_json (build objects and product-level spec overrides).
+    RM_JSON_DISALLOWED = ("tag", "build_type")
+    RM_BUILD_STALE_ON_COMMIT = ("artifact_id", "nos_build_url", "pc_build_url")
+
+    def _strip_rm_illegal_keys(obj):
+        if isinstance(obj, dict):
+            return {
+                k: _strip_rm_illegal_keys(v)
+                for k, v in obj.items()
+                if k not in RM_JSON_DISALLOWED
+            }
+        if isinstance(obj, list):
+            return [_strip_rm_illegal_keys(v) for v in obj]
+        return obj
+
+    def _sanitize_rm_build(build, drop_stale=False):
+        if not isinstance(build, dict):
+            return {}
+        drop = set(RM_JSON_DISALLOWED)
+        if drop_stale:
+            drop.update(RM_BUILD_STALE_ON_COMMIT)
+        return {k: v for k, v in build.items() if k not in drop and v not in (None, "")}
+
+    def _ensure_product_build(rm, product):
+        spec = rm.get(product)
+        if not isinstance(spec, dict):
+            spec = {}
+            rm[product] = spec
+        build = spec.get("build")
+        if not isinstance(build, dict):
+            build = {}
+            spec["build"] = build
+        return spec, build
+
+    rm_json = copy.deepcopy(task_data.get("resource_manager_json") or {})
+    if not isinstance(rm_json, dict):
         rm_json = {}
-        pc_build = {}
-        if overrides.get("pc_commit"):
-            pc_build["commit_id"] = overrides["pc_commit"]
+    rm_json = _strip_rm_illegal_keys(rm_json)
+
+    nos_overridden = any(overrides.get(k) for k in ("nos_branch", "nos_commit", "nos_gbn", "nos_tag"))
+    pc_overridden = any(overrides.get(k) for k in (
+        "pc_commit", "pc_branch", "pc_gbn", "pc_tag",
+        "pc_build_url", "pc_build_url_qcow2",
+    ))
+
+    if nos_overridden:
+        nos_cluster, nos_build = _ensure_product_build(rm_json, "NOS_CLUSTER")
+        nos_build = _sanitize_rm_build(nos_build, drop_stale=True)
+        if overrides.get("nos_branch"):
+            nos_build["branch"] = overrides["nos_branch"]
+        if nos_commit and not str(nos_commit).startswith("$"):
+            nos_build["commit_id"] = nos_commit
+        elif nos_commit and str(nos_commit).startswith("$"):
+            nos_build.pop("commit_id", None)
+            nos_build.pop("gbn", None)
+        nos_gbn = _as_int(overrides.get("nos_gbn"))
+        if nos_gbn is not None:
+            nos_build["gbn"] = nos_gbn
+        nos_build.setdefault("component", "main")
+        nos_cluster["build"] = nos_build
+
+    if pc_overridden:
+        pc, pc_build = _ensure_product_build(rm_json, "PRISM_CENTRAL")
+        pc_build = _sanitize_rm_build(pc_build, drop_stale=True)
         if overrides.get("pc_branch"):
             pc_build["branch"] = overrides["pc_branch"]
-        if overrides.get("pc_gbn"):
-            try:
-                pc_build["gbn"] = int(overrides["pc_gbn"])
-            except (ValueError, TypeError):
-                pass
+        pc_commit = overrides.get("pc_commit")
+        if not pc_commit and overrides.get("pc_tag"):
+            pc_commit = TAG_TO_COMMIT.get(overrides["pc_tag"])
         if overrides.get("pc_tag"):
-            pc_build["tag"] = overrides["pc_tag"]
-        if overrides.get("pc_build_type"):
-            pc_build["build_type"] = overrides["pc_build_type"]
-        if pc_build:
-            rm_json["PRISM_CENTRAL"] = {"build": pc_build}
-        payload["resource_manager_json"] = rm_json
+            # Jita resolve step pops these before schema validation.
+            pc_build["build_selection_option"] = overrides["pc_tag"]
+            if overrides.get("pc_build_type"):
+                pc_build["build_selection_build_type"] = overrides["pc_build_type"]
+            pc_build.pop("commit_id", None)
+            pc_build.pop("gbn", None)
+        elif pc_commit and not str(pc_commit).startswith("$"):
+            pc_build["commit_id"] = pc_commit
+        pc_gbn = _as_int(overrides.get("pc_gbn"))
+        if pc_gbn is not None and not overrides.get("pc_tag"):
+            pc_build["gbn"] = pc_gbn
+        # Jita PC tab: Build Url -> nos_build_url, Build QCOW2 URL -> pc_build_url.
+        pc_build_url = str(overrides.get("pc_build_url") or "").strip()
+        if pc_build_url:
+            pc_build["nos_build_url"] = pc_build_url
+        pc_qcow2_url = str(overrides.get("pc_build_url_qcow2") or "").strip()
+        if pc_qcow2_url:
+            pc_build["pc_build_url"] = pc_qcow2_url
+        pc_build.setdefault("component", "main")
+        pc["build"] = pc_build
 
-    # --- Patch URLs → tester_tags ---
-    tester_tags = list(task_data.get("tester_tags", []))
-    tags_changed = False
-    if overrides.get("patch_url"):
-        patch_url = overrides["patch_url"].strip()
-        if patch_url:
-            patch_tag = f"patch_url__{patch_url}"
-            if patch_tag not in tester_tags:
-                tester_tags.append(patch_tag)
-                tags_changed = True
-    if overrides.get("framework_patch_url"):
-        fw_url = overrides["framework_patch_url"].strip()
-        if fw_url:
-            fw_tag = f"framework_patch_url__{fw_url}"
-            if fw_tag not in tester_tags:
-                tester_tags.append(fw_tag)
-                tags_changed = True
-    if tags_changed:
+    # Always strip schema-illegal keys copied from the original task.
+    rm_json = _strip_rm_illegal_keys(rm_json)
+    for product, spec in list(rm_json.items()):
+        if isinstance(spec, dict) and isinstance(spec.get("build"), dict):
+            spec["build"] = _sanitize_rm_build(spec["build"])
+
+    retain = _ensure_retain_duration(task_data.get("retain_resources_config"), RETAIN_DURATION_72H_MIN)
+
+    sdk_opts = copy.deepcopy(task_data.get("sdk_installation_options") or {})
+    if not isinstance(sdk_opts, dict):
+        sdk_opts = {}
+
+    payload = {
+        "tests": tests,
+        "infra": infra,
+        "username": username or task_data.get("created_by") or "",
+        "skip_resource_spec_match": bool(skip_match),
+        "check_image_compatibility": bool(check_compat),
+        "sdk_installation_options": sdk_opts,
+    }
+    if branch:
+        payload["branch"] = branch
+    if commit_id:
+        payload["commit_id"] = commit_id
+    gbn_int = _as_int(gbn)
+    if gbn_int is not None:
+        payload["gbn"] = gbn_int
+    if image_branch:
+        payload["image_branch"] = image_branch
+    if image_commit:
+        payload["image_commit"] = image_commit
+    image_gbn_int = _as_int(image_gbn)
+    if image_gbn_int is not None:
+        payload["image_gbn"] = image_gbn_int
+    if nutest_branch:
+        payload[fw_branch_key] = nutest_branch
+    if nutest_commit:
+        payload[fw_commit_key] = nutest_commit
+    if overrides.get("nos_build_type"):
+        payload["build_type"] = overrides["nos_build_type"]
+    else:
+        orig_build_type = _original_build_type(task_data)
+        if orig_build_type:
+            payload["build_type"] = orig_build_type
+    orig_image_build_type = task_data.get("image_build_type")
+    if orig_image_build_type not in (None, ""):
+        payload["image_build_type"] = orig_image_build_type
+
+    imaging_options = _original_imaging_options(task_data)
+    orig_nos_url = str(imaging_options.get("nos_url") or "").strip()
+    orig_hyp_url = str(imaging_options.get("hypervisor_url") or "").strip()
+    if orig_nos_url or orig_hyp_url:
+        orig_gbn = task_data.get("gbn")
+        orig_commit = task_data.get("commit_id")
+        orig_image_commit = task_data.get("image_commit")
+        orig_image_gbn = task_data.get("image_gbn")
+        if orig_nos_url:
+            imaging_options["nos_url"] = _rewrite_url_for_new_build(
+                orig_nos_url, orig_gbn, gbn, orig_commit, commit_id,
+            )
+        if orig_hyp_url:
+            imaging_options["hypervisor_url"] = _rewrite_url_for_new_build(
+                orig_hyp_url,
+                orig_image_gbn if orig_image_gbn not in (None, "") else orig_gbn,
+                image_gbn if image_gbn not in (None, "") else gbn,
+                orig_image_commit or orig_commit,
+                image_commit or commit_id,
+            )
+        if not payload.get("build_type"):
+            inferred = _original_build_type(task_data, orig_nos_url)
+            if inferred:
+                payload["build_type"] = inferred
+        payload["imaging_options"] = imaging_options
+    if overrides.get("override_resource_config"):
+        nested_params = requested_hw.get("nested_params") if isinstance(requested_hw.get("nested_params"), dict) else {}
+    else:
+        nested_params = _original_nested_params(task_data)
+    if nested_params:
+        payload["nested_params"] = nested_params
+    elif overrides.get("override_resource_config"):
+        payload.pop("nested_params", None)
+    if requested_hw or infra:
+        if not requested_hw:
+            requested_hw = {}
+        requested_hw["infra"] = infra
+        if payload.get("imaging_options"):
+            requested_hw["imaging_options"] = payload["imaging_options"]
+        if nested_params:
+            requested_hw["nested_params"] = nested_params
+        payload["requested_hardware"] = requested_hw
+        hypervisor = requested_hw.get("hypervisor") or task_data.get("hypervisor")
+        if hypervisor:
+            payload["hypervisor"] = hypervisor
+        hypervisor_version = requested_hw.get("hypervisor_version") or task_data.get("hypervisor_version")
+        if hypervisor_version:
+            payload["hypervisor_version"] = hypervisor_version
+    if label:
+        payload["label"] = label
+    if tester_tags:
         payload["tester_tags"] = tester_tags
+    if rm_json:
+        payload["resource_manager_json"] = rm_json
+    if tfm.get("test") or tfm.get("framework"):
+        payload["test_framework_metadata"] = tfm
+    priority_int = _as_int(priority)
+    if priority_int is not None:
+        payload["priority"] = priority_int
+    if retain:
+        payload["retain_resources_config"] = retain
+    if nested_params:
+        payload["nested_params"] = nested_params
 
-    return payload
+    return {k: v for k, v in payload.items() if v is not None and v != ""}
+
+
+def _task_job_profile_id(task_data):
+    if not isinstance(task_data, dict):
+        return ""
+    jp = task_data.get("job_profile")
+    if isinstance(jp, dict):
+        oid = jp.get("$oid") or jp.get("_id") or jp.get("id")
+        if isinstance(oid, dict):
+            oid = oid.get("$oid")
+        return str(oid or "").strip()
+    if isinstance(jp, str):
+        return jp.strip()
+    return ""
+
+
+def _jp_name_from_agave_task(task_data):
+    """JP name from a fetched agave task: explicit name, then label without -(N)."""
+    if not isinstance(task_data, dict):
+        return ""
+    name = str(task_data.get("job_profile_name") or "").strip()
+    if name:
+        return name
+    jp = task_data.get("job_profile")
+    if isinstance(jp, dict):
+        name = str(jp.get("name") or "").strip()
+        if name:
+            return name
+    label = str(task_data.get("label") or "").strip()
+    if label:
+        import re
+        stripped = re.sub(r"-\(\d+\)$", "", label).strip()
+        return stripped or label
+    return ""
+
+
+def _last_hypervisor_in_jp_name(jp_name):
+    """Return 'esx' or 'ahv' from the last AHV/ESX/ESXi token in the JP name.
+
+    Names like AHVorESX_special_config_AOS-tar_(AHV) mention both; the suffix wins.
+    """
+    import re
+    last = None
+    for match in re.finditer(r"AHV|ESXi?", str(jp_name or ""), flags=re.IGNORECASE):
+        last = match.group(0)
+    if not last:
+        return None
+    return "esx" if last.lower().startswith("esx") else "ahv"
+
+
+def _is_esx_job_profile(jp_name):
+    return _last_hypervisor_in_jp_name(jp_name) == "esx"
+
+
+def _rerun_trigger_account(jp_name):
+    """ESX job profiles run as svc.teamchandra; others use the caller's LDAP account."""
+    if _is_esx_job_profile(jp_name):
+        return "svc.teamchandra"
+    return None
+
+
+def _select_rerun_auth(jp_name, user_auth, current_username, service_accounts=None):
+    """Pick Jita auth for one task. AHV and ESX tasks in the same batch stay independent."""
+    svc_name = _rerun_trigger_account(jp_name)
+    accounts = service_accounts if service_accounts is not None else RUN_PLAN_SERVICE_ACCOUNTS
+    if svc_name and svc_name in accounts:
+        return accounts[svc_name], svc_name
+    return user_auth, current_username
+
+
+def _resolve_rerun_jp_name(task_data, fetch_name=None, cache=None):
+    """
+    Resolve the real JP name for account selection.
+
+    Prefer job_profile_name / job_profile.name. If the task only has a JP id,
+    fetch the name (cached per batch) so a generic AHV label cannot hide an
+    ESX JP, and an ESX leftover label cannot steal an AHV rerun.
+    Label is the last fallback.
+    """
+    if not isinstance(task_data, dict):
+        return ""
+    name = str(task_data.get("job_profile_name") or "").strip()
+    if name:
+        return name
+    jp = task_data.get("job_profile")
+    if isinstance(jp, dict):
+        name = str(jp.get("name") or "").strip()
+        if name:
+            return name
+    jp_id = _task_job_profile_id(task_data)
+    if jp_id and fetch_name:
+        if cache is not None and jp_id in cache:
+            fetched = cache[jp_id]
+        else:
+            fetched = str(fetch_name(jp_id) or "").strip()
+            if cache is not None:
+                cache[jp_id] = fetched
+        if fetched:
+            return fetched
+    return _jp_name_from_agave_task(task_data)
 
 
 # ======================================================
@@ -7189,6 +11085,24 @@ TESTCASE_MGMT_BRANCHES = {
 TESTCASE_MGMT_TEAMS = ["CDP", "AHV"]
 
 
+def _normalize_tc_branch_key(branch):
+    """
+    Canonical Testcase Management storage/UI key.
+
+    master → master
+    ganges-7.6-stable / 7.6 → 7.6
+    keeps unknown names as-is
+    """
+    b = (branch or "master").strip()
+    if not b or b == "master":
+        return "master"
+    if b.startswith("ganges-") and b.endswith("-stable"):
+        return b[len("ganges-"):-len("-stable")]
+    if re.match(r"^\d+(?:\.\d+)+$", b):
+        return b
+    return b
+
+
 def _resolve_branch_config(branch):
     """Resolve branch config from static map or dynamically from a version string.
 
@@ -7197,18 +11111,20 @@ def _resolve_branch_config(branch):
     branches the static TESTCASE_MGMT_BRANCHES entry is returned.  For
     anything else a release-style config is generated on-the-fly.
     """
-    if branch in TESTCASE_MGMT_BRANCHES:
-        return TESTCASE_MGMT_BRANCHES[branch]
+    key = _normalize_tc_branch_key(branch)
+    # Prefer static full-name entries when key is a known release
+    for full_name, cfg in TESTCASE_MGMT_BRANCHES.items():
+        if full_name == branch or _normalize_tc_branch_key(full_name) == key:
+            return cfg
 
-    version = branch
-    if branch.startswith("ganges-") and branch.endswith("-stable"):
-        version = branch.replace("ganges-", "").replace("-stable", "")
+    if key == "master":
+        return TESTCASE_MGMT_BRANCHES["master"]
 
-    if re.match(r"^\d+\.\d+(\.\d+)?$", version):
+    if re.match(r"^\d+(?:\.\d+)+$", key):
         return {
-            "milestone": version,
-            "team_prefix": version,
-            "test_set_regex": f"test_sets/milestones/{version}/",
+            "milestone": key,
+            "team_prefix": key,
+            "test_set_regex": f"test_sets/milestones/{key}/",
         }
 
     return None
@@ -7216,6 +11132,410 @@ def _resolve_branch_config(branch):
 
 def _tcms_auth():
     return (TCMS_USER, TCMS_PASSWORD)
+
+
+def _tcms_nutest_target_branch(branch):
+    """
+    Map Testcase Management branch key → NutestPy3Tests target_branch in TCMS.
+
+    UI / storage use short versions ('7.6'); all_test_cases uses 'ganges-7.6-stable'.
+    """
+    key = _normalize_tc_branch_key(branch)
+    if key == "master":
+        return "master"
+    if re.match(r"^\d+(?:\.\d+)+$", key):
+        return f"ganges-{key}-stable"
+    b = (branch or "").strip()
+    if b.startswith("ganges-") and b.endswith("-stable"):
+        return b
+    return b or "master"
+
+
+def _extract_mongo_oid(value):
+    if isinstance(value, dict):
+        return str(value.get("$oid") or "").strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _resolve_tcms_all_testcase_oid(tc_name, branch_key):
+    """
+    Resolve NutestPy3Tests all_test_cases document oid (+ current tags) by name.
+
+    Tag write API is /all_test_cases/tags/{oid} and needs this oid — NOT the
+    milestone aggregate _id stored as local 'oid'.
+    """
+    name = (tc_name or "").strip()
+    if not name:
+        return None, []
+    target_branch = _tcms_nutest_target_branch(branch_key)
+    try:
+        raw_query = json.dumps({
+            "$and": [
+                {
+                    "target_service": "NutestPy3Tests",
+                    "target_branch": target_branch,
+                    "target_package_type": "tar",
+                    "deleted": False,
+                },
+                {"test_case.name": name},
+                {"test_case.deprecated": False},
+            ]
+        })
+        url = (
+            f"{TCMS_TESTDB_BASE}/all_test_cases"
+            f"?raw_query={urllib.parse.quote(raw_query)}&sort=name&limit=1"
+        )
+        resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
+        if resp.status_code != 200:
+            return None, []
+        rows = resp.json().get("data") or []
+        if not rows:
+            return None, []
+        row = rows[0]
+        oid = _extract_mongo_oid(row.get("_id"))
+        tags = (row.get("additional_data") or {}).get("tags") or []
+        if not isinstance(tags, list):
+            tags = []
+        return (oid or None), tags
+    except Exception as exc:
+        logger.warning("Failed to resolve TCMS all_test_cases oid for %s: %s", name, exc)
+        return None, []
+
+
+def _tcms_mutate_testcase_tags(tcms_oid, tags, action="add"):
+    """
+    Add or delete tags on a TCMS all_test_cases document.
+    Returns (ok: bool, status_code: int, message: str).
+    """
+    oid = (tcms_oid or "").strip()
+    tag_list = [str(t).strip() for t in (tags or []) if str(t).strip()]
+    if not oid or not tag_list:
+        return False, 400, "tcms_oid and tags required"
+    url = f"{TCMS_WRITE_BASE}/all_test_cases/tags/{oid}"
+    headers = {"Content-Type": "application/json"}
+    try:
+        if action == "add":
+            resp = requests.post(
+                url,
+                auth=_tcms_auth(),
+                headers=headers,
+                json={"tags": tag_list},
+                verify=False,
+                timeout=30,
+            )
+            ok = resp.status_code in (200, 201)
+        else:
+            # DELETE with JSON body — use data= for broad server compatibility
+            resp = requests.delete(
+                url,
+                auth=_tcms_auth(),
+                headers=headers,
+                data=json.dumps({"tags": tag_list}),
+                verify=False,
+                timeout=30,
+            )
+            ok = resp.status_code in (200, 204)
+        msg = ""
+        try:
+            body = resp.json() if resp.content else {}
+            msg = str(body.get("message") or body.get("detail") or "")[:300]
+        except Exception:
+            msg = (resp.text or "")[:300]
+        return ok, resp.status_code, msg
+    except Exception as exc:
+        return False, 0, str(exc)
+
+
+def _apply_testcase_tag_ops(testcase_oids, tags, branch, team, action="add"):
+    """
+    Apply tag add/delete for many local testcases (by aggregate oid).
+    Resolves each to TCMS all_test_cases oid, mutates TCMS, updates local JSON
+    only for successes. Works for 1..N selections.
+
+    Critical behaviors:
+    - Deduped tags; case-insensitive presence checks
+    - Add: skip tags already present (no false TCMS churn); still success
+    - Delete: prefer remote TCMS tags for presence; never claim "not present"
+      solely from a failed resolve when we still have a tcms_oid (attempt delete)
+    - On HTTP 404: re-resolve oid once and retry (stale tcms_oid)
+    - Local cache updated only after TCMS success (or pure local no-op add)
+    """
+    branch = _normalize_tc_branch_key(branch)
+    team = (team or "CDP").strip() or "CDP"
+    oids = list(dict.fromkeys(str(o).strip() for o in (testcase_oids or []) if str(o).strip()))
+    # Dedupe tags case-insensitively, keep first spelling
+    tag_list = []
+    _seen_tag = set()
+    for t in (tags or []):
+        s = str(t).strip()
+        if not s:
+            continue
+        k = s.lower()
+        if k in _seen_tag:
+            continue
+        _seen_tag.add(k)
+        tag_list.append(s)
+
+    results = {
+        "success": 0,
+        "failed": 0,
+        "errors": [],
+        "updated_oids": [],
+        "not_present": [],  # delete: tags requested but not on the testcase
+        "already_present": [],  # add: tags already on the testcase
+        "action": action,
+        "tags": tag_list,
+        "branch": branch,
+        "team": team,
+    }
+    if not oids or not tag_list:
+        results["errors"].append({"error": "testcase_oids and tags are required"})
+        results["failed"] = 1 if oids or tag_list else 0
+        return results
+
+    data = _load_tc_data(branch, team)
+    by_oid = {
+        str(tc.get("oid") or ""): tc
+        for tc in (data.get("testcases") or [])
+        if tc.get("oid")
+    }
+
+    def _split_present_missing(current_tags, requested):
+        current_list = [str(t).strip() for t in (current_tags or []) if str(t).strip()]
+        lower_map = {}
+        for t in current_list:
+            lower_map.setdefault(t.lower(), t)
+        present, missing = [], []
+        for tag in requested:
+            hit = lower_map.get(tag.lower())
+            if hit is not None:
+                present.append(hit)
+            else:
+                missing.append(tag)
+        return list(dict.fromkeys(present)), list(dict.fromkeys(missing))
+
+    def _merge_tags_local(existing, to_add):
+        out = list(existing or [])
+        lower = {t.lower() for t in out}
+        for tag in to_add:
+            if tag.lower() not in lower:
+                out.append(tag)
+                lower.add(tag.lower())
+        return out
+
+    def _remove_tags_local(existing, to_remove):
+        drop = {t.lower() for t in (to_remove or [])}
+        return [t for t in (existing or []) if t.lower() not in drop]
+
+    def _refresh_tcms(name, tc, prefer_remote_tags):
+        """Resolve oid (+ optional remote tags). Returns (tcms_oid, tags, resolved_ok)."""
+        resolved_oid, remote_tags = _resolve_tcms_all_testcase_oid(name, branch)
+        tcms_oid = (tc.get("tcms_oid") or "").strip()
+        current = list(tc.get("tags") or [])
+        resolved_ok = bool(resolved_oid)
+        if resolved_oid:
+            tcms_oid = resolved_oid
+            tc["tcms_oid"] = tcms_oid
+            if prefer_remote_tags and isinstance(remote_tags, list):
+                current = list(remote_tags)
+                tc["tags"] = list(remote_tags)
+        return tcms_oid, current, resolved_ok
+
+    def _mutate_with_stale_retry(name, tc, tcms_oid, tags_to_apply):
+        ok, status, msg = _tcms_mutate_testcase_tags(tcms_oid, tags_to_apply, action=action)
+        if ok:
+            return True, status, msg, tcms_oid
+        # Stale / wrong oid → re-resolve once and retry
+        if status == 404 or (status and 400 <= int(status) < 500 and "not found" in (msg or "").lower()):
+            new_oid, _, resolved_ok = _refresh_tcms(name, tc, prefer_remote_tags=False)
+            if resolved_ok and new_oid and new_oid != tcms_oid:
+                ok2, status2, msg2 = _tcms_mutate_testcase_tags(new_oid, tags_to_apply, action=action)
+                return ok2, status2, msg2, new_oid
+        return False, status, msg, tcms_oid
+
+    def _one(local_oid):
+        tc = by_oid.get(local_oid)
+        if not tc:
+            return {
+                "oid": local_oid,
+                "ok": False,
+                "error": "Not present in local testcase cache — Reload from TCMS",
+            }
+        name = tc.get("name") or ""
+        # Always refresh oid for delete (presence accuracy); for add when missing
+        need_resolve = (not (tc.get("tcms_oid") or "").strip()) or action == "delete"
+        if need_resolve:
+            tcms_oid, current_tags, resolved_ok = _refresh_tcms(
+                name, tc, prefer_remote_tags=(action == "delete")
+            )
+        else:
+            tcms_oid = (tc.get("tcms_oid") or "").strip()
+            current_tags = list(tc.get("tags") or [])
+            resolved_ok = False
+
+        if not tcms_oid:
+            return {
+                "oid": local_oid,
+                "name": name,
+                "ok": False,
+                "error": f"Not present in TCMS all_test_cases for branch '{branch}'",
+            }
+
+        missing_tags = []
+        already = []
+
+        if action == "add":
+            present, missing_tags = _split_present_missing(current_tags, tag_list)
+            # If any tag looks new locally, refresh from TCMS so we don't double-add
+            if missing_tags:
+                new_oid, remote_current, refreshed = _refresh_tcms(
+                    name, tc, prefer_remote_tags=True
+                )
+                if new_oid:
+                    tcms_oid = new_oid
+                if refreshed:
+                    current_tags = remote_current
+                    present, missing_tags = _split_present_missing(current_tags, tag_list)
+            already = present
+            tags_to_apply = missing_tags  # only add what's not present
+            if not tags_to_apply:
+                tc["tags"] = list(current_tags)
+                return {
+                    "oid": local_oid,
+                    "name": name,
+                    "tcms_oid": tcms_oid,
+                    "ok": True,
+                    "already_present": already,
+                    "not_present": [],
+                    "noop": True,
+                }
+        else:
+            # delete
+            if resolved_ok:
+                present, missing_tags = _split_present_missing(current_tags, tag_list)
+                if not present:
+                    return {
+                        "oid": local_oid,
+                        "name": name,
+                        "tcms_oid": tcms_oid,
+                        "ok": False,
+                        "not_present": missing_tags,
+                        "error": f"Tag not present: {', '.join(missing_tags)}",
+                    }
+                tags_to_apply = present
+            else:
+                # Resolve failed — do NOT trust stale local emptiness.
+                # Attempt delete of requested tags; TCMS is source of truth.
+                present_local, _missing_local = _split_present_missing(current_tags, tag_list)
+                tags_to_apply = present_local if present_local else list(tag_list)
+                missing_tags = []
+
+        ok, status, msg, tcms_oid = _mutate_with_stale_retry(
+            name, tc, tcms_oid, tags_to_apply
+        )
+        if not ok:
+            # Delete + resolve failed earlier: map common "not found" to Tag not present
+            err = msg or f"HTTP {status}"
+            if action == "delete" and (
+                status == 404
+                or "not present" in err.lower()
+                or "not found" in err.lower()
+            ):
+                if not missing_tags:
+                    missing_tags = list(tag_list)
+                return {
+                    "oid": local_oid,
+                    "name": name,
+                    "tcms_oid": tcms_oid,
+                    "ok": False,
+                    "status": status,
+                    "not_present": missing_tags,
+                    "error": f"Tag not present: {', '.join(missing_tags)}",
+                }
+            return {
+                "oid": local_oid,
+                "name": name,
+                "tcms_oid": tcms_oid,
+                "ok": False,
+                "status": status,
+                "error": err,
+                "not_present": missing_tags,
+            }
+
+        # Local cache update only after TCMS success
+        existing = list(tc.get("tags") or [])
+        if action == "add":
+            tc["tags"] = _merge_tags_local(existing, tags_to_apply)
+        else:
+            tc["tags"] = _remove_tags_local(existing, tags_to_apply)
+        return {
+            "oid": local_oid,
+            "name": name,
+            "tcms_oid": tcms_oid,
+            "ok": True,
+            "not_present": missing_tags,
+            "already_present": already,
+            "removed_tags": tags_to_apply if action == "delete" else [],
+        }
+
+    # Parallel for multi-select
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(oids)))) as pool:
+        futures = {pool.submit(_one, oid): oid for oid in oids}
+        for fut in as_completed(futures):
+            item = fut.result()
+            missing = item.get("not_present") or []
+            already = item.get("already_present") or []
+            if missing:
+                results["not_present"].append({
+                    "oid": item.get("oid"),
+                    "name": item.get("name"),
+                    "tags": missing,
+                })
+            if already:
+                results["already_present"].append({
+                    "oid": item.get("oid"),
+                    "name": item.get("name"),
+                    "tags": already,
+                })
+            if item.get("ok"):
+                results["success"] += 1
+                results["updated_oids"].append(item.get("oid"))
+            else:
+                results["failed"] += 1
+                results["errors"].append({
+                    "oid": item.get("oid"),
+                    "name": item.get("name"),
+                    "error": item.get("error"),
+                    "status": item.get("status"),
+                    "not_present": missing,
+                })
+
+    if results["success"]:
+        data["last_updated"] = datetime.utcnow().isoformat() + "Z"
+        _save_tc_data(branch, team, data)
+
+    if (
+        action == "delete"
+        and results["success"] == 0
+        and results["failed"] > 0
+        and all(
+            (e.get("error") or "").startswith("Tag not present")
+            for e in results["errors"]
+        )
+    ):
+        all_missing = []
+        for e in results["errors"]:
+            all_missing.extend(e.get("not_present") or [])
+        all_missing = list(dict.fromkeys(all_missing))
+        results["error"] = (
+            f"Tag not present: {', '.join(all_missing)}"
+            if all_missing
+            else "Tag not present"
+        )
+
+    return results
 
 
 def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip, limit):
@@ -7347,16 +11667,17 @@ def _normalize_testcase(item):
         "total_results": score.get("total_results"),
         "tickets": item.get("tickets", []),
         "resource_spec": tc.get("resource_spec", []),
+        "tcms_oid": "",  # all_test_cases oid for tag write API (filled by tag fetch)
     }
 
 
 def _fetch_tags_for_testcases(testcases, branch_key):
-    """Batch-fetch tags from the GET all_test_cases API using regex matching."""
+    """Batch-fetch tags + all_test_cases oid from TCMS (correct target_branch)."""
     if not testcases:
         return testcases
 
-    name_map = {tc["name"]: tc for tc in testcases}
-    target_branch = branch_key
+    name_map = {tc["name"]: tc for tc in testcases if tc.get("name")}
+    target_branch = _tcms_nutest_target_branch(branch_key)
 
     batch_size = 50
     names = list(name_map.keys())
@@ -7383,58 +11704,160 @@ def _fetch_tags_for_testcases(testcases, branch_key):
                 resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
                 if resp.status_code == 200:
                     data = resp.json().get("data", [])
-                    if data:
-                        tags = data[0].get("additional_data", {}).get("tags", [])
-                        if tc_name in name_map:
-                            name_map[tc_name]["tags"] = tags
+                    if data and tc_name in name_map:
+                        row = data[0]
+                        tags = (row.get("additional_data") or {}).get("tags", []) or []
+                        name_map[tc_name]["tags"] = tags if isinstance(tags, list) else []
+                        name_map[tc_name]["tcms_oid"] = _extract_mongo_oid(row.get("_id"))
             except Exception as exc:
                 logger.warning(f"Failed to fetch tags for {tc_name}: {exc}")
 
     with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = []
         for i in range(0, len(names), batch_size):
             batch = names[i:i + batch_size]
-            pool.submit(_fetch_batch, batch)
+            futures.append(pool.submit(_fetch_batch, batch))
+        for fut in as_completed(futures):
+            fut.result()
 
     return testcases
 
 
 def _tc_data_file(branch, team):
-    """Return the path for a per-branch/team JSON file."""
-    safe_name = f"testcase_management_{branch}_{team}.json".replace("/", "_")
+    """Return canonical path for a per-branch/team JSON file (short branch key)."""
+    key = _normalize_tc_branch_key(branch)
+    safe_name = f"testcase_management_{key}_{team}.json".replace("/", "_")
     return os.path.join(TESTCASE_MGMT_DATA_DIR, safe_name)
 
 
-def _load_tc_data(branch, team):
-    fpath = _tc_data_file(branch, team)
+def _tc_data_candidate_paths(branch, team):
+    """
+    Candidate JSON paths for a branch/team.
+
+    Canonical short key first, then legacy full ganges-* filenames so old
+    caches (e.g. testcase_management_ganges-7.6-stable_CDP.json) still load.
+    """
+    key = _normalize_tc_branch_key(branch)
+    team = (team or "CDP").strip() or "CDP"
+    paths = [_tc_data_file(key, team)]
+    if key != "master" and re.match(r"^\d+(?:\.\d+)+$", key):
+        legacy = os.path.join(
+            TESTCASE_MGMT_DATA_DIR,
+            f"testcase_management_ganges-{key}-stable_{team}.json".replace("/", "_"),
+        )
+        if legacy not in paths:
+            paths.append(legacy)
+    # Also accept an accidental full-name canonical path if someone saved raw
+    raw = (branch or "").strip()
+    if raw and raw != key:
+        alt = os.path.join(
+            TESTCASE_MGMT_DATA_DIR,
+            f"testcase_management_{raw}_{team}.json".replace("/", "_"),
+        )
+        if alt not in paths:
+            paths.append(alt)
+    return paths
+
+
+def _tc_data_last_updated_ts(data):
+    """Parse last_updated to a comparable timestamp (0 if missing/invalid)."""
+    raw = (data or {}).get("last_updated") or ""
+    if not raw:
+        return 0.0
     try:
-        with open(fpath, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"last_updated": None, "branch": branch, "team": team, "testcases": []}
+        s = str(raw).strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _load_tc_data(branch, team):
+    """
+    Load testcase cache for branch/team.
+
+    Prefer newest last_updated, then richest tags/tcms_oid population.
+    (Avoids stale legacy ganges-* files undoing tag add/delete saved to short key.)
+    """
+    key = _normalize_tc_branch_key(branch)
+    team = (team or "CDP").strip() or "CDP"
+    best = None  # (score, data, path)
+    for fpath in _tc_data_candidate_paths(branch, team):
+        try:
+            with open(fpath, "r") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        tcs = data.get("testcases") or []
+        if not isinstance(tcs, list) or not tcs:
+            continue
+        tagged = sum(1 for t in tcs if isinstance(t, dict) and t.get("tags"))
+        with_tcms = sum(1 for t in tcs if isinstance(t, dict) and t.get("tcms_oid"))
+        # Newest write wins first — critical after tag mutations
+        score = (_tc_data_last_updated_ts(data), tagged, with_tcms, len(tcs))
+        if best is None or score > best[0]:
+            best = (score, data, fpath)
+
+    if best is None:
+        return {"last_updated": None, "branch": key, "team": team, "testcases": []}
+
+    data = best[1]
+    data["branch"] = key
+    data["team"] = team
+    logger.info(
+        "Loaded testcase cache %s (updated_ts=%s tagged=%s tcms_oid=%s total=%s)",
+        best[2], best[0][0], best[0][1], best[0][2], best[0][3],
+    )
+    return data
 
 
 def _save_tc_data(branch, team, data):
+    """
+    Persist testcase cache to canonical short-key path AND any legacy candidate
+    paths so load cannot prefer a stale ganges-* file after tag edits.
+    """
     os.makedirs(TESTCASE_MGMT_DATA_DIR, exist_ok=True)
-    fpath = _tc_data_file(branch, team)
-    with open(fpath, "w") as f:
-        json.dump(data, f, indent=2, default=str)
+    key = _normalize_tc_branch_key(branch)
+    team = (team or "CDP").strip() or "CDP"
+    if isinstance(data, dict):
+        data["branch"] = key
+        data["team"] = team
+        if not data.get("last_updated"):
+            data["last_updated"] = datetime.utcnow().isoformat() + "Z"
+    payload = json.dumps(data, indent=2, default=str)
+    written = []
+    for fpath in _tc_data_candidate_paths(key, team):
+        try:
+            with open(fpath, "w") as f:
+                f.write(payload)
+            written.append(fpath)
+        except OSError as exc:
+            logger.warning("Failed writing testcase cache %s: %s", fpath, exc)
+    if not written:
+        # Fallback: at least write canonical
+        fpath = _tc_data_file(key, team)
+        with open(fpath, "w") as f:
+            f.write(payload)
 
 
 @app.route("/mcp/regression/testcase-mgmt/fetch-data", methods=["GET"])
 @jwt_required
 def testcase_mgmt_fetch_data():
     """Fetch all test cases from TCMS for a given branch/team and persist to JSON."""
-    branch = request.args.get("branch", "master")
+    branch_in = request.args.get("branch", "master")
     team = request.args.get("team", "CDP")
+    branch = _normalize_tc_branch_key(branch_in)
     page_limit = 500
 
     branch_cfg = _resolve_branch_config(branch)
     if not branch_cfg:
-        return jsonify({"error": f"Unknown branch: {branch}. Use a known branch name or a version number like 7.7"}), 400
+        return jsonify({"error": f"Unknown branch: {branch_in}. Use a known branch name or a version number like 7.7"}), 400
 
     milestone = branch_cfg["milestone"]
     team_prefix = branch_cfg["team_prefix"]
     test_set_regex = branch_cfg["test_set_regex"]
+    nutest_branch = _tcms_nutest_target_branch(branch)
 
     all_testcases = []
     skip = 0
@@ -7466,16 +11889,31 @@ def testcase_mgmt_fetch_data():
                 break
             skip += page_limit
 
-        logger.info(f"Total testcases fetched from aggregate API: {len(all_testcases)} for {branch}/{team}")
+        logger.info(
+            "Total testcases fetched from aggregate API: %s for %s/%s (nutest_target_branch=%s)",
+            len(all_testcases), branch, team, nutest_branch,
+        )
 
         _fetch_tags_for_testcases(all_testcases, branch)
+        tagged = sum(1 for t in all_testcases if t.get("tags"))
+        with_tcms = sum(1 for t in all_testcases if t.get("tcms_oid"))
+        logger.info(
+            "Tag population for %s/%s: tagged=%s/%s tcms_oid=%s/%s",
+            branch, team, tagged, len(all_testcases), with_tcms, len(all_testcases),
+        )
 
         now = datetime.utcnow().isoformat() + "Z"
         data = {
             "last_updated": now,
             "branch": branch,
             "team": team,
+            "nutest_target_branch": nutest_branch,
             "testcases": all_testcases,
+            "tag_stats": {
+                "tagged": tagged,
+                "with_tcms_oid": with_tcms,
+                "total": len(all_testcases),
+            },
         }
         _save_tc_data(branch, team, data)
 
@@ -7483,7 +11921,10 @@ def testcase_mgmt_fetch_data():
             "status": "ok",
             "branch": branch,
             "team": team,
+            "nutest_target_branch": nutest_branch,
             "count": len(all_testcases),
+            "tagged_count": tagged,
+            "tcms_oid_count": with_tcms,
             "last_updated": now,
         })
 
@@ -7492,15 +11933,31 @@ def testcase_mgmt_fetch_data():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/mcp/regression/testcase-mgmt/testcases", methods=["GET"])
+@app.route("/mcp/regression/testcase-mgmt/testcases", methods=["GET", "POST"])
 @jwt_required
 def testcase_mgmt_get_testcases():
-    """Return testcases from local JSON with optional filters."""
-    branch = request.args.get("branch", "master")
-    team = request.args.get("team", "CDP")
-    tag_filter = request.args.get("tags", "")
-    name_filter = request.args.get("name", "").lower()
-    status_filter = request.args.get("status", "")
+    """Return testcases from local JSON with optional filters.
+    
+    Supports both GET and POST methods:
+    - GET: For small filters (URL parameters)
+    - POST: For large name filters (in request body to avoid URL length limits)
+    """
+    # Handle both GET and POST
+    if request.method == "POST":
+        body = request.get_json(force=True) or {}
+        branch = _normalize_tc_branch_key(body.get("branch", "master"))
+        team = body.get("team", "CDP")
+        tag_filter = body.get("tags", "")
+        name_filter = body.get("name", "").lower()
+        status_filter = body.get("status", "")
+        exact_match = body.get("exact_match", False)
+    else:
+        branch = _normalize_tc_branch_key(request.args.get("branch", "master"))
+        team = request.args.get("team", "CDP")
+        tag_filter = request.args.get("tags", "")
+        name_filter = request.args.get("name", "").lower()
+        status_filter = request.args.get("status", "")
+        exact_match = request.args.get("exact_match", "false").lower() in ("1", "true", "yes")
 
     data = _load_tc_data(branch, team)
     all_testcases = data.get("testcases", [])
@@ -7514,8 +11971,9 @@ def testcase_mgmt_get_testcases():
         ]
 
     if name_filter:
-        exact_match = request.args.get("exact_match", "false").lower() in ("1", "true", "yes")
-        name_terms = [t.strip() for t in name_filter.split(",") if t.strip()]
+        # Support comma, pipe, and newline as separators
+        name_filter_normalized = name_filter.replace("|", ",").replace("\n", ",")
+        name_terms = [t.strip() for t in name_filter_normalized.split(",") if t.strip()]
         if name_terms:
             if exact_match:
                 testcases = [tc for tc in testcases if tc.get("name", "").lower() in name_terms]
@@ -7544,8 +12002,8 @@ def testcase_mgmt_get_testcases():
 @app.route("/mcp/regression/testcase-mgmt/tags/add", methods=["POST"])
 @jwt_required
 def testcase_mgmt_add_tags():
-    """Add tags to selected test cases via TCMS write API."""
-    body = request.get_json(force=True)
+    """Add tags to selected test cases via TCMS write API (1..N)."""
+    body = request.get_json(force=True) or {}
     testcase_oids = body.get("testcase_oids", [])
     tags_to_add = body.get("tags", [])
     branch = body.get("branch", "master")
@@ -7554,46 +12012,18 @@ def testcase_mgmt_add_tags():
     if not testcase_oids or not tags_to_add:
         return jsonify({"error": "testcase_oids and tags are required"}), 400
 
-    results = {"success": 0, "failed": 0, "errors": []}
-
-    for oid in testcase_oids:
-        try:
-            url = f"{TCMS_WRITE_BASE}/all_test_cases/tags/{oid}"
-            resp = requests.post(
-                url,
-                auth=_tcms_auth(),
-                data=json.dumps({"tags": tags_to_add}),
-                verify=False,
-                timeout=30,
-            )
-            if resp.status_code in (200, 201):
-                results["success"] += 1
-            else:
-                results["failed"] += 1
-                results["errors"].append({"oid": oid, "status": resp.status_code})
-        except Exception as exc:
-            results["failed"] += 1
-            results["errors"].append({"oid": oid, "error": str(exc)})
-
-    data = _load_tc_data(branch, team)
-    for tc in data.get("testcases", []):
-        if tc.get("oid") in testcase_oids:
-            existing = tc.get("tags", [])
-            for tag in tags_to_add:
-                if tag not in existing:
-                    existing.append(tag)
-            tc["tags"] = existing
-    data["last_updated"] = datetime.utcnow().isoformat() + "Z"
-    _save_tc_data(branch, team, data)
-
-    return jsonify(results)
+    results = _apply_testcase_tag_ops(
+        testcase_oids, tags_to_add, branch, team, action="add"
+    )
+    status = 200 if results.get("success") else 400
+    return jsonify(results), status
 
 
 @app.route("/mcp/regression/testcase-mgmt/tags/delete", methods=["POST"])
 @jwt_required
 def testcase_mgmt_delete_tags():
-    """Delete tags from selected test cases via TCMS write API."""
-    body = request.get_json(force=True)
+    """Delete tags from selected test cases via TCMS write API (1..N)."""
+    body = request.get_json(force=True) or {}
     testcase_oids = body.get("testcase_oids", [])
     tags_to_delete = body.get("tags", [])
     branch = body.get("branch", "master")
@@ -7602,35 +12032,11 @@ def testcase_mgmt_delete_tags():
     if not testcase_oids or not tags_to_delete:
         return jsonify({"error": "testcase_oids and tags are required"}), 400
 
-    results = {"success": 0, "failed": 0, "errors": []}
-
-    for oid in testcase_oids:
-        try:
-            url = f"{TCMS_WRITE_BASE}/all_test_cases/tags/{oid}"
-            resp = requests.delete(
-                url,
-                auth=_tcms_auth(),
-                data=json.dumps({"tags": tags_to_delete}),
-                verify=False,
-                timeout=30,
-            )
-            if resp.status_code in (200, 204):
-                results["success"] += 1
-            else:
-                results["failed"] += 1
-                results["errors"].append({"oid": oid, "status": resp.status_code})
-        except Exception as exc:
-            results["failed"] += 1
-            results["errors"].append({"oid": oid, "error": str(exc)})
-
-    data = _load_tc_data(branch, team)
-    for tc in data.get("testcases", []):
-        if tc.get("oid") in testcase_oids:
-            tc["tags"] = [t for t in tc.get("tags", []) if t not in tags_to_delete]
-    data["last_updated"] = datetime.utcnow().isoformat() + "Z"
-    _save_tc_data(branch, team, data)
-
-    return jsonify(results)
+    results = _apply_testcase_tag_ops(
+        testcase_oids, tags_to_delete, branch, team, action="delete"
+    )
+    status = 200 if results.get("success") else 400
+    return jsonify(results), status
 
 
 @app.route("/mcp/regression/testcase-mgmt/resource-spec/download", methods=["GET"])
@@ -7931,11 +12337,18 @@ def testcase_mgmt_resolve_job_profiles():
 def testcase_mgmt_branches():
     """Return available branches and teams for the testcase management module.
 
-    Also signals that the UI can send arbitrary release versions (e.g. '7.7')
-    which the backend resolves dynamically.
+    Branch list uses short canonical keys (master, 7.6, 7.5) matching UI storage.
+    Arbitrary release versions (e.g. '7.7') are still accepted dynamically.
     """
+    short_branches = []
+    seen = set()
+    for full in TESTCASE_MGMT_BRANCHES.keys():
+        key = _normalize_tc_branch_key(full)
+        if key not in seen:
+            seen.add(key)
+            short_branches.append(key)
     return jsonify({
-        "branches": list(TESTCASE_MGMT_BRANCHES.keys()),
+        "branches": short_branches,
         "teams": TESTCASE_MGMT_TEAMS,
         "custom_release_supported": True,
     })
@@ -8625,7 +13038,13 @@ def _framework_args_value_to_dict(val):
             parsed = json.loads(s)
             return dict(parsed) if isinstance(parsed, dict) else {}
         except (json.JSONDecodeError, TypeError, ValueError):
-            return {}
+            # Some payloads arrive as python-literal dict strings with single quotes.
+            try:
+                import ast
+                parsed = ast.literal_eval(s)
+                return dict(parsed) if isinstance(parsed, dict) else {}
+            except (SyntaxError, ValueError, TypeError):
+                return {}
     return {}
 
 
@@ -8729,6 +13148,404 @@ def _ensure_test_args_on_test_set_payload(ts_payload, default_value="{}", custom
     # JITA UI "Test Args" panel renders from args_map (dict, not JSON string).
     ts_payload["args_map"] = dict(existing)
     return ts_payload
+
+
+def _manage_ts_safe_copy_dict(value):
+    """Return a plain dict copy for mapping values; fallback to {} for non-dicts."""
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _manage_ts_stringify_value(value):
+    """Stable stringify for comparing values that may be nested types."""
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def _manage_ts_extract_test_args(ts_doc):
+    """Use JITA Test Args (args_map). Fall back to string fields only if args_map is empty."""
+    primary = _test_args_value_to_dict(ts_doc.get("args_map") if isinstance(ts_doc, dict) else None)
+    if primary:
+        return primary
+    merged = {}
+    for field in ("test_args", "testArgs"):
+        for key, val in _test_args_value_to_dict(ts_doc.get(field) if isinstance(ts_doc, dict) else None).items():
+            if key not in merged:
+                merged[key] = val
+    return merged
+
+
+def _manage_ts_extract_framework_args(ts_doc):
+    """Use JITA Test Framework Options (agave_options). Fall back to strings if empty."""
+    primary = _framework_args_value_to_dict(ts_doc.get("agave_options") if isinstance(ts_doc, dict) else None)
+    if primary:
+        return primary
+    merged = {}
+    for field in ("framework_args", "frameworkArgs"):
+        for key, val in _framework_args_value_to_dict(ts_doc.get(field) if isinstance(ts_doc, dict) else None).items():
+            if key not in merged:
+                merged[key] = val
+    return merged
+
+
+def _manage_ts_compute_common_args(per_ts_rows):
+    """Compute the union of arg keys and value consistency across selected test sets.
+
+    A key listed on any selected TS is included. ``multiple_values`` is true only when
+    the TS that already have the key disagree; absence on some TS is not a value.
+    """
+    if not per_ts_rows:
+        return {"framework_args": [], "test_args": []}
+
+    def _union_keys(field):
+        keys = set()
+        for row in per_ts_rows:
+            keys.update((row.get(field) or {}).keys())
+        return keys
+
+    def _build_rows(keys, field):
+        out = []
+        for key in sorted(keys):
+            values = [
+                row[field].get(key)
+                for row in per_ts_rows
+                if key in (row.get(field) or {})
+            ]
+            val_set = {_manage_ts_stringify_value(v) for v in values}
+            multiple_values = len(val_set) > 1
+            out.append({
+                "key": key,
+                "value": None if multiple_values else (values[0] if values else None),
+                "multiple_values": multiple_values,
+                "value_samples": list(val_set)[:5] if multiple_values else [],
+            })
+        return out
+
+    return {
+        "framework_args": _build_rows(_union_keys("framework_args"), "framework_args"),
+        "test_args": _build_rows(_union_keys("test_args"), "test_args"),
+    }
+
+
+def _manage_ts_normalize_update_maps(req_data):
+    """Normalize update payload into two category maps and validated new args."""
+    edits_framework = req_data.get("edit_framework_args") or {}
+    edits_test = req_data.get("edit_test_args") or {}
+    if not isinstance(edits_framework, dict):
+        raise ValueError("edit_framework_args must be an object")
+    if not isinstance(edits_test, dict):
+        raise ValueError("edit_test_args must be an object")
+
+    new_args = req_data.get("new_arguments") or []
+    if not isinstance(new_args, list):
+        raise ValueError("new_arguments must be an array")
+
+    normalized_new_args = []
+    for idx, item in enumerate(new_args):
+        if not isinstance(item, dict):
+            raise ValueError(f"new_arguments[{idx}] must be an object")
+        key = str(item.get("key", "")).strip()
+        category = str(item.get("category", "")).strip().lower()
+        overwrite_existing = bool(item.get("overwrite_existing", False))
+        if not key:
+            raise ValueError(f"new_arguments[{idx}].key is required")
+        if category not in ("framework", "test"):
+            raise ValueError(f"new_arguments[{idx}].category must be 'framework' or 'test'")
+        value = item.get("value")
+        if value is None:
+            value = ""
+        normalized_new_args.append({
+            "key": key,
+            "value": value,
+            "category": category,
+            "overwrite_existing": overwrite_existing,
+        })
+
+    return edits_framework, edits_test, normalized_new_args
+
+
+def _manage_ts_validate_search_query(query, use_regex=False):
+    """Validate search query semantics used by Manage TS UI."""
+    q = str(query or "").strip()
+    if len(q) < 2:
+        raise ValueError("query must be at least 2 characters")
+    if use_regex:
+        try:
+            re.compile(q)
+        except re.error as ex:
+            raise ValueError(f"Invalid regex: {ex}") from ex
+    return q
+
+
+def _manage_ts_apply_plan_to_args(base_framework, base_test, edits_framework, edits_test, new_args):
+    """Return updated args + structured change info without mutating input args.
+
+    Checkbox edits apply only when the key already exists on this test set.
+    ``new_arguments`` still add or overwrite according to overwrite_existing.
+    """
+    before_framework = _manage_ts_safe_copy_dict(base_framework)
+    before_test = _manage_ts_safe_copy_dict(base_test)
+    after_framework = _manage_ts_safe_copy_dict(base_framework)
+    after_test = _manage_ts_safe_copy_dict(base_test)
+
+    changed_framework = []
+    changed_test = []
+    collision_skips = []
+
+    for key, val in edits_framework.items():
+        if key not in after_framework:
+            continue
+        if val is None:
+            val = ""
+        if _manage_ts_stringify_value(after_framework.get(key)) != _manage_ts_stringify_value(val):
+            changed_framework.append({"key": key, "before": before_framework.get(key), "after": val, "kind": "edit"})
+        after_framework[key] = val
+
+    for key, val in edits_test.items():
+        if key not in after_test:
+            continue
+        if val is None:
+            val = ""
+        if _manage_ts_stringify_value(after_test.get(key)) != _manage_ts_stringify_value(val):
+            changed_test.append({"key": key, "before": before_test.get(key), "after": val, "kind": "edit"})
+        after_test[key] = val
+
+    for item in new_args:
+        tgt = after_framework if item["category"] == "framework" else after_test
+        before_tgt = before_framework if item["category"] == "framework" else before_test
+        changed_tgt = changed_framework if item["category"] == "framework" else changed_test
+        key = item["key"]
+        if key in tgt and not item["overwrite_existing"]:
+            collision_skips.append({
+                "key": key,
+                "category": item["category"],
+                "existing_value": tgt.get(key),
+                "proposed_value": item.get("value"),
+                "reason": "collision_skip",
+            })
+            continue
+        old = before_tgt.get(key)
+        new_val = item.get("value")
+        if new_val is None:
+            new_val = ""
+        if key not in tgt or _manage_ts_stringify_value(tgt.get(key)) != _manage_ts_stringify_value(new_val):
+            changed_tgt.append({
+                "key": key,
+                "before": old,
+                "after": new_val,
+                "kind": "new_overwrite" if key in before_tgt else "new",
+            })
+        tgt[key] = new_val
+
+    return {
+        "before_framework": before_framework,
+        "before_test": before_test,
+        "after_framework": after_framework,
+        "after_test": after_test,
+        "changed_framework": changed_framework,
+        "changed_test": changed_test,
+        "collision_skips": collision_skips,
+    }
+
+
+_MANAGE_TS_FW_FIELDS = (
+    ("framework_args", False),
+    ("frameworkArgs", False),
+    ("agave_options", True),
+)
+_MANAGE_TS_TEST_FIELDS = (
+    ("test_args", False),
+    ("testArgs", False),
+    ("args_map", True),
+)
+_MANAGE_TS_FW_PRIMARY = "agave_options"
+_MANAGE_TS_TEST_PRIMARY = "args_map"
+_MANAGE_TS_FW_CANONICAL = ("framework_args", "agave_options")
+_MANAGE_TS_TEST_CANONICAL = ("test_args", "args_map")
+
+
+def _manage_ts_restrict_map(original, after, allowed_new_keys):
+    """Keep original keys (values from after when present); add only allowed new keys."""
+    out = {}
+    original = original or {}
+    after = after or {}
+    for key, val in original.items():
+        out[key] = after[key] if key in after else val
+    for key in allowed_new_keys or []:
+        if key in after:
+            out[key] = after[key]
+    return out
+
+
+def _manage_ts_build_put_payload(existing_ts, after_framework, after_test, new_args=None):
+    """Clone source test set and patch each arg field in place.
+
+    Checkbox edits never copy a key into a field (or test set) that did not
+    already have it. ``new_arguments`` may add keys; on a test set with no
+    args they are written only to the canonical fields.
+    """
+    payload = _manage_ts_safe_copy_dict(existing_ts)
+    new_args = new_args or []
+    new_fw = [item.get("key") for item in new_args if item.get("category") == "framework" and item.get("key")]
+    new_test = [item.get("key") for item in new_args if item.get("category") == "test" and item.get("key")]
+    after_framework = after_framework if isinstance(after_framework, dict) else {}
+    after_test = after_test if isinstance(after_test, dict) else {}
+
+    def apply_category(fields, parse_fn, after, allowed_new, canonical, primary_name):
+        fields_with_keys = []
+        primary_target = None
+        for name, as_object in fields:
+            parsed = parse_fn(existing_ts.get(name) if isinstance(existing_ts, dict) else None)
+            if parsed:
+                fields_with_keys.append((name, as_object, parsed))
+            if name == primary_name:
+                primary_target = (name, as_object, parsed)
+
+        if primary_target and primary_target[2]:
+            targets = [primary_target]
+        elif fields_with_keys:
+            targets = fields_with_keys
+        elif allowed_new:
+            targets = [
+                (name, as_object, {})
+                for name, as_object in fields
+                if name in canonical
+            ]
+        else:
+            return
+
+        for name, as_object, original in targets:
+            restricted = _manage_ts_restrict_map(original, after, allowed_new)
+            if _manage_ts_stringify_value(original) == _manage_ts_stringify_value(restricted):
+                continue
+            if as_object:
+                payload[name] = _manage_ts_safe_copy_dict(restricted)
+            else:
+                payload[name] = json.dumps(restricted, separators=(",", ":"))
+
+    apply_category(
+        _MANAGE_TS_FW_FIELDS,
+        _framework_args_value_to_dict,
+        after_framework,
+        new_fw,
+        _MANAGE_TS_FW_CANONICAL,
+        _MANAGE_TS_FW_PRIMARY,
+    )
+    apply_category(
+        _MANAGE_TS_TEST_FIELDS,
+        _test_args_value_to_dict,
+        after_test,
+        new_test,
+        _MANAGE_TS_TEST_CANONICAL,
+        _MANAGE_TS_TEST_PRIMARY,
+    )
+    return payload
+
+
+def _manage_ts_sanitize_for_json(val):
+    """Recursively sanitize values for JSON PUT payloads."""
+    if isinstance(val, dict):
+        return {k: _manage_ts_sanitize_for_json(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_manage_ts_sanitize_for_json(v) for v in val]
+    if isinstance(val, (set, tuple)):
+        return [_manage_ts_sanitize_for_json(v) for v in val]
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    if val is Ellipsis:
+        return None
+    return val
+
+
+def _manage_ts_fetch_test_set(ts_id):
+    """Fetch one test set and return normalized record used by inspect/preview/apply."""
+    resp = requests.get(
+        f"{JITA_BASE}/test_sets/{ts_id}",
+        auth=JITA_SVC_AUTH,
+        verify=False,
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to fetch test set {ts_id} (HTTP {resp.status_code})")
+    body = resp.json() or {}
+    ts_doc = body.get("data", {}) or {}
+    ts_oid = ts_doc.get("_id")
+    if isinstance(ts_oid, dict) and "$oid" in ts_oid:
+        ts_oid = ts_oid["$oid"]
+    elif ts_oid and not isinstance(ts_oid, str):
+        ts_oid = str(ts_oid)
+    return {
+        "id": ts_oid or ts_id,
+        "name": ts_doc.get("name", ""),
+        "framework_args": _manage_ts_extract_framework_args(ts_doc),
+        "test_args": _manage_ts_extract_test_args(ts_doc),
+        "raw": ts_doc,
+    }
+
+
+def _jita_test_sets_search_params(raw_query, limit):
+    """Query params for JITA GET /test_sets name search used by Manage TS.
+
+    Name regex is unindexed. ``sort=-_id`` plus large field projections (args maps
+    / ``only`` lists) routinely exceed JITA_SEARCH_TIMEOUT, so the UI gets zero
+    test sets. Skip sort and projection so JITA can stop after ``limit``.
+    """
+    return {
+        "raw_query": raw_query,
+        "limit": min(int(limit), 200),
+    }
+
+
+def _manage_ts_build_preview_rows(ts_rows, edits_framework, edits_test, new_args):
+    """Build per-testset preview rows and summary for dry-run/apply endpoints."""
+    preview_rows = []
+    totals = {
+        "test_sets": len(ts_rows),
+        "changed_test_sets": 0,
+        "framework_changes": 0,
+        "test_changes": 0,
+        "collision_skips": 0,
+    }
+    for row in ts_rows:
+        plan = _manage_ts_apply_plan_to_args(
+            row["framework_args"],
+            row["test_args"],
+            edits_framework,
+            edits_test,
+            new_args,
+        )
+        framework_changed = len(plan["changed_framework"])
+        test_changed = len(plan["changed_test"])
+        changed = framework_changed > 0 or test_changed > 0
+        if changed:
+            totals["changed_test_sets"] += 1
+        totals["framework_changes"] += framework_changed
+        totals["test_changes"] += test_changed
+        totals["collision_skips"] += len(plan["collision_skips"])
+        preview_rows.append({
+            "ts_id": row["id"],
+            "ts_name": row["name"],
+            "changed": changed,
+            "changed_framework_args": plan["changed_framework"],
+            "changed_test_args": plan["changed_test"],
+            "collision_skips": plan["collision_skips"],
+            "before_framework_args": plan["before_framework"],
+            "after_framework_args": plan["after_framework"],
+            "before_test_args": plan["before_test"],
+            "after_test_args": plan["after_test"],
+            "put_payload": _manage_ts_build_put_payload(
+                row["raw"],
+                plan["after_framework"],
+                plan["after_test"],
+                new_args,
+            ) if changed else None,
+        })
+    return preview_rows, totals
 
 
 @app.route("/mcp/regression/dynamic-jp/check-existing", methods=["POST"])
@@ -8960,6 +13777,10 @@ def dynamic_jp_fetch_testset():
         if not isinstance(tests, list):
             tests = []
 
+        # Same fields JITA's Test Sets UI shows (args_map / agave_options).
+        normalized_test_args = _manage_ts_extract_test_args(ts_data)
+        normalized_framework_args = _manage_ts_extract_framework_args(ts_data)
+
         return jsonify({
             "success": True,
             "test_set": {
@@ -8967,7 +13788,13 @@ def dynamic_jp_fetch_testset():
                 "name": ts_data.get("name", "") or "",
                 "path": ts_data.get("path", "") or "",
                 "test_args": ts_data.get("test_args", "") or "",
+                "testArgs": ts_data.get("testArgs", "") or "",
+                "args_map": ts_data.get("args_map", {}) or {},
+                "test_args_map": normalized_test_args,
                 "framework_args": ts_data.get("framework_args", "") or "",
+                "frameworkArgs": ts_data.get("frameworkArgs", "") or "",
+                "agave_options": ts_data.get("agave_options", {}) or {},
+                "framework_args_map": normalized_framework_args,
                 "tests": tests,
                 "description": ts_data.get("description", "") or "",
             }
@@ -9208,6 +14035,47 @@ DYN_QMS_KIND_BY_RESOURCE_TYPE = {
 }
 
 
+def _validate_qms_coupon(coupon, resource_type="nested_2.0", username=None):
+    """Validate coupon against QMS and return (ok, payload)."""
+    coupon = (coupon or "").strip()
+    if not coupon:
+        return False, {"error": "No coupon specified"}
+
+    kind = DYN_QMS_KIND_BY_RESOURCE_TYPE.get((resource_type or "nested_2.0").strip(), "nested_ahv_2")
+    user_email = (username or "").strip()
+    if user_email and "@" not in user_email:
+        user_email = f"{user_email}@nutanix.com"
+    if not user_email:
+        return False, {"error": "Could not determine user email for validation"}
+
+    from urllib.parse import quote as _quote
+    try:
+        resp = requests.post(
+            f"{QMS_BASE_URL}/coupons/{_quote(coupon, safe='')}/validate",
+            json={"kinds": [kind], "username": user_email},
+            verify=False,
+            timeout=20,
+        )
+    except requests.exceptions.Timeout:
+        return False, {"error": "QMS validation timed out", "status_code": 504}
+    except requests.exceptions.RequestException as e:
+        return False, {"error": f"Could not reach QMS: {e}", "status_code": 502}
+
+    try:
+        body = resp.json()
+    except (ValueError, TypeError):
+        body = {}
+
+    if resp.status_code == 200:
+        return True, {
+            "category": body.get("category"),
+            "message": "Coupon is valid",
+        }
+
+    msg = body.get("message") if isinstance(body, dict) else None
+    return False, {"error": msg or "Invalid coupon", "status_code": 400}
+
+
 @app.route("/mcp/regression/dynamic-jp/validate-coupon", methods=["POST"])
 @jwt_required
 def dynamic_jp_validate_coupon():
@@ -9227,40 +14095,15 @@ def dynamic_jp_validate_coupon():
         if not coupon:
             return jsonify({"valid": False, "error": "No coupon specified"}), 400
 
-        kind = DYN_QMS_KIND_BY_RESOURCE_TYPE.get(resource_type, "nested_ahv_2")
-
         username = current_user_email or (req_data.get("username") or "").strip()
-        if username and "@" not in username:
-            username = f"{username}@nutanix.com"
-        if not username:
-            return jsonify({"valid": False, "error": "Could not determine user email for validation"}), 400
-
-        from urllib.parse import quote as _quote
-        try:
-            resp = requests.post(
-                f"{QMS_BASE_URL}/coupons/{_quote(coupon, safe='')}/validate",
-                json={"kinds": [kind], "username": username},
-                verify=False,
-                timeout=20,
-            )
-        except requests.exceptions.Timeout:
-            return jsonify({"valid": False, "error": "QMS validation timed out"}), 504
-        except requests.exceptions.RequestException as e:
-            return jsonify({"valid": False, "error": f"Could not reach QMS: {e}"}), 502
-
-        try:
-            body = resp.json()
-        except (ValueError, TypeError):
-            body = {}
-
-        if resp.status_code == 200:
+        valid, result = _validate_qms_coupon(coupon, resource_type=resource_type, username=username)
+        if valid:
             return jsonify({
                 "valid": True,
-                "category": body.get("category"),
-                "message": "Coupon is valid",
+                "category": result.get("category"),
+                "message": result.get("message", "Coupon is valid"),
             })
-        msg = body.get("message") if isinstance(body, dict) else None
-        return jsonify({"valid": False, "error": msg or "Invalid coupon"})
+        return jsonify({"valid": False, "error": result.get("error", "Invalid coupon")}), result.get("status_code", 400)
     except Exception as e:
         logger.error(f"Error validating coupon: {e}", exc_info=True)
         return jsonify({"valid": False, "error": str(e)}), 500
@@ -9274,10 +14117,30 @@ def dynamic_jp_create():
     - create_fresh=False: clone from source_jp_id, optionally copying test_args from source_testset_id
     """
     try:
-        # Get current user info from JWT
-        current_user_email = None
-        if hasattr(g, 'current_user') and isinstance(g.current_user, dict):
-            current_user_email = g.current_user.get('email', '').strip()
+        # Get current user info from JWT. To make JITA's native `created_by` the
+        # real person (not the shared svc account), we authenticate the JITA
+        # create/update calls with the logged-in user's cached LDAP credentials
+        # when available, falling back to the svc account otherwise (e.g. cache
+        # expired after a backend restart) so creation never fails.
+        # Independently, we also stamp the personal login into the JP's
+        # emails/user fields so RegX-side ownership stays correct even on the
+        # svc-account fallback path.
+        current_user_email, current_user_name = _personal_identity_from_jwt()
+        if not current_user_email:
+            current_user_email = None
+
+        _user_auth = _current_user_jita_auth()
+        create_auth = _user_auth or JITA_SVC_AUTH
+        if _user_auth:
+            logger.info(
+                f"[create] Authenticating JITA calls as user '{current_user_name}' "
+                f"(created_by will be the user)"
+            )
+        else:
+            logger.info(
+                "[create] No cached user credentials — authenticating JITA calls as "
+                "service account (created_by = svc; owner recorded via emails/user)"
+            )
         
         req_data = request.json
         if not req_data:
@@ -9324,6 +14187,28 @@ def dynamic_jp_create():
         custom_test_args = req_data.get("custom_test_args")
         custom_framework_options = req_data.get("custom_framework_options")
         include_optional_defaults = bool(req_data.get("include_optional_defaults", False))
+
+        # --- Release Migration options (all optional; default preserves prior behavior) ---
+        # Explicit description for the new JP (e.g. version-migrated source description).
+        # When omitted, the generic clone/fresh description is used as before.
+        custom_jp_description = (req_data.get("custom_jp_description") or "").strip() or None
+        # In clone mode, apply the requested nos_branch/pc_branch to the new JP instead of
+        # preserving the source JP's branches. Fresh mode already applies branches.
+        override_source_branches = bool(req_data.get("override_source_branches", False))
+        # Branch used for the JITA -> TCMS sync (written to system_under_test.branch, the
+        # field JITA derives the TCMS milestone from). Only applied when sync is enabled.
+        tcms_sync_branch = (req_data.get("tcms_sync_branch") or "").strip() or None
+        # Keep the source JP's email recipients, visibility and tag filters as-is instead of
+        # forcing email to the current user / cdp_reg_jarvis. Used by Release Migration so a
+        # migrated JP keeps behaving like its source (only branches/version change).
+        preserve_source_config = bool(req_data.get("preserve_source_config", False))
+        # Release Migration version rewrite. When `version_to` is set (clone mode), the
+        # new JP/TS names and description are derived from the source by replacing the old
+        # release version with the new one. `version_from` is optional: when blank, the old
+        # version is auto-detected from the source JP (its name's version token first, then
+        # its existing NOS/git branch). Explicit custom_* values still take precedence.
+        version_from = (req_data.get("version_from") or "").strip()
+        version_to = (req_data.get("version_to") or "").strip()
         
         # Convert None to empty dict
         if not custom_test_args or not isinstance(custom_test_args, dict):
@@ -9491,8 +14376,13 @@ def dynamic_jp_create():
                     payload[snake] = payload[camel]
             return payload
 
-        def _set_tcms_sync_flags(jp_payload, enabled):
-            """Set JITA/TCMS sync flags for the created JP."""
+        def _set_tcms_sync_flags(jp_payload, enabled, sync_branch=None):
+            """Set JITA/TCMS sync flags for the created JP.
+
+            ``sync_branch`` (optional): when sync is enabled, overwrite the TCMS sync
+            branch on ``system_under_test.branch`` — the field JITA uses to resolve the
+            TCMS milestone that results are published under.
+            """
             if not isinstance(jp_payload, dict):
                 return
 
@@ -9509,16 +14399,46 @@ def dynamic_jp_create():
                 jp_payload["tester_tags"] = ["official"]
 
             sut = jp_payload.get("system_under_test")
+            if not isinstance(sut, dict) and enabled and sync_branch:
+                sut = {}
             if isinstance(sut, dict):
                 sut["sync_to_tcms"] = bool(enabled)
+                if enabled and sync_branch:
+                    sut["branch"] = sync_branch
+                jp_payload["system_under_test"] = sut
 
             if enabled:
-                jp_payload.setdefault("package_type", "tar")
-                jp_payload.setdefault("test_service", "NutestPy3Tests")
+                # TCMS "service" is product-agnostic. Source/template JPs carry
+                # whatever they test (PC, AOS, NOS, AWS, Files, …); always publish
+                # results under nutest-py3test. Assignment (not setdefault) so a
+                # JITA GET-after-POST that restores the product value is overwritten.
+                jp_payload["service"] = "nutest-py3test"
+                # Fill blanks only — keep an explicit non-empty package/test_service.
+                if not str(jp_payload.get("package_type") or "").strip():
+                    jp_payload["package_type"] = "tar"
+                if not str(jp_payload.get("test_service") or "").strip():
+                    jp_payload["test_service"] = "NutestPy3Tests"
             else:
                 # Empty strings survive JITA PUT; missing keys get defaulted back.
                 for k in ("service", "package_type", "test_service"):
                     jp_payload[k] = ""
+
+        def _force_tcms_service_on_test_set(ts_payload):
+            """New test sets (fresh or cloned copy) use the same TCMS service as new JPs."""
+            if not isinstance(ts_payload, dict):
+                return
+            ts_payload["service"] = "nutest-py3test"
+            if not str(ts_payload.get("package_type") or "").strip():
+                ts_payload["package_type"] = "tar"
+            tests = ts_payload.get("tests")
+            if not isinstance(tests, list):
+                return
+            for row in tests:
+                if not isinstance(row, dict):
+                    continue
+                row["service"] = "nutest-py3test"
+                if not str(row.get("package_type") or "").strip():
+                    row["package_type"] = "tar"
 
         def _apply_retain_setup_on_failure(jp_payload):
             """Retain deployment after each test failure, excluding DataCorruptionError."""
@@ -9533,7 +14453,7 @@ def dynamic_jp_create():
             existing_params = (
                 existing_test_failure.get("params") if isinstance(existing_test_failure, dict) else {}
             )
-            duration = existing_params.get("duration", 720) if isinstance(existing_params, dict) else 720
+            duration = RETAIN_DURATION_72H_MIN
             states = existing_params.get("states_to_track") if isinstance(existing_params, dict) else None
             if not isinstance(states, list) or not states:
                 states = ["Failed"]
@@ -9691,6 +14611,41 @@ def dynamic_jp_create():
                     reuse_ts_display_name = linked_ts_id_for_reuse
             logger.info(f"[create] reuse_source_ts=True, linked_ts_id={linked_ts_id_for_reuse}, name={reuse_ts_display_name}")
 
+        # Release Migration: derive migrated JP/TS names + description from the source by
+        # replacing the old release version with the new one. The old version is taken from
+        # `version_from` when provided, otherwise auto-detected from the source JP — its
+        # name's version token first (that is what actually appears in the name/description),
+        # then its existing NOS/git branch as a fallback.
+        if version_to and not create_fresh and isinstance(source_jp, dict):
+            def _extract_version_token(text):
+                # digits, with each later segment a number or single-letter wildcard (e.g. 7.6.X)
+                m = re.search(r"\d+(?:\.(?:\d+|[xX]))+", str(text or ""))
+                return m.group(0) if m else ""
+
+            old_ver = version_from
+            if not old_ver:
+                src_git = source_jp.get("git") if isinstance(source_jp.get("git"), dict) else {}
+                src_branch = src_git.get("branch") or ""
+                old_ver = _extract_version_token(source_jp.get("name")) or _extract_version_token(src_branch)
+
+            def _migrate_text(text):
+                s = "" if text is None else str(text)
+                if old_ver and old_ver != version_to and old_ver in s:
+                    return s.replace(old_ver, version_to)
+                return s
+
+            src_name = source_jp.get("name") or ""
+            if not custom_jp_name and src_name:
+                custom_jp_name = _migrate_text(src_name)
+            if not custom_jp_description:
+                custom_jp_description = _migrate_text(source_jp.get("description"))
+            if not custom_ts_name and isinstance(source_ts, dict) and source_ts.get("name"):
+                custom_ts_name = _migrate_text(source_ts.get("name"))
+            logger.info(
+                f"[create] Release Migration version rewrite: from={old_ver or '(none)'} "
+                f"to={version_to}, jp_name={custom_jp_name!r}, ts_name={custom_ts_name!r}"
+            )
+
         # 3. Sequential names: User_Dyn_<YYYYMMDD>_JP_N / User_Dyn_<YYYYMMDD>_TS_N
         dyn_name_date = (req_data.get("dyn_name_date") or "").strip()
         if dyn_name_date and (len(dyn_name_date) != 8 or not dyn_name_date.isdigit()):
@@ -9846,7 +14801,7 @@ def dynamic_jp_create():
                     row.setdefault("framework_version", "nutest-py3-tests")
                     row.setdefault("framework", "nutest-py3-tests")
                     row.setdefault("package_type", "tar")
-                    row.setdefault("service", "NutestPy3Tests")
+                    row["service"] = "nutest-py3test"
                     test_entries.append(row)
             else:
                 test_entries = source_ts.get("tests", []) or []
@@ -9870,6 +14825,7 @@ def dynamic_jp_create():
                 new_ts_payload, retain_setup_on_failure, custom_framework_options
             )
             _ensure_test_args_on_test_set_payload(new_ts_payload, "{}", custom_test_args)
+            _force_tcms_service_on_test_set(new_ts_payload)
             logger.info(f"[create] TS POST payload: name={new_ts_name}, #tests={len(test_entries)}, "
                         f"test_args_keys={list(_test_args_value_to_dict(new_ts_payload.get('test_args')).keys())}, "
                         f"fw_args_keys={list(_framework_args_value_to_dict(new_ts_payload.get('framework_args')).keys())}")
@@ -9879,7 +14835,7 @@ def dynamic_jp_create():
                 ts_create_resp = requests.post(
                     f"{JITA_BASE}/test_sets",
                     json=new_ts_payload,
-                    auth=JITA_SVC_AUTH, verify=False, timeout=30,
+                    auth=create_auth, verify=False, timeout=30,
                 )
                 ts_resp_json = ts_create_resp.json() if ts_create_resp.content else {}
                 if ts_resp_json.get("success"):
@@ -9889,7 +14845,7 @@ def dynamic_jp_create():
                         try:
                             ts_get_resp = requests.get(
                                 f"{JITA_BASE}/test_sets/{created_ts_id}",
-                                auth=JITA_SVC_AUTH,
+                                auth=create_auth,
                                 verify=False,
                                 timeout=30,
                             )
@@ -9909,7 +14865,7 @@ def dynamic_jp_create():
                                     ts_put_resp = requests.put(
                                         f"{JITA_BASE}/test_sets/{created_ts_id}",
                                         json=created_ts_doc,
-                                        auth=JITA_SVC_AUTH,
+                                        auth=create_auth,
                                         verify=False,
                                         timeout=30,
                                     )
@@ -10042,7 +14998,7 @@ def dynamic_jp_create():
                     "infra": merged_infra,
                     "requested_hardware": _default_requested_hardware(resource_type),
                     "services": ["NOS"],
-                    "service": "AOS",
+                    "service": "nutest-py3test",
                     "test_framework": "nutest-py3-tests",
                     "nutest-py3-tests_branch": nutest_branch,
                     "scheduling_options": _default_scheduling_options(),
@@ -10072,7 +15028,7 @@ def dynamic_jp_create():
                     "infra": infra,
                     "requested_hardware": _default_requested_hardware(resource_type),
                     "services": ["NOS"],
-                    "service": "AOS",
+                    "service": "nutest-py3test",
                     "test_framework": "nutest-py3-tests",
                     "nutest-py3-tests_branch": nutest_branch,
                     "scheduling_options": _default_scheduling_options(),
@@ -10096,7 +15052,10 @@ def dynamic_jp_create():
             for field in ["_id", "created_at", "updated_at", "created_by", "__v"]:
                 new_jp_payload.pop(field, None)
             new_jp_payload["name"] = new_jp_name
-            new_jp_payload["description"] = f"Dynamic JP cloned from {source_jp.get('name', source_jp_id)}"
+            # Release Migration keeps the source description as-is (the deep copy already
+            # carries it); a transformed description is applied later via custom_jp_description.
+            if not preserve_source_config:
+                new_jp_payload["description"] = f"Dynamic JP cloned from {source_jp.get('name', source_jp_id)}"
             # Legacy `test_set` on the source doc can override `test_sets` on POST; clear before we set links.
             new_jp_payload.pop("test_set", None)
             new_jp_payload["test_sets"] = []
@@ -10310,10 +15269,70 @@ def dynamic_jp_create():
                 logger.info(f"[create] Clone mode — set build_selection: nos_build_type={nos_build_type}, "
                            f"pc_build_type={pc_build_type}, by_latest_smoked=True, nos_branch={actual_nos_branch}, pc_branch={actual_pc_branch}")
 
+        # Release Migration: overwrite the source JP's NOS (git) and Prism Central
+        # branches with the requested ones. Fresh mode already applies branches above;
+        # this covers clone mode, which otherwise preserves the source branches.
+        if override_source_branches and not create_fresh and not use_latest_commit:
+            git = new_jp_payload.get("git") or {}
+            if not isinstance(git, dict):
+                git = {}
+            git["branch"] = nos_branch
+            git.setdefault("repo", "main")
+            new_jp_payload["git"] = git
+
+            nos_build_type = "opt" if nos_branch.strip().lower() == "master" else "release"
+            pc_build_type = "opt" if pc_branch.strip().lower() == "master" else "release"
+
+            if nos_update_type == "by_commit":
+                bs = {
+                    "by_commit_id": True,
+                    "commit_must_be_newer": False,
+                    "build_type": nos_build_type,
+                }
+                if nos_commit_id:
+                    bs["commit_id"] = nos_commit_id
+                if nos_gbn:
+                    try:
+                        bs["gbn"] = int(nos_gbn) if isinstance(nos_gbn, str) else nos_gbn
+                    except (ValueError, TypeError):
+                        bs["gbn"] = nos_gbn
+                new_jp_payload["build_selection"] = bs
+            else:
+                new_jp_payload["build_selection"] = {
+                    "by_latest_smoked": nos_tag == "Latest Smoke Passed",
+                    "commit_must_be_newer": False,
+                    "build_type": nos_build_type,
+                }
+
+            rmj = new_jp_payload.get("resource_manager_json") or {}
+            if not isinstance(rmj, dict):
+                rmj = {}
+            rmj.setdefault("NOS_CLUSTER", {})
+            pc_build = {
+                "branch": pc_branch,
+                "build_selection_build_type": pc_build_type,
+            }
+            if pc_update_type == "by_commit":
+                if pc_commit_id:
+                    pc_build["build_selection_option"] = pc_commit_id
+            else:
+                pc_build["build_selection_option"] = pc_tag
+            rmj["PRISM_CENTRAL"] = {"build": pc_build}
+            new_jp_payload["resource_manager_json"] = rmj
+            logger.info(f"[create] Release Migration — overrode branches: nos={nos_branch}, pc={pc_branch}")
+
         if retain_setup_on_failure:
             _apply_retain_setup_on_failure(new_jp_payload)
+        new_jp_payload["retain_resources_config"] = _ensure_retain_duration(
+            new_jp_payload.get("retain_resources_config"), RETAIN_DURATION_72H_MIN
+        )
 
-        _set_tcms_sync_flags(new_jp_payload, sync_to_tcms)
+        # Release Migration: use the explicitly transformed description when provided
+        # (e.g. old-version -> new-version replacement), overriding the generic default.
+        if custom_jp_description:
+            new_jp_payload["description"] = custom_jp_description
+
+        _set_tcms_sync_flags(new_jp_payload, sync_to_tcms, tcms_sync_branch)
 
         def _force_email_on_and_clear_tag_filters(jp):
             """Turn 'Send Email Reports' ON (logged-in user as recipient) and disable
@@ -10353,6 +15372,16 @@ def dynamic_jp_create():
                 recipients = [current_user_email]
                 jp["emails"] = recipients
                 jp["email_ids"] = recipients
+                # Record the human requester as owner-of-record. JITA authenticates
+                # this POST as the shared svc account (so created_by = svc), but the
+                # ownership logic treats `user`/`emails` as the real owner for
+                # service-account-created entities — this makes the JP's manager
+                # show the personal login instead of the svc account.
+                # JITA's owner/"Created by" follows the sAMAccountName pattern
+                # (firstname.lastname, e.g. "swapnil.wankhede"), NOT an email — so
+                # stamp the username here; keep the email only in emails/email_ids.
+                if current_user_name:
+                    jp["user"] = current_user_name
                 jp["private"] = True
                 jp["user_groups"] = ["cdp_reg_jarvis"]
             # Disable "Run Tests With Tags" and drop inherited TCMS tag(s) (e.g. "unstable").
@@ -10364,11 +15393,17 @@ def dynamic_jp_create():
             jp["advanced_options"] = adv
             jp["run_tests_with_additional_tags"] = []
 
-        _force_email_on_and_clear_tag_filters(new_jp_payload)
-        logger.info(
-            f"[create] Email ON (recipient={current_user_email}); "
-            f"run_tests_with_tags disabled and TCMS tag filters cleared"
-        )
+        if not preserve_source_config:
+            _force_email_on_and_clear_tag_filters(new_jp_payload)
+            logger.info(
+                f"[create] Email ON (recipient={current_user_email}); "
+                f"run_tests_with_tags disabled and TCMS tag filters cleared"
+            )
+        else:
+            logger.info(
+                "[create] preserve_source_config=True — kept source email/visibility/tag "
+                "config unchanged (Release Migration)"
+            )
 
         # Tags will be applied via a separate PUT after creation (same
         # approach as Run Plan) because JITA's POST ignores tag fields.
@@ -10401,7 +15436,7 @@ def dynamic_jp_create():
             jp_create_resp = requests.post(
                 f"{JITA_BASE}/job_profiles",
                 json=serializable_payload,
-                auth=JITA_SVC_AUTH,
+                auth=create_auth,
                 verify=False,
                 timeout=30
             )
@@ -10438,7 +15473,7 @@ def dynamic_jp_create():
             try:
                 get_resp = requests.get(
                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
-                    auth=JITA_SVC_AUTH,
+                    auth=create_auth,
                     verify=False,
                     timeout=30,
                 )
@@ -10481,7 +15516,7 @@ def dynamic_jp_create():
                         put_resp = requests.put(
                             f"{JITA_BASE}/job_profiles/{created_jp_id}",
                             json=sanitize_value(jp_data),
-                            auth=JITA_SVC_AUTH,
+                            auth=create_auth,
                             verify=False,
                             timeout=30,
                         )
@@ -10493,7 +15528,7 @@ def dynamic_jp_create():
                             try:
                                 final_get = requests.get(
                                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
-                                    auth=JITA_SVC_AUTH,
+                                    auth=create_auth,
                                     verify=False,
                                     timeout=15,
                                 )
@@ -10549,7 +15584,7 @@ def dynamic_jp_create():
             try:
                 get_resp = requests.get(
                     f"{JITA_BASE}/job_profiles/{created_jp_id}",
-                    auth=JITA_SVC_AUTH,                     verify=False, timeout=30,
+                    auth=create_auth,                     verify=False, timeout=30,
                 )
                 if get_resp.status_code == 200:
                     jp_data = get_resp.json().get("data", {})
@@ -10578,7 +15613,7 @@ def dynamic_jp_create():
                         put_resp = requests.put(
                             f"{JITA_BASE}/job_profiles/{created_jp_id}",
                             json=put_payload,
-                            auth=JITA_SVC_AUTH,                             verify=False, timeout=30,
+                            auth=create_auth,                             verify=False, timeout=30,
                         )
                         if put_resp.status_code == 200:
                             logger.info(f"[create] Tags applied successfully: tester_tags={merged}")
@@ -10804,9 +15839,34 @@ def dynamic_jp_search():
         req_data = request.json or {}
         query = (req_data.get("query") or "").strip()
         date_str = (req_data.get("date") or "").strip()
+        # When true, treat `query` as a raw regular expression (Release Migration uses
+        # this to target JP families like "CDP_Regression_FullReg_7\.6\.0\.6_.*").
+        # Otherwise the query is escaped and matched as a literal substring.
+        use_regex = bool(req_data.get("regex", False))
+        # Callers that only need one collection can skip the other. An unindexed
+        # name-regex scan on JITA is slow, so skipping the unused query (e.g. Release
+        # Migration only needs job profiles) avoids a second ~20s round-trip.
+        include_job_profiles = bool(req_data.get("include_job_profiles", True))
+        include_test_sets = bool(req_data.get("include_test_sets", True))
 
-        if len(query) < 2 and not date_str:
+        # Multi-term search: in literal mode a "|"-separated query like "CDP | 7.5.1"
+        # matches names that contain ALL of the terms (AND), mirroring the JITA UI where
+        # adding words narrows the result set. In regex mode we keep the whole query
+        # intact so "|" behaves as native regex alternation (Release Migration relies on it).
+        if use_regex:
+            search_terms = [query] if query else []
+        else:
+            search_terms = [t.strip() for t in query.split("|") if t.strip()]
+
+        if not any(len(t) >= 2 for t in search_terms) and not date_str:
             return jsonify({"error": "Provide a search term (>= 2 chars) or pick a date"}), 400
+
+        if use_regex:
+            for t in search_terms:
+                try:
+                    re.compile(t)
+                except re.error as rex:
+                    return jsonify({"error": f"Invalid regular expression '{t}': {rex}"}), 400
 
         date_cond = None
         if date_str:
@@ -10816,11 +15876,16 @@ def dynamic_jp_search():
             start_oid, end_oid = bounds
             date_cond = {"_id": {"$gte": {"$oid": start_oid}, "$lt": {"$oid": end_oid}}}
 
-        name_cond = (
-            {"name": {"$regex": re.escape(query), "$options": "i"}}
-            if len(query) >= 2
-            else None
-        )
+        def _name_regex(term):
+            return {"name": {"$regex": term if use_regex else re.escape(term), "$options": "i"}}
+
+        if not search_terms:
+            name_cond = None
+        elif len(search_terms) == 1:
+            name_cond = _name_regex(search_terms[0])
+        else:
+            # AND semantics: the name must contain every term (order-independent).
+            name_cond = {"$and": [_name_regex(t) for t in search_terms]}
 
         # "Created by this tool" marker: every dynamic JP/TS is tagged with the
         # cdp_reg_jarvis user group (JITA's created_by is an opaque ObjectId and is
@@ -10841,8 +15906,16 @@ def dynamic_jp_search():
                 return None
             return json.dumps({"$and": conds} if len(conds) > 1 else conds[0])
 
-        limit = min(int(req_data.get("limit", 20)), 50)
+        # JITA honors a large single `limit` and returns a top-level `total`, so we
+        # fetch everything that matches in one request (like the JITA UI, which shows
+        # "N of TOTAL") instead of an arbitrary 20. Capped high for safety.
+        SEARCH_MAX_LIMIT = int(os.getenv("JITA_SEARCH_MAX_LIMIT", "2000"))
+        limit = min(int(req_data.get("limit", SEARCH_MAX_LIMIT)), SEARCH_MAX_LIMIT)
         result = {"job_profiles": [], "test_sets": []}
+        totals = {"job_profiles": 0, "test_sets": 0}
+        # Timeouts/failures are surfaced here so the UI can tell "no matches" apart
+        # from "the JITA scan was too slow" (a silent empty result is misleading).
+        warnings = []
 
         def _extract_id(item):
             eid = item.get("_id")
@@ -10850,17 +15923,18 @@ def dynamic_jp_search():
                 return eid["$oid"]
             return str(eid) if eid else None
 
-        jp_raw_q = _build_raw_query(jp_tool_cond)
+        jp_raw_q = _build_raw_query(jp_tool_cond) if include_job_profiles else None
         if jp_raw_q:
             try:
                 jp_resp = requests.get(
                     f"{JITA_BASE}/job_profiles",
                     params={"raw_query": jp_raw_q, "limit": limit, "sort": "-_id",
                             "only": "_id,name,description,tags,created_at"},
-                    auth=JITA_SVC_AUTH, verify=False, timeout=20,
+                    auth=JITA_SVC_AUTH, verify=False, timeout=JITA_SEARCH_TIMEOUT,
                 )
                 if jp_resp.status_code == 200:
-                    for item in (jp_resp.json().get("data", []) or []):
+                    jp_body = jp_resp.json() or {}
+                    for item in (jp_body.get("data", []) or []):
                         if not isinstance(item, dict):
                             continue
                         result["job_profiles"].append({
@@ -10869,20 +15943,50 @@ def dynamic_jp_search():
                             "description": item.get("description", ""),
                             "created_at": item.get("created_at"),
                         })
+                    totals["job_profiles"] = jp_body.get("total", len(result["job_profiles"]))
+                else:
+                    warnings.append(f"Job profile search returned HTTP {jp_resp.status_code}.")
+                    logger.warning(f"[search] JP search HTTP {jp_resp.status_code}: {jp_resp.text[:200]}")
+            except requests.exceptions.Timeout:
+                warnings.append(
+                    "Job profile search timed out. Narrow the query (add more of the name) "
+                    "or lower the result limit, then retry."
+                )
+                logger.warning("[search] JP search timed out")
             except Exception as e:
+                warnings.append(f"Job profile search failed: {e}")
                 logger.warning(f"[search] JP search failed: {e}")
 
-        ts_raw_q = _build_raw_query(ts_tool_cond)
+        ts_raw_q = _build_raw_query(ts_tool_cond) if include_test_sets else None
         if ts_raw_q:
-            try:
-                ts_resp = requests.get(
+            def _run_ts_search(raw_q, lim, timeout_s):
+                return requests.get(
                     f"{JITA_BASE}/test_sets",
-                    params={"raw_query": ts_raw_q, "limit": limit, "sort": "-_id",
-                            "only": "_id,name,description,created_at"},
-                    auth=JITA_SVC_AUTH, verify=False, timeout=20,
+                    params=_jita_test_sets_search_params(raw_q, lim),
+                    auth=JITA_SVC_AUTH, verify=False, timeout=timeout_s,
                 )
+
+            ts_resp = None
+            try:
+                ts_resp = _run_ts_search(ts_raw_q, limit, min(max(JITA_SEARCH_TIMEOUT, 20), 25))
+            except requests.exceptions.Timeout:
+                logger.warning("[search] TS search timed out; retrying with limit=10")
+                try:
+                    ts_resp = _run_ts_search(ts_raw_q, min(10, int(limit) or 10), 40)
+                except requests.exceptions.Timeout:
+                    ts_resp = None
+                    warnings.append(
+                        "Test set search timed out. Narrow the query or lower the result limit, then retry."
+                    )
+                    logger.warning("[search] TS search timed out on retry")
+            except Exception as e:
+                warnings.append(f"Test set search failed: {e}")
+                logger.warning(f"[search] TS search failed: {e}")
+
+            if ts_resp is not None:
                 if ts_resp.status_code == 200:
-                    for item in (ts_resp.json().get("data", []) or []):
+                    ts_body = ts_resp.json() or {}
+                    for item in (ts_body.get("data", []) or []):
                         if not isinstance(item, dict):
                             continue
                         result["test_sets"].append({
@@ -10890,19 +15994,425 @@ def dynamic_jp_search():
                             "name": item.get("name", ""),
                             "description": item.get("description", ""),
                             "created_at": item.get("created_at"),
+                            # Include both raw and normalized arg maps so Manage TS can
+                            # compute common keys from list/search payload directly.
+                            "test_args": item.get("test_args", "") or item.get("testArgs", "") or "",
+                            "framework_args": item.get("framework_args", "") or item.get("frameworkArgs", "") or "",
+                            "args_map": item.get("args_map", {}) or {},
+                            "agave_options": item.get("agave_options", {}) or {},
+                            "test_args_map": _manage_ts_extract_test_args(item),
+                            "framework_args_map": _manage_ts_extract_framework_args(item),
                         })
-            except Exception as e:
-                logger.warning(f"[search] TS search failed: {e}")
+                    totals["test_sets"] = ts_body.get("total", len(result["test_sets"]))
+                else:
+                    warnings.append(f"Test set search returned HTTP {ts_resp.status_code}.")
+                    logger.warning(f"[search] TS search HTTP {ts_resp.status_code}: {ts_resp.text[:200]}")
 
-        return jsonify({"success": True, **result})
+        # Note when JITA reports more matches than we returned (shouldn't happen with
+        # the high cap, but keeps the UI honest if a query exceeds SEARCH_MAX_LIMIT).
+        for kind, human in (("job_profiles", "job profiles"), ("test_sets", "test sets")):
+            if totals[kind] > len(result[kind]):
+                warnings.append(
+                    f"Showing {len(result[kind])} of {totals[kind]} matching {human}. "
+                    f"Refine the search to see the rest."
+                )
+
+        return jsonify({
+            "success": True,
+            "warnings": warnings,
+            "totals": totals,
+            **result,
+        })
     except Exception as e:
         logger.error(f"Error in dynamic-jp search: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/mcp/regression/dynamic-jp/manage-ts/inspect", methods=["POST"])
+@jwt_required
+def manage_ts_inspect():
+    """Inspect selected test sets and return the union of framework/test arguments."""
+    try:
+        req_data = request.json or {}
+        ts_ids = req_data.get("ts_ids") or []
+        if not isinstance(ts_ids, list):
+            return jsonify({"error": "ts_ids must be an array"}), 400
+        ts_ids = [str(i).strip() for i in ts_ids if str(i).strip()]
+        if not ts_ids:
+            return jsonify({"error": "At least one test set id is required"}), 400
+
+        per_ts = []
+        errors = []
+        for ts_id in ts_ids:
+            try:
+                per_ts.append(_manage_ts_fetch_test_set(ts_id))
+            except Exception as e:
+                errors.append({"ts_id": ts_id, "error": str(e)})
+
+        if errors:
+            return jsonify({"error": "Failed to fetch one or more test sets", "details": errors}), 502
+
+        common = _manage_ts_compute_common_args(per_ts)
+        return jsonify({
+            "success": True,
+            "selected_count": len(per_ts),
+            "test_sets": [{"_id": row["id"], "name": row["name"]} for row in per_ts],
+            "common_framework_args": common["framework_args"],
+            "common_test_args": common["test_args"],
+        })
+    except Exception as e:
+        logger.error(f"Error in manage-ts inspect: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/dynamic-jp/manage-ts/preview", methods=["POST"])
+@jwt_required
+def manage_ts_preview():
+    """Dry-run bulk test-set argument updates and return full diff summary."""
+    try:
+        req_data = request.json or {}
+        ts_ids = req_data.get("ts_ids") or []
+        if not isinstance(ts_ids, list):
+            return jsonify({"error": "ts_ids must be an array"}), 400
+        ts_ids = [str(i).strip() for i in ts_ids if str(i).strip()]
+        if not ts_ids:
+            return jsonify({"error": "At least one test set id is required"}), 400
+
+        try:
+            edits_framework, edits_test, new_args = _manage_ts_normalize_update_maps(req_data)
+        except ValueError as vex:
+            return jsonify({"error": str(vex)}), 400
+
+        ts_rows = []
+        errors = []
+        for ts_id in ts_ids:
+            try:
+                ts_rows.append(_manage_ts_fetch_test_set(ts_id))
+            except Exception as e:
+                errors.append({"ts_id": ts_id, "error": str(e)})
+        if errors:
+            return jsonify({"error": "Failed to fetch one or more test sets", "details": errors}), 502
+
+        preview_rows, totals = _manage_ts_build_preview_rows(ts_rows, edits_framework, edits_test, new_args)
+        return jsonify({
+            "success": True,
+            "dry_run": True,
+            "summary": totals,
+            "preview": preview_rows,
+        })
+    except Exception as e:
+        logger.error(f"Error in manage-ts preview: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/dynamic-jp/manage-ts/apply", methods=["POST"])
+@jwt_required
+def manage_ts_apply():
+    """Apply bulk test-set argument updates after user-reviewed dry run."""
+    try:
+        req_data = request.json or {}
+        ts_ids = req_data.get("ts_ids") or []
+        if not isinstance(ts_ids, list):
+            return jsonify({"error": "ts_ids must be an array"}), 400
+        ts_ids = [str(i).strip() for i in ts_ids if str(i).strip()]
+        if not ts_ids:
+            return jsonify({"error": "At least one test set id is required"}), 400
+
+        try:
+            edits_framework, edits_test, new_args = _manage_ts_normalize_update_maps(req_data)
+        except ValueError as vex:
+            return jsonify({"error": str(vex)}), 400
+
+        ts_rows = []
+        fetch_errors = []
+        for ts_id in ts_ids:
+            try:
+                ts_rows.append(_manage_ts_fetch_test_set(ts_id))
+            except Exception as e:
+                fetch_errors.append({"ts_id": ts_id, "error": str(e)})
+        if fetch_errors:
+            return jsonify({"error": "Failed to fetch one or more test sets", "details": fetch_errors}), 502
+
+        preview_rows, totals = _manage_ts_build_preview_rows(ts_rows, edits_framework, edits_test, new_args)
+        update_targets = [row for row in preview_rows if row["changed"] and row.get("put_payload")]
+        if not update_targets:
+            return jsonify({
+                "success": True,
+                "updated_count": 0,
+                "failed_updates": [],
+                "summary": totals,
+                "results": [],
+            })
+
+        def _put_one(row):
+            try:
+                put_resp = requests.put(
+                    f"{JITA_BASE}/test_sets/{row['ts_id']}",
+                    json=_manage_ts_sanitize_for_json(row["put_payload"]),
+                    auth=JITA_SVC_AUTH,
+                    verify=False,
+                    timeout=30,
+                )
+                ok = put_resp.status_code == 200
+                msg = "Updated" if ok else (put_resp.text[:500] if put_resp.text else f"HTTP {put_resp.status_code}")
+                return {
+                    "ts_id": row["ts_id"],
+                    "ts_name": row["ts_name"],
+                    "success": ok,
+                    "message": msg,
+                    "changed_framework_args": row["changed_framework_args"],
+                    "changed_test_args": row["changed_test_args"],
+                    "collision_skips": row["collision_skips"],
+                }
+            except Exception as e:
+                return {
+                    "ts_id": row["ts_id"],
+                    "ts_name": row["ts_name"],
+                    "success": False,
+                    "message": str(e),
+                    "changed_framework_args": row["changed_framework_args"],
+                    "changed_test_args": row["changed_test_args"],
+                    "collision_skips": row["collision_skips"],
+                }
+
+        results = []
+        max_workers = min(10, len(update_targets)) or 1
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_idx = {
+                pool.submit(_put_one, row): idx
+                for idx, row in enumerate(update_targets)
+            }
+            ordered = [None] * len(update_targets)
+            for fut in as_completed(future_to_idx):
+                idx = future_to_idx[fut]
+                ordered[idx] = fut.result()
+            results = ordered
+
+        updated_count = len([r for r in results if r and r["success"]])
+        failed_updates = [r for r in results if r and not r["success"]]
+        return jsonify({
+            "success": True,
+            "updated_count": updated_count,
+            "failed_updates": failed_updates,
+            "summary": totals,
+            "results": results,
+        })
+    except Exception as e:
+        logger.error(f"Error in manage-ts apply: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+def _current_user_identifiers():
+    """Identity aliases for the logged-in user, lowercased, for owner matching.
+
+    Includes the JWT email, the username (sAMAccountName), the username with the
+    default corp domain, and the local-part of the email. Matching any of these
+    against an entity's owner emails counts as ownership.
+    """
+    cu = getattr(g, "current_user", None)
+    username = (cu.get("sub") if isinstance(cu, dict) else "") or ""
+    email = (cu.get("email") if isinstance(cu, dict) else "") or ""
+    ids = set()
+    username = username.strip().lower()
+    email = email.strip().lower()
+    if username:
+        ids.add(username)
+        ids.add(f"{username}@nutanix.com")
+    if email:
+        ids.add(email)
+        ids.add(email.split("@")[0])  # local-part
+    return {i for i in ids if i}
+
+
+def _user_in_cdp_reg_jarvis(user_ids=None):
+    """True if the logged-in user is a member of the cdp_reg_jarvis group roster."""
+    if not CDP_REG_JARVIS_MEMBERS:
+        return False
+    ids = user_ids if user_ids is not None else _current_user_identifiers()
+    return bool(ids & CDP_REG_JARVIS_MEMBERS)
+
+
+_jita_user_cache = {}
+_jita_user_cache_lock = threading.Lock()
+
+
+def _resolve_jita_user(oid):
+    """Resolve a JITA user ObjectId to its user record via /api/v1/users/<oid>.
+
+    Cached process-wide so a bulk delete of many entities owned by the same
+    person only hits JITA once for that owner.
+    """
+    if not oid:
+        return {}
+    with _jita_user_cache_lock:
+        if oid in _jita_user_cache:
+            return _jita_user_cache[oid]
+    record = {}
+    try:
+        r = requests.get(f"{JITA_V1_BASE}/users/{oid}", auth=JITA_SVC_AUTH, verify=False, timeout=20)
+        if r.status_code == 200:
+            record = (r.json() or {}).get("data", {}) or {}
+        else:
+            logger.warning(f"[delete] user resolve {oid} -> HTTP {r.status_code}")
+    except Exception as e:
+        logger.warning(f"[delete] user resolve {oid} error: {e}")
+    if record:
+        with _jita_user_cache_lock:
+            _jita_user_cache[oid] = record
+    return record
+
+
+# Markers that identify a JITA *service/bot/tool* account (not a real human).
+# When a JP/TS is created by one of these (or created_by can't be resolved), the
+# real owner is taken from the entity's ``emails`` list instead — that's where the
+# RegX tool records the user who requested the clone/create.
+_SERVICE_ACCOUNT_MARKERS = (
+    "svc.", "svc_", "svc-", "_bot", "-bot", "bot_", "jarvis", "agave", "jenkins", "automation",
+)
+
+
+def _is_service_account(user_name, email=""):
+    blob = f"{user_name or ''} {email or ''}".lower()
+    return any(m in blob for m in _SERVICE_ACCOUNT_MARKERS)
+
+
+def _emails_as_ids(entity_data):
+    """Owner identifiers pulled from an entity's ``emails``/``user`` fields."""
+    ids = set()
+    emails = entity_data.get("emails") or []
+    if isinstance(emails, str):
+        emails = [emails]
+    for e in emails:
+        if isinstance(e, str) and e.strip():
+            e = e.strip().lower()
+            ids.add(e)
+            if "@" in e:
+                ids.add(e.split("@")[0])
+    u = entity_data.get("user")
+    if isinstance(u, str) and u.strip():
+        u = u.strip().lower()
+        ids.add(u)
+        if "@" in u:
+            ids.add(u.split("@")[0])
+    return ids, (emails[0] if emails else None)
+
+
+def _oid_from_ref(value):
+    """Extract ObjectId string from a JITA ref (bare string, {$oid}, or {_id:{$oid}})."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        v = value.strip()
+        return v or None
+    if isinstance(value, dict):
+        if value.get("$oid"):
+            return str(value["$oid"]).strip() or None
+        inner = value.get("_id")
+        if isinstance(inner, dict) and inner.get("$oid"):
+            return str(inner["$oid"]).strip() or None
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip()
+    return None
+
+
+def _owner_record_from_entity(entity_data):
+    """Resolve the creator/owner user record from created_by_user / created_by / creator.
+
+    Prefer the **creator** identity — never treat the notification ``emails`` list
+    as the creator. ``emails`` is only used later for service-account-created JPs.
+    """
+    # 1) Expanded created_by_user (full user doc)
+    cbu = entity_data.get("created_by_user")
+    if isinstance(cbu, dict) and (cbu.get("user_name") or cbu.get("email") or cbu.get("display_name")):
+        return cbu
+
+    # 2) Explicit creator field (some JITA payloads)
+    creator = entity_data.get("creator")
+    if isinstance(creator, dict) and (creator.get("user_name") or creator.get("email") or creator.get("display_name")):
+        return creator
+    creator_oid = _oid_from_ref(creator)
+    if creator_oid:
+        resolved = _resolve_jita_user(creator_oid)
+        if resolved:
+            return resolved
+
+    # 3) created_by ObjectId (string or {$oid}) — resolve via users API
+    cb_oid = _oid_from_ref(entity_data.get("created_by"))
+    if not cb_oid:
+        cb_oid = _oid_from_ref(cbu)  # unexpanded created_by_user: {"$oid": "..."}
+    if cb_oid:
+        resolved = _resolve_jita_user(cb_oid)
+        if resolved:
+            return resolved
+
+    return {}
+
+
+def _entity_owner_identity(entity_data):
+    """Resolve who is allowed to delete a JITA entity.
+
+    Returns ``(owner_ids, owner_display)`` — a lowercased set of the owner's
+    identifiers (user_name, email, email local-part) plus a human-readable name.
+
+    Rules:
+    - If **creator** / ``created_by`` / ``created_by_user`` resolves to a **real human**,
+      ONLY that person may delete (notification ``emails`` are ignored).
+    - If creator is a **service/bot/tool** account, fall back to ``emails``/``user``
+      (where RegX records the human requester).
+    - If creator cannot be resolved at all, return empty owner_ids (caller blocks delete).
+    """
+    owner = _owner_record_from_entity(entity_data or {})
+
+    owner_user_name = (owner.get("user_name") or "").strip().lower()
+    owner_email = (owner.get("email") or "").strip().lower()
+    owner_display_name = (owner.get("display_name") or "").strip().lower()
+    # Some expanded users only expose display_name/first_name
+    if not owner_user_name and owner_display_name and " " not in owner_display_name:
+        owner_user_name = owner_display_name
+
+    creator_is_human = bool(owner_user_name or owner_email) and not _is_service_account(
+        owner_user_name, owner_email
+    )
+
+    if creator_is_human:
+        owner_ids = set()
+        for v in (owner_user_name, owner_email):
+            if v:
+                owner_ids.add(v)
+                if "@" in v:
+                    owner_ids.add(v.split("@")[0])
+        owner_display = (
+            owner.get("user_name") or owner.get("email") or owner.get("display_name") or "another user"
+        )
+        return owner_ids, owner_display
+
+    if owner_user_name or owner_email:
+        # Resolved creator is a service/bot — allow requester(s) from emails/user.
+        owner_ids, first_email = _emails_as_ids(entity_data)
+        owner_display = (
+            first_email
+            or owner.get("user_name")
+            or owner.get("display_name")
+            or "the creator"
+        )
+        return owner_ids, owner_display
+
+    # Creator unresolved — do NOT fall back to emails (would let any CC'd teammate delete).
+    return set(), "unverified creator"
+
+
 @app.route("/mcp/regression/dynamic-jp/delete", methods=["POST"])
+@jwt_required
 def dynamic_jp_delete():
-    """Delete one or more Job Profiles and/or Test Sets by ID."""
+    """Delete one or more Job Profiles and/or Test Sets by ID.
+
+    JITA does **not** enforce per-entity ownership on delete (any authenticated
+    user can delete any entity), so authorization is enforced here (see
+    ``_entity_owner_identity``): a human-created entity may only be deleted by that
+    human; a tool/service-created entity may be deleted by the user(s) recorded in
+    its ``emails``. Non-owners — and entities whose ownership can't be verified —
+    are blocked with a clear message instead of being deleted.
+    """
     try:
         req_data = request.json or {}
         jp_ids = req_data.get("jp_ids", [])
@@ -10919,64 +16429,125 @@ def dynamic_jp_delete():
         jp_ids = [str(i).strip() for i in jp_ids if i]
         ts_ids = [str(i).strip() for i in ts_ids if i]
 
+        current_username = g.current_user.get("sub", "") if isinstance(getattr(g, "current_user", None), dict) else ""
+        user_ids = _current_user_identifiers()
+        if not user_ids:
+            return jsonify({
+                "error": "Could not determine your identity from the session. Please re-login.",
+                "code": "IDENTITY_UNKNOWN",
+            }), 401
+        is_admin = current_username.strip().lower() in JP_DELETE_ADMIN_USERS
+        is_group_member = _user_in_cdp_reg_jarvis(user_ids)
+
         results = {"job_profiles": [], "test_sets": []}
 
-        for jp_id in jp_ids:
+        def _delete_with_ownership(kind, path, entity_id):
+            label = "Job Profile" if kind == "job_profiles" else "Test Set"
+
+            # 1) Fetch the entity (with owner expanded) to verify ownership before deleting.
             try:
-                resp = requests.delete(
-                    f"{JITA_BASE}/job_profiles/{jp_id}",
+                get_resp = requests.get(
+                    f"{JITA_BASE}/{path}/{entity_id}",
+                    params={"expand": "created_by_user"},
                     auth=JITA_SVC_AUTH, verify=False, timeout=30,
                 )
-                success = resp.status_code in (200, 204)
-                msg = "Deleted" if success else f"JITA returned HTTP {resp.status_code}"
-                if not success:
-                    try:
-                        msg = resp.json().get("message", msg)
-                    except Exception:
-                        pass
-                results["job_profiles"].append({
-                    "_id": jp_id,
-                    "success": success,
-                    "message": msg,
-                })
-                logger.info(f"[delete] JP {jp_id}: {'OK' if success else 'FAILED'} ({msg})")
             except Exception as e:
-                results["job_profiles"].append({
-                    "_id": jp_id,
-                    "success": False,
-                    "message": str(e),
-                })
-                logger.warning(f"[delete] JP {jp_id} error: {e}")
+                logger.warning(f"[delete] {label} {entity_id} lookup error: {e}")
+                return {"_id": entity_id, "success": False, "message": f"Could not look up {label}: {e}"}
 
-        for ts_id in ts_ids:
+            if get_resp.status_code == 404:
+                return {"_id": entity_id, "success": False, "message": f"{label} not found (already deleted?)."}
+            if get_resp.status_code != 200:
+                return {"_id": entity_id, "success": False,
+                        "message": f"Could not verify ownership ({label} lookup HTTP {get_resp.status_code})."}
+
+            entity = (get_resp.json() or {}).get("data", {}) or {}
+            entity_name = entity.get("name", entity_id)
+            owner_ids, owner_display = _entity_owner_identity(entity)
+            entity_groups = entity.get("user_groups") or []
+            is_regx_managed = CDP_REG_JARVIS_GROUP in entity_groups
+
+            # 2) Authorization decision — mirror JITA: only the real owner (created_by)
+            #    may delete. Exceptions: the admin allowlist, and members of the
+            #    cdp_reg_jarvis group for any RegX-managed (tagged) entity.
+            if is_admin:
+                logger.info(f"[delete] admin '{current_username}' authorized to delete {label} '{entity_name}'")
+            elif is_group_member and is_regx_managed:
+                logger.info(
+                    f"[delete] cdp_reg_jarvis member '{current_username}' authorized to delete "
+                    f"RegX-managed {label} '{entity_name}'"
+                )
+            elif not owner_ids:
+                # Owner could not be resolved => cannot prove ownership. Block (safe default).
+                logger.warning(
+                    f"[delete] {label} '{entity_name}' ({entity_id}) owner unresolved; "
+                    f"blocking delete requested by '{current_username}'"
+                )
+                return {
+                    "_id": entity_id, "success": False, "unauthorized": True,
+                    "message": f"You are not authorized to delete this {label}: its owner could not be verified.",
+                }
+            elif user_ids.isdisjoint(owner_ids):
+                logger.warning(
+                    f"[delete] BLOCKED: '{current_username}' is not the owner of {label} "
+                    f"'{entity_name}' ({entity_id}); owner={owner_display}"
+                )
+                return {
+                    "_id": entity_id, "success": False, "unauthorized": True,
+                    "owner": owner_display,
+                    "message": f"You are not authorized to delete this {label}. Only the owner ({owner_display}) can delete it.",
+                }
+
+            # 3) Ownership confirmed — perform the delete (service account always has rights).
             try:
-                resp = requests.delete(
-                    f"{JITA_BASE}/test_sets/{ts_id}",
+                del_resp = requests.delete(
+                    f"{JITA_BASE}/{path}/{entity_id}",
                     auth=JITA_SVC_AUTH, verify=False, timeout=30,
                 )
-                success = resp.status_code in (200, 204)
-                msg = "Deleted" if success else f"JITA returned HTTP {resp.status_code}"
-                if not success:
-                    try:
-                        msg = resp.json().get("message", msg)
-                    except Exception:
-                        pass
-                results["test_sets"].append({
-                    "_id": ts_id,
-                    "success": success,
-                    "message": msg,
-                })
-                logger.info(f"[delete] TS {ts_id}: {'OK' if success else 'FAILED'} ({msg})")
             except Exception as e:
-                results["test_sets"].append({
-                    "_id": ts_id,
-                    "success": False,
-                    "message": str(e),
-                })
-                logger.warning(f"[delete] TS {ts_id} error: {e}")
+                logger.warning(f"[delete] {label} {entity_id} delete error: {e}")
+                return {"_id": entity_id, "success": False, "message": str(e)}
 
-        all_ok = all(r["success"] for r in results["job_profiles"] + results["test_sets"])
-        return jsonify({"success": all_ok, "results": results})
+            if del_resp.status_code in (200, 204):
+                logger.info(f"[delete] {label} '{entity_name}' ({entity_id}) deleted by owner '{current_username}'")
+                return {"_id": entity_id, "success": True, "message": "Deleted"}
+
+            msg = f"JITA returned HTTP {del_resp.status_code}"
+            try:
+                msg = del_resp.json().get("message", msg)
+            except Exception:
+                pass
+            return {"_id": entity_id, "success": False, "message": msg}
+
+        # Process every selected entity independently and in parallel so bulk
+        # deletes (100+ items with mixed ownership) stay fast. Each item is fetched,
+        # ownership-checked, and deleted (or blocked) on its own — one blocked item
+        # never affects the others. Order is preserved to match the request.
+        def _run(kind, path, ids):
+            if not ids:
+                return []
+            ordered = [None] * len(ids)
+            max_workers = min(10, len(ids)) or 1
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_to_idx = {
+                    pool.submit(_delete_with_ownership, kind, path, eid): i
+                    for i, eid in enumerate(ids)
+                }
+                for fut in as_completed(future_to_idx):
+                    i = future_to_idx[fut]
+                    try:
+                        ordered[i] = fut.result()
+                    except Exception as e:
+                        ordered[i] = {"_id": ids[i], "success": False, "message": str(e)}
+            return ordered
+
+        results["job_profiles"] = _run("job_profiles", "job_profiles", jp_ids)
+        results["test_sets"] = _run("test_sets", "test_sets", ts_ids)
+
+        all_items = results["job_profiles"] + results["test_sets"]
+        all_ok = bool(all_items) and all(r["success"] for r in all_items)
+        any_unauthorized = any(r.get("unauthorized") for r in all_items)
+        return jsonify({"success": all_ok, "unauthorized": any_unauthorized, "results": results})
     except Exception as e:
         logger.error(f"Error in dynamic-jp delete: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -11002,7 +16573,7 @@ def debug_inspect_jp(jp_id):
         for key in jp_data.keys():
             if 'email' in key.lower() or 'mail' in key.lower() or key in ['emails', 'user_groups', 'scheduling_options']:
                 email_fields[key] = jp_data.get(key)
-        
+
         return jsonify({
             "jp_id": jp_id,
             "jp_name": jp_data.get("name"),
@@ -11046,6 +16617,63 @@ def _call_ai_chat(system_prompt, user_content, max_tokens=2048):
             raise Exception("AI returned no choices")
         content = (choices[0].get("message") or {}).get("content", "")
         return content.strip()
+
+
+def _build_owner_tickets_fallback_analysis(all_tickets, jira_details, owner_for_ticket, ticket_test_count, tag):
+    """Generate deterministic markdown when AI endpoint is unavailable for owner tickets analysis."""
+    table_header = (
+        "| Ticket ID | Owner | Status | Issue Type | Root Cause Category | Impact | AI Recommended Action |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |"
+    )
+    table_rows = []
+    for ticket_id in sorted(all_tickets):
+        jd = jira_details.get(ticket_id, {})
+        owners = ", ".join(owner_for_ticket.get(ticket_id, []))
+        tc_count = ticket_test_count.get(ticket_id, 0)
+        status = jd.get("status", "N/A")
+        issue_type = jd.get("issue_type", "N/A")
+        
+        # Simple classification based on issue type
+        if "bug" in issue_type.lower():
+            root_cause = "Product" if "product" in jd.get("summary", "").lower() else "Test"
+        elif "test" in issue_type.lower():
+            root_cause = "Test"
+        else:
+            root_cause = "Unknown"
+        
+        impact = f"{tc_count} testcase(s) affected"
+        
+        # Recommendation based on status
+        if status.lower() in ["open", "to do", "new"]:
+            recommended_action = "Prioritize triage and assign to appropriate owner"
+        elif status.lower() in ["in progress", "in review"]:
+            recommended_action = "Monitor progress and verify fix"
+        elif status.lower() in ["resolved", "closed", "done"]:
+            recommended_action = "Verify fix is complete and re-run affected tests"
+        else:
+            recommended_action = "Review status and update as needed"
+        
+        table_rows.append(
+            f"| {ticket_id} | {owners or 'Unassigned'} | {status} | {issue_type} | {root_cause} | {impact} | {recommended_action} |"
+        )
+    
+    analysis = (
+        f"# Owner Ticket Breakdown Analysis\n\n"
+        f"**Note:** AI analysis endpoint unavailable. Showing basic breakdown.\n\n"
+        f"**Regression Tag:** {tag}\n"
+        f"**Total Unique Tickets:** {len(all_tickets)}\n\n"
+        f"## Ticket Details\n\n"
+        f"{table_header}\n" + "\n".join(table_rows) + "\n\n"
+        f"## Summary\n\n"
+        f"- Total tickets requiring attention: {len(all_tickets)}\n"
+        f"- Please review each ticket status and ensure proper ownership assignment\n"
+        f"- Priority should be given to tickets with multiple testcases impacted\n\n"
+        f"## Recommended Actions\n\n"
+        f"1. Review all Open/To Do tickets and assign owners\n"
+        f"2. Monitor In Progress tickets for timely completion\n"
+        f"3. Verify Resolved/Closed tickets and re-run affected tests\n"
+    )
+    return analysis
 
 
 def _build_bulk_issues_fallback_analysis(issue_rows, tag, total_tests):
@@ -11308,6 +16936,119 @@ def ai_deep_triage():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/mcp/regression/user-keys", methods=["GET", "PUT"])
+@app.route("/api/mcp/regression/user-keys", methods=["GET", "PUT"])
+@jwt_required
+def user_api_keys():
+    """Load or save per-user API keys (User Settings → API Keys)."""
+    username = _current_username()
+    if not username:
+        return jsonify({"error": "Unable to resolve current user"}), 401
+
+    if request.method == "GET":
+        return jsonify(get_user_keys_masked(username))
+
+    body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "Expected a JSON object of keys"}), 400
+    try:
+        masked = upsert_user_keys(username, body)
+        return jsonify(masked)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logger.error("Failed to save user keys for %s: %s", username, exc, exc_info=True)
+        return jsonify({"error": "Failed to save keys"}), 500
+
+
+@app.route("/mcp/regression/user-keys/validate", methods=["POST"])
+@app.route("/api/mcp/regression/user-keys/validate", methods=["POST"])
+@jwt_required
+def validate_user_api_keys():
+    """Best-effort key checks. Failures here do not block using a saved Jira token."""
+    username = _current_username()
+    body = request.get_json(force=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "Expected a JSON object of keys"}), 400
+
+    results = {}
+
+    cursor_key = (body.get("cursor_api_key") or "").strip()
+    if not cursor_key or "****" in cursor_key:
+        cursor_key = get_user_key(username, "cursor_api_key") or ""
+    if not cursor_key:
+        results["cursor_api_key"] = {"valid": None, "message": "Not provided (optional for Jira lookups)"}
+    elif cursor_key.startswith("crsr_") or cursor_key.startswith("key_"):
+        results["cursor_api_key"] = {"valid": True, "message": "Format looks valid"}
+    else:
+        results["cursor_api_key"] = {
+            "valid": None,
+            "message": "Format unusual — still saved if you clicked Save",
+        }
+
+    # Prefer request body plaintext; otherwise use decrypted User Settings store.
+    jira_tok = (body.get("atlassian_jira_token") or "").strip()
+    if not jira_tok or "****" in jira_tok:
+        jira_tok = get_user_key(username, "atlassian_jira_token") or ""
+    if not jira_tok:
+        results["atlassian_jira_token"] = {
+            "valid": None,
+            "message": "Not saved yet — paste token and click Save (Test Keys is optional)",
+        }
+    else:
+        try:
+            resp = session.get(
+                f"{JIRA_BASE}/myself",
+                headers=get_jira_headers(jira_tok),
+                timeout=15,
+                verify=False,
+            )
+            if resp.status_code == 200:
+                display = (resp.json() or {}).get("displayName") or "OK"
+                results["atlassian_jira_token"] = {
+                    "valid": True,
+                    "message": f"Authenticated as {display}",
+                }
+            elif resp.status_code in (401, 403):
+                # Still keep the token for ticket fetches — auth style can differ.
+                results["atlassian_jira_token"] = {
+                    "valid": None,
+                    "message": (
+                        f"Live /myself check returned HTTP {resp.status_code}. "
+                        "Token is still used for ticket lookups after Save."
+                    ),
+                }
+            else:
+                results["atlassian_jira_token"] = {
+                    "valid": None,
+                    "message": (
+                        f"Live check HTTP {resp.status_code}. "
+                        "Token is still used for ticket lookups after Save."
+                    ),
+                }
+        except Exception as exc:
+            results["atlassian_jira_token"] = {
+                "valid": None,
+                "message": (
+                    f"Could not reach Jira for Test Keys ({exc}). "
+                    "Save the token anyway — dashboard ticket fetches will use it."
+                ),
+            }
+
+    conf_tok = (body.get("atlassian_confluence_token") or "").strip()
+    if not conf_tok or "****" in conf_tok:
+        conf_tok = get_user_key(username, "atlassian_confluence_token") or ""
+    if not conf_tok:
+        results["atlassian_confluence_token"] = {"valid": None, "message": "Not provided"}
+    else:
+        results["atlassian_confluence_token"] = {
+            "valid": True,
+            "message": "Saved (live Confluence probe skipped)",
+        }
+
+    return jsonify({"results": results})
+
+
 @app.route("/mcp/regression/jira-ticket-details", methods=["POST"])
 @app.route("/api/mcp/regression/jira-ticket-details", methods=["POST"])
 @jwt_required
@@ -11319,17 +17060,37 @@ def get_jira_ticket_details():
         if not ticket_ids:
             return jsonify({"error": "No ticket IDs provided"}), 400
 
+        # Capture token on the request thread (Flask g is not safe across workers).
+        jira_token = resolve_jira_token()
+        if not jira_token:
+            return jsonify({
+                "success": False,
+                "error": (
+                    "Jira personal token not configured. "
+                    "Open User Settings → API Keys and add your Atlassian Jira Personal Token."
+                ),
+                "details": {},
+            }), 400
+
+        # De-dupe and cap generously; fetch in parallel so large owner maps
+        # (100+ unique tickets) return well within the client timeout.
+        unique_ids = list(dict.fromkeys(ticket_ids))[:200]
+
+        def _one(ticket_id):
+            try:
+                jira_data = fetch_jira_ticket(
+                    ticket_id, token=jira_token, fields="status,issuetype"
+                )
+                return ticket_id, _extract_jira_ticket_detail(jira_data)
+            except Exception as exc:
+                logger.warning("Error fetching JIRA details for %s: %s", ticket_id, exc)
+                return ticket_id, {"status": "N/A", "issue_type": "N/A", "bug_type": None}
+
         results = {}
-        for ticket_id in ticket_ids[:50]:
-            jira_data = fetch_jira_ticket(ticket_id)
-            if jira_data:
-                fields = jira_data.get("fields", {})
-                results[ticket_id] = {
-                    "status": fields.get("status", {}).get("name", "Unknown"),
-                    "issue_type": fields.get("issuetype", {}).get("name", "Unknown")
-                }
-            else:
-                results[ticket_id] = {"status": "N/A", "issue_type": "N/A"}
+        max_workers = min(10, len(unique_ids)) or 1
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for ticket_id, detail in pool.map(_one, unique_ids):
+                results[ticket_id] = detail
 
         return jsonify({"success": True, "details": results})
     except Exception as e:
@@ -11367,9 +17128,10 @@ def ai_analyze_owner_tickets():
         for ticket_id in all_tickets:
             jira_data = fetch_jira_ticket(ticket_id)
             if jira_data:
-                fields = jira_data.get("fields", {})
-                status = fields.get("status", {}).get("name", "Unknown")
-                issue_type = fields.get("issuetype", {}).get("name", "Unknown")
+                fields = jira_data.get("fields") or {}
+                detail = _extract_jira_ticket_detail(jira_data)
+                status = detail["status"]
+                issue_type = detail["issue_type"]
                 summary = fields.get("summary", "")
                 description = (fields.get("description") or "")[:500]
                 priority = fields.get("priority", {}).get("name", "Unknown") if fields.get("priority") else "Unknown"
@@ -11457,7 +17219,21 @@ def ai_analyze_owner_tickets():
             "Use markdown tables. Use the exact ticket IDs and data provided — never invent data."
         )
 
-        analysis = _call_ai_chat(system_prompt, user_content)
+        try:
+            analysis = _call_ai_chat(system_prompt, user_content)
+        except urllib.error.HTTPError as err:
+            if err.code == 401:
+                logger.warning(f"AI endpoint returned 401 Unauthorized; returning fallback analysis.")
+                analysis = _build_owner_tickets_fallback_analysis(
+                    all_tickets, jira_details, owner_for_ticket, ticket_test_count, tag
+                )
+            else:
+                raise
+        except urllib.error.URLError as err:
+            logger.warning(f"AI owner tickets endpoint unreachable ({err.reason}); returning fallback analysis.")
+            analysis = _build_owner_tickets_fallback_analysis(
+                all_tickets, jira_details, owner_for_ticket, ticket_test_count, tag
+            )
 
         # Return both analysis and jira_details for the frontend table
         return jsonify({
@@ -11666,11 +17442,54 @@ def cursor_ai_analyze_testcase():
         if not testcase_name:
             return jsonify({"error": "testcase_name is required"}), 400
 
+        # Get user API keys for Cursor SDK
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        
+        if not cursor_api_key:
+            return jsonify({
+                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "require_key_setup": True
+            }), 403
+
+        # Get Atlassian tokens (optional)
+        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
+        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
+        
+        atlassian_tokens = {}
+        if atlassian_jira_token:
+            atlassian_tokens["jira"] = atlassian_jira_token
+        if atlassian_confluence_token:
+            atlassian_tokens["confluence"] = atlassian_confluence_token
+
         exception_summary = body.get("exception_summary", "")
         exception = body.get("exception", "")
         test_log_url = body.get("test_log_url", "")
         jira_tickets = body.get("jira_tickets", [])
         failure_stage = body.get("failure_stage", "")
+        testcase_id = body.get("testcase_id") or ""
+        status = (body.get("status") or "").lower()
+        analysis_type = body.get("analysis_type") or ("skipped" if status == "skipped" else "failed")
+        triage_genie_ticket = body.get("triage_genie_ticket") or body.get("triage_genie_ticket_id") or ""
+        glean_tickets = body.get("glean_tickets") or []
+        glean_snippets = body.get("glean_snippets") or []
+
+        if not triage_genie_ticket and testcase_id:
+            try:
+                triage_genie_ticket = fetch_triage_genie_ticket_id(testcase_id) or ""
+            except Exception as tg_err:
+                logger.warning("Could not fetch TG ticket for cursor-ai %s: %s", testcase_id, tg_err)
+
+        if not glean_tickets:
+            try:
+                search = search_existing_tickets_for_failure(
+                    exception_summary, exception, testcase_name
+                )
+                glean_tickets = _enrich_tickets_with_jira(search.get("tickets") or [])
+                if not glean_snippets:
+                    glean_snippets = search.get("snippets") or []
+            except Exception as glean_err:
+                logger.warning("Glean auto-search for cursor-ai failed: %s", glean_err)
 
         # Fetch logs if not provided in the request
         steps_log = body.get("steps_log", "")
@@ -11680,15 +17499,28 @@ def cursor_ai_analyze_testcase():
             steps_log = logs.get("steps_log", "")
             nutest_test_log = logs.get("nutest_test_log", "")
 
+        rdm_link = body.get("rdm_link") or body.get("rdm_url") or ""
+        rdm_message = body.get("rdm_message") or exception_summary or ""
+        skill_url = rdm_link if analysis_type == "skipped" else test_log_url
+
         payload = {
             "testcase_name": testcase_name,
-            "exception_summary": exception_summary,
-            "exception": exception,
+            "exception_summary": exception_summary or rdm_message,
+            "exception": exception or rdm_message,
             "steps_log": steps_log[:5000],
             "nutest_test_log": nutest_test_log[:5000],
-            "test_log_url": test_log_url,
+            "test_log_url": skill_url or test_log_url,
+            "rdm_url": rdm_link,
+            "rdm_message": rdm_message,
+            "jita_task_id": body.get("agave_task_id") or body.get("jita_task_id") or "",
             "jira_tickets": jira_tickets,
             "failure_stage": failure_stage,
+            "triage_genie_ticket": triage_genie_ticket,
+            "glean_tickets": glean_tickets,
+            "glean_snippets": glean_snippets,
+            "analysis_type": analysis_type,
+            "cursor_api_key": cursor_api_key,
+            "atlassian_tokens": atlassian_tokens,
         }
 
         resp = requests.post(
@@ -11728,6 +17560,26 @@ def cursor_ai_analyze_batch():
         if not testcases:
             return jsonify({"error": "testcases array is required"}), 400
 
+        # Get user API keys for Cursor SDK
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        
+        if not cursor_api_key:
+            return jsonify({
+                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "require_key_setup": True
+            }), 403
+
+        # Get Atlassian tokens (optional)
+        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
+        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
+        
+        atlassian_tokens = {}
+        if atlassian_jira_token:
+            atlassian_tokens["jira"] = atlassian_jira_token
+        if atlassian_confluence_token:
+            atlassian_tokens["confluence"] = atlassian_confluence_token
+
         # Enrich each testcase with logs if missing
         enriched = []
         for tc in testcases:
@@ -11741,7 +17593,11 @@ def cursor_ai_analyze_batch():
 
         resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/analyze-batch",
-            json={"testcases": enriched},
+            json={
+                "testcases": enriched,
+                "cursor_api_key": cursor_api_key,
+                "atlassian_tokens": atlassian_tokens,
+            },
             timeout=30,
         )
         if resp.status_code != 200:
@@ -11853,6 +17709,26 @@ def cursor_ai_follow_up():
         if not question:
             return jsonify({"error": "question is required"}), 400
 
+        # Get user API keys for Cursor SDK
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        
+        if not cursor_api_key:
+            return jsonify({
+                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "require_key_setup": True
+            }), 403
+
+        # Get Atlassian tokens (optional)
+        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
+        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
+        
+        atlassian_tokens = {}
+        if atlassian_jira_token:
+            atlassian_tokens["jira"] = atlassian_jira_token
+        if atlassian_confluence_token:
+            atlassian_tokens["confluence"] = atlassian_confluence_token
+
         resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/follow-up",
             json={
@@ -11860,6 +17736,8 @@ def cursor_ai_follow_up():
                 "question": question,
                 "mode": mode,
                 "recovery_context": recovery_context,
+                "cursor_api_key": cursor_api_key,
+                "atlassian_tokens": atlassian_tokens,
             },
             timeout=600,
         )
@@ -12258,11 +18136,101 @@ def cursor_ai_sync_skills():
         return jsonify({"error": str(e)}), 500
 
 
+def _cursor_bridge_chat(messages, system_prompt, mode):
+    """Send chat to cursor-bridge /chat using the caller's Cursor API key.
+
+    Returns (response_dict, http_status). response_dict has success=True on OK.
+    """
+    last_user_msg = ""
+    for msg in reversed(messages or []):
+        if msg.get("role") == "user":
+            last_user_msg = (msg.get("content") or "").strip()
+            break
+    if not last_user_msg:
+        return {"error": "No user message for Cursor Bridge chat"}, 400
+
+    username = _current_username()
+    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+    if not cursor_api_key:
+        return {
+            "error": (
+                "Cursor API key required for chat (Nutanix AI key is invalid/unavailable). "
+                "Add it under Settings → API Keys."
+            ),
+            "require_key_setup": True,
+        }, 403
+
+    atlassian_tokens = {}
+    jira_tok = get_user_key(username, "atlassian_jira_token") if username else None
+    conf_tok = get_user_key(username, "atlassian_confluence_token") if username else None
+    if jira_tok:
+        atlassian_tokens["jira"] = jira_tok
+    if conf_tok:
+        atlassian_tokens["confluence"] = conf_tok
+
+    try:
+        bridge_resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/chat",
+            json={
+                "message": last_user_msg,
+                "system_prompt": system_prompt or "",
+                "cursor_api_key": cursor_api_key,
+                "atlassian_tokens": atlassian_tokens,
+            },
+            timeout=600,
+        )
+    except requests.exceptions.ConnectionError:
+        logger.error("[cursor-ai-chat] Cursor bridge not reachable at %s", CURSOR_BRIDGE_URL)
+        return {
+            "error": (
+                f"Cursor Bridge is not reachable at {CURSOR_BRIDGE_URL}. "
+                "Start it with: cd cursor-bridge && npm start"
+            ),
+        }, 503
+    except requests.exceptions.Timeout:
+        return {"error": "Cursor Bridge chat timed out (>600s)."}, 504
+    except Exception as bridge_exc:
+        logger.error("[cursor-ai-chat] Cursor Bridge request failed: %s", bridge_exc)
+        return {"error": f"Cursor Bridge request failed: {bridge_exc}"}, 503
+
+    if bridge_resp.status_code == 200:
+        bridge_data = bridge_resp.json() or {}
+        reply = (bridge_data.get("reply") or "").strip()
+        if not reply:
+            analysis = bridge_data.get("analysis") or {}
+            reply = (
+                analysis.get("follow_up_answer")
+                or analysis.get("root_cause")
+                or json.dumps(analysis or bridge_data, indent=2)
+            )
+        return {
+            "success": True,
+            "reply": reply,
+            "mode": mode,
+            "model": "cursor-bridge",
+            "tools_used": [],
+        }, 200
+
+    bridge_err = ""
+    try:
+        bridge_err = ((bridge_resp.json() or {}).get("error") or "") or bridge_resp.text
+    except Exception:
+        bridge_err = bridge_resp.text
+    logger.error(
+        "[cursor-ai-chat] Cursor Bridge HTTP %s: %s",
+        bridge_resp.status_code,
+        (bridge_err or "")[:500],
+    )
+    return {
+        "error": f"Cursor Bridge chat failed: {bridge_err or bridge_resp.status_code}",
+    }, 503
+
+
 @app.route("/mcp/regression/cursor-ai/chat", methods=["POST"])
 @app.route("/api/mcp/regression/cursor-ai/chat", methods=["POST"])
 @jwt_required
 def cursor_ai_chat():
-    """Interactive Cursor AI chat endpoint supporting multiple modes and MCP context."""
+    """Interactive chat: prefer Cursor Bridge (user key), else Nutanix AI."""
     try:
         body = request.get_json(force=True) or {}
         messages = body.get("messages", [])
@@ -12278,7 +18246,6 @@ def cursor_ai_chat():
 
         system_prompt = MODE_SYSTEM_PROMPTS[mode]
 
-        # Add MCP context to system prompt
         if mcp_servers:
             active_tools = []
             for sid in mcp_servers:
@@ -12293,19 +18260,32 @@ def cursor_ai_chat():
                     "data-driven insights where possible."
                 )
 
-        # Build chat messages in OpenAI-compatible format
+        # Prefer Cursor Bridge when the user has a Cursor API key — Nutanix AI
+        # enterprise key is frequently expired/unauthorized in local/dev setups.
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        if cursor_api_key:
+            bridge_body, bridge_status = _cursor_bridge_chat(messages, system_prompt, mode)
+            if bridge_body.get("success"):
+                return jsonify(bridge_body), bridge_status
+            logger.warning(
+                "[cursor-ai-chat] Cursor Bridge preferred path failed (%s); trying Nutanix AI",
+                bridge_body.get("error", bridge_status),
+            )
+        else:
+            bridge_body, bridge_status = None, None
+
         chat_messages = [{"role": "system", "content": system_prompt}]
         for msg in messages:
             role = msg.get("role", "user")
             if role in ("user", "assistant"):
                 chat_messages.append({"role": role, "content": msg.get("content", "")})
 
-        # Map model names
         ai_model = model
         if model in ("claude-sonnet-4.6-high", "claude-sonnet-4.6"):
             ai_model = "hack-reason"
 
-        payload = {
+        nutanix_payload = {
             "model": ai_model,
             "messages": chat_messages,
             "max_tokens": 4096,
@@ -12319,80 +18299,48 @@ def cursor_ai_chat():
             "Content-Type": "application/json",
         }
 
-        data = json.dumps(payload).encode("utf-8")
+        data = json.dumps(nutanix_payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, context=SSL_CTX, timeout=120) as resp:
-            if resp.getcode() != 200:
-                return jsonify({"error": f"AI API returned HTTP {resp.getcode()}"}), 502
-
-            response_data = json.loads(resp.read().decode())
-            choices = response_data.get("choices", [])
-            if not choices:
-                return jsonify({"error": "AI returned no choices"}), 502
-
-            content = (choices[0].get("message") or {}).get("content", "")
-
-            tools_used = []
-            if mcp_servers:
-                for sid in mcp_servers[:5]:
-                    cfg = MCP_SERVER_CONFIGS.get(sid)
-                    if cfg and cfg["description"].lower() in content.lower():
-                        tools_used.append(sid)
-
-            return jsonify({
-                "success": True,
-                "reply": content.strip(),
-                "mode": mode,
-                "model": model,
-                "tools_used": tools_used,
-            })
-
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode() if e.fp else ""
-        logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
-        return jsonify({"error": f"AI API error (HTTP {e.code})"}), 502
-    except urllib.error.URLError as e:
-        logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason}), falling back to Cursor Bridge")
-        # Fallback: route through the Cursor Bridge when the Nutanix AI endpoint is down
         try:
-            last_user_msg = ""
-            for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    last_user_msg = msg.get("content", "")
-                    break
-            if not last_user_msg:
-                return jsonify({"error": "Cannot reach AI API endpoint and no user message for fallback"}), 503
+            with urllib.request.urlopen(req, context=SSL_CTX, timeout=120) as resp:
+                if resp.getcode() != 200:
+                    return jsonify({"error": f"AI API returned HTTP {resp.getcode()}"}), 502
 
-            bridge_resp = requests.post(
-                f"{CURSOR_BRIDGE_URL}/analyze-testcase",
-                json={
-                    "testcase_name": "cursor-ai-chat-fallback",
-                    "exception_summary": last_user_msg,
-                    "exception": "",
-                    "steps_log": "",
-                    "nutest_test_log": "",
-                    "test_log_url": "",
-                    "jira_tickets": [],
-                    "failure_stage": "chat",
-                },
-                timeout=600,
-            )
-            if bridge_resp.status_code == 200:
-                bridge_data = bridge_resp.json()
-                analysis = bridge_data.get("analysis", {})
-                reply = analysis.get("follow_up_answer") or analysis.get("root_cause") or json.dumps(analysis, indent=2)
+                response_data = json.loads(resp.read().decode())
+                choices = response_data.get("choices", [])
+                if not choices:
+                    return jsonify({"error": "AI returned no choices"}), 502
+
+                content = (choices[0].get("message") or {}).get("content", "")
+
+                tools_used = []
+                if mcp_servers:
+                    for sid in mcp_servers[:5]:
+                        cfg = MCP_SERVER_CONFIGS.get(sid)
+                        if cfg and cfg["description"].lower() in content.lower():
+                            tools_used.append(sid)
+
                 return jsonify({
                     "success": True,
-                    "reply": reply,
+                    "reply": content.strip(),
                     "mode": mode,
-                    "model": "cursor-bridge-fallback",
-                    "tools_used": [],
+                    "model": model,
+                    "tools_used": tools_used,
                 })
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            if isinstance(e, urllib.error.HTTPError):
+                error_body = e.read().decode() if e.fp else ""
+                logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
             else:
-                return jsonify({"error": "Cannot reach AI API endpoint and Cursor Bridge also failed"}), 503
-        except Exception as fallback_err:
-            logger.error(f"[cursor-ai-chat] Cursor Bridge fallback also failed: {fallback_err}")
-            return jsonify({"error": "Cannot reach AI API endpoint. Cursor Bridge fallback also unavailable."}), 503
+                logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason})")
+
+            if cursor_api_key and bridge_body is not None:
+                return jsonify(bridge_body), bridge_status
+
+            # No Cursor key — bridge call returns require_key_setup
+            fb_body, fb_status = _cursor_bridge_chat(messages, system_prompt, mode)
+            return jsonify(fb_body), fb_status
+
     except Exception as e:
         logger.error(f"Error in cursor-ai chat: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -12413,76 +18361,1365 @@ def cursor_ai_list_mcp_servers():
     return jsonify({"success": True, "servers": servers})
 
 
+
+
+# ======================================================
+# Handover / Onboarding & Deprecation (ported feature)
+# ======================================================
+# ======================================================
+# Handover / JITA Analysis - Parse URL
+# ======================================================
+def parse_jita_url(url):
+    """Extract task_ids from JITA results URL or direct API URL."""
+    if not url or not url.strip():
+        return []
+    from urllib.parse import urlparse, parse_qs
+    url = url.strip()
+    parsed = urlparse(url)
+    if "/agave_tasks/" in parsed.path:
+        task_id = parsed.path.rstrip("/").split("/")[-1]
+        if task_id and len(task_id) >= 20:
+            return [task_id]
+    qs = parse_qs(parsed.query)
+    task_ids_param = qs.get("task_ids", [])
+    if not task_ids_param:
+        return []
+    raw = task_ids_param[0] if isinstance(task_ids_param[0], str) else ",".join(task_ids_param)
+    return [tid.strip() for tid in raw.split(",") if tid.strip()]
+
+
+# ======================================================
+# Jira Helper Functions (for Handover)
+# ======================================================
+_JIRA_ISSUE_KEY_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_]+-\d+)\b")
+
+
+def _normalize_jira_issue_key(ticket_id):
+    """Extract a Jira issue key (e.g. ENG-12345) from a raw ticket string or URL."""
+    if ticket_id is None:
+        return None
+    text = str(ticket_id).strip()
+    if not text:
+        return None
+    match = _JIRA_ISSUE_KEY_RE.search(text)
+    if not match:
+        return text
+    project, number = match.group(1).split("-", 1)
+    return "%s-%s" % (project.upper(), number)
+
+
+def _named_jira_field(value, default="Unknown"):
+    """Read ``name`` from a Jira field object that may be None, a dict, or a string."""
+    if not value:
+        return default
+    if isinstance(value, dict):
+        return (value.get("name") or default).strip() or default
+    text = str(value).strip()
+    return text or default
+
+
+def _extract_jira_ticket_detail(jira_data):
+    """Map a Jira issue payload to status / issue_type / categorized bug_type."""
+    if not jira_data:
+        return {"status": "N/A", "issue_type": "N/A", "bug_type": None}
+    fields = jira_data.get("fields") or {}
+    issue_type = _named_jira_field(fields.get("issuetype"))
+    status = _named_jira_field(fields.get("status"))
+    return {
+        "status": status,
+        "issue_type": issue_type,
+        "bug_type": _categorize_bug_type_from_issuetype(issue_type),
+    }
+
+
+def _categorize_bug_type_from_issuetype(issuetype):
+    """Categorize bug type from Jira issuetype name."""
+    if not issuetype:
+        return None
+    issuetype_lower = issuetype.lower()
+    if "environment" in issuetype_lower:
+        return "Environment"
+    elif "flaky" in issuetype_lower:
+        return "Flaky"
+    elif "test" in issuetype_lower or "testbed" in issuetype_lower:
+        # Any test-type issue (e.g. "Test", "Test Bug") counts as a test issue.
+        return "Test Bug"
+    elif "bug" in issuetype_lower:
+        # Any remaining bug (e.g. "Bug", "Product Bug") counts as a product bug.
+        return "Product Bug"
+    return None
+
+
+def _fetch_ticket_issuetype(ticket):
+    """Fetch Jira ticket issuetype using the app's Jira integration
+    (JIRA_BASE + get_jira_headers() + shared session). Returns (issuetype, error)."""
+    if not ticket or not ticket.strip():
+        return None, None
+    ticket = ticket.strip().upper()
+    if "-" in ticket and ticket.split("-")[0].isalpha():
+        ticket = ticket.split("-")[0].upper() + "-" + (ticket.split("-", 1)[1] or "")
+
+    if not resolve_jira_token():
+        return None, "Jira not configured"
+
+    url = "%s/issue/%s" % (JIRA_BASE, ticket)
+
+    try:
+        resp = session.get(url, headers=get_jira_headers(), timeout=10)
+        if resp.status_code == 401:
+            return None, "Authentication required"
+        if resp.status_code == 404:
+            return None, "Ticket not found"
+        if resp.status_code == 403:
+            return None, "Forbidden"
+        resp.raise_for_status()
+        data = resp.json()
+        name = _named_jira_field((data.get("fields") or {}).get("issuetype"), default="")
+        return name or None, None
+    except requests.RequestException as e:
+        err_msg = str(e) or "Failed to fetch Jira issue."
+        if "resolve" in err_msg.lower() or "nodename" in err_msg.lower():
+            err_msg = "Cannot reach Jira server. Check network or VPN."
+        elif "Connection" in err_msg and ("refused" in err_msg.lower() or "timeout" in err_msg.lower()):
+            err_msg = "Cannot connect to Jira. Check network/VPN or try again later."
+        return None, err_msg
+    except Exception:
+        return None, "Error"
+
+
+def _get_task_id_from_run(run):
+    """Extract task_id string from a test run's agave_task_id."""
+    aid = run.get("agave_task_id")
+    if not aid:
+        return None
+    if isinstance(aid, dict) and "$oid" in aid:
+        return aid["$oid"]
+    return str(aid)
+
+
+def _aggregate_jita_test_cases(test_data, min_passes_for_success=1, auto_categorize_bug_types=False, latest_2_task_ids=None):
+    """Aggregate test results by test_name. Returns (test_cases_list, total_executions, total_passed, all_tests_passed, summary, tickets_set).
+    If latest_2_task_ids is provided, only consider runs from those 2 most recent tasks (consecutive latest runs).
+    A test passes only if it passed in BOTH of the 2 latest runs (consecutive passes)."""
+    by_name = defaultdict(list)
+    tickets_set = set()
+    tickets_by_test = defaultdict(set)
+    for test in test_data:
+        test_name = test.get("test", {}).get("name", "")
+        if not test_name:
+            continue
+        # Filter to only 2 latest runs if specified
+        if latest_2_task_ids:
+            tid = _get_task_id_from_run(test)
+            if tid not in latest_2_task_ids:
+                continue
+        by_name[test_name].append(test)
+        test_tickets = test.get("jira_tickets") or []
+        for t in test_tickets:
+            if t and t.strip():
+                tickets_set.add(t.strip())
+                tickets_by_test[test_name].add(t.strip())
+
+    # When using latest_2_task_ids, total_executions/total_passed reflect only those 2 runs
+    filtered_data = test_data
+    if latest_2_task_ids:
+        filtered_data = [t for t in test_data if _get_task_id_from_run(t) in latest_2_task_ids]
+    total_executions = len(filtered_data)
+    total_passed = sum(1 for t in filtered_data if t.get("status") == "Succeeded")
+    test_cases = []
+    summary = {"total": 0, "succeeded": 0, "failed": 0, "warning": 0, "pending": 0, "running": 0, "skipped": 0}
+    all_succeeded = True
+
+    for test_name, runs in by_name.items():
+        total_count = len(runs)
+        passed_count = sum(1 for r in runs if r.get("status") == "Succeeded")
+        # When using latest_2_task_ids: require BOTH runs to pass (consecutive). Otherwise use min_passes_for_success.
+        required_passes = 2 if latest_2_task_ids else min_passes_for_success
+        derived_status = "Succeeded" if passed_count >= required_passes else "Failed"
+        if derived_status != "Succeeded":
+            all_succeeded = False
+        jira_tickets = []
+        seen = set()
+        for r in runs:
+            raw_tickets = r.get("jira_tickets") or []
+            for t in raw_tickets:
+                if t and t.strip():
+                    ticket_clean = t.strip()
+                    if ticket_clean not in seen:
+                        seen.add(ticket_clean)
+                        jira_tickets.append(ticket_clean)
+
+        bug_types = set()
+        if auto_categorize_bug_types and jira_tickets and resolve_jira_token():
+            for ticket in jira_tickets:
+                if not ticket or not ticket.strip():
+                    continue
+                ticket_clean = ticket.strip().upper()
+                if "-" in ticket_clean:
+                    parts = ticket_clean.split("-", 1)
+                    if len(parts) == 2 and parts[0].isalpha() and parts[1]:
+                        ticket_clean = f"{parts[0].upper()}-{parts[1]}"
+                    else:
+                        continue
+                else:
+                    continue
+
+                issuetype, error = _fetch_ticket_issuetype(ticket_clean)
+                if issuetype:
+                    bug_type = _categorize_bug_type_from_issuetype(issuetype)
+                    if bug_type:
+                        bug_types.add(bug_type)
+                if len(jira_tickets) > 1:
+                    time.sleep(0.1)
+
+        bug_type_str = ", ".join(sorted(bug_types)) if bug_types else None
+
+        exception_summary = None
+        test_log_url = None
+        failure_analysis = None
+        for r in runs:
+            if r.get("exception_summary") and not exception_summary:
+                exception_summary = r.get("exception_summary")
+            if r.get("test_log_url") and not test_log_url:
+                test_log_url = r.get("test_log_url")
+            if r.get("failure_analysis") and not failure_analysis:
+                failure_analysis = r.get("failure_analysis")
+            if exception_summary and test_log_url and failure_analysis:
+                break
+
+        test_case_obj = {
+            "test_name": test_name,
+            "status": derived_status,
+            "total_count": total_count,
+            "passed_count": passed_count,
+            "jira_tickets": jira_tickets,
+            "exception_summary": exception_summary,
+            "test_log_url": test_log_url,
+            "failure_analysis": failure_analysis,
+            "bug_type": bug_type_str,
+        }
+        test_cases.append(test_case_obj)
+        summary["total"] += 1
+        if derived_status == "Succeeded":
+            summary["succeeded"] += 1
+        else:
+            summary["failed"] += 1
+
+    all_tests_passed = all_succeeded and (summary["failed"] == 0)
+    return test_cases, total_executions, total_passed, all_tests_passed, summary, list(tickets_set)
+
+
+@app.route("/mcp/regression/jita-analysis", methods=["GET", "POST"])
+@jwt_required
+def jita_analysis():
+    """Fetch by tag (same as Triage), or by JITA URL(s) / task_ids. Returns test cases with aggregated pass/fail."""
+    import re
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    start = time.time()
+    url = ""
+    urls_param = []
+    task_ids_param = ""
+    tag_param = ""
+    input_param = ""
+    min_passes = 1
+
+    if request.method == "POST" and request.is_json:
+        data = request.get_json() or {}
+        url = (data.get("url") or "").strip()
+        urls_param = data.get("urls") or []
+        if isinstance(urls_param, str):
+            urls_param = [s.strip() for s in urls_param.split("\n") if s.strip()]
+        else:
+            urls_param = [(u or "").strip() for u in urls_param if (u or "").strip()]
+        task_ids_param = (data.get("task_ids") or "").strip()
+        tag_param = (data.get("tag") or "").strip()
+        input_param = (data.get("input") or "").strip()
+        min_passes = int(data.get("min_passes_for_success") or 1)
+    else:
+        url = request.args.get("url", "").strip()
+        urls_param = request.args.getlist("urls") or []
+        urls_param = [u.strip() for u in urls_param if u.strip()]
+        task_ids_param = request.args.get("task_ids", "").strip()
+        tag_param = request.args.get("tag", "").strip()
+        input_param = request.args.get("input", "").strip()
+        try:
+            min_passes = int(request.args.get("min_passes_for_success") or 1)
+        except Exception:
+            min_passes = 1
+
+    task_ids = []
+    if tag_param:
+        logger.info(f"[START] JITA Analysis (by tag) | tag={tag_param}")
+        try:
+            tasks = fetch_regression_tasks(tag_param)
+            task_ids = [t["_id"]["$oid"] for t in tasks if t.get("_id", {}).get("$oid")]
+            logger.info(f"JITA Analysis | tag yielded {len(task_ids)} task_ids")
+        except Exception as e:
+            logger.error(f"JITA Analysis by tag failed: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    if not task_ids and urls_param:
+        for u in urls_param:
+            if u.startswith("http://") or u.startswith("https://"):
+                task_ids.extend(parse_jita_url(u))
+            else:
+                potential_ids = re.split(r'[,\s\n]+', u)
+                task_ids.extend([tid.strip() for tid in potential_ids if tid.strip() and re.match(r'^[a-f0-9]{20,}$', tid.strip())])
+        task_ids = list(dict.fromkeys(task_ids))
+
+    if not task_ids and input_param:
+        if input_param.startswith("http://") or input_param.startswith("https://"):
+            task_ids = parse_jita_url(input_param)
+        else:
+            potential_ids = re.split(r'[,\s\n]+', input_param)
+            task_ids = [tid.strip() for tid in potential_ids if tid.strip() and re.match(r'^[a-f0-9]{20,}$', tid.strip())]
+
+    if not task_ids and url:
+        task_ids = parse_jita_url(url)
+
+    if not task_ids and task_ids_param:
+        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
+
+    if not task_ids:
+        return jsonify({
+            "error": "Provide JITA URL(s) (e.g. https://jita.../results?task_ids=...) or task ID(s) (24-char hex, comma/space separated)"
+        }), 400
+
+    logger.info(f"[START] JITA Analysis | task_ids={len(task_ids)} | min_passes={min_passes}")
+    try:
+        try:
+            test_data = fetch_test_results_batch_with_pagination(task_ids, timeout=180, merge=False)
+            logger.info(f"JITA Analysis | fetched {len(test_data)} test results")
+        except Exception as fetch_err:
+            err_msg = str(fetch_err)
+            if "timeout" in err_msg.lower() or "connection" in err_msg.lower() or "network" in err_msg.lower() or "resolve" in err_msg.lower():
+                return jsonify({
+                    "error": f"Network error while fetching JITA data: {err_msg}. Please check your VPN connection and ensure JITA server is accessible.",
+                    "task_ids": task_ids,
+                    "generated_at": datetime.utcnow().isoformat()
+                }), 500
+            raise
+
+        task_metadata = []
+        task_id_to_ts = {}
+        for tid in task_ids:
+            try:
+                agave = fetch_agave_task(tid)
+                tfm = agave.get("test_framework_metadata", {}) or {}
+                test_branch = tfm.get("test", {}).get("branch") if tfm.get("test") else None
+                framework_branch = tfm.get("framework", {}).get("branch") if tfm.get("framework") else None
+                raw_ts = agave.get("updated_at") or agave.get("created_at") or ""
+                # Normalize to comparable string: API may return dict e.g. {"$date": "..."} or nested
+                if isinstance(raw_ts, dict):
+                    val = raw_ts.get("$date") or raw_ts.get("$numberLong") or ""
+                    while isinstance(val, dict):
+                        val = val.get("$date") or val.get("$numberLong") or ""
+                    updated_at = str(val) if val and not isinstance(val, dict) else ""
+                else:
+                    updated_at = str(raw_ts) if raw_ts else ""
+                task_id_to_ts[tid] = str(updated_at)  # ensure always string
+                if len(task_metadata) < 20:
+                    task_metadata.append({
+                        "task_id": tid,
+                        "status": agave.get("status"),
+                        "label": agave.get("label"),
+                        "branch": test_branch or framework_branch,
+                        "test_result_count": agave.get("test_result_count", {}),
+                        "emails": agave.get("emails", []),
+                        "test_framework_metadata": tfm,
+                        "container_details": agave.get("container_details"),
+                        "updated_at": updated_at,
+                    })
+            except Exception as e:
+                logger.warning(f"Could not fetch agave_tasks for {tid}: {e}")
+                task_id_to_ts[tid] = ""
+
+        # Sort tasks by date (newest first), take 2 latest for "consecutive passes" logic
+        def _ts_key(tid):
+            v = task_id_to_ts.get(tid, "")
+            return str(v) if not isinstance(v, str) else v  # always comparable string
+        sorted_task_ids = sorted(task_ids, key=_ts_key, reverse=True)
+        latest_2_task_ids = set(sorted_task_ids[:2]) if len(sorted_task_ids) >= 2 else None
+        if latest_2_task_ids:
+            logger.info(f"JITA Analysis | Using 2 latest runs only (consecutive): {list(latest_2_task_ids)}")
+
+        test_cases, total_executions, total_passed, all_tests_passed, summary, tickets_set = _aggregate_jita_test_cases(
+            test_data, min_passes_for_success=min_passes, auto_categorize_bug_types=True, latest_2_task_ids=latest_2_task_ids
+        )
+        logger.info(f"[END] JITA Analysis | all_passed={all_tests_passed} | time={time.time() - start:.2f}s")
+        return jsonify({
+            "task_ids": task_ids,
+            "tag": tag_param or None,
+            "jita_url": url or None,
+            "urls": urls_param if urls_param else None,
+            "task_metadata": task_metadata,
+            "all_tests_passed": all_tests_passed,
+            "summary": summary,
+            "test_cases": test_cases,
+            "assigned_tickets": tickets_set,
+            "total_executions": total_executions,
+            "total_passed": total_passed,
+            "min_passes_for_success": min_passes,
+            "generated_at": datetime.utcnow().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"Error in JITA analysis: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
+# ======================================================
+# Handover Records Support
+# ======================================================
+# Use abspath so the path is correct regardless of cwd when backend is started
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_BACKEND_DIR)
+HANDOVER_RECORDS_PATH = (os.getenv("HANDOVER_RECORDS_PATH") or "").strip() or os.path.join(_PROJECT_ROOT, "data", "handover_records.json")
+
+def _load_handover_records():
+    """Load handover records from JSON file"""
+    try:
+        parent = os.path.dirname(HANDOVER_RECORDS_PATH)
+        if not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+        if os.path.exists(HANDOVER_RECORDS_PATH):
+            with open(HANDOVER_RECORDS_PATH, "r") as f:
+                data = json.load(f)
+                return data.get("records", [])
+    except Exception as e:
+        logger.warning(f"Could not load handover records: {e}")
+    return []
+
+
+def _save_handover_records(records):
+    """Save handover records to JSON file"""
+    try:
+        parent = os.path.dirname(HANDOVER_RECORDS_PATH)
+        os.makedirs(parent, exist_ok=True)
+        with open(HANDOVER_RECORDS_PATH, "w") as f:
+            json.dump({"records": records, "updated_at": datetime.utcnow().isoformat()}, f, indent=2)
+    except Exception as e:
+        logger.error(f"Could not save handover records: {e}")
+
+
+def _add_handover_records(test_names, tickets, by_whom, branch="", lst_file="", test_bug_types=None, test_bug_tickets=None, handover_tickets=None):
+    """Add handover records for test names"""
+    records = _load_handover_records()
+    now = datetime.utcnow().isoformat()
+    ticket_list = tickets if isinstance(tickets, list) else []
+    test_bug_types = test_bug_types if isinstance(test_bug_types, dict) else {}
+    test_bug_tickets = test_bug_tickets if isinstance(test_bug_tickets, dict) else {}
+    handover_tickets_list = handover_tickets if isinstance(handover_tickets, list) else []
+    for test_name in test_names:
+        if not (test_name and test_name.strip()):
+            continue
+        test_name = test_name.strip()
+        tix = ticket_list
+        if isinstance(tickets, dict) and test_name in tickets:
+            tix = tickets[test_name] if isinstance(tickets[test_name], list) else [tickets[test_name]]
+        bug_tix = []
+        if isinstance(test_bug_tickets, dict) and test_name in test_bug_tickets:
+            bug_tix = test_bug_tickets[test_name] if isinstance(test_bug_tickets[test_name], list) else [test_bug_tickets[test_name]]
+        handover_tix = handover_tickets_list.copy()
+        rec = {
+            "test_name": test_name,
+            "tickets": tix if isinstance(tix, list) else [tix] if tix else [],
+            "bug_tickets": bug_tix,
+            "handover_tickets": handover_tix,
+            "handover_date": now,
+            "by_whom": by_whom or "unknown",
+            "branch": branch,
+            "lst_file": lst_file,
+        }
+        if test_name in test_bug_types and test_bug_types[test_name]:
+            rec["bug_type"] = test_bug_types[test_name]
+        records.append(rec)
+    _save_handover_records(records)
+    logger.info(f"[HANDOVER-RECORD] Saved {len(test_names)} record(s), by {by_whom}")
+
+
+def _delete_handover_record(test_name, handover_date, lst_file):
+    """Delete a handover record"""
+    records = _load_handover_records()
+    lst = (lst_file or "").strip()
+    date_str = (handover_date or "").strip()
+    name = (test_name or "").strip()
+    for i, r in enumerate(records):
+        if (r.get("test_name") or "").strip() == name and (r.get("handover_date") or "").strip() == date_str and (r.get("lst_file") or "").strip() == lst:
+            records.pop(i)
+            _save_handover_records(records)
+            logger.info(f"[HANDOVER-RECORD] Deleted record: {name} @ {date_str}")
+            return True
+    return False
+
+
+@app.route("/mcp/regression/handover-record", methods=["POST"])
+@jwt_required
+def handover_record():
+    """Create a handover record"""
+    data = request.get_json() or {}
+    test_names = data.get("test_names", [])
+    tickets = data.get("tickets", [])
+    test_tickets = data.get("test_tickets", {})
+    test_bug_types = data.get("test_bug_types") or {}
+    test_bug_tickets = data.get("test_bug_tickets", {})
+    handover_tickets = data.get("handover_tickets", [])
+    by_whom = (data.get("by_whom") or data.get("user_email") or data.get("user_name") or "").strip()
+    branch = (data.get("branch") or "").strip()
+    lst_file = (data.get("lst_file") or "").strip()
+    if not test_names:
+        return jsonify({"error": "test_names is required"}), 400
+    _add_handover_records(test_names, test_tickets if test_tickets else tickets, by_whom or "unknown", branch, lst_file, test_bug_types=test_bug_types, test_bug_tickets=test_bug_tickets, handover_tickets=handover_tickets)
+    return jsonify({"success": True, "message": "Recorded handover for %s test(s)." % len(test_names), "generated_at": datetime.utcnow().isoformat()})
+
+
+@app.route("/mcp/regression/handover-record-delete", methods=["POST"])
+@jwt_required
+def handover_record_delete():
+    """Delete a handover record"""
+    data = request.get_json() or {}
+    test_name = (data.get("test_name") or "").strip()
+    handover_date = (data.get("handover_date") or "").strip()
+    lst_file = (data.get("lst_file") or "").strip()
+    if not test_name or not handover_date:
+        return jsonify({"error": "test_name and handover_date are required"}), 400
+    removed = _delete_handover_record(test_name, handover_date, lst_file)
+    return jsonify({"success": removed, "message": "Record deleted." if removed else "No matching record found.", "generated_at": datetime.utcnow().isoformat()})
+
+
+@app.route("/mcp/regression/validate-jira-ticket", methods=["GET", "POST"])
+@jwt_required
+def validate_jira_ticket():
+    """Validate if a Jira ticket exists and return its issuetype."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    ticket = ""
+    if request.method == "POST" and request.is_json:
+        ticket = (request.get_json() or {}).get("ticket", "").strip().upper()
+    else:
+        ticket = (request.args.get("ticket") or "").strip().upper()
+
+    if not ticket:
+        return jsonify({"valid": False, "ticket": "", "issuetype": None, "error": "ticket is required"}), 400
+
+    if "-" in ticket and ticket.split("-")[0].isalpha():
+        ticket = ticket.split("-")[0].upper() + "-" + (ticket.split("-", 1)[1] or "")
+
+    if not resolve_jira_token():
+        return jsonify({
+            "valid": None, "ticket": ticket, "issuetype": None, "skipped": True,
+            "message": (
+                "Jira validation is not configured. "
+                "Open User Settings → API Keys and add your Atlassian Jira Personal Token."
+            )
+        }), 200
+
+    url = "%s/issue/%s" % (JIRA_BASE, ticket)
+
+    try:
+        resp = session.get(url, headers=get_jira_headers(), timeout=10)
+        if resp.status_code == 401:
+            return jsonify({
+                "valid": False, "ticket": ticket, "issuetype": None,
+                "error": (
+                    "Authentication required. Check your Atlassian Jira Personal Token "
+                    "in User Settings → API Keys."
+                )
+            }), 200
+        if resp.status_code == 404:
+            return jsonify({"valid": False, "ticket": ticket, "issuetype": None, "error": "Ticket not found"}), 200
+        if resp.status_code == 403:
+            return jsonify({"valid": False, "ticket": ticket, "issuetype": None, "error": "Forbidden"}), 200
+        resp.raise_for_status()
+        data = resp.json()
+        name = _named_jira_field((data.get("fields") or {}).get("issuetype"), default="")
+        bug_type = _categorize_bug_type_from_issuetype(name)
+        is_valid = bug_type == "Product Bug"
+        return jsonify({
+            "valid": is_valid, "ticket": ticket, "issuetype": name, "bug_type": bug_type,
+            "generated_at": datetime.utcnow().isoformat()
+        })
+    except requests.RequestException as e:
+        err_msg = str(e)
+        if "resolve" in err_msg.lower() or "nodename" in err_msg.lower():
+            return jsonify({
+                "valid": False, "ticket": ticket, "issuetype": None,
+                "error": "Cannot reach Jira server. Check network or VPN."
+            }), 200
+        return jsonify({"valid": False, "ticket": ticket, "issuetype": None, "error": err_msg}), 200
+    except Exception as e:
+        return jsonify({"valid": False, "ticket": ticket, "issuetype": None, "error": str(e)}), 200
+
+
+# ======================================================
+# Handover - validate-lst, create-lst-cr, check-lst-testcases, search-lst-file, deprecate-lst-cr, deprecation-search
+# ======================================================
+def validate_with_sourcegraph(repo_name, branch, file_path):
+    """Validate branch and file exist in repo via Sourcegraph."""
+    results = {"branch_valid": None, "file_valid": None, "branch_error": None, "file_error": None, "file_suggestions": [], "auth_required": False}
+    sg_token = (os.getenv("SOURCEGRAPH_TOKEN", "") or "").strip()
+    sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
+    sg_graphql_path = (os.getenv("SOURCEGRAPH_GRAPHQL_PATH") or "/api/graphql").strip() or "/api/graphql"
+    if not sg_token:
+        results["auth_required"] = True
+        return results
+    base_url = sg_url
+    if not base_url:
+        results["branch_error"] = "SOURCEGRAPH_URL not set"
+        return results
+    api_urls_to_try = []
+    sg_graphql_url = (os.getenv("SOURCEGRAPH_GRAPHQL_URL") or "").strip().rstrip("/")
+    if sg_graphql_url:
+        api_urls_to_try.append(sg_graphql_url)
+    base = (base_url or "").strip().rstrip("/")
+    graphql_path = sg_graphql_path
+    if not graphql_path.startswith("/"):
+        graphql_path = "/" + graphql_path
+    if base:
+        api_url = base + graphql_path
+        if api_url not in api_urls_to_try:
+            api_urls_to_try.append(api_url)
+    if base:
+        for p in ["/api/graphql", "/.api/graphql", "/graphql"]:
+            full = base + p
+            if full not in api_urls_to_try:
+                api_urls_to_try.append(full)
+    auth_headers = [
+        {"Content-Type": "application/json", "Authorization": "token %s" % sg_token},
+        {"Content-Type": "application/json", "Authorization": "Bearer %s" % sg_token},
+    ]
+    def run_search(search_query, url=None):
+        urls = [url] if url else api_urls_to_try
+        for u in urls:
+            if not u:
+                continue
+            for headers in auth_headers:
+                try:
+                    resp = requests.post(u, json={"query": "query Search($q: String!) { search(query: $q) { results { matchCount resultCount results { ... on FileMatch { file { path } } } } } }", "variables": {"q": search_query}}, headers=headers, timeout=20, verify=False)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("errors"):
+                            continue
+                        sr = data.get("data", {}).get("search", {}).get("results")
+                        if sr is not None:
+                            match_count = (sr or {}).get("matchCount") or (sr or {}).get("resultCount") or len((sr or {}).get("results", []))
+                            return (match_count or 0), None
+                except Exception:
+                    continue
+        return None, "Sourcegraph not configured or unreachable"
+    try:
+        branch_query = "repo:%s rev:%s count:1" % (repo_name, branch)
+        match_count, err = run_search(branch_query)
+        if err:
+            results["branch_valid"] = None
+            results["branch_error"] = err
+        else:
+            results["branch_valid"] = match_count > 0
+            if not results["branch_valid"]:
+                results["branch_error"] = "Branch '%s' not found" % branch
+    except Exception as e:
+        results["branch_valid"] = None
+        results["branch_error"] = str(e)
+    try:
+        file_query = "repo:%s rev:%s file:%s type:path count:10" % (repo_name, branch, file_path)
+        match_count, err = run_search(file_query)
+        if err:
+            results["file_valid"] = None
+            results["file_error"] = err
+        else:
+            results["file_valid"] = match_count > 0
+            if not results["file_valid"]:
+                results["file_error"] = "File '%s' not found" % file_path
+    except Exception as e:
+        results["file_valid"] = None
+        results["file_error"] = str(e)
+    return results
+
+
+def fetch_file_content_via_sourcegraph(repo_name, rev, file_path):
+    """Fetch file content from Sourcegraph. Returns (content, None) or (None, error_message)."""
+    sg_token = (os.getenv("SOURCEGRAPH_TOKEN", "") or "").strip()
+    if not sg_token:
+        return None, "SOURCEGRAPH_TOKEN environment variable not set. Set it on the backend or paste LST file content below."
+    base_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
+    if not base_url:
+        return None, "SOURCEGRAPH_URL not set"
+    api_urls = [base_url + p for p in ["/api/graphql", "/.api/graphql", "/graphql"]]
+    auth_headers = [
+        {"Content-Type": "application/json", "Authorization": "token %s" % sg_token},
+        {"Content-Type": "application/json", "Authorization": "Bearer %s" % sg_token},
+    ]
+    for query_name, query in [
+        ("blob", "query RepoFile($repo: String!, $rev: String!, $path: String!) { repository(name: $repo) { commit(rev: $rev) { blob(path: $path) { content } } } }"),
+        ("file", "query RepoFile($repo: String!, $rev: String!, $path: String!) { repository(name: $repo) { commit(rev: $rev) { file(path: $path) { content } } } }"),
+    ]:
+        payload = {"query": query, "variables": {"repo": repo_name, "rev": rev, "path": file_path}}
+        for api_url in api_urls:
+            for headers in auth_headers:
+                try:
+                    resp = requests.post(api_url, json=payload, headers=headers, timeout=20, verify=False)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("errors"):
+                            continue
+                        repo_data = (data.get("data") or {}).get("repository") or {}
+                        commit_data = repo_data.get("commit") or {}
+                        blob_or_file = commit_data.get("blob") or commit_data.get("file")
+                        if blob_or_file is not None and "content" in blob_or_file:
+                            return (blob_or_file.get("content") or ""), None
+                except Exception:
+                    continue
+    return None, "Could not fetch file from Sourcegraph. Set the SOURCEGRAPH_TOKEN environment variable or paste LST content below."
+
+
+def _check_testnames_in_lst_content(lst_content, test_names):
+    """Check which test names are present in LST file content. Returns (present_list, not_present_list)."""
+    if not lst_content or not isinstance(lst_content, str):
+        return [], test_names
+    existing = set()
+    lines = lst_content.splitlines()
+    for test_name in test_names:
+        test_name = test_name.strip()
+        if not test_name:
+            continue
+        for line in lines:
+            if test_name in line:
+                escaped_name = re.escape(test_name)
+                pattern = r'(^|[\s,\[\]"\'])' + escaped_name + r'([\s,\[\]"\']|$)'
+                if re.search(pattern, line):
+                    existing.add(test_name)
+    already_present = [t for t in test_names if t.strip() in existing]
+    not_present = [t for t in test_names if t.strip() not in existing]
+    return already_present, not_present
+
+
+@app.route("/mcp/regression/validate-lst", methods=["POST"])
+@jwt_required
+def validate_lst():
+    """Validate LST file path and branch via Sourcegraph."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json() or {}
+    branch = (data.get("branch") or "master").strip()
+    lst_file = (data.get("lst_file") or "").strip()
+    repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
+    if not lst_file:
+        return jsonify({"error": "lst_file is required", "branch_valid": None, "file_valid": None}), 400
+    validation_results = validate_with_sourcegraph(repo_name, branch, lst_file)
+    sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
+    sourcegraph_url = f"{sg_url}/{repo_name}@{branch}/-/blob/{lst_file.replace(' ', '+')}" if sg_url else None
+    return jsonify({
+        "branch": branch, "lst_file": lst_file, "repo_name": repo_name,
+        "branch_valid": validation_results.get("branch_valid"),
+        "file_valid": validation_results.get("file_valid"),
+        "branch_error": validation_results.get("branch_error"),
+        "file_error": validation_results.get("file_error"),
+        "file_suggestions": validation_results.get("file_suggestions", []),
+        "sourcegraph_url": sourcegraph_url,
+        "message": validation_results.get("message", ""),
+        "generated_at": datetime.utcnow().isoformat()
+    })
+
+
+@app.route("/mcp/regression/search-reviewers", methods=["GET"])
+@jwt_required
+def search_reviewers():
+    """Search for reviewers by name (uses Gerrit accounts suggest API). Returns name, email, username."""
+    q = (request.args.get("q") or "").strip()
+    if not q or len(q) < 2:
+        return jsonify({"results": [], "message": "Type at least 2 characters to search"})
+    gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
+    gerrit_auth = (os.getenv("GERRIT_TOKEN") or "").strip()
+    if not gerrit_auth:
+        username = (os.getenv("GERRIT_USERNAME") or "").strip()
+        password = (os.getenv("GERRIT_HTTP_PASSWORD") or "").strip()
+        if username and password:
+            gerrit_auth = "%s:%s" % (username, password)
+    if not gerrit_auth:
+        gerrit_auth = (os.getenv("GERRIT_HTTP_PASSWORD") or "").strip()
+    prefix = "/a" if gerrit_auth else ""
+    url = "%s%s/accounts/?suggest&q=%s&n=15" % (gerrit_url, prefix, requests.utils.quote(q))
+    headers = {"Accept": "application/json"}
+    if gerrit_auth:
+        import base64
+        if ":" in gerrit_auth:
+            user, pw = gerrit_auth.split(":", 1)
+        else:
+            user, pw = "anonymous", gerrit_auth
+        headers["Authorization"] = "Basic " + base64.b64encode(("%s:%s" % (user, pw)).encode()).decode()
+    try:
+        resp = requests.get(url, headers=headers, timeout=10, verify=False)
+        if resp.status_code == 401:
+            return jsonify({"results": [], "error": "Gerrit reviewer search requires authentication. Set GERRIT_TOKEN (username:http_password) or GERRIT_USERNAME + GERRIT_HTTP_PASSWORD environment variables. You can still add reviewers by typing an email and pressing Enter."})
+        if resp.status_code != 200:
+            return jsonify({"results": [], "error": "Could not fetch reviewers from Gerrit (status %s). Add reviewers manually by typing email and pressing Enter." % resp.status_code})
+        text = resp.text
+        if text.startswith(")]}'"):
+            text = text[5:]
+        data = json.loads(text)
+        accounts = data if isinstance(data, list) else (data.get("accounts") if isinstance(data, dict) else [])
+        if not isinstance(accounts, list):
+            accounts = []
+        results = []
+        for acc in accounts:
+            if not isinstance(acc, dict):
+                continue
+            name = acc.get("name") or acc.get("display_name") or ""
+            email = acc.get("email") or acc.get("preferred_email") or ""
+            if not email and isinstance(acc.get("emails"), list):
+                for e in acc["emails"]:
+                    if isinstance(e, dict) and e.get("preferred"):
+                        email = e.get("email") or e.get("value") or ""
+                        break
+                if not email and acc["emails"]:
+                    email = acc["emails"][0].get("email") or acc["emails"][0].get("value") or "" if isinstance(acc["emails"][0], dict) else ""
+            username = acc.get("username") or ""
+            if email or name or username:
+                results.append({"name": name, "email": email, "username": username})
+        return jsonify({"results": results, "generated_at": datetime.utcnow().isoformat()})
+    except requests.exceptions.Timeout:
+        return jsonify({"results": [], "error": "Gerrit request timed out. Add reviewers manually by typing email and pressing Enter."})
+    except requests.exceptions.ConnectionError as e:
+        err = str(e)
+        if "resolve" in err.lower() or "nodename" in err.lower():
+            return jsonify({"results": [], "error": "Cannot reach Gerrit (check VPN/network). Add reviewers manually by typing email and pressing Enter."})
+        return jsonify({"results": [], "error": "Cannot connect to Gerrit. Add reviewers manually by typing email and pressing Enter."})
+    except Exception as e:
+        logger.warning("search_reviewers failed: %s", e)
+        return jsonify({"results": [], "error": "Could not fetch reviewers: %s. Add reviewers manually by typing email and pressing Enter." % str(e)})
+
+
+@app.route("/mcp/regression/gerrit-connectivity", methods=["GET"])
+@jwt_required
+def gerrit_connectivity():
+    """Check if we can reach Gerrit and authenticate (for CR creation)."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
+    auth = _get_gerrit_auth()
+    if not auth:
+        return jsonify({
+            "ok": False,
+            "message": "Gerrit credentials not configured",
+            "details": "Set GERRIT_USERNAME and GERRIT_HTTP_PASSWORD environment variables (only needed for reviewer search)",
+        })
+    url = "%s/a/accounts/self" % gerrit_url
+    headers = {"Accept": "application/json"}
+    import base64
+    user, pw = auth
+    headers["Authorization"] = "Basic " + base64.b64encode(("%s:%s" % (user, pw)).encode()).decode()
+    try:
+        resp = requests.get(url, headers=headers, timeout=10, verify=False)
+        if resp.status_code == 200:
+            text = resp.text
+            if text.startswith(")]}'"):
+                text = text[5:]
+            data = json.loads(text) if text else {}
+            username = data.get("username") or data.get("name") or user
+            return jsonify({
+                "ok": True,
+                "message": "Connected to Gerrit",
+                "details": "Authenticated as %s. Ready to create CR." % username,
+            })
+        if resp.status_code == 401:
+            return jsonify({
+                "ok": False,
+                "message": "Gerrit authentication failed",
+                "details": "Invalid credentials. Check GERRIT_USERNAME and GERRIT_HTTP_PASSWORD.",
+            })
+        return jsonify({
+            "ok": False,
+            "message": "Gerrit returned status %s" % resp.status_code,
+            "details": (resp.text or "")[:200],
+        })
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "ok": False,
+            "message": "Gerrit request timed out",
+            "details": "Check VPN/network and try again.",
+        })
+    except requests.exceptions.ConnectionError as e:
+        err = str(e)
+        if "resolve" in err.lower() or "nodename" in err.lower():
+            return jsonify({
+                "ok": False,
+                "message": "Cannot reach Gerrit",
+                "details": "Check VPN/network. DNS resolution failed.",
+            })
+        return jsonify({
+            "ok": False,
+            "message": "Gerrit connection failed",
+            "details": str(e)[:200],
+        })
+    except Exception as e:
+        logger.exception("gerrit_connectivity failed")
+        return jsonify({
+            "ok": False,
+            "message": "Unexpected error",
+            "details": str(e)[:200],
+        })
+
+
+def _build_gerrit_push_ref(branch, reviewers):
+    """Build Gerrit push ref with optional reviewers (e.g. refs/for/master%r=user@x.com)."""
+    ref = "refs/for/%s" % (branch or "master")
+    if reviewers and isinstance(reviewers, list):
+        reviewers = [r.strip() for r in reviewers if r and str(r).strip()]
+        if reviewers:
+            ref += "%" + ",".join("r=" + r for r in reviewers)
+    return ref
+
+
+def _get_gerrit_auth():
+    """Get Gerrit auth as (username, password) or None if not configured."""
+    gerrit_token = (os.getenv("GERRIT_TOKEN") or "").strip()
+    if gerrit_token and ":" in gerrit_token:
+        parts = gerrit_token.split(":", 1)
+        return (parts[0], parts[1])
+    username = (os.getenv("GERRIT_USERNAME") or "").strip()
+    password = (os.getenv("GERRIT_HTTP_PASSWORD") or "").strip()
+    if username and password:
+        return (username, password)
+    return None
+
+
+@app.route("/mcp/regression/create-lst-cr", methods=["POST"])
+@jwt_required
+def create_lst_cr():
+    """Return the manual git steps to add tests to an LST file and push for review.
+
+    Manual-only by design: the backend never pushes to Gerrit itself, so no Gerrit
+    credentials are needed on the server. The reviewers are baked into the push ref.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    logger.info("[CREATE-LST-CR] POST received")
+    data = request.get_json() or {}
+    branch = (data.get("branch") or "master").strip()
+    lst_file = (data.get("lst_file") or "").strip()
+    test_names = data.get("test_names", [])
+    logger.info("[CREATE-LST-CR] Received: branch=%r, lst_file=%r, test_names_count=%s, reviewers=%s",
+                branch, lst_file, len(test_names) if isinstance(test_names, list) else "?", data.get("reviewers"))
+    reviewers = data.get("reviewers") or []
+    if not test_names:
+        return jsonify({"error": "test_names is required"}), 400
+    if not lst_file:
+        return jsonify({"error": "lst_file is required"}), 400
+    test_names = [str(t).strip() for t in test_names if (t or "").strip()]
+    if not test_names:
+        return jsonify({"error": "test_names is required"}), 400
+    push_ref = _build_gerrit_push_ref(branch, reviewers)
+    instructions = {
+        "message": "Add the following %s test(s) to the LST file, then push for review." % len(test_names),
+        "branch": branch, "lst_file": lst_file, "test_names": test_names,
+        "manual_steps": [
+            "1. Clone the repository and checkout branch '%s'" % branch,
+            "2. Open the LST file: %s" % lst_file,
+            "3. Add the following %s test name(s) to the file:" % len(test_names),
+            "   " + "\n   ".join(test_names[:10]) + ("..." if len(test_names) > 10 else ""),
+            "4. Commit with message: 'Add %s test(s) to LST'" % len(test_names),
+            "5. Push for review: git push origin HEAD:%s" % push_ref,
+        ],
+    }
+    return jsonify({
+        "manual": True,
+        "instructions": instructions,
+        "message": "Follow the manual steps below to push the change for review.",
+        "generated_at": datetime.utcnow().isoformat(),
+    })
+
+
+@app.route("/mcp/regression/check-lst-testcases", methods=["POST"])
+@jwt_required
+def check_lst_testcases():
+    """Check which testcases are present in LST file."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json() or {}
+    branch = (data.get("branch") or "master").strip()
+    lst_file = (data.get("lst_file") or "").strip().replace("(pasted content)", "").strip()
+    test_names = data.get("test_names") or []
+    lst_file_content = data.get("lst_file_content")
+    repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
+    if not lst_file and not (lst_file_content and isinstance(lst_file_content, str)):
+        return jsonify({"error": "Enter LST file path or paste LST file content"}), 400
+    test_names = [str(t).strip() for t in test_names if (t or "").strip()]
+    if not test_names:
+        return jsonify({"error": "test_names is required (at least one)"}), 400
+    if lst_file_content:
+        already_present, not_present = _check_testnames_in_lst_content(lst_file_content, test_names)
+        return jsonify({"branch": branch, "lst_file": lst_file or "(pasted content)", "test_names": test_names, "present": already_present, "not_present": not_present, "generated_at": datetime.utcnow().isoformat()})
+    if not lst_file:
+        return jsonify({"error": "Enter LST file path or paste LST file content"}), 400
+    content, err = fetch_file_content_via_sourcegraph(repo_name, branch, lst_file)
+    if err:
+        return jsonify({"error": err, "test_names": test_names, "present": [], "not_present": test_names, "generated_at": datetime.utcnow().isoformat()}), 200
+    already_present, not_present = _check_testnames_in_lst_content(content, test_names)
+    return jsonify({"branch": branch, "lst_file": lst_file, "test_names": test_names, "present": already_present, "not_present": not_present, "generated_at": datetime.utcnow().isoformat()})
+
+
+def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=False):
+    """Search Sourcegraph for files containing the test name."""
+    test_name = str(test_name).strip() if test_name else ""
+    if not test_name:
+        return []
+    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    if not token:
+        return []
+    base_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
+    # Sourcegraph's GraphQL endpoint is "/.api/graphql" (with the dot). Try the
+    # configured path first (if any), then the standard candidates - same as
+    # validate_with_sourcegraph / fetch_file_content_via_sourcegraph.
+    configured_path = (os.getenv("SOURCEGRAPH_GRAPHQL_PATH") or "").strip()
+    if configured_path and not configured_path.startswith("/"):
+        configured_path = "/" + configured_path
+    api_urls = []
+    for p in [configured_path, "/.api/graphql", "/api/graphql", "/graphql"]:
+        if not p:
+            continue
+        u = base_url + p
+        if u not in api_urls:
+            api_urls.append(u)
+    auth_headers = [
+        {"Content-Type": "application/json", "Authorization": "token %s" % token},
+        {"Content-Type": "application/json", "Authorization": "Bearer %s" % token},
+    ]
+    escaped = test_name.replace("\\", "\\\\").replace('"', '\\"')
+    search_query = f'repo:{repo_name} rev:{rev} "{escaped}" count:50'
+    payload = {"query": "query Search($q: String!) { search(query: $q) { results { matchCount results { ... on FileMatch { file { path } } } } } }", "variables": {"q": search_query}}
+    for api_url in api_urls:
+        for headers in auth_headers:
+            try:
+                resp = requests.post(api_url, json=payload, headers=headers, timeout=20, verify=False)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                if data.get("errors"):
+                    continue
+                search_node = (data.get("data") or {}).get("search")
+                if not search_node:
+                    continue
+                results_node = search_node.get("results") or search_node.get("matches")
+                if isinstance(results_node, dict):
+                    hits = results_node.get("results", results_node.get("matches", [])) or []
+                elif isinstance(results_node, list):
+                    hits = results_node
+                else:
+                    continue
+                out = [{"path": h["file"]["path"], "repo": repo_name, "rev": rev} for h in hits if isinstance(h, dict) and (h.get("file") or {}).get("path")]
+                if lst_files_only:
+                    out = [x for x in out if (x.get("path") or "").lower().endswith(".lst")]
+                return out
+            except Exception as e:
+                logger.warning("[SOURCEGRAPH] Search failed (%s): %s", api_url, e)
+                continue
+    return []
+
+
+@app.route("/mcp/regression/search-lst-file", methods=["POST"])
+@jwt_required
+def search_lst_file():
+    """Search for LST files containing a test name via Sourcegraph."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json() or {}
+    test_name = (data.get("test_name") or "").strip()
+    if not test_name:
+        return jsonify({"error": "test_name is required", "lst_files": []}), 400
+    repo_name = os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")
+    rev = (data.get("rev") or "master").strip()
+    lst_files = search_sourcegraph_for_test(repo_name, test_name, rev=rev, lst_files_only=True)
+    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    if not lst_files and not token:
+        return jsonify({"test_name": test_name, "lst_files": [], "error": "Sourcegraph integration not configured. Set the SOURCEGRAPH_TOKEN environment variable.", "generated_at": datetime.utcnow().isoformat()})
+    return jsonify({"test_name": test_name, "lst_files": [f["path"] for f in lst_files], "generated_at": datetime.utcnow().isoformat()})
+
+
+@app.route("/mcp/regression/deprecate-lst-cr", methods=["POST"])
+@jwt_required
+def deprecate_lst_cr():
+    """Return the manual git steps to remove tests from an LST file and push for review.
+
+    Manual-only by design: no Gerrit credentials are needed on the server.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json() or {}
+    branch = (data.get("branch") or "master").strip()
+    lst_file = (data.get("lst_file") or "").strip()
+    test_names = data.get("test_names") or []
+    reviewers = data.get("reviewers") or []
+    if not test_names:
+        return jsonify({"error": "test_names is required"}), 400
+    if not lst_file:
+        return jsonify({"error": "lst_file is required"}), 400
+    test_names = [str(t).strip() for t in test_names if (t or "").strip()]
+    if not test_names:
+        return jsonify({"error": "test_names is required"}), 400
+    push_ref = _build_gerrit_push_ref(branch, reviewers)
+    instructions = {
+        "message": "Remove the following %s test(s) from the LST file, then push for review." % len(test_names),
+        "branch": branch, "lst_file": lst_file, "test_names": test_names,
+        "manual_steps": [
+            "1. Clone the repository and checkout branch '%s'" % branch,
+            "2. Open the LST file: %s" % lst_file,
+            "3. Remove the following %s test name(s) from the file:" % len(test_names),
+            "   " + "\n   ".join(test_names[:10]) + ("..." if len(test_names) > 10 else ""),
+            "4. Commit with message: 'Deprecated %s test(s) from LST'" % len(test_names),
+            "5. Push for review: git push origin HEAD:%s" % push_ref,
+        ],
+    }
+    return jsonify({
+        "manual": True,
+        "instructions": instructions,
+        "message": "Follow the manual steps below to push the change for review.",
+        "generated_at": datetime.utcnow().isoformat(),
+    })
+
+
+@app.route("/mcp/regression/deprecation-search", methods=["GET", "POST"])
+@jwt_required
+def deprecation_search():
+    """Search handover records for deprecation. Includes Sourcegraph LST file hints for each query."""
+    # Support both GET (params) and POST (body) to avoid URL length/encoding issues with long test names
+    parts = request.args.getlist("q")
+    if not parts:
+        q0 = (request.args.get("q") or request.args.get("test_name") or "").strip()
+        parts = [q0] if q0 else []
+    if not parts and request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        q_from_body = data.get("q") or data.get("queries") or data.get("test_names")
+        if isinstance(q_from_body, list):
+            parts = [str(x).strip() for x in q_from_body if str(x).strip()]
+        elif q_from_body:
+            parts = [str(q_from_body).strip()]
+    queries = []
+    for p in parts:
+        if not p:
+            continue
+        s = str(p).strip()
+        if not s:
+            continue
+        # Split on whitespace, comma, or newline to support "test_a test_b", "test_a,test_b", etc.
+        queries.extend([t.strip() for t in re.split(r"[\s,\n\r]+", s) if t.strip()])
+    seen_q = set()
+    uniq_queries = []
+    for q in queries:
+        k = q.lower()
+        if k not in seen_q:
+            seen_q.add(k)
+            uniq_queries.append(q)
+    queries = uniq_queries
+    if not queries:
+        return jsonify({
+            "results": [], "count": 0, "message": "Provide query parameter q (one or more test names; repeat q= for each, or comma/newline in a single q).",
+            "sourcegraph_first_repo": [], "sourcegraph_other_repos": [],
+            "sourcegraph_first_repo_name": "nugerrit.ntnxdpro.com/nutest-py3-tests",
+            "generated_at": datetime.utcnow().isoformat()
+        })
+    records = _load_handover_records()
+    q_lowers = [qt.lower() for qt in queries]
+    matches = [r for r in records if any(qt in (r.get("test_name") or "").lower() for qt in q_lowers)]
+    seen_key = set()
+    unique_matches = []
+    for r in matches:
+        key = ((r.get("test_name") or "").strip(), (r.get("handover_date") or "").strip(), (r.get("lst_file") or "").strip())
+        if key not in seen_key:
+            seen_key.add(key)
+            unique_matches.append(r)
+    unique_matches.sort(key=lambda r: r.get("handover_date") or "", reverse=True)
+
+    # Sourcegraph: search for LST files containing each query (first repo only for now)
+    sourcegraph_first_repo = []
+    sourcegraph_other_repos = []
+    repo_name = os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")
+    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    if token and queries:
+        seen_paths = set()
+        for test_name in queries[:10]:  # Limit to first 10 queries
+            lst_files = search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=True)
+            for f in lst_files:
+                path = f.get("path", "")
+                if path and path not in seen_paths:
+                    seen_paths.add(path)
+                    sourcegraph_first_repo.append({"path": path, "test_name": test_name})
+        sourcegraph_other_repos = []  # Can be extended with SOURCEGRAPH_OTHER_REPOS
+
+    return jsonify({
+        "q": " ".join(queries), "queries": queries, "results": unique_matches, "count": len(unique_matches),
+        "sourcegraph_first_repo": sourcegraph_first_repo,
+        "sourcegraph_other_repos": sourcegraph_other_repos,
+        "sourcegraph_first_repo_name": repo_name,
+        "generated_at": datetime.utcnow().isoformat()
+    })
+
+
+@app.route("/mcp/regression/failed-analysis/first-level-ai", methods=["POST"])
 @app.route("/api/agents/triage/first-level-ai", methods=["POST"])
 @jwt_required
 def first_level_ai_analysis():
-    """Trigger First Level AI analysis using JITA and Glean."""
+    """First Level AI: failure analysis plus Triage Genie ticket validation."""
     try:
-        request_data = request.get_json()
-        test_result = request_data.get("test_result", {})
-        
-        if not test_result:
+        request_data = request.get_json(force=True) or {}
+        test_result = request_data.get("test_result") or request_data
+        if not test_result or not (
+            test_result.get("testcase_name") or test_result.get("testcase_id")
+        ):
+            return jsonify({"success": False, "error": "test_result is required"}), 400
+
+        result = _run_first_level_ai_analysis(test_result, run_ai=True)
+        result["user_requested"] = True
+        result["analysis_result"] = {
+            "analysis_type": "first_level_ai",
+            "confidence": 0.85 if result.get("tg_ticket_validation", {}).get("verdict") == "Correct" else 0.7,
+        }
+        return jsonify(result)
+    except Exception as e:
+        logger.error("Error in first level AI analysis: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/deep-ai", methods=["POST"])
+@jwt_required
+def failed_analysis_deep_ai():
+    """Deep AI: skill-based triage via Cursor bridge, plus Glean/Jira ticket hunt."""
+    try:
+        body = request.get_json(force=True) or {}
+        test_result = body.get("test_result") or body
+        testcase_name = test_result.get("testcase_name") or ""
+        if not testcase_name:
+            return jsonify({"success": False, "error": "testcase_name is required"}), 400
+
+        username = _current_username()
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        if not cursor_api_key:
             return jsonify({
                 "success": False,
-                "error": "test_result is required"
-            }), 400
-        
-        # Initialize intelligent triage agent directly
-        from agents.analysis.intelligent_triage_agent import IntelligentTriageAgent
-        from agents.base import AgentConfig
-        
-        agent_config = AgentConfig(
-            name="intelligent_triage",
-            type="intelligent_triage"
+                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "require_key_setup": True,
+            }), 403
+
+        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
+        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
+        atlassian_tokens = {}
+        if atlassian_jira_token:
+            atlassian_tokens["jira"] = atlassian_jira_token
+        if atlassian_confluence_token:
+            atlassian_tokens["confluence"] = atlassian_confluence_token
+
+        first_level = _run_first_level_ai_analysis(test_result, run_ai=False)
+        exception_summary = test_result.get("exception_summary") or ""
+        exception = test_result.get("exception") or ""
+        test_log_url = test_result.get("test_log_url") or first_level.get("test_log_url") or ""
+        failure_stage = test_result.get("failure_stage") or first_level.get("failure_stage") or ""
+        jira_tickets = list(test_result.get("jira_tickets") or [])
+        tg_ticket = (
+            test_result.get("triage_genie_ticket_id")
+            or test_result.get("triage_genie_ticket")
+            or (first_level.get("tg_ticket_validation") or {}).get("ticket")
+            or ""
         )
-        agent = IntelligentTriageAgent(agent_config)
-        
-        # Since this is async, we need to run it in an event loop
-        import asyncio
-        
-        async def run_analysis():
-            return await agent.analyze(test_result, user_requested_ai=True)
-        
-        # Create new event loop for the analysis
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            analysis_result = loop.run_until_complete(run_analysis())
-        finally:
-            loop.close()
-        
-        # Handle different response formats
-        if hasattr(analysis_result, '__dict__'):
-            result_dict = analysis_result.__dict__
-        else:
-            result_dict = analysis_result
-        
-        response_data = {
-            "success": True,
-            "analysis_result": result_dict,
-            "analysis_type": "first_level_ai", 
-            "user_requested": True
+        if tg_ticket and tg_ticket not in jira_tickets:
+            jira_tickets.append(tg_ticket)
+
+        steps_log = test_result.get("steps_log") or ""
+        nutest_test_log = test_result.get("nutest_test_log") or ""
+        if not steps_log and not nutest_test_log and test_log_url:
+            logs = fetch_testcase_logs(testcase_name, test_log_url)
+            steps_log = logs.get("steps_log", "")
+            nutest_test_log = logs.get("nutest_test_log", "")
+
+        status = (test_result.get("status") or "").lower()
+        analysis_type = "skipped" if status == "skipped" else "failed"
+        rdm_link = (
+            test_result.get("rdm_link")
+            or (test_result.get("rdm_info") or {}).get("rdm_link")
+            or ""
+        )
+        rdm_message = (
+            test_result.get("rdm_message")
+            or (test_result.get("rdm_info") or {}).get("rdm_message")
+            or exception_summary
+            or ""
+        )
+        skill_url = rdm_link if analysis_type == "skipped" else test_log_url
+
+        payload = {
+            "testcase_name": testcase_name,
+            "exception_summary": exception_summary or rdm_message,
+            "exception": exception or rdm_message,
+            "steps_log": steps_log[:5000],
+            "nutest_test_log": nutest_test_log[:5000],
+            "test_log_url": skill_url or test_log_url,
+            "rdm_url": rdm_link,
+            "rdm_message": rdm_message,
+            "jita_task_id": test_result.get("agave_task_id") or "",
+            "jira_tickets": jira_tickets,
+            "failure_stage": failure_stage,
+            "triage_genie_ticket": tg_ticket,
+            "glean_tickets": first_level.get("enriched_tickets") or [],
+            "glean_snippets": first_level.get("glean_snippets") or [],
+            "analysis_type": analysis_type,
+            "cursor_api_key": cursor_api_key,
+            "atlassian_tokens": atlassian_tokens,
         }
-        
-        # Add metadata if available
-        if hasattr(analysis_result, 'data') and analysis_result.data:
-            response_data.update(analysis_result.data)
-        
-        if hasattr(analysis_result, 'metadata') and analysis_result.metadata:
-            response_data.update({
-                "pattern_suggestion": analysis_result.metadata.get("pattern_suggestion"),
-                "jita_analysis": analysis_result.metadata.get("jita_analysis"),
-                "glean_results": analysis_result.metadata.get("glean_results")
-            })
-        
-        return jsonify(response_data)
-        
-    except Exception as e:
-        logger.error(f"Error in first level AI analysis: {str(e)}")
+
+        resp = requests.post(
+            f"{CURSOR_BRIDGE_URL}/analyze-testcase",
+            json=payload,
+            timeout=600,
+        )
+        if resp.status_code != 200:
+            error_msg = (
+                resp.json().get("error", resp.text)
+                if resp.headers.get("content-type", "").startswith("application/json")
+                else resp.text
+            )
+            return jsonify({"success": False, "error": "Bridge error: %s" % error_msg}), 502
+
+        data = resp.json()
+        analysis = data.get("analysis") or {}
+        return jsonify({
+            "success": True,
+            "session_id": data.get("session_id", ""),
+            "analysis": analysis,
+            "root_cause": analysis.get("root_cause"),
+            "classification": analysis.get("classification"),
+            "confidence": analysis.get("confidence"),
+            "suggested_fix": analysis.get("suggested_fix"),
+            "failing_code": analysis.get("failing_code"),
+            "related_components": analysis.get("related_components"),
+            "jira_duplicates": analysis.get("jira_duplicates"),
+            "triage_report": analysis.get("triage_report"),
+            "tg_ticket_validation": analysis.get("tg_ticket_validation") or first_level.get("tg_ticket_validation"),
+            "enriched_tickets": first_level.get("enriched_tickets") or [],
+            "glean_snippets": first_level.get("glean_snippets") or [],
+            "glean_available": first_level.get("glean_available"),
+            "search_source": first_level.get("search_source"),
+            "skill_used": (
+                "triage-rdm-deployment-failure"
+                if analysis_type == "skipped"
+                else "triage-cdp-test-failure"
+            ),
+        })
+    except requests.exceptions.ConnectionError:
+        logger.error("Cursor bridge is not reachable at %s", CURSOR_BRIDGE_URL)
         return jsonify({
             "success": False,
-            "error": str(e)
-        }), 500
+            "error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start",
+        }), 503
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "success": False,
+            "error": "Deep AI analysis timed out (>600s).",
+        }), 504
+    except Exception as e:
+        logger.error("Error in failed-analysis deep-ai: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ======================================================

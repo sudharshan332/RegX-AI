@@ -2,6 +2,8 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import api from '../api';
 import { API_BASE_URL, jitaJobProfileWebUrl, jitaTestSetWebUrl } from '../config';
 import ManageJobProfile from './ManageJobProfile';
+import ReleaseMigration from './ReleaseMigration';
+import ManageTestSets from './ManageTestSets';
 import { useAuth } from '../context/AuthContext';
 import './DynamicJobProfile.css';
 
@@ -1196,7 +1198,7 @@ export default function DynamicJobProfile() {
   return (
     <div className="djp-container">
       <div className="djp-header">
-        <h1>Dynamic Job Profile</h1>
+        <h1>Manage Job Profile</h1>
         <div className="djp-header-actions">
           <div className="djp-actions-wrapper" ref={djpManageMenuRef}>
             <button
@@ -1230,7 +1232,29 @@ export default function DynamicJobProfile() {
                     setShowDjpManageMenu(false);
                   }}
                 >
-                  Delete
+                  Manage JP
+                </button>
+                <button
+                  type="button"
+                  className="djp-actions-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setDjpSubView('manage-ts');
+                    setShowDjpManageMenu(false);
+                  }}
+                >
+                  Manage TS
+                </button>
+                <button
+                  type="button"
+                  className="djp-actions-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setDjpSubView('migration');
+                    setShowDjpManageMenu(false);
+                  }}
+                >
+                  Release Migration
                 </button>
               </div>
             )}
@@ -1240,6 +1264,10 @@ export default function DynamicJobProfile() {
 
       {djpSubView === 'manage' ? (
         <ManageJobProfile embedded />
+      ) : djpSubView === 'manage-ts' ? (
+        <ManageTestSets embedded />
+      ) : djpSubView === 'migration' ? (
+        <ReleaseMigration embedded />
       ) : (
       <>
       {/* Error messages are displayed below the Create buttons */}

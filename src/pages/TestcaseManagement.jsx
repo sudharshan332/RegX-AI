@@ -6,7 +6,7 @@ import AiMarkdown from '../components/AiMarkdown';
 import * as XLSX from 'xlsx';
 import './TestcaseManagement.css';
 
-const PAGE_SIZE_OPTIONS = [50, 100, 200];
+const PAGE_SIZE_OPTIONS = [50, 100, 200, 'All'];
 const DEFAULT_PAGE_SIZE = 50;
 
 const TAG_CLASS_MAP = {
@@ -67,7 +67,7 @@ const CUSTOM_BRANCHES_STORAGE_KEY = 'tc-mgmt-custom-branches';
 
 function toShortBranch(name) {
   if (name === 'master') return 'master';
-  const m = name.match(/^ganges-(\d+\.\d+(?:\.\d+)?)-stable$/);
+  const m = name.match(/^ganges-(\d+(?:\.\d+)+)-stable$/);
   return m ? m[1] : name;
 }
 
@@ -309,28 +309,56 @@ export default function TestcaseManagement() {
 
   const fetchTestcases = useCallback(() => {
     setLoading(true);
-    const params = { branch, team };
-    if (tagFilter) params.tags = tagFilter;
-    if (nameFilter) {
-      params.name = nameFilter;
-      if (nameExactMatch) params.exact_match = 'true';
+    
+    // Use POST if there's a name filter (to avoid URL length limits for large filters)
+    const usePost = nameFilter && nameFilter.length > 0;
+    
+    if (usePost) {
+      // POST method - send data in body
+      const body = {
+        branch,
+        team,
+        name: nameFilter,
+        exact_match: nameExactMatch,
+      };
+      if (tagFilter) body.tags = tagFilter;
+      if (statusFilter) body.status = statusFilter;
+      
+      api.post(`${API_BASE_URL}/mcp/regression/testcase-mgmt/testcases`, body)
+        .then(res => {
+          setTestcases(res.data.testcases || []);
+          setTotalCount(res.data.total_count || 0);
+          setAvailableTags(res.data.available_tags || []);
+          setLastUpdated(res.data.last_updated);
+          setPage(1);
+          setSelectedOids(new Set());
+        })
+        .catch(err => {
+          console.error('Failed to load testcases', err);
+          showToast('Failed to load testcases', 'error');
+        })
+        .finally(() => setLoading(false));
+    } else {
+      // GET method - use query parameters for small filters
+      const params = { branch, team };
+      if (tagFilter) params.tags = tagFilter;
+      if (statusFilter) params.status = statusFilter;
+      
+      api.get(`${API_BASE_URL}/mcp/regression/testcase-mgmt/testcases`, { params })
+        .then(res => {
+          setTestcases(res.data.testcases || []);
+          setTotalCount(res.data.total_count || 0);
+          setAvailableTags(res.data.available_tags || []);
+          setLastUpdated(res.data.last_updated);
+          setPage(1);
+          setSelectedOids(new Set());
+        })
+        .catch(err => {
+          console.error('Failed to load testcases', err);
+          showToast('Failed to load testcases', 'error');
+        })
+        .finally(() => setLoading(false));
     }
-    if (statusFilter) params.status = statusFilter;
-
-    api.get(`${API_BASE_URL}/mcp/regression/testcase-mgmt/testcases`, { params })
-      .then(res => {
-        setTestcases(res.data.testcases || []);
-        setTotalCount(res.data.total_count || 0);
-        setAvailableTags(res.data.available_tags || []);
-        setLastUpdated(res.data.last_updated);
-        setPage(1);
-        setSelectedOids(new Set());
-      })
-      .catch(err => {
-        console.error('Failed to load testcases', err);
-        showToast('Failed to load testcases', 'error');
-      })
-      .finally(() => setLoading(false));
   }, [branch, team, tagFilter, nameFilter, nameExactMatch, statusFilter, showToast]);
 
   useEffect(() => { fetchTestcases(); }, [fetchTestcases]);
@@ -344,8 +372,14 @@ export default function TestcaseManagement() {
       timeout: 300000,
     })
       .then(res => {
-        showToast(`Loaded ${res.data.count} test cases`, 'success');
-        updateTask(taskId, { status: 'success', detail: `Loaded ${res.data.count} test cases` });
+        const d = res.data || {};
+        const tagged = d.tagged_count != null ? `, ${d.tagged_count} with tags` : '';
+        const tcms = d.tcms_oid_count != null ? `, ${d.tcms_oid_count} TCMS ids` : '';
+        showToast(`Loaded ${d.count || 0} test cases${tagged}${tcms}`, 'success');
+        updateTask(taskId, {
+          status: 'success',
+          detail: `Loaded ${d.count || 0} test cases${tagged}${tcms}`,
+        });
         fetchTestcases();
       })
       .catch(err => {
@@ -589,8 +623,8 @@ export default function TestcaseManagement() {
     return sortDir === 'asc' ? cmp : -cmp;
   });
 
-  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
-  const paginated = sorted.slice((page - 1) * pageSize, page * pageSize);
+  const totalPages = pageSize === 'All' ? 1 : Math.max(1, Math.ceil(sorted.length / pageSize));
+  const paginated = pageSize === 'All' ? sorted : sorted.slice((page - 1) * pageSize, page * pageSize);
 
   const handleSort = (field) => {
     if (sortField === field) {
@@ -626,27 +660,88 @@ export default function TestcaseManagement() {
 
     setTagActionLoading(true);
     const verb = action === 'add' ? 'Add' : 'Delete';
+    const selectedCount = selectedOids.size;
     const taskId = addTask({
-      label: `${verb} tags [${tags.join(', ')}] on ${selectedOids.size} testcase(s)`,
+      label: `${verb} tags [${tags.join(', ')}] on ${selectedCount} testcase(s)`,
       page: 'Testcase Management',
     });
     const url = action === 'add'
       ? `${API_BASE_URL}/mcp/regression/testcase-mgmt/tags/add`
       : `${API_BASE_URL}/mcp/regression/testcase-mgmt/tags/delete`;
 
-    api.post(url, { testcase_oids: Array.from(selectedOids), tags, branch, team })
+    api.post(url, { testcase_oids: Array.from(selectedOids), tags, branch, team }, { timeout: 120000 })
       .then(res => {
-        const d = res.data;
-        const detail = `${d.success} succeeded, ${d.failed} failed`;
-        showToast(`${verb} tags: ${detail}`, d.failed > 0 ? 'error' : 'success');
-        updateTask(taskId, { status: d.failed > 0 ? 'error' : 'success', detail });
-        setTagInput('');
-        setSelectedOids(new Set());
-        fetchTestcases();
+        const d = res.data || {};
+        const ok = d.success || 0;
+        const fail = d.failed || 0;
+        const notPresentTags = [
+          ...new Set(
+            (d.not_present || [])
+              .flatMap(n => n.tags || [])
+              .concat(
+                (d.errors || []).flatMap(e => e.not_present || [])
+              )
+          ),
+        ];
+        const errBits = (d.errors || [])
+          .slice(0, 3)
+          .map(e => e.error || e.oid)
+          .filter(Boolean);
+
+        let detail;
+        let toastType;
+        if (action === 'delete' && ok === 0 && notPresentTags.length) {
+          detail = `Tag not present: ${notPresentTags.join(', ')}`;
+          toastType = 'error';
+        } else if (action === 'delete' && notPresentTags.length && ok > 0) {
+          detail = `${ok} removed, ${fail} failed — Tag not present: ${notPresentTags.join(', ')}`;
+          toastType = 'info';
+        } else {
+          detail = `${ok} succeeded, ${fail} failed`
+            + (errBits.length ? ` — ${errBits.join('; ')}` : '');
+          toastType = fail > 0 && ok === 0 ? 'error' : fail > 0 ? 'info' : 'success';
+        }
+
+        showToast(`${verb} tags: ${detail}`, toastType);
+        updateTask(taskId, {
+          status: ok > 0 && fail === 0 ? 'success' : fail > 0 && ok === 0 ? 'error' : 'success',
+          detail,
+        });
+        if (ok > 0) {
+          setTagInput('');
+          const updated = new Set(d.updated_oids || []);
+          setSelectedOids(prev => {
+            if (!updated.size) return new Set();
+            const next = new Set(prev);
+            updated.forEach(oid => next.delete(oid));
+            return next;
+          });
+          fetchTestcases();
+        }
       })
       .catch(err => {
-        const msg = err.response?.data?.error || err.message;
-        showToast('Tag operation failed: ' + msg, 'error');
+        const d = err.response?.data || {};
+        const notPresentTags = [
+          ...new Set(
+            (d.not_present || [])
+              .flatMap(n => n.tags || [])
+              .concat((d.errors || []).flatMap(e => e.not_present || []))
+          ),
+        ];
+        const errBits = (d.errors || [])
+          .slice(0, 3)
+          .map(e => e.error || e.oid)
+          .filter(Boolean);
+        let msg = d.error
+          || (notPresentTags.length ? `Tag not present: ${notPresentTags.join(', ')}` : null)
+          || (errBits.length ? errBits.join('; ') : null)
+          || err.message
+          || 'Tag operation failed';
+        // Prefer explicit not-present phrasing
+        if (action === 'delete' && /tag not present/i.test(msg) === false && notPresentTags.length) {
+          msg = `Tag not present: ${notPresentTags.join(', ')}`;
+        }
+        showToast(msg.startsWith('Tag not present') ? msg : `Tag ${verb.toLowerCase()} failed: ${msg}`, 'error');
         updateTask(taskId, { status: 'error', detail: msg });
       })
       .finally(() => setTagActionLoading(false));
@@ -861,11 +956,17 @@ export default function TestcaseManagement() {
         </div>
         <div className="tc-mgmt-filter-group tc-name-filter-group">
           <label>Name:</label>
-          <input
-            type="text"
-            placeholder="Filter by name (comma separated for multiple)..."
+          <textarea
+            className="tc-name-filter-textarea"
+            placeholder="Filter by name (comma, pipe, or newline separated)..."
             value={nameFilter}
             onChange={e => setNameFilter(e.target.value)}
+            rows={1}
+            onInput={(e) => {
+              // Auto-resize based on content
+              e.target.style.height = 'auto';
+              e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+            }}
           />
           <label className="tc-exact-match-label">
             <input
@@ -1029,13 +1130,20 @@ export default function TestcaseManagement() {
           {/* Pagination */}
           <div className="tc-mgmt-pagination">
             <span className="page-info">
-              Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, sorted.length)} of {sorted.length}
+              {pageSize === 'All' 
+                ? `Showing all ${sorted.length} rows`
+                : `Showing ${(page - 1) * pageSize + 1}–${Math.min(page * pageSize, sorted.length)} of ${sorted.length}`
+              }
             </span>
             <div className="tc-page-size-picker">
               <label>Rows:</label>
               <select
                 value={pageSize}
-                onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}
+                onChange={e => { 
+                  const newValue = e.target.value === 'All' ? 'All' : Number(e.target.value);
+                  setPageSize(newValue); 
+                  setPage(1); 
+                }}
               >
                 {PAGE_SIZE_OPTIONS.map(n => (
                   <option key={n} value={n}>{n}</option>
@@ -1043,9 +1151,9 @@ export default function TestcaseManagement() {
               </select>
             </div>
             <div className="page-controls">
-              <button disabled={page <= 1} onClick={() => setPage(1)}>First</button>
-              <button disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Prev</button>
-              {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+              <button disabled={page <= 1 || pageSize === 'All'} onClick={() => setPage(1)}>First</button>
+              <button disabled={page <= 1 || pageSize === 'All'} onClick={() => setPage(p => p - 1)}>Prev</button>
+              {pageSize !== 'All' && Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
                 let pageNum;
                 if (totalPages <= 5) pageNum = i + 1;
                 else if (page <= 3) pageNum = i + 1;
@@ -1057,8 +1165,8 @@ export default function TestcaseManagement() {
                   </button>
                 );
               })}
-              <button disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>Next</button>
-              <button disabled={page >= totalPages} onClick={() => setPage(totalPages)}>Last</button>
+              <button disabled={page >= totalPages || pageSize === 'All'} onClick={() => setPage(p => p + 1)}>Next</button>
+              <button disabled={page >= totalPages || pageSize === 'All'} onClick={() => setPage(totalPages)}>Last</button>
             </div>
           </div>
         </>

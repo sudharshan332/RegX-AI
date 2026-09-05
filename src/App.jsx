@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import RegressionHome from './RegressionHome';
 import RunPlan from './pages/RunPlan';
 import Handover from './pages/Handover';
@@ -6,29 +6,48 @@ import TestcaseManagement from './pages/TestcaseManagement';
 import TriageGenie from './pages/TriageGenie';
 import RunReport from './pages/RunReport';
 import DynamicJobProfile from './pages/DynamicJobProfile';
-import ManageJobProfile from './pages/ManageJobProfile';
 import FailedTestcaseAnalysis from './pages/FailedTestcaseAnalysis';
 import CursorAI from './pages/CursorAI';
 import { TaskProvider } from './context/TaskContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import TaskStatusIcon from './components/TaskStatusIcon';
 import LoginPage from './components/LoginPage';
+import { resolveDisplayName } from './utils/authUser';
 import './App.css';
+
+const PAGE_COMPONENTS = {
+  home: RegressionHome,
+  'run-plan': RunPlan,
+  handover: Handover,
+  testcase: TestcaseManagement,
+  'triage-genie': TriageGenie,
+  'failed-analysis': FailedTestcaseAnalysis,
+  'run-report': RunReport,
+  'job-profile': DynamicJobProfile,
+  'cursor-ai': CursorAI,
+};
 
 function Dashboard() {
   const { user, logout } = useAuth();
   const [activePage, setActivePage] = useState('home');
+  const [visitedPages, setVisitedPages] = useState(() => ['home']);
   const [menuVisible, setMenuVisible] = useState(true);
+
+  const navigateToPage = useCallback((pageId) => {
+    const id = PAGE_COMPONENTS[pageId] ? pageId : 'home';
+    setActivePage(id);
+    setVisitedPages((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }, []);
 
   useEffect(() => {
     const handleSetActivePage = (event) => {
-      setActivePage(event.detail);
+      navigateToPage(event.detail);
     };
     window.addEventListener('setActivePage', handleSetActivePage);
     return () => {
       window.removeEventListener('setActivePage', handleSetActivePage);
     };
-  }, []);
+  }, [navigateToPage]);
 
   const menuItems = [
     { id: 'home', label: 'Home', icon: '🏠', description: 'Regression Overview' },
@@ -38,41 +57,13 @@ function Dashboard() {
     { id: 'triage-genie', label: 'Triage Genie', icon: '🤖', description: 'Automated Failure Triage' },
     { id: 'failed-analysis', label: 'Failed Testcase Analysis', icon: '🔍', description: 'AI-Powered Failure Analysis' },
     { id: 'run-report', label: 'Run Report', icon: '📊', description: 'QI Analysis' },
-    { id: 'job-profile', label: 'Dynamic Job Profile', icon: '⚙️', description: 'Job Profile creation & manage JP/TS' },
-    { id: 'manage-jp', label: 'Manage JP / TS', icon: '🗑️', description: 'Search & Delete JP/TS' },
+    { id: 'job-profile', label: 'Manage Job Profile', icon: '⚙️', description: 'Create, clone, delete & release-migrate JPs' },
     { id: 'cursor-ai', label: 'Cursor AI', icon: '✨', description: 'Interactive AI Chat' },
   ];
 
-  const renderPage = () => {
-    switch (activePage) {
-      case 'home':
-        return <RegressionHome />;
-      case 'run-plan':
-        return <RunPlan />;
-      case 'handover':
-        return <Handover />;
-      case 'testcase':
-        return <TestcaseManagement />;
-      case 'triage-genie':
-        return <TriageGenie />;
-      case 'failed-analysis':
-        return <FailedTestcaseAnalysis />;
-      case 'run-report':
-        return <RunReport />;
-      case 'job-profile':
-        return <DynamicJobProfile />;
-      case 'manage-jp':
-        return <ManageJobProfile />;
-      case 'cursor-ai':
-        return <CursorAI />;
-      default:
-        return <RegressionHome />;
-    }
-  };
-
-  const displayName = user?.name || user?.sub || 'User';
+  const displayName = resolveDisplayName(user);
   const openSidebarSettings = () => {
-    setActivePage('cursor-ai');
+    navigateToPage('cursor-ai');
     setTimeout(() => {
       window.dispatchEvent(new CustomEvent('openCursorAiSettings'));
     }, 0);
@@ -92,9 +83,27 @@ function Dashboard() {
               {menuVisible ? '◀' : '▶'}
             </button>
           </div>
+          <ul className="menu-list">
+            {menuItems.map((item) => (
+              <li
+                key={item.id}
+                className={`menu-item ${activePage === item.id ? 'active' : ''}`}
+                onClick={() => navigateToPage(item.id)}
+              >
+                <span className="menu-icon">{item.icon}</span>
+                <div className="menu-content">
+                  <span className="menu-label">{item.label}</span>
+                  <span className="menu-description">{item.description}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
           <div className="sidebar-user-info">
             <div className="sidebar-user-meta">
-              <span className="sidebar-user-name" title={user?.email || ''}>
+              <span
+                className="sidebar-user-name"
+                title={user?.email || user?.username || displayName}
+              >
                 {displayName}
               </span>
               <button
@@ -110,21 +119,6 @@ function Dashboard() {
               Logout
             </button>
           </div>
-          <ul className="menu-list">
-            {menuItems.map((item) => (
-              <li
-                key={item.id}
-                className={`menu-item ${activePage === item.id ? 'active' : ''}`}
-                onClick={() => setActivePage(item.id)}
-              >
-                <span className="menu-icon">{item.icon}</span>
-                <div className="menu-content">
-                  <span className="menu-label">{item.label}</span>
-                  <span className="menu-description">{item.description}</span>
-                </div>
-              </li>
-            ))}
-          </ul>
         </nav>
 
         {!menuVisible && (
@@ -138,7 +132,21 @@ function Dashboard() {
         )}
 
         <main className={`main-content ${menuVisible ? '' : 'expanded'}`}>
-          {renderPage()}
+          {visitedPages.map((id) => {
+            const PageComponent = PAGE_COMPONENTS[id];
+            if (!PageComponent) return null;
+            const isActive = activePage === id;
+            return (
+              <div
+                key={id}
+                className={`page-pane${isActive ? ' is-active' : ''}`}
+                hidden={!isActive}
+                aria-hidden={!isActive}
+              >
+                <PageComponent />
+              </div>
+            );
+          })}
         </main>
 
         <TaskStatusIcon />

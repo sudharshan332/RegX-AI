@@ -6,16 +6,24 @@ import AiMarkdown from '../components/AiMarkdown';
 import './RunPlan.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/run-plan`;
-const JITA_BASE = 'https://jita.eng.nutanix.com/api/v2';
 
+/** JITA enum for run_tests_with_additional_tags (fixed server-side schema). */
 const ADDITIONAL_TAG_OPTIONS = [
-  'CDP_Regression_Qual',
-  'CDP_Smart_Qual',
   'NESTED_QUALIFIED',
+  'CDP_Smart_Qual',
+  'CDP_Regression_Qual',
   'critical',
   'major',
   'minor',
   'unstable',
+  'PC_SMART_QUAL',
+  'PC_REGRESSION',
+  'PC_SANITY',
+  'PC_PCBR',
+  'PC_PCDR',
+  'PC_PC_INFRA',
+  'PC_API_INFRA',
+  'PC_DISAGG',
 ];
 
 export default function RunPlan() {
@@ -47,11 +55,13 @@ export default function RunPlan() {
   const [formData, setFormData] = useState({
     name: '',
     branch: '',
+    serviceAccount: '',
     jobProfileSearchType: 'id', // 'id' or 'pattern'
     jobProfileIds: '',
     jobProfilePattern: '',
     scheduleDate: '',
-    selectedJobProfiles: []
+    selectedJobProfiles: [],
+    isDummy: false,
   });
 
   // Batch Update state
@@ -88,7 +98,6 @@ export default function RunPlan() {
     additionalTags: []
   });
 
-  const [availableTags, setAvailableTags] = useState([]);
   const [showAdditionalTagsDropdown, setShowAdditionalTagsDropdown] = useState(false);
   const additionalTagsRef = useRef(null);
 
@@ -321,7 +330,8 @@ export default function RunPlan() {
       jobProfileIds: '',
       jobProfilePattern: '',
       scheduleDate: '',
-      selectedJobProfiles: []
+      selectedJobProfiles: [],
+      isDummy: false,
     });
     setJobProfileResults([]);
     setView('create');
@@ -337,7 +347,8 @@ export default function RunPlan() {
       jobProfileIds: '',
       jobProfilePattern: '',
       scheduleDate: runPlan.schedule_date || '',
-      selectedJobProfiles: []
+      selectedJobProfiles: [],
+      isDummy: !!runPlan.is_dummy,
     });
     
     // Fetch job profile details for the IDs in the run plan
@@ -437,6 +448,33 @@ export default function RunPlan() {
     });
   };
 
+  const handleDeleteRunPlan = async () => {
+    if (view !== 'edit' || !selectedRunPlan?.id) return;
+    const name = selectedRunPlan.name || formData.name || selectedRunPlan.id;
+    if (!window.confirm(
+      `Delete run plan "${name}"?\n\nThis also removes its trigger history. Job profiles in JITA are not deleted.`
+    )) {
+      return;
+    }
+    setLoading(true);
+    const taskId = addTask({ label: `Delete Run Plan: ${name}`, page: 'Run Plan' });
+    try {
+      await api.delete(`${API_BASE}/${selectedRunPlan.id}`);
+      updateTaskCtx(taskId, { status: 'success', detail: 'Deleted' });
+      alert(`Run plan "${name}" deleted`);
+      setSelectedRunPlan(null);
+      setView('list');
+      fetchRunPlans();
+    } catch (error) {
+      console.error('Error deleting run plan:', error);
+      const msg = error.response?.data?.error || error.message || 'Failed to delete run plan';
+      alert(msg);
+      updateTaskCtx(taskId, { status: 'error', detail: msg });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSaveRunPlan = async () => {
     // Validation
     if (!formData.name.trim()) {
@@ -457,7 +495,8 @@ export default function RunPlan() {
         branch: formData.branch || '',
         service_account: formData.serviceAccount || '',
         job_profiles: formData.selectedJobProfiles.map(jp => extractId(jp._id)),
-        schedule_date: formData.scheduleDate || null
+        schedule_date: formData.scheduleDate || null,
+        is_dummy: !!formData.isDummy,
       };
       
       if (view === 'create') {
@@ -593,7 +632,6 @@ export default function RunPlan() {
       payload.tester_tags_to_remove = tagsToRemove;
     }
     if (batchUpdateData.updateAdditionalTags) payload.run_tests_with_additional_tags = batchUpdateData.additionalTags;
-
     return payload;
   };
 
@@ -604,6 +642,10 @@ export default function RunPlan() {
       : selectedRunPlan ? [selectedRunPlan] : [];
 
     if (targets.length === 0) return;
+    if (!batchUpdateData.updateNosCluster && !batchUpdateData.updatePrismCentral && !batchUpdateData.nutestBranch && !batchUpdateData.patchUrl && !batchUpdateData.frameworkPatchUrl && !batchUpdateData.testerTagsAction && !batchUpdateData.updateAdditionalTags) {
+      alert('Select at least one field to update (component, branch/patch, tags).');
+      return;
+    }
 
     const totalJPs = targets.reduce((s, rp) => s + (rp.job_profiles?.length || 0), 0);
     const label = isBulk
@@ -724,7 +766,7 @@ export default function RunPlan() {
   const handleRetryTrigger = async (historyEntryId) => {
     setLoading(true);
     try {
-      const response = await api.post(`${API_BASE}/history/${historyEntryId}/retry`);
+      await api.post(`${API_BASE}/history/${historyEntryId}/retry`);
       alert('Retry triggered successfully!');
       if (selectedRunPlan) {
         handleViewHistory(selectedRunPlan.id);
@@ -1096,6 +1138,11 @@ export default function RunPlan() {
                         <tr key={plan.id}>
                           <td>
                             {plan.name}
+                            {plan.is_dummy && (
+                              <span className="svc-badge" style={{ background: '#b45309', marginLeft: 6 }} title="Dummy/test plan — not auto-triggered">
+                                DUMMY
+                              </span>
+                            )}
                             {plan.service_account && (
                               <span className="svc-badge" title={`Triggered via ${plan.service_account}`}>{plan.service_account}</span>
                             )}
@@ -1360,11 +1407,40 @@ export default function RunPlan() {
             </div>
           </div>
 
+          <div className="form-group">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={!!formData.isDummy}
+                onChange={(e) => setFormData({ ...formData, isDummy: e.target.checked })}
+              />
+              Dummy / test plan
+            </label>
+            <small style={{ display: 'block', marginTop: 6, color: '#666' }}>
+              Use for feature testing. Dummy plans are never auto-triggered by the scheduler.
+              Prefer names like <code>DUMMY_…</code> or <code>[TEST] …</code>.
+              For fully isolated storage set env <code>REGX_RUN_PLANS_FILE=run_plans_test.json</code>.
+            </small>
+          </div>
+
           <div className="form-actions">
-            <button onClick={() => setView('list')}>Cancel</button>
-            <button className="btn-primary" onClick={handleSaveRunPlan} disabled={loading}>
-              {loading ? 'Saving...' : 'Save'}
-            </button>
+            {view === 'edit' && (
+              <button
+                type="button"
+                className="btn-danger-outline"
+                onClick={handleDeleteRunPlan}
+                disabled={loading || !selectedRunPlan?.id}
+                title="Delete this run plan"
+              >
+                {loading ? 'Working...' : 'Delete Run Plan'}
+              </button>
+            )}
+            <div className="form-actions-right">
+              <button type="button" onClick={() => setView('list')} disabled={loading}>Cancel</button>
+              <button className="btn-primary" onClick={handleSaveRunPlan} disabled={loading}>
+                {loading ? 'Saving...' : 'Save'}
+              </button>
+            </div>
           </div>
         </div>
       </div>

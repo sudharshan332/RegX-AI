@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { API_BASE_URL } from '../config';
+import { normalizeAuthUser } from '../utils/authUser';
 
 const AuthContext = createContext(null);
 
@@ -30,7 +31,8 @@ export function AuthProvider({ children }) {
         headers: { Authorization: `Bearer ${token}` },
       })
       .then((res) => {
-        setUser(res.data.user);
+        // JWT payload uses sub/name; normalize so UI always has username/displayName/name
+        setUser(normalizeAuthUser(res.data.user));
       })
       .catch(() => {
         clearAuth();
@@ -40,13 +42,17 @@ export function AuthProvider({ children }) {
       });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const login = useCallback(async (username, password) => {
-    const res = await axios.post(`${AUTH_API}/login`, { username, password });
+  const login = useCallback(async (username, password, team) => {
+    const res = await axios.post(`${AUTH_API}/login`, { username, password, team });
     const { token: newToken, user: newUser } = res.data;
+    // LDAP login returns displayName/username (not name/sub) — normalize before state
+    const normalized = normalizeAuthUser(newUser);
+    // Add team to normalized user
+    normalized.team = team;
     localStorage.setItem(TOKEN_KEY, newToken);
     setToken(newToken);
-    setUser(newUser);
-    return newUser;
+    setUser(normalized);
+    return normalized;
   }, []);
 
   const logout = useCallback(() => {
