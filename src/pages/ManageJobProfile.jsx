@@ -1,10 +1,6 @@
 import React, { useState } from 'react';
-import axios from 'axios';
 import api from '../api';
-import { API_BASE_URL } from '../config';
 import './DynamicJobProfile.css';
-
-const API_BASE = `${API_BASE_URL}/mcp/regression/dynamic-jp`;
 
 // Tool went live in April 2026 — no entities exist before this date.
 const TOOL_START_DATE = '2026-04-01';
@@ -48,12 +44,20 @@ export default function ManageJobProfile({ embedded = false }) {
     setSelectedJPs(new Set());
     setSelectedTSs(new Set());
     try {
-      // No small limit — return everything that matches (JITA honors a large
-      // limit and reports the true total), so the list mirrors the JITA UI.
-      const resp = await axios.post(`${API_BASE}/search`, {
-        query: q,
-        date: selectedDate || null,
-      });
+      // JPs tolerate a larger scan; TS name regex is unindexed and times out
+      // above ~50. Match Manage TS: modest TS limit + long client timeout.
+      const resp = await api.post(
+        `/mcp/regression/dynamic-jp/search`,
+        {
+          query: q,
+          date: selectedDate || null,
+          include_job_profiles: true,
+          include_test_sets: true,
+          limit: 200,
+          ts_limit: 50,
+        },
+        { timeout: 90000 }
+      );
       const jps = resp.data?.job_profiles || [];
       const tss = resp.data?.test_sets || [];
       setJobProfiles(jps);
@@ -61,12 +65,21 @@ export default function ManageJobProfile({ embedded = false }) {
       setTotals(resp.data?.totals || { job_profiles: jps.length, test_sets: tss.length });
       setSearched(true);
       const warnings = Array.isArray(resp.data?.warnings) ? resp.data.warnings : [];
+      const timeoutWarn = warnings.find((w) => /timed out/i.test(String(w || '')));
       if (!jps.length && !tss.length) {
         const where = [
           q.length >= 2 ? `matching "${q}"` : '',
           selectedDate ? `created on ${selectedDate}` : '',
         ].filter(Boolean).join(' and ');
-        setErrorMsg(`No Job Profiles or Test Sets found ${where}`);
+        setErrorMsg(
+          timeoutWarn
+            ? `${timeoutWarn} Refine the name and retry.`
+            : `No Job Profiles or Test Sets found ${where}`
+        );
+      } else if (timeoutWarn && !tss.length) {
+        setErrorMsg(
+          `${timeoutWarn} Job profiles are shown; refine the query to load test sets.`
+        );
       } else if (warnings.length) {
         setErrorMsg(warnings.join(' '));
       }

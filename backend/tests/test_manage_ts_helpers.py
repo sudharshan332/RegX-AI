@@ -36,15 +36,15 @@ class TestJitaTestSetSearchParams(unittest.TestCase):
 
     def test_search_params_skip_sort_and_arg_projections(self):
         fn = self.ns["_jita_test_sets_search_params"]
-        params = fn('{"name":{"$regex":"CDP","$options":"i"}}', 80)
-        self.assertEqual(params["limit"], 80)
+        params = fn('{"name":{"$regex":"CDP","$options":"i"}}', 40)
+        self.assertEqual(params["limit"], 40)
         self.assertNotIn("sort", params)
         self.assertNotIn("only", params)
 
     def test_search_params_cap_limit(self):
         fn = self.ns["_jita_test_sets_search_params"]
         params = fn("{}", 2000)
-        self.assertEqual(params["limit"], 200)
+        self.assertEqual(params["limit"], 50)
 
 
 class TestManageTsRegexValidation(unittest.TestCase):

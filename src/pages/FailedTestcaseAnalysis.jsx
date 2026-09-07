@@ -641,7 +641,6 @@ export default function FailedTestcaseAnalysis() {
   const [patternSaving, setPatternSaving] = useState(false);
 
   // Intelligent Triage state
-  const [intelligentTriageLoading, setIntelligentTriageLoading] = useState({});
   const [intelligentTriageResults, setIntelligentTriageResults] = useState({});
   const [firstLevelAiLoading, setFirstLevelAiLoading] = useState({});
   const [firstLevelAiResults, setFirstLevelAiResults] = useState({});
@@ -1520,6 +1519,23 @@ export default function FailedTestcaseAnalysis() {
     !(retriggerOverrides.pc.buildUrl || '').trim() ||
     !(retriggerOverrides.pc.qcow2Url || '').trim()
   );
+  const allComponentsOverride = [
+    retriggerOverrides.updateNos,
+    retriggerOverrides.updatePc,
+    retriggerOverrides.updateImage,
+    retriggerOverrides.updateFramework,
+    retriggerOverrides.updateResource,
+  ].every(Boolean);
+  const toggleAllComponentOverrides = (checked) => {
+    setRetriggerOverrides(prev => ({
+      ...prev,
+      updateNos: checked,
+      updatePc: checked,
+      updateImage: checked,
+      updateFramework: checked,
+      updateResource: checked,
+    }));
+  };
   const handleRetrigger = async () => {
     const selected = selectedRows.filter(Boolean);
     if (selected.length === 0) return;
@@ -1624,7 +1640,10 @@ export default function FailedTestcaseAnalysis() {
     }
     const skippedRows = selected
       .map(id => results.find(r => r.testcase_id === id))
-      .filter(r => r && (r.status || '').toLowerCase() === 'skipped' || (r?.status || '').toLowerCase() === 'skip');
+      .filter((r) => {
+        const status = (r?.status || '').toLowerCase();
+        return status === 'skipped' || status === 'skip';
+      });
 
     if (skippedRows.length === 0) {
       alert('No skipped testcases selected. Please select skipped testcases to analyze.');
@@ -2936,8 +2955,8 @@ export default function FailedTestcaseAnalysis() {
   useEffect(() => {
     const needSame = visibleColumns.includes('history_same_branch');
     const needOther = visibleColumns.includes('history_other_branch');
-    if (!needSame && !needOther || !analysisTag || !currentBranch || filteredResults.length === 0) return;
-    filteredResults.forEach((result, idx) => {
+    if ((!needSame && !needOther) || !analysisTag || !currentBranch || filteredResults.length === 0) return;
+    filteredResults.forEach((result) => {
       const testName = result.testcase_name;
       if (!testName) return;
       const keySame = `${testName}|true`;
@@ -2949,7 +2968,7 @@ export default function FailedTestcaseAnalysis() {
         fetchHistory(testName, false);
       }
     });
-  }, [visibleColumns, analysisTag, currentBranch, filteredResults.length, fetchHistory, historyCache]);
+  }, [visibleColumns, analysisTag, currentBranch, filteredResults, fetchHistory, historyCache]);
 
   const visibleIdsForHeader = filteredResults.map(r => r.testcase_id).filter(Boolean);
   const selectedVisibleCount = visibleIdsForHeader.filter(id => selectedRows.includes(id)).length;

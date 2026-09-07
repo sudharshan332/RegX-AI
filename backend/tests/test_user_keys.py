@@ -4,10 +4,13 @@ import tempfile
 import unittest
 
 from user_keys import (
+    clear_login_credential,
+    get_login_credential,
     get_user_key,
     get_user_keys_masked,
     mask_secret,
     reset_fernet_cache_for_tests,
+    store_login_credential,
     upsert_user_keys,
 )
 
@@ -17,8 +20,10 @@ class TestUserKeys(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._path = os.path.join(self._tmpdir.name, "user_api_keys.json")
         self._fernet = os.path.join(self._tmpdir.name, "user_api_keys.fernet")
+        self._login = os.path.join(self._tmpdir.name, "user_login_creds.json")
         os.environ["REGX_USER_KEYS_FILE"] = self._path
         os.environ["REGX_USER_KEYS_FERNET_FILE"] = self._fernet
+        os.environ["REGX_LOGIN_CREDS_FILE"] = self._login
         os.environ.pop("SECRET_KEY", None)
         os.environ.pop("REGX_SECRET_KEY", None)
         os.environ.pop("REGX_USER_KEYS_SECRET", None)
@@ -28,6 +33,7 @@ class TestUserKeys(unittest.TestCase):
         self._tmpdir.cleanup()
         os.environ.pop("REGX_USER_KEYS_FILE", None)
         os.environ.pop("REGX_USER_KEYS_FERNET_FILE", None)
+        os.environ.pop("REGX_LOGIN_CREDS_FILE", None)
         reset_fernet_cache_for_tests()
 
     def test_upsert_and_masked_roundtrip(self):
@@ -62,6 +68,18 @@ class TestUserKeys(unittest.TestCase):
         self.assertEqual(mask_secret("abcdefghij"), "abcd****ghij")
         view = get_user_keys_masked("nobody")
         self.assertEqual(view["atlassian_jira_token"], "")
+
+    def test_login_credential_roundtrip_is_case_insensitive(self):
+        store_login_credential("Swapnil.Wankhede", "secret-ldap-pass")
+        self.assertEqual(get_login_credential("swapnil.wankhede"), "secret-ldap-pass")
+        self.assertEqual(get_login_credential("Swapnil.Wankhede"), "secret-ldap-pass")
+
+    def test_login_credential_survives_fernet_cache_reset(self):
+        store_login_credential("alice", "ldap-password-value")
+        reset_fernet_cache_for_tests()
+        self.assertEqual(get_login_credential("alice"), "ldap-password-value")
+        clear_login_credential("alice")
+        self.assertIsNone(get_login_credential("alice"))
 
 
 if __name__ == "__main__":

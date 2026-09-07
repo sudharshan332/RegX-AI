@@ -52,6 +52,17 @@ from tag_extra_task_ids import (
     plan_accept_after_tagging,
     remove_extras_for_tag,
 )
+from dynamic_jp_clone import (
+    apply_clone_retain_exceptions,
+    apply_destination_nos,
+    apply_destination_pc,
+    apply_latest_smoke_on_current_branches,
+    is_master_branch,
+    nutest_mainline_branch,
+    pc_branch_search_query,
+    resolve_clone_pc_branch,
+    set_sut_branch,
+)
 from user_keys import (
     get_user_key,
     get_user_keys_masked,
@@ -85,23 +96,47 @@ _credential_cache_lock = threading.Lock()
 CREDENTIAL_TTL_SECONDS = int(os.environ.get("JWT_EXPIRY_HOURS", "24")) * 3600
 
 
+def _norm_login_username(username):
+    """Lowercase username the same way the on-disk login store does."""
+    return (username or "").strip().lower()
+
+
 def _store_user_credentials(username, password):
-    """Cache user credentials on successful login."""
+    """Cache user credentials on successful login and persist them across restarts."""
+    uname = _norm_login_username(username)
+    if not uname or not password:
+        return
     with _credential_cache_lock:
-        _credential_cache[username] = {
+        _credential_cache[uname] = {
             "password": password,
             "expires_at": time.time() + CREDENTIAL_TTL_SECONDS,
         }
+    store_login_credential(uname, password)
 
 
 def _get_user_credentials(username):
-    """Retrieve cached credentials. Returns (username, password) tuple or None."""
-    with _credential_cache_lock:
-        entry = _credential_cache.get(username)
-        if entry and entry["expires_at"] > time.time():
-            return (username, entry["password"])
-        _credential_cache.pop(username, None)
+    """Retrieve cached credentials. Returns (username, password) tuple or None.
+
+    On an in-memory miss (Flask restart), rehydrate from the on-disk login store
+    so JITA POSTs still authenticate as the logged-in user.
+    """
+    uname = _norm_login_username(username)
+    if not uname:
         return None
+    with _credential_cache_lock:
+        entry = _credential_cache.get(uname)
+        if entry and entry["expires_at"] > time.time():
+            return (uname, entry["password"])
+        _credential_cache.pop(uname, None)
+    password = get_login_credential(uname)
+    if not password:
+        return None
+    with _credential_cache_lock:
+        _credential_cache[uname] = {
+            "password": password,
+            "expires_at": time.time() + CREDENTIAL_TTL_SECONDS,
+        }
+    return (uname, password)
 
 
 # Corporate email domain used to construct a personal email from a sAMAccountName
@@ -142,16 +177,17 @@ def _current_user_jita_auth():
     basic auth, or ``None`` if unavailable.
 
     JITA attributes ``created_by`` to whoever authenticates the POST. When we
-    have the user's cached credentials (captured at login), creating entities as
-    the user makes JITA's native ``created_by`` = the real person instead of the
-    shared service account. Returns ``None`` when the cache is empty/expired
-    (e.g. token still valid but backend restarted), so callers can fall back to
-    the service account and never fail the operation.
+    have the user's cached credentials (captured at login, rehydrated from disk
+    after a restart), creating entities as the user makes JITA's native
+    ``created_by`` = the real person instead of the shared service account.
+    Returns ``None`` when memory and disk are both empty/expired, so callers can
+    fall back to the service account and never fail the operation.
     """
     payload = getattr(g, "current_user", None)
     if not isinstance(payload, dict):
         return None
-    username = (payload.get("sub") or payload.get("username") or "").strip()
+    raw = (payload.get("sub") or payload.get("username") or "").strip()
+    username = _norm_login_username(raw.split("@")[0] if raw else "")
     if not username:
         return None
     creds = _get_user_credentials(username)
@@ -213,6 +249,32 @@ _cdp_reg_jarvis_env = {
     u.strip().lower() for u in os.getenv("CDP_REG_JARVIS_MEMBERS", "").split(",") if u.strip()
 }
 CDP_REG_JARVIS_MEMBERS = _cdp_reg_jarvis_env or _CDP_REG_JARVIS_DEFAULT_MEMBERS
+
+
+def _ensure_cdp_reg_jarvis_user_groups(payload):
+    """Merge ``cdp_reg_jarvis`` into ``user_groups`` without dropping other groups."""
+    if not isinstance(payload, dict):
+        return payload
+    groups = payload.get("user_groups")
+    if not isinstance(groups, list):
+        groups = []
+    merged = []
+    seen = set()
+    for g in list(groups) + [CDP_REG_JARVIS_GROUP]:
+        if g is None:
+            continue
+        key = str(g).strip()
+        if not key:
+            continue
+        low = key.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        merged.append(CDP_REG_JARVIS_GROUP if low == CDP_REG_JARVIS_GROUP else key)
+    payload["user_groups"] = merged
+    return payload
+
+
 # Name-regex searches are unindexed on JITA and scale with the result limit, so the
 # search endpoint needs a longer read timeout than the default one-shot GETs.
 JITA_SEARCH_TIMEOUT = int(os.getenv("JITA_SEARCH_TIMEOUT", "30"))
@@ -10745,6 +10807,12 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
             tester_tags.append(fw_tag)
     if "jita3" not in tester_tags:
         tester_tags.append("jita3")
+    nested_resource_types = {
+        "nested", "nested_1", "nested_1.0", "nested_2", "nested_2.0",
+        "nestedahv 1.0", "nestedahv 2.0",
+    }
+    physical_resource_types = {"physical"}
+    resource_type = str(overrides.get("resource_type") or "").strip().lower()
     if overrides.get("override_pool") and resource_type in nested_resource_types:
         if "rdm__virtual" not in tester_tags:
             tester_tags.append("rdm__virtual")
@@ -10932,11 +11000,19 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         payload["imaging_options"] = imaging_options
     if overrides.get("override_resource_config"):
         nested_params = requested_hw.get("nested_params") if isinstance(requested_hw.get("nested_params"), dict) else {}
+    elif overrides.get("override_pool") and resource_type in physical_resource_types:
+        nested_params = {}
+        requested_hw.pop("nested_params", None)
+    elif overrides.get("override_pool") and resource_type in nested_resource_types:
+        version = "1.0" if resource_type in ("nested_1", "nested_1.0", "nestedahv 1.0") else "2.0"
+        nested_params = {"is_nested": True, "version": version}
     else:
         nested_params = _original_nested_params(task_data)
     if nested_params:
         payload["nested_params"] = nested_params
-    elif overrides.get("override_resource_config"):
+    elif overrides.get("override_resource_config") or (
+        overrides.get("override_pool") and resource_type in physical_resource_types
+    ):
         payload.pop("nested_params", None)
     if requested_hw or infra:
         if not requested_hw:
@@ -13489,15 +13565,16 @@ def _manage_ts_fetch_test_set(ts_id):
 
 
 def _jita_test_sets_search_params(raw_query, limit):
-    """Query params for JITA GET /test_sets name search used by Manage TS.
+    """Query params for JITA GET /test_sets name search used by Manage JP/TS.
 
     Name regex is unindexed. ``sort=-_id`` plus large field projections (args maps
     / ``only`` lists) routinely exceed JITA_SEARCH_TIMEOUT, so the UI gets zero
-    test sets. Skip sort and projection so JITA can stop after ``limit``.
+    test sets. Skip sort and projection so JITA can stop after ``limit``. Cap
+    aggressively — large limits make Manage JP hang and return an empty TS column.
     """
     return {
         "raw_query": raw_query,
-        "limit": min(int(limit), 200),
+        "limit": min(max(int(limit or 25), 1), 50),
     }
 
 
@@ -13957,6 +14034,29 @@ def dynamic_jp_search_node_pools():
         return jsonify({"error": str(e), "pools": []}), 500
 
 
+def _search_jita_branch_names(query, limit=20):
+    """Return JITA branch names matching ``query`` (case-insensitive regex)."""
+    query = (query or "").strip()
+    if len(query) < 2:
+        return []
+    pattern = re.escape(query)
+    raw_q = json.dumps({"name": {"$regex": pattern, "$options": "i"}})
+    resp = requests.get(
+        f"{JITA_BASE}/branches",
+        params={"raw_query": raw_q, "limit": limit},
+        auth=JITA_SVC_AUTH, verify=False, timeout=15,
+    )
+    branches = []
+    if resp.status_code == 200:
+        for item in resp.json().get("data", []) or []:
+            name = (item.get("name") or "") if isinstance(item, dict) else ""
+            if name and name not in branches:
+                branches.append(name)
+    q_lower = query.lower()
+    branches.sort(key=lambda b: (0 if b.lower().startswith(q_lower) else 1, b.lower()))
+    return branches
+
+
 @app.route("/mcp/regression/dynamic-jp/search-branches", methods=["POST"])
 def dynamic_jp_search_branches():
     """Search JITA branches by name."""
@@ -13965,26 +14065,11 @@ def dynamic_jp_search_branches():
         query = (req_data.get("query") or "").strip()
         if len(query) < 2:
             return jsonify({"branches": []})
-
-        pattern = re.escape(query)
-        raw_q = json.dumps({"name": {"$regex": pattern, "$options": "i"}})
-        resp = requests.get(
-            f"{JITA_BASE}/branches",
-            params={"raw_query": raw_q, "limit": 20},
-            auth=JITA_SVC_AUTH, verify=False, timeout=15
-        )
-        branches = []
-        if resp.status_code == 200:
-            for item in resp.json().get("data", []):
-                name = item.get("name") or ""
-                if name and name not in branches:
-                    branches.append(name)
-        # Sort so exact-prefix matches come first
-        q_lower = query.lower()
-        branches.sort(key=lambda b: (0 if b.lower().startswith(q_lower) else 1, b.lower()))
+        try:
+            branches = _search_jita_branch_names(query)
+        except requests.exceptions.Timeout:
+            return jsonify({"error": "Timed out", "branches": []}), 504
         return jsonify({"branches": branches})
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Timed out", "branches": []}), 504
     except Exception as e:
         logger.error(f"Error searching branches: {e}", exc_info=True)
         return jsonify({"error": str(e), "branches": []}), 500
@@ -14137,7 +14222,7 @@ def dynamic_jp_create():
                 f"(created_by will be the user)"
             )
         else:
-            logger.info(
+            logger.warning(
                 "[create] No cached user credentials — authenticating JITA calls as "
                 "service account (created_by = svc; owner recorded via emails/user)"
             )
@@ -14209,6 +14294,38 @@ def dynamic_jp_create():
         # its existing NOS/git branch). Explicit custom_* values still take precedence.
         version_from = (req_data.get("version_from") or "").strip()
         version_to = (req_data.get("version_to") or "").strip()
+        clone_to_branch = (req_data.get("clone_to_branch") or "").strip()
+        pc_branch_unresolved = None
+
+        # Clone-to: NOS/TCMS use the destination AOS branch. NuTest uses the
+        # release mainline (7.6.0.6 → ganges-7.6-stable; master → master).
+        # PC is looked up as `{clone_to}-pc` in JITA (master stays master).
+        # Never invent a PC name.
+        if clone_to_branch and not create_fresh:
+            nos_branch = clone_to_branch
+            nutest_branch = nutest_mainline_branch(clone_to_branch)
+            if not tcms_sync_branch:
+                tcms_sync_branch = clone_to_branch
+            override_source_branches = True
+            if is_master_branch(clone_to_branch):
+                pc_branch = "master"
+            else:
+                pc_query = pc_branch_search_query(clone_to_branch)
+                try:
+                    pc_hits = _search_jita_branch_names(pc_query) if pc_query else []
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"[create] PC branch search failed for {pc_query!r}: {e}")
+                    pc_hits = []
+                resolved_pc, missing_pc = resolve_clone_pc_branch(clone_to_branch, pc_hits)
+                if resolved_pc:
+                    pc_branch = resolved_pc
+                else:
+                    pc_branch = None
+                    pc_branch_unresolved = missing_pc
+                    logger.warning(
+                        f"[create] PC branch {missing_pc!r} not found in JITA; "
+                        "keeping source JP PC branch"
+                    )
         
         # Convert None to empty dict
         if not custom_test_args or not isinstance(custom_test_args, dict):
@@ -14439,49 +14556,6 @@ def dynamic_jp_create():
                 row["service"] = "nutest-py3test"
                 if not str(row.get("package_type") or "").strip():
                     row["package_type"] = "tar"
-
-        def _apply_retain_setup_on_failure(jp_payload):
-            """Retain deployment after each test failure, excluding DataCorruptionError."""
-            if not isinstance(jp_payload, dict):
-                return
-
-            existing = jp_payload.get("retain_resources_config")
-            existing_criteria = existing.get("criteria") if isinstance(existing, dict) else {}
-            existing_test_failure = (
-                existing_criteria.get("TEST_FAILURE") if isinstance(existing_criteria, dict) else {}
-            )
-            existing_params = (
-                existing_test_failure.get("params") if isinstance(existing_test_failure, dict) else {}
-            )
-            duration = RETAIN_DURATION_72H_MIN
-            states = existing_params.get("states_to_track") if isinstance(existing_params, dict) else None
-            if not isinstance(states, list) or not states:
-                states = ["Failed"]
-            required_states = ["Failed", "Aborted", "Timeout", "InfraError", "Warning"]
-            states = list(dict.fromkeys(states + [s for s in required_states if s not in states]))
-            exceptions = existing_params.get("exceptions") if isinstance(existing_params, dict) else []
-            if not isinstance(exceptions, list):
-                exceptions = []
-            exceptions = [e for e in exceptions if e != "DataCorruptionError"]
-
-            criteria = dict(existing_criteria) if isinstance(existing_criteria, dict) else {}
-            criteria["TEST_FAILURE"] = {
-                "entity": "DEPLOYMENT",
-                "type": "AFTER_EACH",
-                "params": {
-                    "duration": duration,
-                    "exceptions": exceptions,
-                    "states_to_track": states,
-                },
-            }
-            jp_payload["retain_resources_config"] = {"criteria": criteria}
-
-            for plugin in jp_payload.get("plugins") or []:
-                if not isinstance(plugin, dict):
-                    continue
-                args = plugin.get("args")
-                if isinstance(args, dict) and isinstance(args.get("exceptions"), list):
-                    args["exceptions"] = [e for e in args["exceptions"] if e != "DataCorruptionError"]
 
         source_testset_name = (req_data.get("source_testset_name") or "").strip()
 
@@ -14781,7 +14855,8 @@ def dynamic_jp_create():
             if _reuse_args_warn:
                 ts_create_warning = f"{ts_create_warning} {_reuse_args_warn}"
         else:
-            # Build test entries
+            # Build test entries the same way as before: copy the source row template
+            # and attach the typed names. Do not look tests up in the JITA catalog.
             if testcase_names:
                 row_tmpl = {}
                 if isinstance(source_ts, dict):
@@ -14826,6 +14901,7 @@ def dynamic_jp_create():
             )
             _ensure_test_args_on_test_set_payload(new_ts_payload, "{}", custom_test_args)
             _force_tcms_service_on_test_set(new_ts_payload)
+            _ensure_cdp_reg_jarvis_user_groups(new_ts_payload)
             logger.info(f"[create] TS POST payload: name={new_ts_name}, #tests={len(test_entries)}, "
                         f"test_args_keys={list(_test_args_value_to_dict(new_ts_payload.get('test_args')).keys())}, "
                         f"fw_args_keys={list(_framework_args_value_to_dict(new_ts_payload.get('framework_args')).keys())}")
@@ -14862,6 +14938,7 @@ def dynamic_jp_create():
                                         "{}",
                                         custom_test_args,
                                     )
+                                    _ensure_cdp_reg_jarvis_user_groups(created_ts_doc)
                                     ts_put_resp = requests.put(
                                         f"{JITA_BASE}/test_sets/{created_ts_id}",
                                         json=created_ts_doc,
@@ -15202,130 +15279,55 @@ def dynamic_jp_create():
                 new_jp_payload["patch_url"] = framework_patch_url
             else:
                 new_jp_payload.pop("patch_url", None)
-            logger.info(f"[create] Clone mode — set test framework branch={nutest_branch}, "
-                        f"patches(test={bool(test_patch_url)}, fw={bool(framework_patch_url)})")
+            logger.info(
+                f"[create] Clone mode — set test framework (nutest) branch={nutest_branch} "
+                f"(from clone_to={clone_to_branch or nos_branch}), "
+                f"patches(test={bool(test_patch_url)}, fw={bool(framework_patch_url)})"
+            )
 
-            # Use Latest Commit: override build selection to Latest Smoke Passed with optimal build type
-            if use_latest_commit:
-                logger.info(f"[create] Clone mode — applying use_latest_commit configuration")
-                
-                # Extract actual branches from source JP (not from request)
-                source_git = new_jp_payload.get("git") or {}
-                actual_nos_branch = source_git.get("branch", "master") if isinstance(source_git, dict) else "master"
-                
-                # For PC branch, check resource_manager_json
-                resource_manager_json = new_jp_payload.get("resource_manager_json") or {}
-                if isinstance(resource_manager_json, dict):
-                    pc_config = resource_manager_json.get("PRISM_CENTRAL") or {}
-                    if isinstance(pc_config, dict):
-                        pc_build = pc_config.get("build") or {}
-                        if isinstance(pc_build, dict):
-                            actual_pc_branch = pc_build.get("branch", actual_nos_branch)
-                        else:
-                            actual_pc_branch = actual_nos_branch
-                    else:
-                        actual_pc_branch = actual_nos_branch
-                else:
-                    actual_pc_branch = actual_nos_branch
-                    resource_manager_json = {}
-                
-                # Determine build types based on actual branches from source JP
-                nos_build_type = "opt" if actual_nos_branch.strip().lower() == "master" else "release"
-                pc_build_type = "opt" if actual_pc_branch.strip().lower() == "master" else "release"
-                
-                logger.info(f"[create] Extracted branches from source JP: nos={actual_nos_branch}, pc={actual_pc_branch}")
-                
-                # Update git config (keep source branch)
-                git = new_jp_payload.get("git") or {}
-                if not isinstance(git, dict):
-                    git = {}
-                git["branch"] = actual_nos_branch
-                git["repo"] = "main"
-                new_jp_payload["git"] = git
-                
-                # Update build selection for NOS
-                new_jp_payload["build_selection"] = {
-                    "by_latest_smoked": True,  # Always true for Latest Smoke Passed
-                    "commit_must_be_newer": False,
-                    "build_type": nos_build_type,
-                }
-                # Ensure conflicting fields are removed
-                new_jp_payload["build_selection"].pop("by_commit_id", None)
-                new_jp_payload["build_selection"].pop("commit_id", None)
-                new_jp_payload["build_selection"].pop("gbn", None)
-                
-                # Update resource_manager_json for PC
-                if "NOS_CLUSTER" not in resource_manager_json:
-                    resource_manager_json["NOS_CLUSTER"] = {}
-                resource_manager_json["PRISM_CENTRAL"] = {
-                    "build": {
-                        "branch": actual_pc_branch,
-                        "build_selection_build_type": pc_build_type,
-                        "build_selection_option": "Latest Smoke Passed",
-                    }
-                }
-                new_jp_payload["resource_manager_json"] = resource_manager_json
-                
-                logger.info(f"[create] Clone mode — set build_selection: nos_build_type={nos_build_type}, "
-                           f"pc_build_type={pc_build_type}, by_latest_smoked=True, nos_branch={actual_nos_branch}, pc_branch={actual_pc_branch}")
+        # Clone-to / Release Migration: overwrite NOS (and PC when resolved) before Latest.
+        if override_source_branches and not create_fresh:
+            apply_destination_nos(
+                new_jp_payload,
+                nos_branch,
+                nos_tag=nos_tag,
+                nos_update_type=nos_update_type,
+                nos_commit_id=nos_commit_id,
+                nos_gbn=nos_gbn,
+            )
+            apply_destination_pc(
+                new_jp_payload,
+                pc_branch,
+                pc_tag=pc_tag,
+                pc_update_type=pc_update_type,
+                pc_commit_id=pc_commit_id,
+            )
+            logger.info(
+                f"[create] Overrode destination branches: nos={nos_branch}, pc={pc_branch}"
+            )
 
-        # Release Migration: overwrite the source JP's NOS (git) and Prism Central
-        # branches with the requested ones. Fresh mode already applies branches above;
-        # this covers clone mode, which otherwise preserves the source branches.
-        if override_source_branches and not create_fresh and not use_latest_commit:
-            git = new_jp_payload.get("git") or {}
-            if not isinstance(git, dict):
-                git = {}
-            git["branch"] = nos_branch
-            git.setdefault("repo", "main")
-            new_jp_payload["git"] = git
+        if use_latest_commit and not create_fresh:
+            apply_latest_smoke_on_current_branches(new_jp_payload)
+            logger.info("[create] Clone mode — applied Latest Smoke Passed on current destination branches")
 
-            nos_build_type = "opt" if nos_branch.strip().lower() == "master" else "release"
-            pc_build_type = "opt" if pc_branch.strip().lower() == "master" else "release"
+        def _reapply_clone_retain(jp):
+            """Always set TEST_FAILURE retain; DCE unless Retain Setup is on."""
+            if preserve_source_config or not isinstance(jp, dict):
+                return
+            apply_clone_retain_exceptions(
+                jp,
+                retain_setup_on_failure=retain_setup_on_failure,
+                duration_min=RETAIN_DURATION_72H_MIN,
+            )
+            jp["retain_resources_config"] = _ensure_retain_duration(
+                jp.get("retain_resources_config"), RETAIN_DURATION_72H_MIN
+            )
 
-            if nos_update_type == "by_commit":
-                bs = {
-                    "by_commit_id": True,
-                    "commit_must_be_newer": False,
-                    "build_type": nos_build_type,
-                }
-                if nos_commit_id:
-                    bs["commit_id"] = nos_commit_id
-                if nos_gbn:
-                    try:
-                        bs["gbn"] = int(nos_gbn) if isinstance(nos_gbn, str) else nos_gbn
-                    except (ValueError, TypeError):
-                        bs["gbn"] = nos_gbn
-                new_jp_payload["build_selection"] = bs
-            else:
-                new_jp_payload["build_selection"] = {
-                    "by_latest_smoked": nos_tag == "Latest Smoke Passed",
-                    "commit_must_be_newer": False,
-                    "build_type": nos_build_type,
-                }
-
-            rmj = new_jp_payload.get("resource_manager_json") or {}
-            if not isinstance(rmj, dict):
-                rmj = {}
-            rmj.setdefault("NOS_CLUSTER", {})
-            pc_build = {
-                "branch": pc_branch,
-                "build_selection_build_type": pc_build_type,
-            }
-            if pc_update_type == "by_commit":
-                if pc_commit_id:
-                    pc_build["build_selection_option"] = pc_commit_id
-            else:
-                pc_build["build_selection_option"] = pc_tag
-            rmj["PRISM_CENTRAL"] = {"build": pc_build}
-            new_jp_payload["resource_manager_json"] = rmj
-            logger.info(f"[create] Release Migration — overrode branches: nos={nos_branch}, pc={pc_branch}")
-
-        if retain_setup_on_failure:
-            _apply_retain_setup_on_failure(new_jp_payload)
-        new_jp_payload["retain_resources_config"] = _ensure_retain_duration(
-            new_jp_payload.get("retain_resources_config"), RETAIN_DURATION_72H_MIN
-        )
+        _reapply_clone_retain(new_jp_payload)
+        if preserve_source_config:
+            new_jp_payload["retain_resources_config"] = _ensure_retain_duration(
+                new_jp_payload.get("retain_resources_config"), RETAIN_DURATION_72H_MIN
+            )
 
         # Release Migration: use the explicitly transformed description when provided
         # (e.g. old-version -> new-version replacement), overriding the generic default.
@@ -15333,6 +15335,8 @@ def dynamic_jp_create():
             new_jp_payload["description"] = custom_jp_description
 
         _set_tcms_sync_flags(new_jp_payload, sync_to_tcms, tcms_sync_branch)
+        if clone_to_branch and not create_fresh:
+            set_sut_branch(new_jp_payload, clone_to_branch)
 
         def _force_email_on_and_clear_tag_filters(jp):
             """Turn 'Send Email Reports' ON (logged-in user as recipient) and disable
@@ -15383,7 +15387,7 @@ def dynamic_jp_create():
                 if current_user_name:
                     jp["user"] = current_user_name
                 jp["private"] = True
-                jp["user_groups"] = ["cdp_reg_jarvis"]
+            _ensure_cdp_reg_jarvis_user_groups(jp)
             # Disable "Run Tests With Tags" and drop inherited TCMS tag(s) (e.g. "unstable").
             adv = jp.get("advanced_options")
             if not isinstance(adv, dict):
@@ -15404,6 +15408,7 @@ def dynamic_jp_create():
                 "[create] preserve_source_config=True — kept source email/visibility/tag "
                 "config unchanged (Release Migration)"
             )
+        _ensure_cdp_reg_jarvis_user_groups(new_jp_payload)
 
         # Tags will be applied via a separate PUT after creation (same
         # approach as Run Plan) because JITA's POST ignores tag fields.
@@ -15481,6 +15486,8 @@ def dynamic_jp_create():
                     jp_data = get_resp.json().get("data", {})
                     if isinstance(jp_data, dict):
                         _set_tcms_sync_flags(jp_data, False)
+                        if clone_to_branch:
+                            set_sut_branch(jp_data, clone_to_branch)
                         # Log infra from Jita's perspective after JP creation
                         infra_after = jp_data.get('infra', [])
                         coupon_allocated = None
@@ -15509,6 +15516,8 @@ def dynamic_jp_create():
                             jp_data["requested_hardware"] = _default_requested_hardware(resource_type)
                         # Force email ON + clear inherited tag filters.
                         _force_email_on_and_clear_tag_filters(jp_data)
+                        _ensure_cdp_reg_jarvis_user_groups(jp_data)
+                        _reapply_clone_retain(jp_data)
                         logger.info(
                             f"[create] Re-applied email + tag filters "
                             f"(send_emails={jp_data.get('send_emails')}, emails={jp_data.get('emails')})"
@@ -15596,10 +15605,14 @@ def dynamic_jp_create():
                         if not sync_to_tcms:
                             merged = [t for t in merged if t != "official"]
                         jp_data["tester_tags"] = merged
-                        _set_tcms_sync_flags(jp_data, sync_to_tcms)
+                        _set_tcms_sync_flags(jp_data, sync_to_tcms, tcms_sync_branch)
+                        if clone_to_branch:
+                            set_sut_branch(jp_data, clone_to_branch)
                         # Keep email ON and tag filters cleared on this PUT too
                         # (covers the sync_to_tcms path where the block above is skipped).
                         _force_email_on_and_clear_tag_filters(jp_data)
+                        _ensure_cdp_reg_jarvis_user_groups(jp_data)
+                        _reapply_clone_retain(jp_data)
 
                         put_payload = {}
                         for k, v in jp_data.items():
@@ -15636,6 +15649,11 @@ def dynamic_jp_create():
             warnings.append(ts_fetch_warning)
         if ts_create_warning:
             warnings.append(ts_create_warning)
+        if pc_branch_unresolved:
+            warnings.append(
+                f"PC branch '{pc_branch_unresolved}' was not found in JITA; "
+                "kept the source job profile's Prism Central branch."
+            )
         if tag_warning:
             warnings.append(tag_warning)
         if tcms_cleanup_warning:
@@ -15957,8 +15975,13 @@ def dynamic_jp_search():
                 warnings.append(f"Job profile search failed: {e}")
                 logger.warning(f"[search] JP search failed: {e}")
 
-        ts_raw_q = _build_raw_query(ts_tool_cond) if include_test_sets else None
-        if ts_raw_q:
+        if include_test_sets:
+            # Test-set name regex is unindexed and slow. Prefer exact match for a
+            # single literal term, then a modest substring scan with a longer
+            # timeout (Manage JP used to time out at 25s with limit=200 → empty TS).
+            ts_limit = min(int(req_data.get("ts_limit", min(limit, 50))), 50)
+            ts_timeout = max(int(JITA_SEARCH_TIMEOUT), 45)
+
             def _run_ts_search(raw_q, lim, timeout_s):
                 return requests.get(
                     f"{JITA_BASE}/test_sets",
@@ -15966,47 +15989,90 @@ def dynamic_jp_search():
                     auth=JITA_SVC_AUTH, verify=False, timeout=timeout_s,
                 )
 
-            ts_resp = None
-            try:
-                ts_resp = _run_ts_search(ts_raw_q, limit, min(max(JITA_SEARCH_TIMEOUT, 20), 25))
-            except requests.exceptions.Timeout:
-                logger.warning("[search] TS search timed out; retrying with limit=10")
-                try:
-                    ts_resp = _run_ts_search(ts_raw_q, min(10, int(limit) or 10), 40)
-                except requests.exceptions.Timeout:
-                    ts_resp = None
-                    warnings.append(
-                        "Test set search timed out. Narrow the query or lower the result limit, then retry."
-                    )
-                    logger.warning("[search] TS search timed out on retry")
-            except Exception as e:
-                warnings.append(f"Test set search failed: {e}")
-                logger.warning(f"[search] TS search failed: {e}")
+            def _append_ts_hits(items):
+                for item in items or []:
+                    if not isinstance(item, dict):
+                        continue
+                    eid = _extract_id(item)
+                    if eid and any(r.get("_id") == eid for r in result["test_sets"]):
+                        continue
+                    result["test_sets"].append({
+                        "_id": eid,
+                        "name": item.get("name", ""),
+                        "description": item.get("description", ""),
+                        "created_at": item.get("created_at"),
+                        "test_args": item.get("test_args", "") or item.get("testArgs", "") or "",
+                        "framework_args": item.get("framework_args", "") or item.get("frameworkArgs", "") or "",
+                        "args_map": item.get("args_map", {}) or {},
+                        "agave_options": item.get("agave_options", {}) or {},
+                        "test_args_map": _manage_ts_extract_test_args(item),
+                        "framework_args_map": _manage_ts_extract_framework_args(item),
+                    })
 
-            if ts_resp is not None:
-                if ts_resp.status_code == 200:
-                    ts_body = ts_resp.json() or {}
-                    for item in (ts_body.get("data", []) or []):
-                        if not isinstance(item, dict):
-                            continue
-                        result["test_sets"].append({
-                            "_id": _extract_id(item),
-                            "name": item.get("name", ""),
-                            "description": item.get("description", ""),
-                            "created_at": item.get("created_at"),
-                            # Include both raw and normalized arg maps so Manage TS can
-                            # compute common keys from list/search payload directly.
-                            "test_args": item.get("test_args", "") or item.get("testArgs", "") or "",
-                            "framework_args": item.get("framework_args", "") or item.get("frameworkArgs", "") or "",
-                            "args_map": item.get("args_map", {}) or {},
-                            "agave_options": item.get("agave_options", {}) or {},
-                            "test_args_map": _manage_ts_extract_test_args(item),
-                            "framework_args_map": _manage_ts_extract_framework_args(item),
-                        })
-                    totals["test_sets"] = ts_body.get("total", len(result["test_sets"]))
-                else:
-                    warnings.append(f"Test set search returned HTTP {ts_resp.status_code}.")
-                    logger.warning(f"[search] TS search HTTP {ts_resp.status_code}: {ts_resp.text[:200]}")
+            def _ts_query_with_name(name_clause):
+                conds = [name_clause]
+                if date_cond:
+                    conds.append(date_cond)
+                    conds.append(ts_tool_cond)
+                return json.dumps({"$and": conds} if len(conds) > 1 else conds[0])
+
+            # Fast path: exact name (indexed) for a single literal term.
+            if (
+                not use_regex
+                and len(search_terms) == 1
+                and len(search_terms[0]) >= 2
+            ):
+                exact_q = _ts_query_with_name({"name": search_terms[0]})
+                try:
+                    exact_resp = _run_ts_search(exact_q, min(ts_limit, 20), 15)
+                    if exact_resp.status_code == 200:
+                        exact_body = exact_resp.json() or {}
+                        exact_data = exact_body.get("data", []) or []
+                        if exact_data:
+                            _append_ts_hits(exact_data)
+                            totals["test_sets"] = exact_body.get("total", len(result["test_sets"]))
+                            logger.info(
+                                f"[search] TS exact-name hit for {search_terms[0]!r}: "
+                                f"{len(result['test_sets'])} row(s)"
+                            )
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"[search] TS exact-name lookup failed: {e}")
+
+            ts_raw_q = _build_raw_query(ts_tool_cond)
+            if ts_raw_q and not result["test_sets"]:
+                ts_resp = None
+                try:
+                    ts_resp = _run_ts_search(ts_raw_q, ts_limit, ts_timeout)
+                except requests.exceptions.Timeout:
+                    logger.warning(
+                        f"[search] TS search timed out (limit={ts_limit}, timeout={ts_timeout}s); "
+                        "retrying with limit=15"
+                    )
+                    try:
+                        ts_resp = _run_ts_search(ts_raw_q, 15, max(ts_timeout, 60))
+                    except requests.exceptions.Timeout:
+                        ts_resp = None
+                        warnings.append(
+                            "Test set search timed out. Narrow the query (more of the name) "
+                            "or search by date, then retry."
+                        )
+                        logger.warning("[search] TS search timed out on retry")
+                except Exception as e:
+                    warnings.append(f"Test set search failed: {e}")
+                    logger.warning(f"[search] TS search failed: {e}")
+
+                if ts_resp is not None:
+                    if ts_resp.status_code == 200:
+                        ts_body = ts_resp.json() or {}
+                        _append_ts_hits(ts_body.get("data", []) or [])
+                        totals["test_sets"] = ts_body.get("total", len(result["test_sets"]))
+                    else:
+                        warnings.append(f"Test set search returned HTTP {ts_resp.status_code}.")
+                        logger.warning(
+                            f"[search] TS search HTTP {ts_resp.status_code}: {ts_resp.text[:200]}"
+                        )
+            elif result["test_sets"] and not totals["test_sets"]:
+                totals["test_sets"] = len(result["test_sets"])
 
         # Note when JITA reports more matches than we returned (shouldn't happen with
         # the high cap, but keeps the UI honest if a query exceeds SEARCH_MAX_LIMIT).

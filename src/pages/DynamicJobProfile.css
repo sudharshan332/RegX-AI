@@ -405,8 +405,19 @@
 
 .djp-branch-field {
   flex: 1;
-  min-width: 260px;
+  min-width: 200px;
   position: relative;
+}
+
+.djp-clone-arrow {
+  display: flex;
+  align-items: center;
+  padding-bottom: 10px;
+  color: var(--djp-muted);
+  font-size: 18px;
+  line-height: 1;
+  flex: 0 0 auto;
+  user-select: none;
 }
 
 .djp-branch-results {
