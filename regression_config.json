@@ -1,6 +1,6 @@
 {
   "input_mode": "tag",
-  "default_tag": "752_rc1",
+  "default_tag": "cdp_master_full_reg",
   "added_tags": [
     "cdp_master_full_reg",
     "7.6.0.1_RC1",
@@ -9,7 +9,7 @@
     "master|Full|25Jul2026",
     "752_rc1"
   ],
-  "tag": "752_rc1",
+  "tag": "cdp_master_full_reg",
   "task_ids": [],
   "tag_extra_task_ids": {
     "7.6.0.1_RC1": [

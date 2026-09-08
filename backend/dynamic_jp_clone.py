@@ -321,3 +321,94 @@ def set_sut_branch(jp_payload, branch):
         sut = {}
     sut["branch"] = branch.strip()
     jp_payload["system_under_test"] = sut
+
+
+# JITA additional/tester tags that should survive clone / release migration.
+# Drop run-specific tags such as 752_rc1 or eg-7.6|RC3-july-13-2026.
+CLONE_KEEP_ADDITIONAL_TAGS = (
+    "jita3",
+    "v3.1",
+    "container__unlimited",
+    "max_deployments__0",
+    "infra__cdp",
+    "py3.12",
+    "jita__node_pool",
+)
+# TCMS sync flag on tester_tags; never strip if already present.
+_TESTER_TAGS_ALWAYS_KEEP = ("official",)
+
+
+def _coerce_tag_list(tags):
+    """Normalize JITA tag fields (list or comma-separated string) to a list."""
+    if tags is None:
+        return []
+    if isinstance(tags, list):
+        return tags
+    if isinstance(tags, str):
+        return [t.strip() for t in tags.split(",") if t.strip()]
+    return []
+
+
+def _filter_kept_tags(tags, extra_keep=()):
+    """Keep allowlisted tags in source order. Does not invent missing tags."""
+    keep = {t.lower() for t in CLONE_KEEP_ADDITIONAL_TAGS}
+    keep.update(t.lower() for t in extra_keep)
+    out = []
+    seen = set()
+    for raw in _coerce_tag_list(tags):
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key not in keep or key in seen:
+            continue
+        out.append(name)
+        seen.add(key)
+    return out
+
+
+def _field_is_tag_list(jp_payload, key):
+    return key in jp_payload and isinstance(jp_payload.get(key), (list, str))
+
+
+def clear_run_tests_with_tags(jp_payload):
+    """Turn off JITA 'Run Tests With Tags' and keep only infra additional tags.
+
+    Mutates ``jp_payload``. Does not change email, visibility, or user_groups.
+    Only rewrites additional/tester tag fields when they are already present so a
+    JITA GET that omitted them cannot wipe them on PUT.
+    """
+    if not isinstance(jp_payload, dict):
+        return False
+    adv = jp_payload.get("advanced_options")
+    adv = dict(adv) if isinstance(adv, dict) else {}
+    adv["run_tests_with_tags"] = False
+    jp_payload["advanced_options"] = adv
+    if _field_is_tag_list(jp_payload, "run_tests_with_additional_tags"):
+        jp_payload["run_tests_with_additional_tags"] = _filter_kept_tags(
+            jp_payload.get("run_tests_with_additional_tags")
+        )
+    if _field_is_tag_list(jp_payload, "tester_tags"):
+        jp_payload["tester_tags"] = _filter_kept_tags(
+            jp_payload.get("tester_tags"), extra_keep=_TESTER_TAGS_ALWAYS_KEEP
+        )
+    return True
+
+
+DEFAULT_TEST_SERVICE = "NutestPy3Tests"
+
+
+def apply_clone_test_defaults(jp_payload):
+    """Set Test Service (and TCMS service) to NutestPy3Tests; skip bad tests.
+
+    Mutates ``jp_payload``. Does not change email, visibility, or user_groups.
+    Overwrites ``service`` only when Sync To TCMS is on (or it already has a
+    value) so a TCMS-off cleanup PUT can still clear it.
+    """
+    if not isinstance(jp_payload, dict):
+        return False
+    jp_payload["test_service"] = DEFAULT_TEST_SERVICE
+    jp_payload["skip_bad_tests"] = True
+    if jp_payload.get("sync_to_tcms") or str(jp_payload.get("service") or "").strip():
+        jp_payload["service"] = DEFAULT_TEST_SERVICE
+    return True

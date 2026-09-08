@@ -54,9 +54,11 @@ from tag_extra_task_ids import (
 )
 from dynamic_jp_clone import (
     apply_clone_retain_exceptions,
+    apply_clone_test_defaults,
     apply_destination_nos,
     apply_destination_pc,
     apply_latest_smoke_on_current_branches,
+    clear_run_tests_with_tags,
     is_master_branch,
     nutest_mainline_branch,
     pc_branch_search_query,
@@ -15311,12 +15313,18 @@ def dynamic_jp_create():
             logger.info("[create] Clone mode — applied Latest Smoke Passed on current destination branches")
 
         def _reapply_clone_retain(jp):
-            """Always set TEST_FAILURE retain; DCE unless Retain Setup is on."""
-            if preserve_source_config or not isinstance(jp, dict):
+            """Always set TEST_FAILURE retain; DCE unless Retain Setup is on.
+
+            Release Migration (preserve_source_config) forces retain-on-failure with
+            DataCorruptionError. Dynamic JP clone honors the Retain Setup UI toggle.
+            """
+            if not isinstance(jp, dict):
                 return
             apply_clone_retain_exceptions(
                 jp,
-                retain_setup_on_failure=retain_setup_on_failure,
+                retain_setup_on_failure=(
+                    False if preserve_source_config else retain_setup_on_failure
+                ),
                 duration_min=RETAIN_DURATION_72H_MIN,
             )
             jp["retain_resources_config"] = _ensure_retain_duration(
@@ -15324,10 +15332,6 @@ def dynamic_jp_create():
             )
 
         _reapply_clone_retain(new_jp_payload)
-        if preserve_source_config:
-            new_jp_payload["retain_resources_config"] = _ensure_retain_duration(
-                new_jp_payload.get("retain_resources_config"), RETAIN_DURATION_72H_MIN
-            )
 
         # Release Migration: use the explicitly transformed description when provided
         # (e.g. old-version -> new-version replacement), overriding the generic default.
@@ -15335,12 +15339,14 @@ def dynamic_jp_create():
             new_jp_payload["description"] = custom_jp_description
 
         _set_tcms_sync_flags(new_jp_payload, sync_to_tcms, tcms_sync_branch)
+        apply_clone_test_defaults(new_jp_payload)
         if clone_to_branch and not create_fresh:
             set_sut_branch(new_jp_payload, clone_to_branch)
 
         def _force_email_on_and_clear_tag_filters(jp):
             """Turn 'Send Email Reports' ON (logged-in user as recipient) and disable
-            'Run Tests With Tags' / clear any inherited TCMS tag filters. Mutates jp.
+            'Run Tests With Tags'. Additional/tester tags are filtered to the infra
+            allowlist (run-specific tags dropped). Mutates jp.
 
             JITA's "Send Email Reports" checkbox is NOT a boolean field — the UI derives
             its state from whether an ``EmailPlugin`` exists in ``plugins.post_run``
@@ -15388,25 +15394,22 @@ def dynamic_jp_create():
                     jp["user"] = current_user_name
                 jp["private"] = True
             _ensure_cdp_reg_jarvis_user_groups(jp)
-            # Disable "Run Tests With Tags" and drop inherited TCMS tag(s) (e.g. "unstable").
-            adv = jp.get("advanced_options")
-            if not isinstance(adv, dict):
-                adv = {}
-            adv["run_tests_with_tags"] = False
-            adv["tags"] = []
-            jp["advanced_options"] = adv
-            jp["run_tests_with_additional_tags"] = []
+            clear_run_tests_with_tags(jp)
 
+        # Always turn off "Run Tests With Tags", including Release Migration
+        # (preserve_source_config). Keep only allowlisted additional/tester tags;
+        # drop run-specific tags. Email/visibility stay as-is in that mode.
+        clear_run_tests_with_tags(new_jp_payload)
         if not preserve_source_config:
             _force_email_on_and_clear_tag_filters(new_jp_payload)
             logger.info(
                 f"[create] Email ON (recipient={current_user_email}); "
-                f"run_tests_with_tags disabled and TCMS tag filters cleared"
+                f"run_tests_with_tags disabled"
             )
         else:
             logger.info(
-                "[create] preserve_source_config=True — kept source email/visibility/tag "
-                "config unchanged (Release Migration)"
+                "[create] preserve_source_config=True — kept source email/visibility; "
+                "run_tests_with_tags disabled; additional tags filtered to allowlist"
             )
         _ensure_cdp_reg_jarvis_user_groups(new_jp_payload)
 
@@ -15507,15 +15510,17 @@ def dynamic_jp_create():
                         jp_data["auto_schedule_cron"] = False
                         jp_data["allow_resource_sharing"] = False
                         jp_data["allow_resource_sharing_across_tasks"] = False
-                        jp_data["skip_bad_tests"] = True
+                        apply_clone_test_defaults(jp_data)
                         jp_data["run_tests_with_priorities"] = jp_data.get("run_tests_with_priorities") or []
                         jp_data["sdk_installation_options"] = jp_data.get("sdk_installation_options") or {}
                         jp_data["demo_mode"] = False
                         jp_data["image_build_type"] = jp_data.get("image_build_type") or "None"
                         if create_fresh:
                             jp_data["requested_hardware"] = _default_requested_hardware(resource_type)
-                        # Force email ON + clear inherited tag filters.
-                        _force_email_on_and_clear_tag_filters(jp_data)
+                        if preserve_source_config:
+                            clear_run_tests_with_tags(jp_data)
+                        else:
+                            _force_email_on_and_clear_tag_filters(jp_data)
                         _ensure_cdp_reg_jarvis_user_groups(jp_data)
                         _reapply_clone_retain(jp_data)
                         logger.info(
@@ -15606,11 +15611,15 @@ def dynamic_jp_create():
                             merged = [t for t in merged if t != "official"]
                         jp_data["tester_tags"] = merged
                         _set_tcms_sync_flags(jp_data, sync_to_tcms, tcms_sync_branch)
+                        apply_clone_test_defaults(jp_data)
                         if clone_to_branch:
                             set_sut_branch(jp_data, clone_to_branch)
-                        # Keep email ON and tag filters cleared on this PUT too
-                        # (covers the sync_to_tcms path where the block above is skipped).
-                        _force_email_on_and_clear_tag_filters(jp_data)
+                        # Re-clear tag filters on PUT (JITA may ignore them on POST).
+                        # Preserve source email/visibility for Release Migration.
+                        if preserve_source_config:
+                            clear_run_tests_with_tags(jp_data)
+                        else:
+                            _force_email_on_and_clear_tag_filters(jp_data)
                         _ensure_cdp_reg_jarvis_user_groups(jp_data)
                         _reapply_clone_retain(jp_data)
 
