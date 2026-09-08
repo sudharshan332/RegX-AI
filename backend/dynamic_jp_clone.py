@@ -1,5 +1,6 @@
 """Pure helpers for dynamic JP clone-to, retain defaults, and catalog test selection."""
 
+import copy
 import re
 
 NUTEST_FRAMEWORKS = ("nutest-py3-tests", "nutest-py3test")
@@ -326,13 +327,9 @@ def set_sut_branch(jp_payload, branch):
 # JITA additional/tester tags that should survive clone / release migration.
 # Drop run-specific tags such as 752_rc1 or eg-7.6|RC3-july-13-2026.
 CLONE_KEEP_ADDITIONAL_TAGS = (
-    "jita3",
-    "v3.1",
     "container__unlimited",
     "max_deployments__0",
     "infra__cdp",
-    "py3.12",
-    "jita__node_pool",
 )
 # TCMS sync flag on tester_tags; never strip if already present.
 _TESTER_TAGS_ALWAYS_KEEP = ("official",)
@@ -399,16 +396,27 @@ DEFAULT_TEST_SERVICE = "NutestPy3Tests"
 
 
 def apply_clone_test_defaults(jp_payload):
-    """Set Test Service (and TCMS service) to NutestPy3Tests; skip bad tests.
+    """Set Test Service to NutestPy3Tests and skip unstable/excluded/non-existing tests.
 
-    Mutates ``jp_payload``. Does not change email, visibility, or user_groups.
-    Overwrites ``service`` only when Sync To TCMS is on (or it already has a
-    value) so a TCMS-off cleanup PUT can still clear it.
+    Mutates ``jp_payload``. Does not change ``service``/``services``, email,
+    visibility, or user_groups — those stay cloned from the source JP.
     """
     if not isinstance(jp_payload, dict):
         return False
     jp_payload["test_service"] = DEFAULT_TEST_SERVICE
     jp_payload["skip_bad_tests"] = True
-    if jp_payload.get("sync_to_tcms") or str(jp_payload.get("service") or "").strip():
-        jp_payload["service"] = DEFAULT_TEST_SERVICE
+    return True
+
+
+def restore_clone_service(jp_payload, source_jp):
+    """Copy source JP ``service`` and ``services`` so TCMS defaults cannot replace them.
+
+    Mutates ``jp_payload``. Missing keys on the source are left as-is on the clone.
+    """
+    if not isinstance(jp_payload, dict) or not isinstance(source_jp, dict):
+        return False
+    if "service" in source_jp:
+        jp_payload["service"] = copy.deepcopy(source_jp["service"])
+    if "services" in source_jp:
+        jp_payload["services"] = copy.deepcopy(source_jp["services"])
     return True

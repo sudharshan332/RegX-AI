@@ -91,7 +91,7 @@ export const buildMigrationPayload = (jp, form) => {
     retain_setup_on_failure: false,
     // Sync to TCMS is always enabled for release migration.
     // "Run Tests With Tags" is turned off server-side. Additional tags keep
-    // jita3/v3.1/infra allowlist only; run-specific tags are dropped.
+    // container__unlimited, infra__cdp, and max_deployments__0 only.
     sync_to_tcms: true,
     tcms_sync_branch: form.tcmsSyncBranch,
     // Reuse the source JP's existing test set unchanged (no new test set created).

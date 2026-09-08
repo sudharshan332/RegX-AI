@@ -17,6 +17,7 @@ from dynamic_jp_clone import (  # noqa: E402
     catalog_test_to_row,
     clear_run_tests_with_tags,
     apply_clone_test_defaults,
+    restore_clone_service,
     is_master_branch,
     nutest_mainline_branch,
     pc_branch_search_query,
@@ -274,13 +275,9 @@ class TestClearRunTestsWithTags(unittest.TestCase):
                 "tags": ["unstable"],
             },
             "run_tests_with_additional_tags": [
-                "jita3",
-                "v3.1",
                 "container__unlimited",
                 "max_deployments__0",
                 "infra__cdp",
-                "py3.12",
-                "jita__node_pool",
                 "752_rc1",
                 "eg-7.6|RC3-july-13-2026",
             ],
@@ -294,16 +291,12 @@ class TestClearRunTestsWithTags(unittest.TestCase):
         self.assertEqual(
             jp["run_tests_with_additional_tags"],
             [
-                "jita3",
-                "v3.1",
                 "container__unlimited",
                 "max_deployments__0",
                 "infra__cdp",
-                "py3.12",
-                "jita__node_pool",
             ],
         )
-        self.assertEqual(jp["tester_tags"], ["jita3", "official", "infra__cdp"])
+        self.assertEqual(jp["tester_tags"], ["official", "infra__cdp"])
         self.assertEqual(jp["emails"], ["owner@nutanix.com"])
         self.assertFalse(jp["private"])
 
@@ -316,8 +309,8 @@ class TestClearRunTestsWithTags(unittest.TestCase):
         self.assertTrue(clear_run_tests_with_tags(jp))
         self.assertFalse(jp["advanced_options"]["run_tests_with_tags"])
         self.assertTrue(jp["advanced_options"]["skip_setup"])
-        self.assertEqual(jp["run_tests_with_additional_tags"], ["jita3", "infra__cdp"])
-        self.assertEqual(jp["tester_tags"], ["jita3"])
+        self.assertEqual(jp["run_tests_with_additional_tags"], ["infra__cdp"])
+        self.assertEqual(jp["tester_tags"], [])
 
     def test_subset_does_not_invent_allowlist(self):
         jp = {
@@ -326,8 +319,8 @@ class TestClearRunTestsWithTags(unittest.TestCase):
             "tester_tags": ["jita3"],
         }
         clear_run_tests_with_tags(jp)
-        self.assertEqual(jp["run_tests_with_additional_tags"], ["jita3"])
-        self.assertEqual(jp["tester_tags"], ["jita3"])
+        self.assertEqual(jp["run_tests_with_additional_tags"], [])
+        self.assertEqual(jp["tester_tags"], [])
 
     def test_empty_tag_lists_stay_empty(self):
         jp = {
@@ -360,7 +353,7 @@ class TestClearRunTestsWithTags(unittest.TestCase):
         }
         self.assertTrue(clear_run_tests_with_tags(jp))
         self.assertEqual(jp["advanced_options"], {"run_tests_with_tags": False})
-        self.assertEqual(jp["run_tests_with_additional_tags"], ["jita3"])
+        self.assertEqual(jp["run_tests_with_additional_tags"], [])
         self.assertNotIn("tester_tags", jp)
         self.assertEqual(jp["emails"], ["keep@nutanix.com"])
         self.assertTrue(jp["private"])
@@ -368,12 +361,17 @@ class TestClearRunTestsWithTags(unittest.TestCase):
     def test_duplicates_and_mixed_case(self):
         jp = {
             "advanced_options": {"run_tests_with_tags": True},
-            "run_tests_with_additional_tags": ["Jita3", "jita3", "JITA3", "v3.1"],
-            "tester_tags": ["JITA3", "jita3"],
+            "run_tests_with_additional_tags": [
+                "Infra__cdp",
+                "infra__cdp",
+                "INFRA__CDP",
+                "max_deployments__0",
+            ],
+            "tester_tags": ["INFRA__CDP", "infra__cdp"],
         }
         clear_run_tests_with_tags(jp)
-        self.assertEqual(jp["run_tests_with_additional_tags"], ["Jita3", "v3.1"])
-        self.assertEqual(jp["tester_tags"], ["JITA3"])
+        self.assertEqual(jp["run_tests_with_additional_tags"], ["Infra__cdp", "max_deployments__0"])
+        self.assertEqual(jp["tester_tags"], ["INFRA__CDP"])
 
     def test_whitespace_and_empty_entries(self):
         jp = {
@@ -382,7 +380,7 @@ class TestClearRunTestsWithTags(unittest.TestCase):
             "tester_tags": [" infra__cdp ", None, "official"],
         }
         clear_run_tests_with_tags(jp)
-        self.assertEqual(jp["run_tests_with_additional_tags"], ["jita3"])
+        self.assertEqual(jp["run_tests_with_additional_tags"], [])
         self.assertEqual(jp["tester_tags"], ["infra__cdp", "official"])
 
     def test_official_stays_on_tester_tags_not_additional(self):
@@ -392,28 +390,33 @@ class TestClearRunTestsWithTags(unittest.TestCase):
             "tester_tags": ["official", "752_rc1"],
         }
         clear_run_tests_with_tags(jp)
-        self.assertEqual(jp["run_tests_with_additional_tags"], ["jita3"])
+        self.assertEqual(jp["run_tests_with_additional_tags"], [])
         self.assertEqual(jp["tester_tags"], ["official"])
 
     def test_comma_separated_string_tags(self):
         jp = {
             "advanced_options": {"run_tests_with_tags": True, "skip_setup": True},
-            "run_tests_with_additional_tags": "jita3, v3.1, 752_rc1, eg-7.6|RC3-july-13-2026",
-            "tester_tags": "jita3, official, 752_rc1",
+            "run_tests_with_additional_tags": (
+                "container__unlimited, jita3, 752_rc1, infra__cdp, max_deployments__0"
+            ),
+            "tester_tags": "jita3, official, 752_rc1, infra__cdp",
             "emails": ["owner@nutanix.com"],
             "private": False,
         }
         clear_run_tests_with_tags(jp)
         self.assertFalse(jp["advanced_options"]["run_tests_with_tags"])
         self.assertTrue(jp["advanced_options"]["skip_setup"])
-        self.assertEqual(jp["run_tests_with_additional_tags"], ["jita3", "v3.1"])
-        self.assertEqual(jp["tester_tags"], ["jita3", "official"])
+        self.assertEqual(
+            jp["run_tests_with_additional_tags"],
+            ["container__unlimited", "infra__cdp", "max_deployments__0"],
+        )
+        self.assertEqual(jp["tester_tags"], ["official", "infra__cdp"])
         self.assertEqual(jp["emails"], ["owner@nutanix.com"])
 
     def test_post_then_put_refilters_restored_run_tags(self):
         jp = {
             "advanced_options": {"run_tests_with_tags": True, "tags": ["unstable"]},
-            "run_tests_with_additional_tags": ["jita3", "v3.1", "752_rc1"],
+            "run_tests_with_additional_tags": ["jita3", "infra__cdp", "752_rc1"],
             "tester_tags": ["jita3", "752_rc1"],
             "emails": ["owner@nutanix.com"],
             "private": False,
@@ -421,19 +424,19 @@ class TestClearRunTestsWithTags(unittest.TestCase):
         clear_run_tests_with_tags(jp)
         jp["tester_tags"] = list(dict.fromkeys(jp["tester_tags"] + ["official"]))
         self.assertFalse(jp["advanced_options"]["run_tests_with_tags"])
-        self.assertEqual(jp["run_tests_with_additional_tags"], ["jita3", "v3.1"])
-        self.assertEqual(jp["tester_tags"], ["jita3", "official"])
+        self.assertEqual(jp["run_tests_with_additional_tags"], ["infra__cdp"])
+        self.assertEqual(jp["tester_tags"], ["official"])
 
         # JITA GET reintroduces run tags (POST ignored).
         jp["advanced_options"]["run_tests_with_tags"] = True
-        jp["run_tests_with_additional_tags"] = ["jita3", "v3.1", "752_rc1"]
+        jp["run_tests_with_additional_tags"] = ["jita3", "infra__cdp", "752_rc1"]
         jp["tester_tags"] = ["jita3", "official", "752_rc1"]
         jp["tester_tags"] = list(dict.fromkeys(jp["tester_tags"] + ["official"]))
         clear_run_tests_with_tags(jp)
         self.assertFalse(jp["advanced_options"]["run_tests_with_tags"])
         self.assertEqual(jp["advanced_options"]["tags"], ["unstable"])
-        self.assertEqual(jp["run_tests_with_additional_tags"], ["jita3", "v3.1"])
-        self.assertEqual(jp["tester_tags"], ["jita3", "official"])
+        self.assertEqual(jp["run_tests_with_additional_tags"], ["infra__cdp"])
+        self.assertEqual(jp["tester_tags"], ["official"])
         self.assertEqual(jp["emails"], ["owner@nutanix.com"])
         self.assertFalse(jp["private"])
 
@@ -460,20 +463,19 @@ class TestCloneTestDefaults(unittest.TestCase):
         self.assertEqual(jp2["test_service"], "NutestPy3Tests")
         self.assertTrue(jp2["skip_bad_tests"])
 
-    def test_overwrites_service_when_tcms_on_or_already_set(self):
+    def test_does_not_touch_service_or_services(self):
         jp = {
             "sync_to_tcms": True,
             "service": "nutest-py3test",
+            "services": ["NOS"],
             "test_service": "Nutest",
             "skip_bad_tests": False,
         }
         apply_clone_test_defaults(jp)
-        self.assertEqual(jp["service"], "NutestPy3Tests")
+        self.assertEqual(jp["service"], "nutest-py3test")
+        self.assertEqual(jp["services"], ["NOS"])
         self.assertEqual(jp["test_service"], "NutestPy3Tests")
-        jp2 = {"service": "nutest-py3test", "test_service": "Nutest"}
-        apply_clone_test_defaults(jp2)
-        self.assertEqual(jp2["service"], "NutestPy3Tests")
-        self.assertEqual(jp2["test_service"], "NutestPy3Tests")
+        self.assertTrue(jp["skip_bad_tests"])
 
     def test_does_not_fill_service_when_tcms_off_and_blank(self):
         jp = {"sync_to_tcms": False, "service": "", "test_service": "Nutest"}
@@ -490,7 +492,7 @@ class TestCloneTestDefaults(unittest.TestCase):
             "private": False,
         }
         apply_clone_test_defaults(jp)
-        self.assertEqual(jp["service"], "NutestPy3Tests")
+        self.assertEqual(jp["service"], "nutest-py3test")
         self.assertEqual(jp["test_service"], "NutestPy3Tests")
         self.assertTrue(jp["skip_bad_tests"])
         self.assertEqual(jp["emails"], ["owner@nutanix.com"])
@@ -499,6 +501,30 @@ class TestCloneTestDefaults(unittest.TestCase):
     def test_non_dict_is_a_no_op(self):
         self.assertFalse(apply_clone_test_defaults(None))
         self.assertFalse(apply_clone_test_defaults("jp"))
+
+
+class TestRestoreCloneService(unittest.TestCase):
+    def test_restores_source_service_and_services_after_tcms_overwrite(self):
+        source = {"service": "NOS", "services": ["NOS", "PC"]}
+        jp = {
+            "service": "NutestPy3Tests",
+            "services": ["nutest-py3test"],
+            "test_service": "NutestPy3Tests",
+        }
+        self.assertTrue(restore_clone_service(jp, source))
+        self.assertEqual(jp["service"], "NOS")
+        self.assertEqual(jp["services"], ["NOS", "PC"])
+        self.assertEqual(jp["test_service"], "NutestPy3Tests")
+
+    def test_missing_source_keys_are_left_alone(self):
+        jp = {"service": "NutestPy3Tests", "test_service": "NutestPy3Tests"}
+        restore_clone_service(jp, {"name": "src"})
+        self.assertEqual(jp["service"], "NutestPy3Tests")
+        self.assertNotIn("services", jp)
+
+    def test_non_dict_is_a_no_op(self):
+        self.assertFalse(restore_clone_service(None, {}))
+        self.assertFalse(restore_clone_service({}, None))
 
 
 if __name__ == "__main__":

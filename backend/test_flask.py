@@ -63,6 +63,7 @@ from dynamic_jp_clone import (
     nutest_mainline_branch,
     pc_branch_search_query,
     resolve_clone_pc_branch,
+    restore_clone_service,
     set_sut_branch,
 )
 from user_keys import (
@@ -15340,6 +15341,8 @@ def dynamic_jp_create():
 
         _set_tcms_sync_flags(new_jp_payload, sync_to_tcms, tcms_sync_branch)
         apply_clone_test_defaults(new_jp_payload)
+        if not create_fresh:
+            restore_clone_service(new_jp_payload, source_jp)
         if clone_to_branch and not create_fresh:
             set_sut_branch(new_jp_payload, clone_to_branch)
 
@@ -15397,8 +15400,9 @@ def dynamic_jp_create():
             clear_run_tests_with_tags(jp)
 
         # Always turn off "Run Tests With Tags", including Release Migration
-        # (preserve_source_config). Keep only allowlisted additional/tester tags;
-        # drop run-specific tags. Email/visibility stay as-is in that mode.
+        # (preserve_source_config). Keep only container__unlimited, infra__cdp,
+        # and max_deployments__0; drop run-specific tags. Email/visibility stay
+        # as-is in that mode.
         clear_run_tests_with_tags(new_jp_payload)
         if not preserve_source_config:
             _force_email_on_and_clear_tag_filters(new_jp_payload)
@@ -15511,6 +15515,8 @@ def dynamic_jp_create():
                         jp_data["allow_resource_sharing"] = False
                         jp_data["allow_resource_sharing_across_tasks"] = False
                         apply_clone_test_defaults(jp_data)
+                        if not create_fresh:
+                            restore_clone_service(jp_data, source_jp)
                         jp_data["run_tests_with_priorities"] = jp_data.get("run_tests_with_priorities") or []
                         jp_data["sdk_installation_options"] = jp_data.get("sdk_installation_options") or {}
                         jp_data["demo_mode"] = False
@@ -15612,6 +15618,8 @@ def dynamic_jp_create():
                         jp_data["tester_tags"] = merged
                         _set_tcms_sync_flags(jp_data, sync_to_tcms, tcms_sync_branch)
                         apply_clone_test_defaults(jp_data)
+                        if not create_fresh:
+                            restore_clone_service(jp_data, source_jp)
                         if clone_to_branch:
                             set_sut_branch(jp_data, clone_to_branch)
                         # Re-clear tag filters on PUT (JITA may ignore them on POST).
