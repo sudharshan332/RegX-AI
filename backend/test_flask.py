@@ -14,6 +14,9 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import ssl
+import subprocess
+import tempfile
+import shutil
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from collections import defaultdict
@@ -33,6 +36,14 @@ from auth import (
     load_teams_config,
     validate_team,
     get_default_team,
+)
+from handover_helpers import (
+    parse_task_id_inputs,
+    parse_jita_url as _parse_jita_url_helper,
+    categorize_bug_type_from_issuetype,
+    evaluate_sliding_eligibility,
+    get_task_id_from_run,
+    order_runs_for_test,
 )
 from owner_triage_report import (
     build_owner_status_table,
@@ -17129,6 +17140,94 @@ def validate_user_api_keys():
             "message": "Saved (live Confluence probe skipped)",
         }
 
+    sg_tok = (body.get("sourcegraph_token") or "").strip()
+    if not sg_tok or "****" in sg_tok:
+        sg_tok = get_user_key(username, "sourcegraph_token") or ""
+    if not sg_tok:
+        sg_tok = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    if not sg_tok:
+        results["sourcegraph_token"] = {
+            "valid": None,
+            "message": "Not saved yet — paste token and click Save (required for Suggest/Validate LST).",
+        }
+    else:
+        sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
+        api_urls = [sg_url + p for p in ["/.api/graphql", "/api/graphql", "/graphql"]]
+        auth_headers = [
+            {"Content-Type": "application/json", "Authorization": "token %s" % sg_tok},
+            {"Content-Type": "application/json", "Authorization": "Bearer %s" % sg_tok},
+        ]
+        probe_ok = False
+        probe_msg = "Could not reach Sourcegraph"
+        for api_url in api_urls:
+            for headers in auth_headers:
+                try:
+                    resp = requests.post(
+                        api_url,
+                        json={"query": "query { currentUser { username } }"},
+                        headers=headers,
+                        timeout=12,
+                        verify=False,
+                    )
+                    if resp.status_code in (401, 403):
+                        probe_msg = "Authentication failed (HTTP %s) — check the token" % resp.status_code
+                        continue
+                    if resp.status_code != 200:
+                        probe_msg = "HTTP %s from Sourcegraph" % resp.status_code
+                        continue
+                    data = resp.json() if resp.text else {}
+                    if data.get("errors"):
+                        # Some instances disallow currentUser; treat GraphQL auth success as OK.
+                        probe_ok = True
+                        probe_msg = "Reachable (GraphQL responded)"
+                        break
+                    user = ((data.get("data") or {}).get("currentUser") or {})
+                    uname = user.get("username") if isinstance(user, dict) else None
+                    probe_ok = True
+                    probe_msg = ("Authenticated as %s" % uname) if uname else "Authenticated"
+                    break
+                except Exception as exc:
+                    probe_msg = "Could not reach Sourcegraph (%s)" % exc
+                    continue
+            if probe_ok:
+                break
+        results["sourcegraph_token"] = {
+            "valid": True if probe_ok else False,
+            "message": probe_msg,
+        }
+
+    gerrit_pwd = (body.get("gerrit_http_password") or "").strip()
+    if not gerrit_pwd or "****" in gerrit_pwd:
+        gerrit_pwd = get_user_key(username, "gerrit_http_password") or ""
+    # Gerrit HTTP Credentials username is the LDAP id (e.g. swapnil.wankhede), not email.
+    gerrit_user = (username or "").strip()
+    if not gerrit_pwd:
+        results["gerrit_http_password"] = {
+            "valid": None,
+            "message": "Not saved yet — paste Gerrit HTTP password and Save (required for Take handover CR).",
+        }
+    elif not gerrit_user:
+        results["gerrit_http_password"] = {
+            "valid": None,
+            "message": "Could not resolve your Gerrit username (LDAP id). Log in again and retry Test Keys.",
+        }
+    else:
+        gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
+        ok_auth, auth_msg = _validate_gerrit_credentials(gerrit_url, gerrit_user, gerrit_pwd)
+        if ok_auth:
+            results["gerrit_http_password"] = {
+                "valid": True,
+                "message": "Authenticated as %s" % gerrit_user,
+            }
+        else:
+            results["gerrit_http_password"] = {
+                "valid": False,
+                "message": (
+                    "%s. Re-generate the HTTP password in Gerrit → Settings → HTTP Credentials "
+                    "and Save again (username is your Gerrit/LDAP id: %s)." % (auth_msg, gerrit_user)
+                ),
+            }
+
     return jsonify({"results": results})
 
 
@@ -18454,21 +18553,12 @@ def cursor_ai_list_mcp_servers():
 # ======================================================
 def parse_jita_url(url):
     """Extract task_ids from JITA results URL or direct API URL."""
-    if not url or not url.strip():
-        return []
-    from urllib.parse import urlparse, parse_qs
-    url = url.strip()
-    parsed = urlparse(url)
-    if "/agave_tasks/" in parsed.path:
-        task_id = parsed.path.rstrip("/").split("/")[-1]
-        if task_id and len(task_id) >= 20:
-            return [task_id]
-    qs = parse_qs(parsed.query)
-    task_ids_param = qs.get("task_ids", [])
-    if not task_ids_param:
-        return []
-    raw = task_ids_param[0] if isinstance(task_ids_param[0], str) else ",".join(task_ids_param)
-    return [tid.strip() for tid in raw.split(",") if tid.strip()]
+    return _parse_jita_url_helper(url)
+
+
+def _parse_task_id_inputs(text):
+    """Parse mixed JITA URLs / hex task IDs (comma, space, or newline separated)."""
+    return parse_task_id_inputs(text)
 
 
 # ======================================================
@@ -18517,20 +18607,7 @@ def _extract_jira_ticket_detail(jira_data):
 
 def _categorize_bug_type_from_issuetype(issuetype):
     """Categorize bug type from Jira issuetype name."""
-    if not issuetype:
-        return None
-    issuetype_lower = issuetype.lower()
-    if "environment" in issuetype_lower:
-        return "Environment"
-    elif "flaky" in issuetype_lower:
-        return "Flaky"
-    elif "test" in issuetype_lower or "testbed" in issuetype_lower:
-        # Any test-type issue (e.g. "Test", "Test Bug") counts as a test issue.
-        return "Test Bug"
-    elif "bug" in issuetype_lower:
-        # Any remaining bug (e.g. "Bug", "Product Bug") counts as a product bug.
-        return "Product Bug"
-    return None
+    return categorize_bug_type_from_issuetype(issuetype)
 
 
 def _fetch_ticket_issuetype(ticket):
@@ -18572,40 +18649,67 @@ def _fetch_ticket_issuetype(ticket):
 
 def _get_task_id_from_run(run):
     """Extract task_id string from a test run's agave_task_id."""
-    aid = run.get("agave_task_id")
-    if not aid:
-        return None
-    if isinstance(aid, dict) and "$oid" in aid:
-        return aid["$oid"]
-    return str(aid)
+    return get_task_id_from_run(run)
 
 
-def _aggregate_jita_test_cases(test_data, min_passes_for_success=1, auto_categorize_bug_types=False, latest_2_task_ids=None):
-    """Aggregate test results by test_name. Returns (test_cases_list, total_executions, total_passed, all_tests_passed, summary, tickets_set).
-    If latest_2_task_ids is provided, only consider runs from those 2 most recent tasks (consecutive latest runs).
-    A test passes only if it passed in BOTH of the 2 latest runs (consecutive passes)."""
+def _resolve_ticket_bug_type_map(jira_tickets, auto_categorize=True):
+    """Fetch and cache bug types for a list of Jira tickets. Returns {TICKET: bug_type}."""
+    ticket_bug_types = {}
+    if not auto_categorize or not jira_tickets or not resolve_jira_token():
+        return ticket_bug_types
+    for ticket in jira_tickets:
+        if not ticket or not ticket.strip():
+            continue
+        ticket_clean = ticket.strip().upper()
+        if "-" in ticket_clean:
+            parts = ticket_clean.split("-", 1)
+            if len(parts) == 2 and parts[0].isalpha() and parts[1]:
+                ticket_clean = "%s-%s" % (parts[0].upper(), parts[1])
+            else:
+                continue
+        else:
+            continue
+        if ticket_clean in ticket_bug_types:
+            continue
+        issuetype, _error = _fetch_ticket_issuetype(ticket_clean)
+        bug_type = _categorize_bug_type_from_issuetype(issuetype) if issuetype else None
+        ticket_bug_types[ticket_clean] = bug_type
+        if len(jira_tickets) > 1:
+            time.sleep(0.05)
+    return ticket_bug_types
+
+
+def _aggregate_jita_test_cases(
+    test_data,
+    min_passes_for_success=1,
+    auto_categorize_bug_types=False,
+    latest_2_task_ids=None,
+    sorted_task_ids=None,
+    use_sliding_eligibility=False,
+):
+    """Aggregate test results by test_name.
+
+    When ``use_sliding_eligibility`` is True (handover path), a test is Succeeded if
+    two Succeeded runs exist with only Product-Bug-only failures between them across
+    ``sorted_task_ids`` (newest-first). Otherwise falls back to min_passes / latest_2.
+    """
     by_name = defaultdict(list)
     tickets_set = set()
-    tickets_by_test = defaultdict(set)
     for test in test_data:
         test_name = test.get("test", {}).get("name", "")
         if not test_name:
             continue
-        # Filter to only 2 latest runs if specified
-        if latest_2_task_ids:
+        if latest_2_task_ids and not use_sliding_eligibility:
             tid = _get_task_id_from_run(test)
             if tid not in latest_2_task_ids:
                 continue
         by_name[test_name].append(test)
-        test_tickets = test.get("jira_tickets") or []
-        for t in test_tickets:
+        for t in (test.get("jira_tickets") or []):
             if t and t.strip():
                 tickets_set.add(t.strip())
-                tickets_by_test[test_name].add(t.strip())
 
-    # When using latest_2_task_ids, total_executions/total_passed reflect only those 2 runs
     filtered_data = test_data
-    if latest_2_task_ids:
+    if latest_2_task_ids and not use_sliding_eligibility:
         filtered_data = [t for t in test_data if _get_task_id_from_run(t) in latest_2_task_ids]
     total_executions = len(filtered_data)
     total_passed = sum(1 for t in filtered_data if t.get("status") == "Succeeded")
@@ -18613,48 +18717,55 @@ def _aggregate_jita_test_cases(test_data, min_passes_for_success=1, auto_categor
     summary = {"total": 0, "succeeded": 0, "failed": 0, "warning": 0, "pending": 0, "running": 0, "skipped": 0}
     all_succeeded = True
 
+    all_tickets = sorted(tickets_set)
+    ticket_bug_types = _resolve_ticket_bug_type_map(all_tickets, auto_categorize=auto_categorize_bug_types)
+    task_order = list(sorted_task_ids or [])
+
     for test_name, runs in by_name.items():
         total_count = len(runs)
-        passed_count = sum(1 for r in runs if r.get("status") == "Succeeded")
-        # When using latest_2_task_ids: require BOTH runs to pass (consecutive). Otherwise use min_passes_for_success.
-        required_passes = 2 if latest_2_task_ids else min_passes_for_success
-        derived_status = "Succeeded" if passed_count >= required_passes else "Failed"
-        if derived_status != "Succeeded":
-            all_succeeded = False
         jira_tickets = []
         seen = set()
         for r in runs:
-            raw_tickets = r.get("jira_tickets") or []
-            for t in raw_tickets:
-                if t and t.strip():
-                    ticket_clean = t.strip()
-                    if ticket_clean not in seen:
-                        seen.add(ticket_clean)
-                        jira_tickets.append(ticket_clean)
+            for t in (r.get("jira_tickets") or []):
+                if t and t.strip() and t.strip() not in seen:
+                    seen.add(t.strip())
+                    jira_tickets.append(t.strip())
+
+        eligibility_reason = None
+        if use_sliding_eligibility and task_order:
+            ordered = order_runs_for_test(runs, task_order)
+            run_payloads = []
+            for r in ordered:
+                r_tickets = [t.strip() for t in (r.get("jira_tickets") or []) if t and t.strip()]
+                r_types = []
+                for t in r_tickets:
+                    bt = ticket_bug_types.get(t.upper()) or ticket_bug_types.get(t)
+                    if bt:
+                        r_types.append(bt)
+                run_payloads.append({
+                    "status": r.get("status") or "",
+                    "jira_tickets": r_tickets,
+                    "bug_types": r_types,
+                })
+            eligible, eligibility_reason, passed_count = evaluate_sliding_eligibility(
+                run_payloads, ticket_bug_types=ticket_bug_types
+            )
+            derived_status = "Succeeded" if eligible else "Failed"
+        else:
+            passed_count = sum(1 for r in runs if r.get("status") == "Succeeded")
+            required_passes = 2 if latest_2_task_ids else min_passes_for_success
+            derived_status = "Succeeded" if passed_count >= required_passes else "Failed"
+            if derived_status == "Succeeded" and required_passes >= 2:
+                eligibility_reason = "consecutive_pass"
+
+        if derived_status != "Succeeded":
+            all_succeeded = False
 
         bug_types = set()
-        if auto_categorize_bug_types and jira_tickets and resolve_jira_token():
-            for ticket in jira_tickets:
-                if not ticket or not ticket.strip():
-                    continue
-                ticket_clean = ticket.strip().upper()
-                if "-" in ticket_clean:
-                    parts = ticket_clean.split("-", 1)
-                    if len(parts) == 2 and parts[0].isalpha() and parts[1]:
-                        ticket_clean = f"{parts[0].upper()}-{parts[1]}"
-                    else:
-                        continue
-                else:
-                    continue
-
-                issuetype, error = _fetch_ticket_issuetype(ticket_clean)
-                if issuetype:
-                    bug_type = _categorize_bug_type_from_issuetype(issuetype)
-                    if bug_type:
-                        bug_types.add(bug_type)
-                if len(jira_tickets) > 1:
-                    time.sleep(0.1)
-
+        for t in jira_tickets:
+            bt = ticket_bug_types.get(t.upper()) or ticket_bug_types.get(t)
+            if bt:
+                bug_types.add(bt)
         bug_type_str = ", ".join(sorted(bug_types)) if bug_types else None
 
         exception_summary = None
@@ -18680,6 +18791,7 @@ def _aggregate_jita_test_cases(test_data, min_passes_for_success=1, auto_categor
             "test_log_url": test_log_url,
             "failure_analysis": failure_analysis,
             "bug_type": bug_type_str,
+            "eligibility_reason": eligibility_reason,
         }
         test_cases.append(test_case_obj)
         summary["total"] += 1
@@ -18696,7 +18808,6 @@ def _aggregate_jita_test_cases(test_data, min_passes_for_success=1, auto_categor
 @jwt_required
 def jita_analysis():
     """Fetch by tag (same as Triage), or by JITA URL(s) / task_ids. Returns test cases with aggregated pass/fail."""
-    import re
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
@@ -18707,6 +18818,7 @@ def jita_analysis():
     tag_param = ""
     input_param = ""
     min_passes = 1
+    use_sliding = True
 
     if request.method == "POST" and request.is_json:
         data = request.get_json() or {}
@@ -18720,6 +18832,8 @@ def jita_analysis():
         tag_param = (data.get("tag") or "").strip()
         input_param = (data.get("input") or "").strip()
         min_passes = int(data.get("min_passes_for_success") or 1)
+        if "use_sliding_eligibility" in data:
+            use_sliding = bool(data.get("use_sliding_eligibility"))
     else:
         url = request.args.get("url", "").strip()
         urls_param = request.args.getlist("urls") or []
@@ -18731,6 +18845,8 @@ def jita_analysis():
             min_passes = int(request.args.get("min_passes_for_success") or 1)
         except Exception:
             min_passes = 1
+        if request.args.get("use_sliding_eligibility") is not None:
+            use_sliding = str(request.args.get("use_sliding_eligibility")).lower() in ("1", "true", "yes")
 
     task_ids = []
     if tag_param:
@@ -18744,33 +18860,23 @@ def jita_analysis():
             return jsonify({"error": str(e)}), 500
 
     if not task_ids and urls_param:
-        for u in urls_param:
-            if u.startswith("http://") or u.startswith("https://"):
-                task_ids.extend(parse_jita_url(u))
-            else:
-                potential_ids = re.split(r'[,\s\n]+', u)
-                task_ids.extend([tid.strip() for tid in potential_ids if tid.strip() and re.match(r'^[a-f0-9]{20,}$', tid.strip())])
-        task_ids = list(dict.fromkeys(task_ids))
+        task_ids = _parse_task_id_inputs(urls_param)
 
     if not task_ids and input_param:
-        if input_param.startswith("http://") or input_param.startswith("https://"):
-            task_ids = parse_jita_url(input_param)
-        else:
-            potential_ids = re.split(r'[,\s\n]+', input_param)
-            task_ids = [tid.strip() for tid in potential_ids if tid.strip() and re.match(r'^[a-f0-9]{20,}$', tid.strip())]
+        task_ids = _parse_task_id_inputs(input_param)
 
     if not task_ids and url:
-        task_ids = parse_jita_url(url)
+        task_ids = _parse_task_id_inputs(url)
 
     if not task_ids and task_ids_param:
-        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
+        task_ids = _parse_task_id_inputs(task_ids_param)
 
     if not task_ids:
         return jsonify({
-            "error": "Provide JITA URL(s) (e.g. https://jita.../results?task_ids=...) or task ID(s) (24-char hex, comma/space separated)"
+            "error": "Provide JITA URL(s) (e.g. https://jita.../results?task_ids=...) or task ID(s) (24-char hex, comma/space/newline separated)"
         }), 400
 
-    logger.info(f"[START] JITA Analysis | task_ids={len(task_ids)} | min_passes={min_passes}")
+    logger.info(f"[START] JITA Analysis | task_ids={len(task_ids)} | min_passes={min_passes} | sliding={use_sliding}")
     try:
         try:
             test_data = fetch_test_results_batch_with_pagination(task_ids, timeout=180, merge=False)
@@ -18794,7 +18900,6 @@ def jita_analysis():
                 test_branch = tfm.get("test", {}).get("branch") if tfm.get("test") else None
                 framework_branch = tfm.get("framework", {}).get("branch") if tfm.get("framework") else None
                 raw_ts = agave.get("updated_at") or agave.get("created_at") or ""
-                # Normalize to comparable string: API may return dict e.g. {"$date": "..."} or nested
                 if isinstance(raw_ts, dict):
                     val = raw_ts.get("$date") or raw_ts.get("$numberLong") or ""
                     while isinstance(val, dict):
@@ -18802,7 +18907,7 @@ def jita_analysis():
                     updated_at = str(val) if val and not isinstance(val, dict) else ""
                 else:
                     updated_at = str(raw_ts) if raw_ts else ""
-                task_id_to_ts[tid] = str(updated_at)  # ensure always string
+                task_id_to_ts[tid] = str(updated_at)
                 if len(task_metadata) < 20:
                     task_metadata.append({
                         "task_id": tid,
@@ -18819,21 +18924,28 @@ def jita_analysis():
                 logger.warning(f"Could not fetch agave_tasks for {tid}: {e}")
                 task_id_to_ts[tid] = ""
 
-        # Sort tasks by date (newest first), take 2 latest for "consecutive passes" logic
         def _ts_key(tid):
             v = task_id_to_ts.get(tid, "")
-            return str(v) if not isinstance(v, str) else v  # always comparable string
+            return str(v) if not isinstance(v, str) else v
         sorted_task_ids = sorted(task_ids, key=_ts_key, reverse=True)
-        latest_2_task_ids = set(sorted_task_ids[:2]) if len(sorted_task_ids) >= 2 else None
-        if latest_2_task_ids:
-            logger.info(f"JITA Analysis | Using 2 latest runs only (consecutive): {list(latest_2_task_ids)}")
+        logger.info(
+            "JITA Analysis | ordered tasks newest-first: %s%s",
+            sorted_task_ids[:5],
+            "..." if len(sorted_task_ids) > 5 else "",
+        )
 
         test_cases, total_executions, total_passed, all_tests_passed, summary, tickets_set = _aggregate_jita_test_cases(
-            test_data, min_passes_for_success=min_passes, auto_categorize_bug_types=True, latest_2_task_ids=latest_2_task_ids
+            test_data,
+            min_passes_for_success=min_passes,
+            auto_categorize_bug_types=True,
+            latest_2_task_ids=None,
+            sorted_task_ids=sorted_task_ids,
+            use_sliding_eligibility=use_sliding,
         )
         logger.info(f"[END] JITA Analysis | all_passed={all_tests_passed} | time={time.time() - start:.2f}s")
         return jsonify({
             "task_ids": task_ids,
+            "sorted_task_ids": sorted_task_ids,
             "tag": tag_param or None,
             "jita_url": url or None,
             "urls": urls_param if urls_param else None,
@@ -18845,6 +18957,7 @@ def jita_analysis():
             "total_executions": total_executions,
             "total_passed": total_passed,
             "min_passes_for_success": min_passes,
+            "use_sliding_eligibility": use_sliding,
             "generated_at": datetime.utcnow().isoformat(),
         })
     except Exception as e:
@@ -19041,18 +19154,40 @@ def validate_jira_ticket():
 # ======================================================
 # Handover - validate-lst, create-lst-cr, check-lst-testcases, search-lst-file, deprecate-lst-cr, deprecation-search
 # ======================================================
-def validate_with_sourcegraph(repo_name, branch, file_path):
-    """Validate branch and file exist in repo via Sourcegraph."""
-    results = {"branch_valid": None, "file_valid": None, "branch_error": None, "file_error": None, "file_suggestions": [], "auth_required": False}
-    sg_token = (os.getenv("SOURCEGRAPH_TOKEN", "") or "").strip()
+def validate_with_sourcegraph(repo_name, branch, file_path, explicit_token=None):
+    """Validate branch and file exist in repo via Sourcegraph.
+
+    Uses the logged-in user's Sourcegraph token (Settings) with env fallback.
+    Tries branch aliases (e.g. 7.6.0.1 → ganges-7.6-stable) before failing.
+    """
+    results = {
+        "branch_valid": None,
+        "file_valid": None,
+        "branch_error": None,
+        "file_error": None,
+        "file_suggestions": [],
+        "branch_suggestions": [],
+        "resolved_branch": (branch or "master").strip() or "master",
+        "auth_required": False,
+        "message": "",
+    }
+    sg_token = resolve_sourcegraph_token(explicit_token)
     sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
     sg_graphql_path = (os.getenv("SOURCEGRAPH_GRAPHQL_PATH") or "/api/graphql").strip() or "/api/graphql"
+    auth_msg = (
+        "Sourcegraph token missing. Add Sourcegraph Token in Settings → API Key Configuration "
+        "(or set SOURCEGRAPH_TOKEN on the backend)."
+    )
     if not sg_token:
         results["auth_required"] = True
+        results["branch_error"] = auth_msg
+        results["file_error"] = auth_msg
+        results["message"] = auth_msg
         return results
     base_url = sg_url
     if not base_url:
         results["branch_error"] = "SOURCEGRAPH_URL not set"
+        results["file_error"] = "SOURCEGRAPH_URL not set"
         return results
     api_urls_to_try = []
     sg_graphql_url = (os.getenv("SOURCEGRAPH_GRAPHQL_URL") or "").strip().rstrip("/")
@@ -19075,6 +19210,7 @@ def validate_with_sourcegraph(repo_name, branch, file_path):
         {"Content-Type": "application/json", "Authorization": "token %s" % sg_token},
         {"Content-Type": "application/json", "Authorization": "Bearer %s" % sg_token},
     ]
+
     def run_search(search_query, url=None):
         urls = [url] if url else api_urls_to_try
         for u in urls:
@@ -19082,7 +19218,21 @@ def validate_with_sourcegraph(repo_name, branch, file_path):
                 continue
             for headers in auth_headers:
                 try:
-                    resp = requests.post(u, json={"query": "query Search($q: String!) { search(query: $q) { results { matchCount resultCount results { ... on FileMatch { file { path } } } } } }", "variables": {"q": search_query}}, headers=headers, timeout=20, verify=False)
+                    resp = requests.post(
+                        u,
+                        json={
+                            "query": (
+                                "query Search($q: String!) { search(query: $q) { results "
+                                "{ matchCount resultCount results { ... on FileMatch { file { path } } } } } }"
+                            ),
+                            "variables": {"q": search_query},
+                        },
+                        headers=headers,
+                        timeout=20,
+                        verify=False,
+                    )
+                    if resp.status_code in (401, 403):
+                        return None, "Sourcegraph authentication failed. Check your Sourcegraph Token in Settings."
                     if resp.status_code == 200:
                         data = resp.json()
                         if data.get("errors"):
@@ -19094,40 +19244,72 @@ def validate_with_sourcegraph(repo_name, branch, file_path):
                 except Exception:
                     continue
         return None, "Sourcegraph not configured or unreachable"
+
     try:
-        branch_query = "repo:%s rev:%s count:1" % (repo_name, branch)
-        match_count, err = run_search(branch_query)
-        if err:
+        branch_candidates = _branch_alias_candidates(branch)
+        resolved_branch = None
+        last_err = None
+        for b in branch_candidates:
+            branch_query = "repo:%s rev:%s count:1" % (repo_name, b)
+            match_count, err = run_search(branch_query)
+            if err:
+                last_err = err
+                if "authentication failed" in err.lower():
+                    results["auth_required"] = True
+                    results["branch_valid"] = None
+                    results["file_valid"] = None
+                    results["branch_error"] = err
+                    results["file_error"] = err
+                    results["message"] = err
+                    return results
+                continue
+            if match_count > 0:
+                resolved_branch = b
+                break
+        results["branch_suggestions"] = branch_candidates[:6]
+        if resolved_branch:
+            results["branch_valid"] = True
+            results["resolved_branch"] = resolved_branch
+        elif last_err:
             results["branch_valid"] = None
-            results["branch_error"] = err
+            results["branch_error"] = last_err
         else:
-            results["branch_valid"] = match_count > 0
-            if not results["branch_valid"]:
-                results["branch_error"] = "Branch '%s' not found" % branch
+            results["branch_valid"] = False
+            results["branch_error"] = "Branch '%s' not found (tried: %s)" % (
+                branch, ", ".join(branch_candidates[:6])
+            )
     except Exception as e:
         results["branch_valid"] = None
         results["branch_error"] = str(e)
+
     try:
-        file_query = "repo:%s rev:%s file:%s type:path count:10" % (repo_name, branch, file_path)
+        branch_for_file = results.get("resolved_branch") or branch
+        file_query = "repo:%s rev:%s file:%s type:path count:10" % (repo_name, branch_for_file, file_path)
         match_count, err = run_search(file_query)
         if err:
             results["file_valid"] = None
             results["file_error"] = err
+            if "authentication failed" in err.lower():
+                results["auth_required"] = True
+                results["message"] = err
         else:
             results["file_valid"] = match_count > 0
             if not results["file_valid"]:
-                results["file_error"] = "File '%s' not found" % file_path
+                results["file_error"] = "File '%s' not found on branch '%s'" % (file_path, branch_for_file)
     except Exception as e:
         results["file_valid"] = None
         results["file_error"] = str(e)
     return results
 
 
-def fetch_file_content_via_sourcegraph(repo_name, rev, file_path):
+def fetch_file_content_via_sourcegraph(repo_name, rev, file_path, explicit_token=None):
     """Fetch file content from Sourcegraph. Returns (content, None) or (None, error_message)."""
-    sg_token = (os.getenv("SOURCEGRAPH_TOKEN", "") or "").strip()
+    sg_token = resolve_sourcegraph_token(explicit_token)
     if not sg_token:
-        return None, "SOURCEGRAPH_TOKEN environment variable not set. Set it on the backend or paste LST file content below."
+        return None, (
+            "Sourcegraph token missing. Add Sourcegraph Token in Settings → API Key Configuration "
+            "or paste LST file content below."
+        )
     base_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
     if not base_url:
         return None, "SOURCEGRAPH_URL not set"
@@ -19156,7 +19338,7 @@ def fetch_file_content_via_sourcegraph(repo_name, rev, file_path):
                             return (blob_or_file.get("content") or ""), None
                 except Exception:
                     continue
-    return None, "Could not fetch file from Sourcegraph. Set the SOURCEGRAPH_TOKEN environment variable or paste LST content below."
+    return None, "Could not fetch file from Sourcegraph. Check your Sourcegraph Token or paste LST content below."
 
 
 def _check_testnames_in_lst_content(lst_content, test_names):
@@ -19180,6 +19362,45 @@ def _check_testnames_in_lst_content(lst_content, test_names):
     return already_present, not_present
 
 
+
+def resolve_sourcegraph_token(explicit_token=None):
+    """Resolve Sourcegraph token from request/user settings/env."""
+    tok = (explicit_token or "").strip()
+    if tok and "****" not in tok:
+        return tok
+    username = _current_username()
+    if username:
+        saved = (get_user_key(username, "sourcegraph_token") or "").strip()
+        if saved:
+            return saved
+    return (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+
+
+def _branch_alias_candidates(branch):
+    b = (branch or "").strip()
+    if not b:
+        return ["master"]
+    out = [b]
+    low = b.lower()
+    m = re.search(r"(\d+\.\d+)", low)
+    if m:
+        v = m.group(1)
+        out.extend([
+            "ganges-%s-stable" % v,
+            "%s-stable" % v,
+            v,
+        ])
+    if low != "master":
+        out.append("master")
+    seen = set()
+    uniq = []
+    for x in out:
+        if x and x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq
+
+
 @app.route("/mcp/regression/validate-lst", methods=["POST"])
 @jwt_required
 def validate_lst():
@@ -19192,16 +19413,27 @@ def validate_lst():
     repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
     if not lst_file:
         return jsonify({"error": "lst_file is required", "branch_valid": None, "file_valid": None}), 400
-    validation_results = validate_with_sourcegraph(repo_name, branch, lst_file)
+    validation_results = validate_with_sourcegraph(
+        repo_name, branch, lst_file, explicit_token=data.get("sourcegraph_token")
+    )
+    resolved_branch = validation_results.get("resolved_branch") or branch
     sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
-    sourcegraph_url = f"{sg_url}/{repo_name}@{branch}/-/blob/{lst_file.replace(' ', '+')}" if sg_url else None
+    sourcegraph_url = (
+        f"{sg_url}/{repo_name}@{resolved_branch}/-/blob/{lst_file.replace(' ', '+')}" if sg_url else None
+    )
     return jsonify({
-        "branch": branch, "lst_file": lst_file, "repo_name": repo_name,
+        "branch": resolved_branch,
+        "input_branch": branch,
+        "resolved_branch": resolved_branch,
+        "lst_file": lst_file,
+        "repo_name": repo_name,
         "branch_valid": validation_results.get("branch_valid"),
         "file_valid": validation_results.get("file_valid"),
         "branch_error": validation_results.get("branch_error"),
         "file_error": validation_results.get("file_error"),
         "file_suggestions": validation_results.get("file_suggestions", []),
+        "branch_suggestions": validation_results.get("branch_suggestions", []),
+        "auth_required": bool(validation_results.get("auth_required")),
         "sourcegraph_url": sourcegraph_url,
         "message": validation_results.get("message", ""),
         "generated_at": datetime.utcnow().isoformat()
@@ -19274,6 +19506,66 @@ def search_reviewers():
     except Exception as e:
         logger.warning("search_reviewers failed: %s", e)
         return jsonify({"results": [], "error": "Could not fetch reviewers: %s. Add reviewers manually by typing email and pressing Enter." % str(e)})
+
+
+
+@app.route("/mcp/regression/search-branches", methods=["GET"])
+@jwt_required
+def search_branches():
+    """Suggest branch names for handover branch input."""
+    q = (request.args.get("q") or "").strip()
+    repo_name = (request.args.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
+    raw_project = repo_name.split("/", 1)[-1] if "/" in repo_name else repo_name
+    project_candidates = [repo_name, raw_project]
+
+    suggestions = []
+    seen = set()
+    for c in _branch_alias_candidates(q)[:8]:
+        if c not in seen:
+            seen.add(c)
+            suggestions.append(c)
+
+    gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
+    auth = _get_gerrit_auth()
+    headers = {"Accept": "application/json"}
+    prefix = ""
+    if auth:
+        import base64
+        user, pw = auth
+        headers["Authorization"] = "Basic " + base64.b64encode(("%s:%s" % (user, pw)).encode()).decode()
+        prefix = "/a"
+
+    try:
+        for project in project_candidates:
+            encoded_project = urllib.parse.quote(project, safe="")
+            url = "%s%s/projects/%s/branches/?n=25" % (gerrit_url, prefix, encoded_project)
+            resp = requests.get(url, headers=headers, timeout=10, verify=False)
+            if resp.status_code != 200:
+                continue
+            resp_text = resp.text
+            if resp_text.startswith(")]}'"):
+                resp_text = resp_text[5:]
+            data = json.loads(resp_text) if resp_text else []
+            branches = data if isinstance(data, list) else []
+            for b in branches:
+                ref = (b.get("ref") or "").strip()
+                name = ref.replace("refs/heads/", "").strip()
+                if not name:
+                    continue
+                if q and q.lower() not in name.lower():
+                    if name not in suggestions and len(suggestions) < 4:
+                        pass
+                    else:
+                        continue
+                if name not in seen:
+                    seen.add(name)
+                    suggestions.append(name)
+            if suggestions:
+                break
+    except Exception as exc:
+        logger.warning("search_branches failed: %s", exc)
+
+    return jsonify({"results": suggestions[:10], "query": q, "repo_name": repo_name})
 
 
 @app.route("/mcp/regression/gerrit-connectivity", methods=["GET"])
@@ -19357,8 +19649,20 @@ def _build_gerrit_push_ref(branch, reviewers):
     return ref
 
 
-def _get_gerrit_auth():
-    """Get Gerrit auth as (username, password) or None if not configured."""
+
+def _get_gerrit_auth(prefer_ldap=False):
+    """Get Gerrit auth as (username, password).
+
+    When prefer_ldap=True (CR creation), use the logged-in LDAP username/password.
+    Otherwise prefer env service credentials (reviewer search / branch listing).
+    """
+    if prefer_ldap:
+        username = (_current_username() or "").strip()
+        creds = _get_user_credentials(username) if username else None
+        if creds and creds[1]:
+            return (creds[0], creds[1])
+        return None
+
     gerrit_token = (os.getenv("GERRIT_TOKEN") or "").strip()
     if gerrit_token and ":" in gerrit_token:
         parts = gerrit_token.split(":", 1)
@@ -19367,53 +19671,285 @@ def _get_gerrit_auth():
     password = (os.getenv("GERRIT_HTTP_PASSWORD") or "").strip()
     if username and password:
         return (username, password)
+    # Fall back to LDAP for authenticated Gerrit calls when env not set
+    ldap_user = (_current_username() or "").strip()
+    creds = _get_user_credentials(ldap_user) if ldap_user else None
+    if creds and creds[1]:
+        return (creds[0], creds[1])
     return None
+
+
+def _validate_gerrit_credentials(gerrit_url, username, password):
+    """Validate Gerrit basic auth against /a/accounts/self."""
+    if not gerrit_url or not username or not password:
+        return False, "Missing Gerrit URL/username/password"
+    url = "%s/a/accounts/self" % gerrit_url.rstrip("/")
+    headers = {"Accept": "application/json"}
+    import base64
+    headers["Authorization"] = "Basic " + base64.b64encode(("%s:%s" % (username, password)).encode()).decode()
+    try:
+        resp = requests.get(url, headers=headers, timeout=12, verify=False)
+        if resp.status_code == 200:
+            return True, "Authenticated"
+        if resp.status_code in (401, 403):
+            return False, "Authentication failed (401/403)"
+        return False, "Gerrit returned HTTP %s" % resp.status_code
+    except requests.exceptions.Timeout:
+        return False, "Gerrit request timed out"
+    except requests.exceptions.ConnectionError:
+        return False, "Cannot connect to Gerrit (VPN/network)"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _run_git(args, cwd, check=True):
+    """Run git command and return CompletedProcess."""
+    cmd = ["git"] + list(args)
+    return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=check)
+
+
+def _clone_and_sync_handover_branch(auth_url, repo_dir, branch, tmpdir):
+    """Shallow-clone selected branch, verify HEAD, pull latest; force-reset to origin on any sync issue."""
+    t0 = time.time()
+    logger.info("create_lst_cr: shallow clone branch=%s -> %s", branch, repo_dir)
+    clone = _run_git(
+        ["clone", "--depth", "1", "--single-branch", "--branch", branch, auth_url, repo_dir],
+        cwd=tmpdir,
+        check=False,
+    )
+    if clone.returncode != 0:
+        err = ((clone.stderr or clone.stdout or "")[:500]).strip()
+        logger.warning("create_lst_cr: branch-specific clone failed (%s); falling back", err)
+        if os.path.isdir(repo_dir):
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        _run_git(["clone", "--depth", "1", "--single-branch", auth_url, repo_dir], cwd=tmpdir, check=True)
+        fetch = _run_git(["fetch", "--depth", "1", "origin", branch], cwd=repo_dir, check=False)
+        if fetch.returncode != 0:
+            _run_git(["fetch", "origin", branch], cwd=repo_dir, check=True)
+        checkout = _run_git(["checkout", "-B", branch, "origin/%s" % branch], cwd=repo_dir, check=False)
+        if checkout.returncode != 0:
+            _run_git(["checkout", "-B", branch, "FETCH_HEAD"], cwd=repo_dir, check=True)
+
+    head = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir, check=True)
+    current = (head.stdout or "").strip()
+    if current != branch:
+        logger.warning("create_lst_cr: HEAD is %r, expected %r; forcing checkout", current, branch)
+        _run_git(["fetch", "origin", branch], cwd=repo_dir, check=False)
+        _run_git(["checkout", "-B", branch, "origin/%s" % branch], cwd=repo_dir, check=True)
+
+    pull = _run_git(["pull", "--ff-only", "origin", branch], cwd=repo_dir, check=False)
+    if pull.returncode != 0:
+        err = ((pull.stderr or pull.stdout or "")[:500]).strip()
+        logger.warning(
+            "create_lst_cr: pull --ff-only failed (%s); force reset to origin/%s",
+            err,
+            branch,
+        )
+        _run_git(["fetch", "origin", branch], cwd=repo_dir, check=True)
+        _run_git(["reset", "--hard", "origin/%s" % branch], cwd=repo_dir, check=True)
+        _run_git(["clean", "-fd"], cwd=repo_dir, check=False)
+
+    head = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir, check=True)
+    current = (head.stdout or "").strip()
+    if current != branch:
+        raise RuntimeError("After sync, HEAD is %r but expected branch %r" % (current, branch))
+
+    logger.info("create_lst_cr: clone+sync done in %.1fs branch=%s", time.time() - t0, branch)
+
+
+def _gerrit_identity_for_user():
+    """Return (gerrit_username, gerrit_http_password, email_for_git) for CR push.
+
+    Gerrit HTTP Credentials use the LDAP sAMAccountName (e.g. swapnil.wankhede)
+    plus the Gerrit HTTP password from User Settings — not the email address.
+    Email is kept only for git commit identity.
+    """
+    ldap_username = (_current_username() or "").strip()
+    email = (_current_user_email() or "").strip()
+    if not email and ldap_username:
+        email = "%s@%s" % (ldap_username, CORP_EMAIL_DOMAIN)
+    gerrit_user = ldap_username or (email.split("@")[0] if email else "")
+    http_pwd = (get_user_key(ldap_username, "gerrit_http_password") or "").strip() if ldap_username else ""
+    return gerrit_user, http_pwd, email or ""
 
 
 @app.route("/mcp/regression/create-lst-cr", methods=["POST"])
 @jwt_required
 def create_lst_cr():
-    """Return the manual git steps to add tests to an LST file and push for review.
-
-    Manual-only by design: the backend never pushes to Gerrit itself, so no Gerrit
-    credentials are needed on the server. The reviewers are baked into the push ref.
-    """
+    """Create Gerrit CR to add selected handover tests into an LST file using Gerrit HTTP password."""
     if request.method == "OPTIONS":
         return jsonify({}), 200
-    logger.info("[CREATE-LST-CR] POST received")
+
     data = request.get_json() or {}
     branch = (data.get("branch") or "master").strip()
     lst_file = (data.get("lst_file") or "").strip()
-    test_names = data.get("test_names", [])
-    logger.info("[CREATE-LST-CR] Received: branch=%r, lst_file=%r, test_names_count=%s, reviewers=%s",
-                branch, lst_file, len(test_names) if isinstance(test_names, list) else "?", data.get("reviewers"))
-    reviewers = data.get("reviewers") or []
+    lst_files = data.get("lst_files") or []
+    test_names = data.get("test_names") or []
+    reviewers = [str(r).strip() for r in (data.get("reviewers") or []) if str(r).strip()]
+    cr_subject = (data.get("cr_subject") or "Testcase Handover").strip() or "Testcase Handover"
+    cr_description = (data.get("cr_description") or "").strip()
+    handover_tickets = data.get("handover_tickets") or []
+    if isinstance(handover_tickets, str):
+        handover_tickets = [x.strip() for x in handover_tickets.split(",") if x.strip()]
+    else:
+        handover_tickets = [str(x).strip() for x in handover_tickets if str(x).strip()]
+    manual_only = bool(data.get("manual_only"))
+
+    if not isinstance(lst_files, list):
+        lst_files = []
+    lst_files = [str(x).strip() for x in lst_files if str(x).strip()]
+    if lst_file and lst_file not in lst_files:
+        lst_files.append(lst_file)
+    if not lst_files:
+        return jsonify({"error": "lst_file or lst_files is required"}), 400
+    test_names = [str(t).strip() for t in test_names if str(t or "").strip()]
     if not test_names:
         return jsonify({"error": "test_names is required"}), 400
-    if not lst_file:
-        return jsonify({"error": "lst_file is required"}), 400
-    test_names = [str(t).strip() for t in test_names if (t or "").strip()]
-    if not test_names:
-        return jsonify({"error": "test_names is required"}), 400
+
     push_ref = _build_gerrit_push_ref(branch, reviewers)
-    instructions = {
-        "message": "Add the following %s test(s) to the LST file, then push for review." % len(test_names),
-        "branch": branch, "lst_file": lst_file, "test_names": test_names,
-        "manual_steps": [
-            "1. Clone the repository and checkout branch '%s'" % branch,
-            "2. Open the LST file: %s" % lst_file,
-            "3. Add the following %s test name(s) to the file:" % len(test_names),
-            "   " + "\n   ".join(test_names[:10]) + ("..." if len(test_names) > 10 else ""),
-            "4. Commit with message: 'Add %s test(s) to LST'" % len(test_names),
-            "5. Push for review: git push origin HEAD:%s" % push_ref,
-        ],
-    }
-    return jsonify({
-        "manual": True,
-        "instructions": instructions,
-        "message": "Follow the manual steps below to push the change for review.",
-        "generated_at": datetime.utcnow().isoformat(),
-    })
+    if manual_only:
+        instructions = {
+            "message": "Add the following %s test(s) to the LST file, then push for review." % len(test_names),
+            "branch": branch, "lst_file": lst_files[0], "test_names": test_names,
+            "manual_steps": [
+                "1. Clone the repository and checkout branch '%s'" % branch,
+                "2. Open the LST file: %s" % lst_files[0],
+                "3. Add the following %s test name(s) to the file:" % len(test_names),
+                "   " + "\n   ".join(test_names[:10]) + ("..." if len(test_names) > 10 else ""),
+                "4. Commit with message: 'Add %s test(s) to LST'" % len(test_names),
+                "5. Push for review: git push origin HEAD:%s" % push_ref,
+            ],
+        }
+        return jsonify({
+            "manual": True,
+            "instructions": instructions,
+            "message": "Follow the manual steps below to push the change for review.",
+            "generated_at": datetime.utcnow().isoformat(),
+        })
+
+    gerrit_user, gerrit_pwd, git_email = _gerrit_identity_for_user()
+    if not gerrit_user:
+        return jsonify({
+            "error": "Logged-in username is required for Gerrit CR creation.",
+            "message": "Could not resolve your Gerrit username from the session. Log in again and retry.",
+        }), 400
+    if not gerrit_pwd:
+        return jsonify({
+            "error": "Gerrit HTTP password missing. Save it in Settings → API Keys → Gerrit HTTP Password.",
+            "require_key_setup": True,
+            "missing_key": "gerrit_http_password",
+            "message": "Generate an HTTP password in Gerrit → Settings → HTTP Credentials (username is your LDAP id, e.g. firstname.lastname), then paste it in RegX User Settings and Save.",
+        }), 403
+
+    gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
+    ok_auth, auth_msg = _validate_gerrit_credentials(gerrit_url, gerrit_user, gerrit_pwd)
+    if not ok_auth:
+        return jsonify({
+            "error": "Gerrit authentication failed.",
+            "message": "Unable to validate Gerrit HTTP password for %s: %s. Re-generate the HTTP password in Gerrit and update Settings." % (gerrit_user, auth_msg),
+            "require_key_setup": True,
+            "missing_key": "gerrit_http_password",
+        }), 403
+
+    repo_path = (os.getenv("HANDOVER_REPO_PATH") or "nutest-py3-tests").strip("/")
+    clone_url = "%s/a/%s" % (gerrit_url, repo_path)
+
+    tmpdir = tempfile.mkdtemp(prefix="regx_handover_")
+    repo_dir = os.path.join(tmpdir, "repo")
+    try:
+        auth_url = clone_url.replace(
+            "https://",
+            "https://%s:%s@" % (urllib.parse.quote(gerrit_user), urllib.parse.quote(gerrit_pwd)),
+        )
+        _clone_and_sync_handover_branch(auth_url, repo_dir, branch, tmpdir)
+        if git_email:
+            _run_git(["config", "user.email", git_email], cwd=repo_dir, check=False)
+        display_name = (_current_username() or gerrit_user.split("@")[0] or gerrit_user).strip()
+        _run_git(["config", "user.name", display_name], cwd=repo_dir, check=False)
+        logger.info("create_lst_cr: applying LST edits on branch=%s files=%s", branch, lst_files)
+
+        per_file = []
+        total_to_add = 0
+        for lf in lst_files:
+            abs_lst = os.path.join(repo_dir, lf)
+            if not os.path.isfile(abs_lst):
+                return jsonify({
+                    "error": "LST file not found on branch.",
+                    "message": "File '%s' was not found on branch '%s'." % (lf, branch),
+                }), 400
+            with open(abs_lst, "r", encoding="utf-8", errors="ignore") as fh:
+                old_content = fh.read()
+            already_present, to_add = _check_testnames_in_lst_content(old_content, test_names)
+            if to_add:
+                append_block = "\n" + "\n".join(to_add) + "\n"
+                with open(abs_lst, "a", encoding="utf-8") as fh:
+                    fh.write(append_block)
+                _run_git(["add", lf], cwd=repo_dir, check=True)
+            per_file.append({"lst_file": lf, "already_present": already_present, "to_add": to_add})
+            total_to_add += len(to_add)
+
+        if total_to_add == 0:
+            return jsonify({
+                "success": False,
+                "message": "All selected tests are already present in selected LST file(s).",
+                "files": per_file,
+                "already_present": [x for p in per_file for x in p["already_present"]],
+                "to_add": [],
+            })
+
+        if not cr_description:
+            reviewers_line = ", ".join(reviewers) if reviewers else ""
+            tickets_line = ", ".join(handover_tickets) if handover_tickets else ""
+            all_to_add = [x for p in per_file for x in p["to_add"]]
+            tests_line = ", ".join(all_to_add[:15]) + (" ..." if len(all_to_add) > 15 else "")
+            cr_description = (
+                "Reviewers               : %s\n"
+                "Tickets resolved        : %s\n"
+                "Tests run               : %s\n"
+                "Target release          : %s\n"
+                "Code review URL         : "
+            ) % (reviewers_line, tickets_line, tests_line, branch)
+
+        commit_msg = cr_subject + "\n\n" + cr_description
+        logger.info("create_lst_cr: committing %s test(s) on branch=%s", total_to_add, branch)
+        _run_git(["commit", "-m", commit_msg], cwd=repo_dir, check=True)
+        push_t0 = time.time()
+        logger.info("create_lst_cr: pushing HEAD:%s", push_ref)
+        _run_git(["push", "origin", "HEAD:%s" % push_ref], cwd=repo_dir, check=True)
+        logger.info("create_lst_cr: push done in %.1fs", time.time() - push_t0)
+
+        return jsonify({
+            "success": True,
+            "message": "CR created and pushed for review.",
+            "cr_url": "%s/q/status:open+owner:%s+project:%s+branch:%s" % (
+                gerrit_url,
+                urllib.parse.quote(gerrit_user, safe=""),
+                urllib.parse.quote(repo_path, safe=""),
+                urllib.parse.quote(branch, safe=""),
+            ),
+            "files": per_file,
+            "already_present": [x for p in per_file for x in p["already_present"]],
+            "to_add": [x for p in per_file for x in p["to_add"]],
+            "push_ref": push_ref,
+            "generated_at": datetime.utcnow().isoformat(),
+        })
+    except subprocess.CalledProcessError as cpe:
+        stderr = (cpe.stderr or "").strip()
+        stdout = (cpe.stdout or "").strip()
+        msg = stderr or stdout or str(cpe)
+        return jsonify({
+            "error": "Failed to create CR via git/gerrit.",
+            "git_error": msg[:1000],
+            "message": "Create CR failed. Check Gerrit HTTP password, branch, VPN/network, and repository permissions.",
+        }), 502
+    except Exception as exc:
+        logger.exception("create_lst_cr failed")
+        return jsonify({"error": str(exc), "message": "Unexpected error during CR creation."}), 500
+    finally:
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 @app.route("/mcp/regression/check-lst-testcases", methods=["POST"])
@@ -19445,12 +19981,12 @@ def check_lst_testcases():
     return jsonify({"branch": branch, "lst_file": lst_file, "test_names": test_names, "present": already_present, "not_present": not_present, "generated_at": datetime.utcnow().isoformat()})
 
 
-def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=False):
+def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=False, sg_token=None, max_count=50):
     """Search Sourcegraph for files containing the test name."""
     test_name = str(test_name).strip() if test_name else ""
     if not test_name:
         return []
-    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    token = (sg_token or os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
     if not token:
         return []
     base_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
@@ -19472,7 +20008,7 @@ def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_on
         {"Content-Type": "application/json", "Authorization": "Bearer %s" % token},
     ]
     escaped = test_name.replace("\\", "\\\\").replace('"', '\\"')
-    search_query = f'repo:{repo_name} rev:{rev} "{escaped}" count:50'
+    search_query = f'repo:{repo_name} rev:{rev} "{escaped}" count:{int(max_count) if max_count else 50}'
     payload = {"query": "query Search($q: String!) { search(query: $q) { results { matchCount results { ... on FileMatch { file { path } } } } } }", "variables": {"q": search_query}}
     for api_url in api_urls:
         for headers in auth_headers:
@@ -19501,6 +20037,127 @@ def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_on
                 logger.warning("[SOURCEGRAPH] Search failed (%s): %s", api_url, e)
                 continue
     return []
+
+
+
+@app.route("/mcp/regression/suggest-lst-file", methods=["POST"])
+@jwt_required
+def suggest_lst_file():
+    """Suggest the best-fit LST file for selected handover testcases."""
+    data = request.get_json() or {}
+    test_names = data.get("test_names") or []
+    branch = (data.get("branch") or "master").strip() or "master"
+    repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
+
+    test_names = [str(t).strip() for t in test_names if (t or "").strip()]
+    if not test_names:
+        return jsonify({"error": "test_names is required (at least one testcase)"}), 400
+    sampled_total = len(test_names)
+    test_names = test_names[:20]
+
+    token = resolve_sourcegraph_token(data.get("sourcegraph_token"))
+    if not token:
+        return jsonify({
+            "suggested_lst_file": "",
+            "candidates": [],
+            "testcase_candidates": {},
+            "covered_tests": 0,
+            "total_tests": len(test_names),
+            "tie": False,
+            "error": "Sourcegraph token not configured. Add Sourcegraph Token in Settings → API Key Configuration.",
+            "generated_at": datetime.utcnow().isoformat(),
+        })
+
+    testcase_candidates = {}
+    freq = defaultdict(int)
+    seen_by_path = defaultdict(set)
+
+    def _search_one(test_name):
+        hits = search_sourcegraph_for_test(
+            repo_name,
+            test_name,
+            rev=branch,
+            lst_files_only=True,
+            sg_token=token,
+            max_count=20,
+        )
+        paths = []
+        seen = set()
+        for h in hits:
+            path = (h.get("path") or "").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
+        return test_name, paths
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(test_names)))) as executor:
+        future_map = {executor.submit(_search_one, tn): tn for tn in test_names}
+        for fut in as_completed(future_map):
+            test_name, paths = fut.result()
+            testcase_candidates[test_name] = paths
+            for path in paths:
+                if test_name not in seen_by_path[path]:
+                    seen_by_path[path].add(test_name)
+                    freq[path] += 1
+
+    low_branch = branch.lower()
+    branch_hints = []
+    if low_branch == "master":
+        branch_hints = ["/master/", "/milestones/master/"]
+    else:
+        m = re.search(r"(\d+\.\d+)", low_branch)
+        if m:
+            v = m.group(1)
+            branch_hints = ["/%s/" % v, "/%s-stable/" % v, "/ganges-%s/" % v]
+        branch_hints.append("/%s/" % low_branch)
+
+    def _score(path, count):
+        p = path.lower()
+        bonus = 0
+        for i, hint in enumerate(branch_hints):
+            if hint in p:
+                bonus = max(bonus, 50 - i * 5)
+        # Prefer stable/regression LST paths over intransit for auto-suggestion.
+        if "intransit" in p:
+            bonus -= 200
+        return count * 100 + bonus
+
+    ranked = sorted(freq.items(), key=lambda kv: (-_score(kv[0], kv[1]), -kv[1], kv[0]))
+    candidates = [{"lst_file": path, "count": count} for path, count in ranked]
+
+    # Never auto-suggest an intransit LST; keep those in candidates for manual pick only.
+    from handover_helpers import prefer_non_intransit_lst
+    suggested = prefer_non_intransit_lst([path for path, _count in ranked])
+    top_count = ranked[0][1] if ranked else 0
+    tie = len(ranked) > 1 and ranked[1][1] == top_count and top_count > 0
+    covered_tests = len({t for t, hits in testcase_candidates.items() if hits})
+
+    if suggested:
+        message = (
+            "Suggested LST selected by majority of matching selected testcases."
+            + (" Checked first 20 selected passed tests for faster suggestions." if sampled_total > 20 else "")
+        )
+    elif ranked:
+        message = (
+            "Only intransit LST matches found — pick one manually from candidates, "
+            "or enter a non-intransit LST path."
+        )
+    else:
+        message = "No matching LST files found for selected testcases on this branch."
+
+    return jsonify({
+        "branch": branch,
+        "repo_name": repo_name,
+        "suggested_lst_file": suggested,
+        "candidates": candidates,
+        "testcase_candidates": testcase_candidates,
+        "covered_tests": covered_tests,
+        "total_tests": sampled_total,
+        "tie": tie,
+        "message": message,
+        "generated_at": datetime.utcnow().isoformat(),
+    })
 
 
 @app.route("/mcp/regression/search-lst-file", methods=["POST"])

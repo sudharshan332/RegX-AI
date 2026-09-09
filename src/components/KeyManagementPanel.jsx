@@ -226,7 +226,8 @@ export default function KeyManagementPanel({ onClose }) {
           </button>
         </div>
         <p className="help-text">
-          Used for automatic Gerrit CR creation in Handover. Username is your logged-in email.
+          Required for automatic Gerrit CR creation in Handover. Generate it in Gerrit → Settings → HTTP Credentials.
+          Username is your Gerrit/LDAP id shown on that page (e.g. firstname.lastname), not your email.
         </p>
       </div>
 

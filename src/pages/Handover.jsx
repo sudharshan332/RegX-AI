@@ -19,6 +19,16 @@ const SEARCH_REVIEWERS_API = "/mcp/regression/search-reviewers";
 const SEARCH_BRANCHES_API = "/mcp/regression/search-branches";
 const JIRA_URL = "https://jira.nutanix.com/browse/";
 
+function isIntransitLstPath(path) {
+  return (path || "").toLowerCase().includes("intransit");
+}
+
+function pickAutoLstSuggestion(suggested) {
+  const path = (suggested || "").trim();
+  if (!path || isIntransitLstPath(path)) return "";
+  return path;
+}
+
 const btnBase = { fontSize: "13px", fontWeight: "500", border: "none", borderRadius: "8px", cursor: "pointer", transition: "all 0.15s ease", boxSizing: "border-box" };
 const btnPrimary = { ...btnBase, padding: "10px 20px", background: "#059669", color: "white", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" };
 const btnPrimaryDisabled = { ...btnPrimary, background: "#94a3b8", cursor: "not-allowed", boxShadow: "none" };
@@ -182,7 +192,7 @@ function formatDateIST(isoDateStr) {
 }
 
 export default function Handover({ userInfo }) {
-  const [handoverJitaUrls, setHandoverJitaUrls] = useState([""]);
+  const [handoverJitaInput, setHandoverJitaInput] = useState("");
   const [handoverAnalysis, setHandoverAnalysis] = useState(null);
   const [loadingHandover, setLoadingHandover] = useState(false);
   const [handoverCreateLstBranch, setHandoverCreateLstBranch] = useState("");
@@ -308,8 +318,9 @@ export default function Handover({ userInfo }) {
     const cached = handoverLstSuggestCacheRef.current.get(cacheKey);
     if (cached) {
       setHandoverLstSuggestion(cached);
-      if (cached.suggested_lst_file && getResolvedLstFiles().length === 0 && !(handoverCreateLstFile || "").trim()) {
-        setHandoverCreateLstFiles([cached.suggested_lst_file]);
+      const autoLst = pickAutoLstSuggestion(cached.suggested_lst_file);
+      if (autoLst && getResolvedLstFiles().length === 0 && !(handoverCreateLstFile || "").trim()) {
+        setHandoverCreateLstFiles([autoLst]);
       }
       return;
     }
@@ -324,9 +335,10 @@ export default function Handover({ userInfo }) {
       const data = res.data || {};
       handoverLstSuggestCacheRef.current.set(cacheKey, data);
       setHandoverLstSuggestion(data);
-      if (data.suggested_lst_file) {
+      const autoLst = pickAutoLstSuggestion(data.suggested_lst_file);
+      if (autoLst) {
         if (getResolvedLstFiles().length === 0 && !(handoverCreateLstFile || "").trim()) {
-          setHandoverCreateLstFiles([data.suggested_lst_file]);
+          setHandoverCreateLstFiles([autoLst]);
         }
       }
       if (data.error) {
@@ -416,9 +428,9 @@ export default function Handover({ userInfo }) {
 
 
   const handleHandoverAnalyze = async () => {
-    const urls = (handoverJitaUrls || [""]).map((u) => (u || "").trim()).filter(Boolean);
-    if (urls.length === 0) {
-      alert("Enter at least one JITA results URL or task ID(s). Use + to add more links.");
+    const input = (handoverJitaInput || "").trim();
+    if (!input) {
+      alert("Enter JITA results URL(s) and/or task ID(s), separated by comma, space, or new line.");
       return;
     }
     setLoadingHandover(true);
@@ -450,7 +462,11 @@ export default function Handover({ userInfo }) {
     setHandoverValidation(null); // Clear LST validation
     setHandoverJiraTicketValidation({}); // Clear Jira validation
     try {
-      const res = await api.post(JITA_ANALYSIS_API, { urls, min_passes_for_success: 2 }, { timeout: 120000, headers: { "Content-Type": "application/json" } });
+      const res = await api.post(
+        JITA_ANALYSIS_API,
+        { input, min_passes_for_success: 2, use_sliding_eligibility: true },
+        { timeout: 120000, headers: { "Content-Type": "application/json" } }
+      );
       if (res.data?.error) {
         setHandoverAnalysis({ error: res.data.error });
         return;
@@ -488,15 +504,12 @@ export default function Handover({ userInfo }) {
         setHandoverTestTickets(ticketsMap);
         setHandoverBugTypeMap(bugTypeMap);
         
-        // Auto-select ALL passed test cases (status from backend respects min_passes_for_success=2)
+        // Auto-select eligible tests (2 consecutive passes, or Product Bug gaps between passes)
         const autoSelected = new Set();
         res.data.test_cases.forEach((tc) => {
           const status = (tc.status || "").toLowerCase();
-          const passCount = tc.passed_count || 0;
-          const isPassed = status === "succeeded" || passCount >= 2;
-          
-          // Auto-select all passed test cases
-          if (isPassed) {
+          const isEligible = status === "succeeded" || !!tc.eligibility_reason;
+          if (isEligible) {
             autoSelected.add(tc.test_name);
           }
         });
@@ -849,14 +862,26 @@ export default function Handover({ userInfo }) {
       if (resolvedBranch && resolvedBranch !== branch) {
         setHandoverCreateLstBranch(resolvedBranch);
       }
-      const allValid = responses.length > 0 && responses.every((r) => r.file_valid === true && r.branch_valid === true && !r.error);
+      const authRequired = responses.some((r) => r.auth_required);
+      const branchOk = responses.length > 0 && responses.every((r) => r.branch_valid === true);
+      const fileOk = responses.length > 0 && responses.every((r) => r.file_valid === true);
+      const allValid = branchOk && fileOk && !authRequired && responses.every((r) => !r.error);
+      const authMessage = authRequired
+        ? (responses.find((r) => r.message || r.branch_error || r.file_error)?.message
+          || responses.find((r) => r.branch_error)?.branch_error
+          || "Sourcegraph token missing/invalid — save it in Settings → API Key Configuration.")
+        : null;
       setHandoverValidation({
         all_valid: allValid,
         files: responses,
-        branch_valid: allValid,
-        file_valid: allValid,
-        branch_error: allValid ? null : responses.find((r) => r.branch_error)?.branch_error || null,
-        file_error: allValid ? null : responses.find((r) => r.file_error)?.file_error || null,
+        branch_valid: authRequired ? null : (branchOk ? true : (responses.some((r) => r.branch_valid === false) ? false : null)),
+        file_valid: authRequired ? null : (fileOk ? true : (responses.some((r) => r.file_valid === false) ? false : null)),
+        auth_required: authRequired,
+        branch_error: authRequired ? authMessage : (responses.find((r) => r.branch_error)?.branch_error || null),
+        file_error: authRequired ? authMessage : (responses.find((r) => r.file_error)?.file_error || null),
+        message: authMessage || responses.find((r) => r.message)?.message || null,
+        sourcegraph_url: responses.find((r) => r.sourcegraph_url)?.sourcegraph_url || null,
+        error: responses.find((r) => r.error)?.error || null,
       });
     } catch (err) {
       console.error("LST validation error:", err);
@@ -935,7 +960,7 @@ export default function Handover({ userInfo }) {
           cr_subject: finalCrSubject,
           cr_description: finalCrDescription,
         },
-        { headers: getAuthHeaders() }
+        { headers: getAuthHeaders(), timeout: 600000 }
       );
       if ((res.data.manual || manualOnly) && res.data.instructions) {
         setHandoverManualLstInstructions(res.data.instructions);
@@ -955,7 +980,7 @@ export default function Handover({ userInfo }) {
       if (errData?.require_key_setup && errData?.missing_key === "gerrit_http_password") {
         setHandoverCrResult({
           success: false,
-          error: "Gerrit HTTP password is missing. Please add it in Settings → API Key Configuration.",
+          error: "Gerrit HTTP password is missing or invalid. Save it in Settings → API Keys → Gerrit HTTP Password.",
           message: errData?.message || errData?.error,
           require_key_setup: true,
         });
@@ -1288,7 +1313,7 @@ export default function Handover({ userInfo }) {
           cr_subject: finalCrSubject,
           cr_description: finalCrDescription,
         },
-        { headers: getAuthHeaders(), timeout: 300000 }
+        { headers: getAuthHeaders(), timeout: 600000 }
       );
       if (res.data.manual && res.data.instructions) {
         setHandoverManualLstInstructions(res.data.instructions);
@@ -1306,7 +1331,7 @@ export default function Handover({ userInfo }) {
       if (errData?.require_key_setup && errData?.missing_key === "gerrit_http_password") {
         crResult = {
           success: false,
-          error: "Gerrit HTTP password is missing. Please add it in Settings → API Key Configuration.",
+          error: "Gerrit HTTP password is missing or invalid. Save it in Settings → API Keys → Gerrit HTTP Password.",
           message: errData?.message || errData?.error,
           require_key_setup: true,
         };
@@ -1400,34 +1425,20 @@ export default function Handover({ userInfo }) {
       {activeTab === "handover" && (
         <>
       <p className="ho-subtitle ho-intro">
-        Enter JITA results URL(s). A test is <strong>Passed</strong> only if it passed in <strong>both of the 2 latest runs</strong> (consecutive); otherwise <strong>Failed</strong>. Product Bug failures can be selected manually. Record handover and optionally create a Gerrit CR to add tests to an LST file.
+        Paste JITA results URL(s) and/or task ID(s) in one box (comma, space, or newline separated).
       </p>
 
       <div className="ho-card">
         <div className="ho-card__title">JITA results</div>
-        {(handoverJitaUrls || [""]).map((link, idx) => (
-          <div key={idx} style={{ display: "flex", gap: "8px", alignItems: "center", marginBottom: "8px", flexWrap: "wrap" }}>
-            <input
-              type="text"
-              value={link}
-              onChange={(e) => {
-                const next = [...(handoverJitaUrls || [""])];
-                next[idx] = e.target.value;
-                setHandoverJitaUrls(next);
-              }}
-              placeholder={idx === 0 ? "JITA URL or task ID(s)" : "Another JITA URL or task ID(s)"}
-              style={{ flex: 1, minWidth: "280px", padding: "8px 12px", fontSize: "14px", border: "1px solid #ddd", borderRadius: "4px", boxSizing: "border-box" }}
-            />
-            {idx === (handoverJitaUrls || [""]).length - 1 ? (
-              <button type="button" onClick={() => setHandoverJitaUrls((prev) => [...(prev || [""]), ""])} style={{ padding: "8px 14px", background: "#0d9488", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}>+</button>
-            ) : (handoverJitaUrls || [""]).length > 1 ? (
-              <button type="button" onClick={() => setHandoverJitaUrls((prev) => prev.filter((_, i) => i !== idx))} style={{ padding: "6px 10px", background: "#f87171", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}>×</button>
-            ) : null}
-          </div>
-        ))}
+        <textarea
+          value={handoverJitaInput}
+          onChange={(e) => setHandoverJitaInput(e.target.value)}
+          rows={4}
+          style={{ width: "100%", padding: "10px 12px", fontSize: "14px", border: "1px solid #ddd", borderRadius: "4px", boxSizing: "border-box", fontFamily: "inherit", resize: "vertical" }}
+        />
         <div style={{ display: "flex", gap: "12px", marginTop: "12px", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button onClick={() => handleHandoverAnalyze()} disabled={loadingHandover} style={loadingHandover ? { ...btnValidateDisabled } : { ...btnSecondary }}>
-            {loadingHandover ? "Loading..." : "Fetch from URL(s)"}
+            {loadingHandover ? "Loading..." : "Fetch"}
           </button>
         </div>
       </div>
@@ -1436,7 +1447,7 @@ export default function Handover({ userInfo }) {
         <div style={{ marginTop: "20px" }}>
           {handoverDataLocked && !handoverAnalysis.error && (
             <div style={{ marginBottom: "12px", padding: "12px 16px", background: "#f1f5f9", borderRadius: "8px", border: "1px solid #cbd5e1", color: "#475569", fontSize: "14px" }}>
-              ✓ Data saved. Change JITA URL and click <strong>Fetch from URL(s)</strong> to make new changes.
+              ✓ Data saved. Change the search box and click <strong>Fetch</strong> to make new changes.
             </div>
           )}
           {handoverAnalysis.error ? (
@@ -1987,12 +1998,22 @@ export default function Handover({ userInfo }) {
                   </div>
                   {handoverValidation && (
                     <div style={{ marginBottom: "12px", padding: "10px", background: handoverValidation.file_valid === true && handoverValidation.branch_valid === true ? "#ecfdf5" : "#f8fafc", borderRadius: "4px", border: "1px solid #e2e8f0", fontSize: "13px" }}>
-                      {handoverValidation.file_valid === true && handoverValidation.branch_valid === true ? (
+                      {handoverValidation.auth_required ? (
+                        <div style={{ color: "#b45309" }}>
+                          Sourcegraph token missing/invalid — save it in Settings → API Key Configuration, then click Test Keys and retry Validate LST.
+                          {(handoverValidation.message || handoverValidation.branch_error) && (
+                            <div style={{ marginTop: "6px", fontSize: "12px" }}>{handoverValidation.message || handoverValidation.branch_error}</div>
+                          )}
+                        </div>
+                      ) : handoverValidation.file_valid === true && handoverValidation.branch_valid === true ? (
                         <span style={{ color: "#166534" }}>✓ Branch and file validated.</span>
                       ) : (
                         <>
                           {handoverValidation.branch_valid != null && <span>Branch: {handoverValidation.branch_valid === true ? "✓" : "✗"} </span>}
                           {handoverValidation.file_valid != null && <span>File: {handoverValidation.file_valid === true ? "✓" : "✗"}</span>}
+                          {handoverValidation.branch_valid == null && handoverValidation.file_valid == null && !handoverValidation.error && (
+                            <span style={{ color: "#64748b" }}>Could not complete Sourcegraph validation.</span>
+                          )}
                           {handoverValidation.error && (
                             <div style={{ marginTop: "6px", color: "#dc2626", fontSize: "12px" }}>{handoverValidation.error}</div>
                           )}
@@ -2008,8 +2029,13 @@ export default function Handover({ userInfo }) {
                           {Array.isArray(handoverValidation.files) && handoverValidation.files.length > 0 && (
                             <div style={{ marginTop: "8px", fontSize: "12px" }}>
                               {handoverValidation.files.map((f) => (
-                                <div key={f.lst_file} style={{ marginBottom: "2px", color: f.file_valid && f.branch_valid ? "#166534" : "#b91c1c" }}>
+                                <div key={f.lst_file} style={{ marginBottom: "4px", color: f.file_valid && f.branch_valid ? "#166534" : "#b91c1c" }}>
                                   {(f.file_valid && f.branch_valid) ? "✓" : "✗"} {f.lst_file}
+                                  {(f.branch_error || f.file_error) && (
+                                    <div style={{ color: "#64748b", fontWeight: 400 }}>
+                                      {[f.branch_valid === true ? null : f.branch_error, f.file_valid === true ? null : f.file_error].filter(Boolean).join(" · ")}
+                                    </div>
+                                  )}
                                 </div>
                               ))}
                             </div>
@@ -2064,7 +2090,7 @@ export default function Handover({ userInfo }) {
                             style={isButtonDisabled ? { ...btnPrimaryDisabled } : { ...btnPrimary }}
                             title={isButtonDisabled ? (jiraValidationRequired && !hasJiraValidation ? "Step 1: Please validate Jira tickets first (required for failed test cases)" : (!hasLstValidation ? "Step 2: Please validate LST file" : "")) : ""}
                           >
-                            {handoverCreateLstLoading ? "Processing..." : "Record Handover | Create CR"}
+                            {handoverCreateLstLoading ? "Processing..." : "Take handover"}
                           </button>
                           {allSelectedArePassed && !hasLstValidation && (
                             <span style={{ fontSize: "11px", color: "#64748b", fontStyle: "italic" }}>
