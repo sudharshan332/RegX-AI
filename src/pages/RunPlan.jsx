@@ -7,6 +7,12 @@ import './RunPlan.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/run-plan`;
 
+/** JITA image_build_selection values used when updating Image by tag. */
+const IMAGE_TAG_OPTIONS = [
+  'By Latest Smoke Passed',
+  'By Latest Build Passed',
+];
+
 /** JITA enum for run_tests_with_additional_tags (fixed server-side schema). */
 const ADDITIONAL_TAG_OPTIONS = [
   'NESTED_QUALIFIED',
@@ -69,6 +75,7 @@ export default function RunPlan() {
     // Component checkboxes
     updateNosCluster: false,
     updatePrismCentral: false,
+    updateImageBranch: false,
     // NOS_CLUSTER fields
     nosCluster: {
       branch: '',
@@ -80,6 +87,15 @@ export default function RunPlan() {
     },
     // PRISM_CENTRAL fields
     prismCentral: {
+      branch: '',
+      updateType: '', // 'tag' or 'commit'
+      buildType: '',
+      tag: '',
+      commitId: '',
+      gbn: ''
+    },
+    // Image Branch fields (JITA image_branch / image_build_type / image_commit / image_gbn)
+    imageBranch: {
       branch: '',
       updateType: '', // 'tag' or 'commit'
       buildType: '',
@@ -305,8 +321,10 @@ export default function RunPlan() {
     setBatchUpdateData({
       updateNosCluster: false,
       updatePrismCentral: false,
+      updateImageBranch: false,
       nosCluster: { branch: '', updateType: '', buildType: '', tag: '', commitId: '', gbn: '' },
       prismCentral: { branch: '', updateType: '', buildType: '', tag: '', commitId: '', gbn: '' },
+      imageBranch: { branch: '', updateType: '', buildType: '', tag: '', commitId: '', gbn: '' },
       nutestBranch: '',
       patchUrl: '',
       frameworkPatchUrl: '',
@@ -337,6 +355,29 @@ export default function RunPlan() {
     setView('create');
   };
 
+  // Helper function to extract ID from $oid object or return string
+  const extractId = (id) => {
+    if (id == null || id === '') return '';
+    if (typeof id === 'string') return id;
+    if (id && typeof id === 'object') {
+      if (id.$oid) return String(id.$oid);
+      if (id.oid) return String(id.oid);
+      if (id._id && id._id !== id) return extractId(id._id);
+      if (id.id && id.id !== id) return extractId(id.id);
+    }
+    return String(id);
+  };
+
+  // Normalize job profile data (convert _id from object to string)
+  const normalizeJobProfile = (jp) => {
+    if (!jp) return jp;
+    const normalized = { ...jp };
+    if (normalized._id) {
+      normalized._id = extractId(normalized._id);
+    }
+    return normalized;
+  };
+
   const handleEdit = async (runPlan) => {
     setSelectedRunPlan(runPlan);
     setFormData({
@@ -351,26 +392,31 @@ export default function RunPlan() {
       isDummy: !!runPlan.is_dummy,
     });
     
-    // Fetch job profile details for the IDs in the run plan
-    if (runPlan.job_profiles && runPlan.job_profiles.length > 0) {
+    // Seed from stored IDs so Remove works even if JITA search is incomplete.
+    const jobProfileIds = (runPlan.job_profiles || [])
+      .map((id) => (typeof id === 'string' ? id.trim() : extractId(id)))
+      .filter(Boolean);
+    const stubs = jobProfileIds.map((id) => ({ _id: id, name: id, description: '' }));
+    setFormData(prev => ({ ...prev, selectedJobProfiles: stubs }));
+
+    if (jobProfileIds.length > 0) {
       setLoading(true);
       try {
-        const jobProfileIds = runPlan.job_profiles.filter(id => id && id.trim());
-        if (jobProfileIds.length > 0) {
-          const response = await api.post(`${API_BASE}/search-job-profiles`, {
-            search_type: 'id',
-            search_value: jobProfileIds.join(',')
-          });
-          const normalized = (response.data.job_profiles || []).map(normalizeJobProfile);
-          setFormData(prev => ({
-            ...prev,
-            selectedJobProfiles: normalized
-          }));
-          setJobProfileResults(normalized);
-        }
+        const response = await api.post(`${API_BASE}/search-job-profiles`, {
+          search_type: 'id',
+          search_value: jobProfileIds.join(',')
+        });
+        const normalized = (response.data.job_profiles || []).map(normalizeJobProfile);
+        const byId = new Map(normalized.map((jp) => [extractId(jp._id), jp]));
+        const merged = jobProfileIds.map((id) => byId.get(id) || { _id: id, name: id, description: '' });
+        setFormData(prev => ({
+          ...prev,
+          selectedJobProfiles: merged
+        }));
+        setJobProfileResults(normalized);
       } catch (error) {
         console.error('Error fetching job profiles:', error);
-        alert('Failed to fetch job profile details');
+        alert('Failed to fetch job profile names; you can still remove profiles by ID');
       } finally {
         setLoading(false);
       }
@@ -379,24 +425,6 @@ export default function RunPlan() {
     }
     
     setView('edit');
-  };
-
-  // Helper function to extract ID from $oid object or return string
-  const extractId = (id) => {
-    if (typeof id === 'string') return id;
-    if (id && typeof id === 'object' && id.$oid) return id.$oid;
-    if (id && typeof id === 'object' && id._id) return extractId(id._id);
-    return String(id || '');
-  };
-
-  // Normalize job profile data (convert _id from object to string)
-  const normalizeJobProfile = (jp) => {
-    if (!jp) return jp;
-    const normalized = { ...jp };
-    if (normalized._id) {
-      normalized._id = extractId(normalized._id);
-    }
-    return normalized;
   };
 
   const handleSearchJobProfiles = async () => {
@@ -442,10 +470,13 @@ export default function RunPlan() {
 
   const handleRemoveJobProfile = (jobProfileId) => {
     const idToRemove = extractId(jobProfileId);
-    setFormData({
-      ...formData,
-      selectedJobProfiles: formData.selectedJobProfiles.filter(jp => extractId(jp._id) !== idToRemove)
-    });
+    if (!idToRemove) return;
+    setFormData((prev) => ({
+      ...prev,
+      selectedJobProfiles: prev.selectedJobProfiles.filter(
+        (jp) => extractId(jp._id || jp.id) !== idToRemove
+      )
+    }));
   };
 
   const handleDeleteRunPlan = async () => {
@@ -558,6 +589,7 @@ export default function RunPlan() {
     setBatchUpdateData({
       updateNosCluster: false,
       updatePrismCentral: false,
+      updateImageBranch: false,
       nosCluster: {
         branch: '',
         updateType: '',
@@ -567,6 +599,14 @@ export default function RunPlan() {
         gbn: ''
       },
       prismCentral: {
+        branch: '',
+        updateType: '',
+        buildType: '',
+        tag: '',
+        commitId: '',
+        gbn: ''
+      },
+      imageBranch: {
         branch: '',
         updateType: '',
         buildType: '',
@@ -621,6 +661,23 @@ export default function RunPlan() {
       payload.components.push(d);
     }
 
+    if (batchUpdateData.updateImageBranch) {
+      const d = {
+        component: 'IMAGE',
+        branch: batchUpdateData.imageBranch.branch,
+        update_type: batchUpdateData.imageBranch.updateType,
+        build_type: batchUpdateData.imageBranch.buildType
+      };
+      if (batchUpdateData.imageBranch.updateType === 'tag' && batchUpdateData.imageBranch.tag) d.tag = batchUpdateData.imageBranch.tag;
+      else if (batchUpdateData.imageBranch.updateType === 'commit') {
+        const commitId = (batchUpdateData.imageBranch.commitId || '').trim();
+        const gbn = (batchUpdateData.imageBranch.gbn || '').trim();
+        if (commitId) d.commit_id = commitId;
+        if (gbn) d.gbn = gbn;
+      }
+      payload.components.push(d);
+    }
+
     if (batchUpdateData.nutestBranch) payload.nutest_branch = batchUpdateData.nutestBranch;
     if (batchUpdateData.patchUrl) payload.patch_url = batchUpdateData.patchUrl;
     if (batchUpdateData.frameworkPatchUrl) payload.framework_patch_url = batchUpdateData.frameworkPatchUrl;
@@ -642,7 +699,7 @@ export default function RunPlan() {
       : selectedRunPlan ? [selectedRunPlan] : [];
 
     if (targets.length === 0) return;
-    if (!batchUpdateData.updateNosCluster && !batchUpdateData.updatePrismCentral && !batchUpdateData.nutestBranch && !batchUpdateData.patchUrl && !batchUpdateData.frameworkPatchUrl && !batchUpdateData.testerTagsAction && !batchUpdateData.updateAdditionalTags) {
+    if (!batchUpdateData.updateNosCluster && !batchUpdateData.updatePrismCentral && !batchUpdateData.updateImageBranch && !batchUpdateData.nutestBranch && !batchUpdateData.patchUrl && !batchUpdateData.frameworkPatchUrl && !batchUpdateData.testerTagsAction && !batchUpdateData.updateAdditionalTags) {
       alert('Select at least one field to update (component, branch/patch, tags).');
       return;
     }
@@ -1466,7 +1523,7 @@ export default function RunPlan() {
           {/* Component Selection Checkboxes */}
           <div className="form-group">
             <label>Select Components to Update</label>
-            <div style={{ display: 'flex', gap: '20px', marginTop: '10px' }}>
+            <div style={{ display: 'flex', gap: '20px', marginTop: '10px', flexWrap: 'wrap' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
                 <input
                   type="checkbox"
@@ -1483,12 +1540,20 @@ export default function RunPlan() {
                 />
                 <span style={{ fontWeight: 'bold' }}>PRISM_CENTRAL</span>
               </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={batchUpdateData.updateImageBranch}
+                  onChange={(e) => setBatchUpdateData({ ...batchUpdateData, updateImageBranch: e.target.checked })}
+                />
+                <span style={{ fontWeight: 'bold' }}>Image Branch</span>
+              </label>
             </div>
-            <small>Select one or both components to update independently</small>
+            <small>Select one or more components to update independently</small>
           </div>
 
           {/* Side-by-side component fields */}
-          <div style={{ display: 'flex', gap: '30px', marginTop: '20px' }}>
+          <div style={{ display: 'flex', gap: '30px', marginTop: '20px', flexWrap: 'wrap' }}>
             {/* NOS_CLUSTER Fields */}
             {batchUpdateData.updateNosCluster && (
               <div style={{ flex: 1, border: '1px solid #ddd', padding: '20px', borderRadius: '8px', backgroundColor: '#f9f9f9' }}>
@@ -1706,6 +1771,120 @@ export default function RunPlan() {
                           prismCentral: { ...batchUpdateData.prismCentral, gbn: e.target.value }
                         })}
                         placeholder="e.g., 1764602295"
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Image Branch Fields */}
+            {batchUpdateData.updateImageBranch && (
+              <div style={{ flex: 1, minWidth: '280px', border: '1px solid #ddd', padding: '20px', borderRadius: '8px', backgroundColor: '#f9f9f9' }}>
+                <h3 style={{ marginTop: 0, marginBottom: '20px', color: '#2c3e50' }}>Image Branch</h3>
+                
+                <div className="form-group">
+                  <label>Branch</label>
+                  <input
+                    type="text"
+                    value={batchUpdateData.imageBranch.branch}
+                    onChange={(e) => setBatchUpdateData({ 
+                      ...batchUpdateData, 
+                      imageBranch: { ...batchUpdateData.imageBranch, branch: e.target.value }
+                    })}
+                    placeholder="e.g., ganges-7.6.0.6-stable"
+                  />
+                  <small>Optional: Enter image branch name</small>
+                </div>
+
+                <div className="form-group">
+                  <label>Image Build Type</label>
+                  <select
+                    value={batchUpdateData.imageBranch.buildType}
+                    onChange={(e) => setBatchUpdateData({ 
+                      ...batchUpdateData, 
+                      imageBranch: { ...batchUpdateData.imageBranch, buildType: e.target.value }
+                    })}
+                  >
+                    <option value="">-- Select Build Type (Optional) --</option>
+                    <option value="None">None</option>
+                    <option value="release">release</option>
+                    <option value="opt">opt</option>
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label>Update Type</label>
+                  <div className="radio-group">
+                    <label>
+                      <input
+                        type="radio"
+                        value="tag"
+                        checked={batchUpdateData.imageBranch.updateType === 'tag'}
+                        onChange={(e) => setBatchUpdateData({ 
+                          ...batchUpdateData, 
+                          imageBranch: { ...batchUpdateData.imageBranch, updateType: e.target.value }
+                        })}
+                      />
+                      By Tag
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        value="commit"
+                        checked={batchUpdateData.imageBranch.updateType === 'commit'}
+                        onChange={(e) => setBatchUpdateData({ 
+                          ...batchUpdateData, 
+                          imageBranch: { ...batchUpdateData.imageBranch, updateType: e.target.value }
+                        })}
+                      />
+                      By Commit
+                    </label>
+                  </div>
+                </div>
+
+                {batchUpdateData.imageBranch.updateType === 'tag' && (
+                  <div className="form-group">
+                    <label>Tag</label>
+                    <select
+                      value={batchUpdateData.imageBranch.tag}
+                      onChange={(e) => setBatchUpdateData({ 
+                        ...batchUpdateData, 
+                        imageBranch: { ...batchUpdateData.imageBranch, tag: e.target.value }
+                      })}
+                    >
+                      <option value="">-- Select Tag (Optional) --</option>
+                      {IMAGE_TAG_OPTIONS.map(tag => (
+                        <option key={tag} value={tag}>{tag.replace(/^By /, '')}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {batchUpdateData.imageBranch.updateType === 'commit' && (
+                  <>
+                    <div className="form-group">
+                      <label>Image Commit</label>
+                      <textarea
+                        value={batchUpdateData.imageBranch.commitId}
+                        onChange={(e) => setBatchUpdateData({ 
+                          ...batchUpdateData, 
+                          imageBranch: { ...batchUpdateData.imageBranch, commitId: e.target.value }
+                        })}
+                        placeholder="e.g., fd96efb85c11ac75f282d51dce06e04a279bad2d"
+                        rows={2}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Image GBN</label>
+                      <textarea
+                        value={batchUpdateData.imageBranch.gbn}
+                        onChange={(e) => setBatchUpdateData({ 
+                          ...batchUpdateData, 
+                          imageBranch: { ...batchUpdateData.imageBranch, gbn: e.target.value }
+                        })}
+                        placeholder="e.g., 1786602592"
+                        rows={2}
                       />
                     </div>
                   </>

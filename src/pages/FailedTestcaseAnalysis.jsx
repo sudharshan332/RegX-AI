@@ -5,8 +5,164 @@ import { extractJitaTaskIds, buildJitaResultsUrls } from '../utils/jitaTaskIds';
 import './FailedTestcaseAnalysis.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/failed-analysis`;
+const FLUX_API = `${API_BASE_URL}/mcp/regression/flux`;
 const NODE_POOL_SEARCH_URL = `${API_BASE_URL}/mcp/regression/dynamic-jp/search-node-pools`;
 const JIRA_URL = 'https://jira.nutanix.com/browse/';
+const NO_JIRA_TICKET = 'No Ticket';
+export const JIRA_BUG_TYPE_OPTIONS = ['Product Bug', 'Test Bug', 'Environment', 'Flaky', 'Other', NO_JIRA_TICKET];
+
+/** Classify a Jira issue type string into Test Bug / Product Bug / related categories. */
+export function categorizeJiraBugType(issueType) {
+  if (!issueType) return null;
+  const s = String(issueType).toLowerCase();
+  if (s === 'n/a' || s === 'unknown') return null;
+  if (s.includes('environment')) return 'Environment';
+  if (s.includes('flaky')) return 'Flaky';
+  if (s.includes('test') || s.includes('testbed')) return 'Test Bug';
+  if (s.includes('bug')) return 'Product Bug';
+  return null;
+}
+
+/** Join tester log URL with testcase name, replacing '.' with '/'. */
+export function buildCompleteLogsPath(logUrl, testcaseName) {
+  const base = String(logUrl || '').trim();
+  const name = String(testcaseName || '').trim();
+  if (!base || !name) return '';
+  const path = name.replace(/\./g, '/');
+  return `${base.replace(/\/+$/, '')}/${path}/`;
+}
+
+export function collectResultJiraTickets(result) {
+  return [...new Set((result?.jira_tickets || []).map(t => String(t).trim()).filter(Boolean))];
+}
+
+export function fluxFirstJiraKey(result) {
+  return collectResultJiraTickets(result)[0] || '';
+}
+
+export function fluxConfidencePercent(confidence) {
+  if (confidence == null || confidence === '') return null;
+  const n = Number(confidence);
+  if (!Number.isFinite(n)) return null;
+  const pct = n <= 1 ? Math.round(n * 100) : Math.round(n);
+  return Math.max(0, Math.min(100, pct));
+}
+
+export function fluxCategoryLabel(category) {
+  const c = String(category || '').toLowerCase();
+  if (c === 'product_issue' || c === 'product_bug') return 'Product-side Issue';
+  if (c === 'test_bug' || c === 'genuine_test_bug') return 'Genuine Test Bug';
+  if (c === 'environment_issue' || c === 'environment') return 'Environment Issue';
+  return category ? String(category) : '';
+}
+
+export const FLUX_MAX_WAIT_MS = 15 * 60 * 1000;
+export const FLUX_POLL_INTERVAL_MS = 10000;
+
+export function fluxHasRootCause(ticket) {
+  return Boolean(String(ticket?.root_cause || '').trim());
+}
+
+export function fluxHasGerritCr(ticket) {
+  return Boolean(String(ticket?.gerrit_url || '').trim() && String(ticket?.gerrit_change_id || '').trim());
+}
+
+export function fluxPipelineError(ticket) {
+  const events = ticket?.task_events || [];
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i] || {};
+    const type = String(ev.type || '').toLowerCase();
+    const stage = String(ev.stage || '').toLowerCase();
+    if (type === 'error' || stage === 'failed' || stage === 'error') {
+      return String(ev.message || '').trim() || 'Flux pipeline failed';
+    }
+  }
+  return '';
+}
+
+export function fluxCanCreateGerritCr(ticket) {
+  if (!fluxHasRootCause(ticket) || fluxHasGerritCr(ticket)) return false;
+  const cat = String(ticket?.failure_category || '').toLowerCase();
+  if (cat !== 'test_bug' && cat !== 'genuine_test_bug') return false;
+  return fluxConfidencePercent(ticket?.confidence) != null;
+}
+
+const FLUX_ACTIVE_STATUSES = new Set([
+  'starting', 'queued', 'ingesting', 'analyzing', 'fixing', 'running', 'processing',
+]);
+
+export function fluxShouldPoll(status, ticket, job = {}) {
+  const s = String(status || ticket?.status || job.status || '').toLowerCase();
+  if (!job.record_id && s !== 'starting') return false;
+  if (fluxHasGerritCr(ticket)) return false;
+  if (fluxPipelineError(ticket)) return false;
+  const startedAt = Number(job.startedAt) || 0;
+  if (startedAt && Date.now() - startedAt > FLUX_MAX_WAIT_MS) return false;
+  if (!fluxHasRootCause(ticket)) return true;
+  if (fluxCanCreateGerritCr(ticket) && !job.resumeAttempted) return true;
+  if (job.resumeAttempted && !fluxHasGerritCr(ticket)) return true;
+  return FLUX_ACTIVE_STATUSES.has(s);
+}
+
+export function fluxIsRunning(status, ticket, job = {}) {
+  if (job.resuming) return true;
+  return fluxShouldPoll(status, ticket, job);
+}
+
+export function fluxNutestTargetBranch(result, analysisBranch) {
+  const fromRow = String(
+    (result && (result.nutest_branch || result['nutest-py3-tests_branch'] || result.framework_branch)) || ''
+  ).trim();
+  const raw = fromRow || String(analysisBranch || (result && result.branch) || '').trim();
+  if (!raw) return '';
+  const lower = raw.toLowerCase();
+  if (lower === 'master' || lower === 'main') return 'master';
+  if (/^ganges-.+-stable$/i.test(raw)) return raw;
+  if (/^\d+(?:\.\d+)+$/.test(raw)) return `ganges-${raw}-stable`;
+  return raw;
+}
+
+export function fluxLatestStageMessage(ticket) {
+  const events = ticket?.task_events || [];
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const msg = events[i]?.message;
+    if (msg) return msg;
+  }
+  return ticket?.status || '';
+}
+
+export function bugTypeLabelForDetail(detail) {
+  if (!detail) return 'Other';
+  const bt = detail.bug_type || categorizeJiraBugType(detail.issue_type);
+  return bt || 'Other';
+}
+
+export function jiraBugTypesForResult(result, details = {}) {
+  const tickets = collectResultJiraTickets(result);
+  if (!tickets.length) return [NO_JIRA_TICKET];
+  return tickets.map(t => bugTypeLabelForDetail(details[t]));
+}
+
+export function jiraStatusesForResult(result, details = {}) {
+  const tickets = collectResultJiraTickets(result);
+  if (!tickets.length) return [NO_JIRA_TICKET];
+  return tickets.map(t => {
+    const st = details[t]?.status;
+    if (!st || st === 'N/A') return details[t] ? 'Unknown' : 'Loading';
+    return st;
+  });
+}
+
+export function resultMatchesJiraBugTypes(result, details, selectedTypes) {
+  if (!selectedTypes || selectedTypes.length === 0) return false;
+  if (selectedTypes.length >= JIRA_BUG_TYPE_OPTIONS.length) return true;
+  return jiraBugTypesForResult(result, details).some(t => selectedTypes.includes(t));
+}
+
+export function resultMatchesJiraStatuses(result, details, selectedStatuses) {
+  if (!selectedStatuses || selectedStatuses.length === 0) return false;
+  return jiraStatusesForResult(result, details).some(s => selectedStatuses.includes(s));
+}
 const RESOURCE_MODE_OPTIONS = [
   { value: 'node_pool', label: 'By Node Pool' },
   { value: 'cluster', label: 'By Cluster Pool' },
@@ -230,6 +386,7 @@ function formatStatusCountSummary(counts) {
 const COLUMNS = [
   { id: 'testcase_name', label: 'Testcase Name', defaultVisible: true },
   { id: 'jita_task', label: 'Jita Task', defaultVisible: true },
+  { id: 'complete_logs_path', label: 'Complete Logs Path', defaultVisible: true },
   { id: 'regression_owner', label: 'Regression Owner', defaultVisible: true },
   { id: 'status', label: 'Status', defaultVisible: true },
   { id: 'failure_stage', label: 'Failure Stage', defaultVisible: true },
@@ -242,6 +399,9 @@ const COLUMNS = [
   { id: 'triage_genie_ticket', label: 'Triage Genie Ticket', defaultVisible: true },
   { id: 'triage_genie_review', label: 'Triage Genie Review', defaultVisible: true },
   { id: 'jira_tickets', label: 'Jira Tickets', defaultVisible: true },
+  { id: 'jira_issue_type', label: 'Jira Ticket Issue Type', defaultVisible: true },
+  { id: 'jira_ticket_status', label: 'Jira Ticket Status', defaultVisible: true },
+  { id: 'flux_quick_fix', label: 'Flux Quick Fix', defaultVisible: true },
   { id: 'comment', label: 'Comment', defaultVisible: true },
   { id: 'update_jita', label: 'Update Jita', defaultVisible: true },
   { id: 'issue_type', label: 'Issue Type', defaultVisible: false },
@@ -257,6 +417,9 @@ const DEFAULT_VISIBLE = COLUMNS.filter(c => c.defaultVisible).map(c => c.id);
 const STORAGE_KEY = 'failedAnalysisVisibleColumns';
 const TG_REVIEW_COL_KEY = 'failedAnalysisAddedTgReview';
 const JITA_TASK_COL_KEY = 'failedAnalysisAddedJitaTask';
+const COMPLETE_LOGS_COL_KEY = 'failedAnalysisAddedCompleteLogsPath';
+const JIRA_META_COL_KEY = 'failedAnalysisAddedJiraMetaCols';
+const FLUX_COL_KEY = 'failedAnalysisAddedFluxQuickFix';
 
 function getStoredVisibleColumns() {
   try {
@@ -280,6 +443,37 @@ function getStoredVisibleColumns() {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(cols));
         }
         localStorage.setItem(JITA_TASK_COL_KEY, '1');
+        if (!localStorage.getItem(COMPLETE_LOGS_COL_KEY) && !cols.includes('complete_logs_path')) {
+          const jitaIdx = cols.indexOf('jita_task');
+          const nameIdx = cols.indexOf('testcase_name');
+          if (jitaIdx !== -1) cols.splice(jitaIdx + 1, 0, 'complete_logs_path');
+          else if (nameIdx !== -1) cols.splice(nameIdx + 1, 0, 'complete_logs_path');
+          else cols.unshift('complete_logs_path');
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(cols));
+        }
+        localStorage.setItem(COMPLETE_LOGS_COL_KEY, '1');
+        if (!localStorage.getItem(JIRA_META_COL_KEY)) {
+          const jiraIdx = cols.indexOf('jira_tickets');
+          const insertAt = jiraIdx !== -1 ? jiraIdx + 1 : cols.length;
+          if (!cols.includes('jira_issue_type')) cols.splice(insertAt, 0, 'jira_issue_type');
+          const typeIdx = cols.indexOf('jira_issue_type');
+          const statusAt = typeIdx !== -1 ? typeIdx + 1 : insertAt + 1;
+          if (!cols.includes('jira_ticket_status')) cols.splice(statusAt, 0, 'jira_ticket_status');
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(cols));
+        }
+        localStorage.setItem(JIRA_META_COL_KEY, '1');
+        if (!localStorage.getItem(FLUX_COL_KEY)) {
+          const statusIdx = cols.indexOf('jira_ticket_status');
+          const typeIdx = cols.indexOf('jira_issue_type');
+          const jiraIdx = cols.indexOf('jira_tickets');
+          const insertAt = statusIdx !== -1 ? statusIdx + 1
+            : typeIdx !== -1 ? typeIdx + 1
+            : jiraIdx !== -1 ? jiraIdx + 1
+            : cols.length;
+          if (!cols.includes('flux_quick_fix')) cols.splice(insertAt, 0, 'flux_quick_fix');
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(cols));
+        }
+        localStorage.setItem(FLUX_COL_KEY, '1');
         return cols.length > 0 ? cols : DEFAULT_VISIBLE;
       }
     }
@@ -558,6 +752,15 @@ export default function FailedTestcaseAnalysis() {
   const [filterTestStatus, setFilterTestStatus] = useState([...ALL_STATUS_GROUPS]);
   const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
   const statusDropdownRef = useRef(null);
+  const [jiraTicketDetails, setJiraTicketDetails] = useState({});
+  const [filterJiraBugTypes, setFilterJiraBugTypes] = useState([...JIRA_BUG_TYPE_OPTIONS]);
+  const [filterJiraStatuses, setFilterJiraStatuses] = useState([]);
+  const [jiraTypeDropdownOpen, setJiraTypeDropdownOpen] = useState(false);
+  const [jiraStatusDropdownOpen, setJiraStatusDropdownOpen] = useState(false);
+  const jiraTypeDropdownRef = useRef(null);
+  const jiraStatusDropdownRef = useRef(null);
+  const jiraStatusTouchedRef = useRef(false);
+  const jiraFetchPendingRef = useRef(new Set());
   const [selectedStatuses, setSelectedStatuses] = useState(['failed']);
   const [selectedRows, setSelectedRows] = useState([]);
   const [bulkJiraTicket, setBulkJiraTicket] = useState('');
@@ -611,6 +814,7 @@ export default function FailedTestcaseAnalysis() {
     overrideScheduling: false,
     skip_resource_spec_match: false,
     check_image_compatibility: true,
+    syncToTcms: true,  // Default to sync to TCMS
   };
   const [retriggerOverrides, setRetriggerOverrides] = useState({ ...RETRIGGER_DEFAULTS });
   const [retriggerResults, setRetriggerResults] = useState(null);
@@ -653,6 +857,12 @@ export default function FailedTestcaseAnalysis() {
   const [autoTestFixResults, setAutoTestFixResults] = useState({});
   const [crApprovalLoading, setCrApprovalLoading] = useState({});
 
+  // Flux Quick Fix per-row jobs
+  const [fluxJobs, setFluxJobs] = useState({});
+  const fluxJobsRef = useRef({});
+  const fluxResumeInFlight = useRef({});
+  const [fluxBranchPrompt, setFluxBranchPrompt] = useState(null);
+
   // Saved tags management
   const [savedTags, setSavedTags] = useState([]);
   const [selectedSavedTag, setSelectedSavedTag] = useState('');
@@ -675,11 +885,30 @@ export default function FailedTestcaseAnalysis() {
     );
   };
 
+  const toggleFilterJiraBugType = (type) => {
+    setFilterJiraBugTypes(prev =>
+      prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]
+    );
+  };
+
+  const toggleFilterJiraStatus = (status) => {
+    jiraStatusTouchedRef.current = true;
+    setFilterJiraStatuses(prev =>
+      prev.includes(status) ? prev.filter(s => s !== status) : [...prev, status]
+    );
+  };
+
   // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e) => {
       if (statusDropdownRef.current && !statusDropdownRef.current.contains(e.target)) {
         setStatusDropdownOpen(false);
+      }
+      if (jiraTypeDropdownRef.current && !jiraTypeDropdownRef.current.contains(e.target)) {
+        setJiraTypeDropdownOpen(false);
+      }
+      if (jiraStatusDropdownRef.current && !jiraStatusDropdownRef.current.contains(e.target)) {
+        setJiraStatusDropdownOpen(false);
       }
       if (tagPickerRef.current && !tagPickerRef.current.contains(e.target)) {
         setTagPickerOpen(false);
@@ -718,7 +947,7 @@ export default function FailedTestcaseAnalysis() {
   };
 
   const handleDeleteTag = async (tagName) => {
-    if (!window.confirm(`Remove "${tagName}" and its cached results?`)) return;
+    if (!window.confirm(`Remove "${tagName}" and its cached analysis and triage accuracy files?`)) return;
     try {
       const { data } = await api.delete(`${API_BASE}/saved-tags/${encodeURIComponent(tagName)}`);
       if (data.success) {
@@ -747,6 +976,11 @@ export default function FailedTestcaseAnalysis() {
     setFilterIntermittent('');
     setFilterComment('');
     setFilterException('');
+    setFilterJiraBugTypes([...JIRA_BUG_TYPE_OPTIONS]);
+    setFilterJiraStatuses([]);
+    jiraStatusTouchedRef.current = false;
+    setJiraTicketDetails({});
+    jiraFetchPendingRef.current = new Set();
     try {
       setLoading(true);
       const { data } = await api.get(`${API_BASE}/saved-tags/${encodeURIComponent(tagName)}/results`);
@@ -833,6 +1067,11 @@ export default function FailedTestcaseAnalysis() {
     setFilterIntermittent('');
     setFilterComment('');
     setFilterException('');
+    setFilterJiraBugTypes([...JIRA_BUG_TYPE_OPTIONS]);
+    setFilterJiraStatuses([]);
+    jiraStatusTouchedRef.current = false;
+    setJiraTicketDetails({});
+    jiraFetchPendingRef.current = new Set();
     setSelectedRows([]);
     setHistoryCache({});
     const include = buildIncludeParam(visibleColumns);
@@ -1002,6 +1241,69 @@ export default function FailedTestcaseAnalysis() {
   };
 
   useEffect(() => {
+    const tickets = [...new Set(results.flatMap(r => collectResultJiraTickets(r)))];
+    const missing = tickets.filter(t => !(t in jiraTicketDetails) && !jiraFetchPendingRef.current.has(t));
+    if (!missing.length) return undefined;
+    const delay = analyzing ? 700 : 80;
+    const timer = setTimeout(() => {
+      missing.forEach(t => jiraFetchPendingRef.current.add(t));
+      api.post(`${API_BASE_URL}/mcp/regression/jira-ticket-details`, { ticket_ids: missing }, { timeout: 120000 })
+        .then((resp) => {
+          const details = (resp.data && resp.data.success && resp.data.details) ? resp.data.details : {};
+          setJiraTicketDetails(prev => {
+            const next = { ...prev, ...details };
+            missing.forEach(t => {
+              if (!next[t]) next[t] = { status: 'N/A', issue_type: 'N/A', bug_type: null };
+            });
+            return next;
+          });
+        })
+        .catch(() => {
+          setJiraTicketDetails(prev => {
+            const next = { ...prev };
+            missing.forEach(t => {
+              if (!next[t]) next[t] = { status: 'N/A', issue_type: 'N/A', bug_type: null };
+            });
+            return next;
+          });
+        })
+        .finally(() => {
+          missing.forEach(t => jiraFetchPendingRef.current.delete(t));
+        });
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [results, analyzing, jiraTicketDetails]);
+
+  const uniqueJiraStatuses = (() => {
+    const statusSet = new Set();
+    let hasNoTicket = false;
+    results.forEach(r => {
+      const tickets = collectResultJiraTickets(r);
+      if (!tickets.length) {
+        hasNoTicket = true;
+        return;
+      }
+      tickets.forEach(t => {
+        const st = jiraTicketDetails[t]?.status;
+        if (!jiraTicketDetails[t]) return;
+        if (!st || st === 'N/A') statusSet.add('Unknown');
+        else statusSet.add(st);
+      });
+    });
+    const list = [...statusSet].sort((a, b) => a.localeCompare(b));
+    if (hasNoTicket) list.push(NO_JIRA_TICKET);
+    return list;
+  })();
+
+  useEffect(() => {
+    if (jiraStatusTouchedRef.current) {
+      setFilterJiraStatuses(prev => prev.filter(s => uniqueJiraStatuses.includes(s)));
+      return;
+    }
+    setFilterJiraStatuses([...uniqueJiraStatuses]);
+  }, [uniqueJiraStatuses.join('|')]);
+
+  useEffect(() => {
     let filtered = [...results];
     if (filterTestStatus.length < ALL_STATUS_GROUPS.length) {
       filtered = filtered.filter(r => filterTestStatus.includes(normalizeStatusGroup(r.status)));
@@ -1023,8 +1325,16 @@ export default function FailedTestcaseAnalysis() {
       const want = filterException === EMPTY_EXCEPTION_KEY ? '' : filterException;
       filtered = filtered.filter(r => normalizeExceptionSummary(r.exception_summary).key === want);
     }
+    if (filterJiraBugTypes.length !== JIRA_BUG_TYPE_OPTIONS.length) {
+      filtered = filtered.filter(r => resultMatchesJiraBugTypes(r, jiraTicketDetails, filterJiraBugTypes));
+    }
+    if (filterJiraStatuses.length > 0 && filterJiraStatuses.length < uniqueJiraStatuses.length) {
+      filtered = filtered.filter(r => resultMatchesJiraStatuses(r, jiraTicketDetails, filterJiraStatuses));
+    } else if (filterJiraStatuses.length === 0 && uniqueJiraStatuses.length > 0 && jiraStatusTouchedRef.current) {
+      filtered = [];
+    }
     setFilteredResults(filtered);
-  }, [results, filterTestStatus, filterOwner, filterFailureStage, filterIntermittent, filterComment, filterException, commentEdits]);
+  }, [results, filterTestStatus, filterOwner, filterFailureStage, filterIntermittent, filterComment, filterException, commentEdits, filterJiraBugTypes, filterJiraStatuses, jiraTicketDetails, uniqueJiraStatuses]);
 
   const uniqueOwners = [...new Set(results.map(r => r.regression_owner).filter(Boolean))].sort();
   const uniqueFailureStages = [...new Set(results.map(r => r.failure_stage).filter(Boolean))].sort();
@@ -1459,6 +1769,24 @@ export default function FailedTestcaseAnalysis() {
     setRetriggerOverrides(prev => ({ ...prev, overrideResource: true, ...patch }));
   };
 
+  const toggleAllComponentOverrides = (checked) => {
+    setRetriggerOverrides(prev => ({
+      ...prev,
+      updateNos: checked,
+      updatePc: checked,
+      updateImage: checked,
+      updateFramework: checked,
+      updateResource: checked,
+    }));
+  };
+  const allComponentsOverride = !!(
+    retriggerOverrides.updateNos &&
+    retriggerOverrides.updatePc &&
+    retriggerOverrides.updateImage &&
+    retriggerOverrides.updateFramework &&
+    retriggerOverrides.updateResource
+  );
+
   const handleSearchRetriggerNodePools = (query) => {
     setNodePoolSearch(query);
     if (nodePoolDebounce.current) clearTimeout(nodePoolDebounce.current);
@@ -1519,23 +1847,6 @@ export default function FailedTestcaseAnalysis() {
     !(retriggerOverrides.pc.buildUrl || '').trim() ||
     !(retriggerOverrides.pc.qcow2Url || '').trim()
   );
-  const allComponentsOverride = [
-    retriggerOverrides.updateNos,
-    retriggerOverrides.updatePc,
-    retriggerOverrides.updateImage,
-    retriggerOverrides.updateFramework,
-    retriggerOverrides.updateResource,
-  ].every(Boolean);
-  const toggleAllComponentOverrides = (checked) => {
-    setRetriggerOverrides(prev => ({
-      ...prev,
-      updateNos: checked,
-      updatePc: checked,
-      updateImage: checked,
-      updateFramework: checked,
-      updateResource: checked,
-    }));
-  };
   const handleRetrigger = async () => {
     const selected = selectedRows.filter(Boolean);
     if (selected.length === 0) return;
@@ -1620,6 +1931,7 @@ export default function FailedTestcaseAnalysis() {
       const resp = await api.post(`${API_BASE}/retrigger`, {
         tests: testsPayload,
         overrides,
+        sync_to_tcms: retriggerOverrides.syncToTcms,
       });
       setRetriggerResults(resp.data);
     } catch (err) {
@@ -2229,6 +2541,261 @@ export default function FailedTestcaseAnalysis() {
     }
   };
 
+  const updateFluxJob = (testId, patch) => {
+    setFluxJobs(prev => {
+      const next = { ...prev, [testId]: { ...(prev[testId] || {}), ...patch } };
+      fluxJobsRef.current = next;
+      return next;
+    });
+  };
+
+  const handleFluxQuickFix = async (result) => {
+    const testId = result.testcase_id;
+    if (!testId) return;
+    const jiraKey = fluxFirstJiraKey(result);
+    if (!jiraKey) {
+      alert('Add a Jira ticket first.');
+      return;
+    }
+    const taskId = String(result.agave_task_id || '').trim();
+    const fallback = fluxNutestTargetBranch(result, currentBranch);
+    setFluxBranchPrompt({
+      result,
+      taskId,
+      branch: fallback,
+      loading: Boolean(taskId),
+      error: taskId ? null : 'No Jita Task ID on this row; enter the nutest branch.',
+    });
+    if (!taskId) return;
+    try {
+      const { data } = await api.get(`${FLUX_API}/nutest-branch`, {
+        params: { task_id: taskId },
+        timeout: 30000,
+      });
+      const fromJita = fluxNutestTargetBranch(
+        { 'nutest-py3-tests_branch': data?.nutest_branch || data?.['nutest-py3-tests_branch'] },
+        fallback,
+      );
+      setFluxBranchPrompt(prev => {
+        if (!prev || prev.result?.testcase_id !== testId) return prev;
+        return {
+          ...prev,
+          branch: fromJita || prev.branch || '',
+          loading: false,
+          error: fromJita ? null : (data?.error || 'JITA did not return nutest-py3-tests_branch.'),
+        };
+      });
+    } catch (err) {
+      const message = err.response?.data?.error || err.message || 'Failed to fetch nutest branch from JITA';
+      setFluxBranchPrompt(prev => {
+        if (!prev || prev.result?.testcase_id !== testId) return prev;
+        return { ...prev, loading: false, error: message, branch: prev.branch || fallback };
+      });
+    }
+  };
+
+  const confirmFluxQuickFix = async () => {
+    const prompt = fluxBranchPrompt;
+    const result = prompt?.result;
+    const testId = result?.testcase_id;
+    const jiraKey = fluxFirstJiraKey(result);
+    const targetBranch = fluxNutestTargetBranch({ nutest_branch: prompt?.branch }, currentBranch);
+    if (!testId || !jiraKey) return;
+    if (!targetBranch) {
+      alert('Enter a nutest target branch (for example ganges-7.5-stable).');
+      return;
+    }
+    setFluxBranchPrompt(null);
+    updateFluxJob(testId, {
+      status: 'starting',
+      error: null,
+      ticket: null,
+      rerun: null,
+      startedAt: Date.now(),
+      resumeAttempted: false,
+    });
+    fluxResumeInFlight.current[testId] = false;
+    try {
+      const resp = await api.post(`${FLUX_API}/quick-fix`, {
+        jira_key: jiraKey,
+        target_branch: targetBranch,
+        log_url: null,
+        send_test_fix: true,
+        update_jira: true,
+        pause_for_review: true,
+        testcase_id: testId,
+        testcase_name: result.testcase_name,
+      }, { timeout: 60000 });
+      const data = resp.data || {};
+      const recordId = data.record_id || data.id;
+      updateFluxJob(testId, {
+        record_id: recordId,
+        status: data.status || 'queued',
+        ticket: data,
+        error: null,
+      });
+    } catch (err) {
+      const data = err.response?.data || {};
+      if (data.require_key_setup) {
+        alert(data.error || 'Cursor API key and Gerrit HTTP password are required. Configure them in Settings → API Keys.');
+      } else if (data.code === 'CREDENTIALS_EXPIRED') {
+        alert(data.error || 'Session expired. Please re-login.');
+      } else {
+        alert(data.error || err.message || 'Flux Quick Fix failed');
+      }
+      updateFluxJob(testId, {
+        status: 'error',
+        error: data.error || err.message || 'Flux Quick Fix failed',
+      });
+    }
+  };
+
+  const handleFluxCreateGerritCr = async (result) => {
+    const testId = result.testcase_id;
+    const job = fluxJobsRef.current[testId] || fluxJobs[testId];
+    const recordId = job?.record_id;
+    if (!testId || !recordId) return;
+    fluxResumeInFlight.current[testId] = true;
+    updateFluxJob(testId, { resuming: true, resumeAttempted: true, error: null });
+    try {
+      const resp = await api.post(`${FLUX_API}/tickets/${recordId}/resume`, {}, { timeout: 60000 });
+      const data = resp.data || {};
+      updateFluxJob(testId, {
+        status: data.status || 'fixing',
+        ticket: { ...(job.ticket || {}), ...data },
+        resuming: false,
+      });
+    } catch (err) {
+      const data = err.response?.data || {};
+      fluxResumeInFlight.current[testId] = false;
+      alert(data.error || err.message || 'Failed to resume Flux pipeline');
+      updateFluxJob(testId, {
+        resuming: false,
+        resumeAttempted: false,
+        error: data.error || err.message || 'Failed to resume Flux pipeline',
+      });
+    }
+  };
+
+  const handleFluxRerunWithCr = async (result) => {
+    const testId = result.testcase_id;
+    const job = fluxJobsRef.current[testId] || fluxJobs[testId];
+    const gerritUrl = job?.ticket?.gerrit_url;
+    if (!testId || !gerritUrl) return;
+    if (!result.agave_task_id) {
+      alert('No JITA task id available to retrigger.');
+      return;
+    }
+    updateFluxJob(testId, { rerunning: true, rerun: null, error: null });
+    try {
+      const resp = await api.post(`${API_BASE}/retrigger`, {
+        tests: [{
+          testcase_id: result.testcase_id,
+          testcase_name: result.testcase_name,
+          agave_task_id: result.agave_task_id,
+        }],
+        overrides: { patch_url: gerritUrl },
+        sync_to_tcms: false,
+      });
+      const data = resp.data || {};
+      const rerunId = data.rerun_task_ids?.[0]
+        || (data.results || []).find(r => r.success && r.rerun_task_id)?.rerun_task_id
+        || null;
+      updateFluxJob(testId, {
+        rerunning: false,
+        rerun: {
+          success: !!(data.success || rerunId),
+          rerun_task_id: rerunId,
+          error: data.error || (data.results || []).find(r => !r.success)?.error || null,
+        },
+      });
+    } catch (err) {
+      const data = err.response?.data || {};
+      updateFluxJob(testId, {
+        rerunning: false,
+        rerun: { success: false, error: data.error || err.message || 'Retrigger failed' },
+      });
+      alert(data.error || err.message || 'Rerun with CR failed');
+    }
+  };
+
+  useEffect(() => {
+    fluxJobsRef.current = fluxJobs;
+  }, [fluxJobs]);
+
+  const fluxPollKey = Object.values(fluxJobs)
+    .filter(job => job?.record_id && fluxShouldPoll(job.status, job.ticket, job))
+    .map(job => String(job.record_id))
+    .sort()
+    .join(',');
+
+  useEffect(() => {
+    if (!fluxPollKey) return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      const jobs = fluxJobsRef.current || {};
+      await Promise.all(Object.entries(jobs).map(async ([testId, job]) => {
+        if (!job?.record_id || !fluxShouldPoll(job.status, job.ticket, job)) return;
+        try {
+          const { data } = await api.get(`${FLUX_API}/tickets/${job.record_id}`);
+          if (cancelled) return;
+          const ticket = data || {};
+          const startedAt = job.startedAt || Date.now();
+          const timedOut = Date.now() - startedAt > FLUX_MAX_WAIT_MS;
+          const pipelineError = fluxPipelineError(ticket);
+          let timeoutError = null;
+          if (!pipelineError && timedOut && !fluxHasRootCause(ticket) && !fluxHasGerritCr(ticket)) {
+            timeoutError = 'Flux Quick Fix timed out after 15 minutes waiting for root cause analysis.';
+          }
+          updateFluxJob(testId, {
+            status: pipelineError ? 'failed' : (ticket.status || job.status),
+            ticket,
+            error: pipelineError || timeoutError || null,
+          });
+          if (
+            !pipelineError
+            && !timeoutError
+            && fluxCanCreateGerritCr(ticket)
+            && !job.resumeAttempted
+            && !fluxResumeInFlight.current[testId]
+          ) {
+            fluxResumeInFlight.current[testId] = true;
+            updateFluxJob(testId, { resumeAttempted: true, resuming: true, error: null });
+            try {
+              const resp = await api.post(`${FLUX_API}/tickets/${job.record_id}/resume`, {}, { timeout: 60000 });
+              if (cancelled) return;
+              const resumed = resp.data || {};
+              updateFluxJob(testId, {
+                resuming: false,
+                status: resumed.status || 'fixing',
+                ticket: { ...ticket, ...resumed },
+              });
+            } catch (err) {
+              if (cancelled) return;
+              const message = err.response?.data?.error || err.message || 'Failed to resume Flux pipeline';
+              fluxResumeInFlight.current[testId] = false;
+              updateFluxJob(testId, {
+                resuming: false,
+                resumeAttempted: false,
+                error: message,
+              });
+            }
+          }
+        } catch (err) {
+          if (cancelled) return;
+          const message = err.response?.data?.error || err.message || 'Failed to poll Flux ticket';
+          updateFluxJob(testId, { error: message });
+        }
+      }));
+    };
+    poll();
+    const timer = setInterval(poll, FLUX_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [fluxPollKey]);
+
   // --------------- End Intelligent Triage handlers ---------------
 
   const renderHistoryCell = (result, sameBranch) => {
@@ -2274,6 +2841,18 @@ export default function FailedTestcaseAnalysis() {
             {href ? (
               <a href={href} target="_blank" rel="noopener noreferrer" className="jita-task-link" title={taskId}>
                 {taskId}
+              </a>
+            ) : '-'}
+          </td>
+        );
+      }
+      case 'complete_logs_path': {
+        const href = buildCompleteLogsPath(result.test_log_url, result.testcase_name);
+        return (
+          <td key={colId} className="complete-logs-path-cell">
+            {href ? (
+              <a href={href} target="_blank" rel="noopener noreferrer" className="complete-logs-path-link" title={href}>
+                {href}
               </a>
             ) : '-'}
           </td>
@@ -2335,6 +2914,141 @@ export default function FailedTestcaseAnalysis() {
               value={added || ''}
               onChange={e => setJiraAdd(prev => ({ ...prev, [result.testcase_id]: e.target.value }))}
             />
+          </td>
+        );
+      }
+      case 'jira_issue_type': {
+        const tickets = collectResultJiraTickets(result);
+        if (!tickets.length) return <td key={colId} className="jira-meta-cell">-</td>;
+        const labels = jiraBugTypesForResult(result, jiraTicketDetails);
+        return (
+          <td key={colId} className="jira-meta-cell">
+            {labels.map((label, idx) => {
+              const pending = !jiraTicketDetails[tickets[idx]];
+              const cls = label === 'Product Bug' ? 'jira-bug-product'
+                : label === 'Test Bug' ? 'jira-bug-test'
+                : label === 'Environment' ? 'jira-bug-env'
+                : label === 'Flaky' ? 'jira-bug-flaky'
+                : 'jira-bug-other';
+              return (
+                <span key={`${tickets[idx] || idx}-${label}`}>
+                  {idx > 0 ? ', ' : ''}
+                  <span className={`jira-bug-chip ${cls}`} title={tickets[idx] || ''}>
+                    {pending ? 'Loading' : label}
+                  </span>
+                </span>
+              );
+            })}
+          </td>
+        );
+      }
+      case 'jira_ticket_status': {
+        const tickets = collectResultJiraTickets(result);
+        if (!tickets.length) return <td key={colId} className="jira-meta-cell">-</td>;
+        const labels = jiraStatusesForResult(result, jiraTicketDetails);
+        return (
+          <td key={colId} className="jira-meta-cell">
+            {labels.map((label, idx) => (
+              <span key={`${tickets[idx] || idx}-${label}`}>
+                {idx > 0 ? ', ' : ''}
+                <span className="jira-status-chip" title={tickets[idx] || ''}>{label}</span>
+              </span>
+            ))}
+          </td>
+        );
+      }
+      case 'flux_quick_fix': {
+        const job = fluxJobs[result.testcase_id] || {};
+        const ticket = job.ticket || {};
+        const jiraKey = fluxFirstJiraKey(result);
+        const status = String(job.status || ticket.status || '').toLowerCase();
+        const confidence = fluxConfidencePercent(ticket.confidence);
+        const categoryLabel = fluxCategoryLabel(ticket.failure_category);
+        const canCreateCr = fluxCanCreateGerritCr(ticket);
+        const gerritUrl = ticket.gerrit_url || '';
+        const gerritId = ticket.gerrit_change_id || '';
+        const running = fluxIsRunning(job.status, ticket, job);
+        const rerunHref = job.rerun?.rerun_task_id ? jitaResultsUrl(job.rerun.rerun_task_id) : '';
+        const statusLabel = running ? 'Running' : (ticket.status || job.status);
+        return (
+          <td key={colId} className="flux-quick-fix-cell">
+            <button
+              type="button"
+              className="btn-flux-quick-fix"
+              disabled={!jiraKey || running || job.resuming}
+              onClick={() => handleFluxQuickFix(result)}
+              title={jiraKey ? `Start Flux Quick Fix for ${jiraKey}` : 'Add a Jira ticket first'}
+            >
+              {running ? 'Running' : 'Flux Quick Fix'}
+            </button>
+            {job.error && <div className="flux-job-error" title={job.error}>{job.error}</div>}
+            {statusLabel && status !== 'starting' && (
+              <div className="flux-job-status">Status: {statusLabel}</div>
+            )}
+            {(confidence != null || categoryLabel) && (
+              <div className="flux-review-meta">
+                {confidence != null && <span className="flux-confidence">{confidence}%</span>}
+                {categoryLabel && (
+                  <span className={`flux-category-chip flux-category-${String(ticket.failure_category || '').toLowerCase()}`}>
+                    {categoryLabel}
+                  </span>
+                )}
+              </div>
+            )}
+            {ticket.root_cause && (
+              <details className="flux-rca">
+                <summary>View RCA</summary>
+                <pre className="flux-rca-text">{ticket.root_cause}</pre>
+                {ticket.remediation_strategy && (
+                  <div className="flux-remediation">
+                    <strong>Remediation:</strong> {ticket.remediation_strategy}
+                  </div>
+                )}
+              </details>
+            )}
+            {canCreateCr && !gerritUrl && !job.resumeAttempted && (
+              <button
+                type="button"
+                className="btn-flux-create-cr"
+                disabled={job.resuming || running}
+                onClick={() => handleFluxCreateGerritCr(result)}
+                title="Approve and create a Gerrit CR"
+              >
+                {job.resuming ? 'Creating CR…' : 'Create Gerrit CR'}
+              </button>
+            )}
+            {(gerritUrl || gerritId) && (
+              <a
+                href={gerritUrl || undefined}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flux-gerrit-link"
+                title={gerritUrl}
+              >
+                CR: {gerritId || gerritUrl}
+              </a>
+            )}
+            {gerritUrl && (
+              <button
+                type="button"
+                className="btn-flux-rerun-cr"
+                disabled={job.rerunning}
+                onClick={() => handleFluxRerunWithCr(result)}
+                title="Retrigger this test with the Gerrit CR patch"
+              >
+                {job.rerunning ? 'Rerunning…' : 'Rerun with CR'}
+              </button>
+            )}
+            {job.rerun?.rerun_task_id && (
+              rerunHref ? (
+                <a href={rerunHref} target="_blank" rel="noopener noreferrer" className="flux-rerun-link">
+                  JITA: {job.rerun.rerun_task_id}
+                </a>
+              ) : (
+                <div className="flux-rerun-link">JITA: {job.rerun.rerun_task_id}</div>
+              )
+            )}
+            {job.rerun?.error && <div className="flux-job-error">{job.rerun.error}</div>}
           </td>
         );
       }
@@ -3240,6 +3954,96 @@ export default function FailedTestcaseAnalysis() {
                 </div>
               )}
             </div>
+            <div className="filter-group filter-group-status-dropdown" ref={jiraTypeDropdownRef}>
+              <label>Filter by Jira Bug Type:</label>
+              <button
+                type="button"
+                className="filter-select status-dropdown-trigger"
+                onClick={() => setJiraTypeDropdownOpen(prev => !prev)}
+              >
+                {filterJiraBugTypes.length === JIRA_BUG_TYPE_OPTIONS.length
+                  ? 'All Types'
+                  : filterJiraBugTypes.length === 0
+                    ? 'None'
+                    : filterJiraBugTypes.join(', ')}
+                <span className="status-dropdown-arrow">{jiraTypeDropdownOpen ? '▲' : '▼'}</span>
+              </button>
+              {jiraTypeDropdownOpen && (
+                <div className="status-dropdown-menu">
+                  {JIRA_BUG_TYPE_OPTIONS.map(type => (
+                    <label key={type} className="status-dropdown-item">
+                      <input
+                        type="checkbox"
+                        checked={filterJiraBugTypes.includes(type)}
+                        onChange={() => toggleFilterJiraBugType(type)}
+                      />
+                      <span>{type}</span>
+                    </label>
+                  ))}
+                  <div className="status-dropdown-actions">
+                    <button type="button" className="status-dropdown-action-btn" onClick={() => setFilterJiraBugTypes([...JIRA_BUG_TYPE_OPTIONS])}>All</button>
+                    <button type="button" className="status-dropdown-action-btn" onClick={() => setFilterJiraBugTypes([])}>None</button>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="filter-group filter-group-status-dropdown" ref={jiraStatusDropdownRef}>
+              <label>Filter by Jira Status:</label>
+              <button
+                type="button"
+                className="filter-select status-dropdown-trigger"
+                onClick={() => setJiraStatusDropdownOpen(prev => !prev)}
+              >
+                {uniqueJiraStatuses.length === 0
+                  ? 'No tickets'
+                  : filterJiraStatuses.length === uniqueJiraStatuses.length
+                    ? 'All Statuses'
+                    : filterJiraStatuses.length === 0
+                      ? 'None'
+                      : filterJiraStatuses.join(', ')}
+                <span className="status-dropdown-arrow">{jiraStatusDropdownOpen ? '▲' : '▼'}</span>
+              </button>
+              {jiraStatusDropdownOpen && (
+                <div className="status-dropdown-menu">
+                  {uniqueJiraStatuses.length === 0 ? (
+                    <div className="status-dropdown-item">No Jira statuses yet</div>
+                  ) : uniqueJiraStatuses.map(status => (
+                    <label key={status} className="status-dropdown-item">
+                      <input
+                        type="checkbox"
+                        checked={filterJiraStatuses.includes(status)}
+                        onChange={() => toggleFilterJiraStatus(status)}
+                      />
+                      <span>{status}</span>
+                    </label>
+                  ))}
+                  {uniqueJiraStatuses.length > 0 && (
+                    <div className="status-dropdown-actions">
+                      <button
+                        type="button"
+                        className="status-dropdown-action-btn"
+                        onClick={() => {
+                          jiraStatusTouchedRef.current = false;
+                          setFilterJiraStatuses([...uniqueJiraStatuses]);
+                        }}
+                      >
+                        All
+                      </button>
+                      <button
+                        type="button"
+                        className="status-dropdown-action-btn"
+                        onClick={() => {
+                          jiraStatusTouchedRef.current = true;
+                          setFilterJiraStatuses([]);
+                        }}
+                      >
+                        None
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="filter-group">
               <label>Filter by Regression Owner:</label>
               <select value={filterOwner} onChange={e => setFilterOwner(e.target.value)} className="filter-select">
@@ -3289,8 +4093,18 @@ export default function FailedTestcaseAnalysis() {
                 ))}
               </select>
             </div>
-            {(filterOwner || filterFailureStage || filterIntermittent || filterComment.trim() || filterException || filterTestStatus.length < ALL_STATUS_GROUPS.length) && (
-              <button onClick={() => { setFilterTestStatus([...ALL_STATUS_GROUPS]); setFilterOwner(''); setFilterFailureStage(''); setFilterIntermittent(''); setFilterComment(''); setFilterException(''); }} className="btn-clear-filters">Clear Filters</button>
+            {(filterOwner || filterFailureStage || filterIntermittent || filterComment.trim() || filterException || filterTestStatus.length < ALL_STATUS_GROUPS.length || filterJiraBugTypes.length !== JIRA_BUG_TYPE_OPTIONS.length || (uniqueJiraStatuses.length > 0 && filterJiraStatuses.length < uniqueJiraStatuses.length)) && (
+              <button onClick={() => {
+                setFilterTestStatus([...ALL_STATUS_GROUPS]);
+                setFilterOwner('');
+                setFilterFailureStage('');
+                setFilterIntermittent('');
+                setFilterComment('');
+                setFilterException('');
+                setFilterJiraBugTypes([...JIRA_BUG_TYPE_OPTIONS]);
+                jiraStatusTouchedRef.current = false;
+                setFilterJiraStatuses([...uniqueJiraStatuses]);
+              }} className="btn-clear-filters">Clear Filters</button>
             )}
           </div>
           <div className="results-table-toolbar">
@@ -3484,6 +4298,46 @@ export default function FailedTestcaseAnalysis() {
                 })}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {fluxBranchPrompt && (
+        <div className="modal-overlay" onClick={() => !fluxBranchPrompt.loading && setFluxBranchPrompt(null)}>
+          <div className="modal-content flux-branch-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Flux Quick Fix — target branch</h3>
+              <button type="button" className="modal-close" onClick={() => setFluxBranchPrompt(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <p className="flux-branch-hint">
+                Nutest branch from Jita Task {fluxBranchPrompt.taskId || '(none)'}
+                {fluxBranchPrompt.result?.testcase_name ? ` for ${fluxBranchPrompt.result.testcase_name}` : ''}.
+              </p>
+              <label htmlFor="flux-target-branch">target_branch</label>
+              <input
+                id="flux-target-branch"
+                type="text"
+                className="flux-branch-input"
+                value={fluxBranchPrompt.branch || ''}
+                disabled={fluxBranchPrompt.loading}
+                onChange={e => setFluxBranchPrompt(prev => prev ? { ...prev, branch: e.target.value } : prev)}
+                placeholder="e.g. ganges-7.5-stable"
+              />
+              {fluxBranchPrompt.loading && <div className="flux-branch-loading">Loading nutest-py3-tests_branch from JITA…</div>}
+              {fluxBranchPrompt.error && <div className="flux-job-error">{fluxBranchPrompt.error}</div>}
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn-secondary" onClick={() => setFluxBranchPrompt(null)}>Cancel</button>
+              <button
+                type="button"
+                className="btn-flux-quick-fix"
+                disabled={fluxBranchPrompt.loading || !(fluxBranchPrompt.branch || '').trim()}
+                onClick={confirmFluxQuickFix}
+              >
+                Start Quick Fix
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -4046,6 +4900,20 @@ export default function FailedTestcaseAnalysis() {
                     <span>Resource Requirement Configuration</span>
                   </label>
                 </div>
+              </div>
+
+              <div className="retrigger-tcms-sync-section">
+                <span className="retrigger-component-label">TCMS Integration</span>
+                <div className="retrigger-component-checks">
+                  <label className="retrigger-check-label retrigger-tcms-sync">
+                    <input type="checkbox" checked={retriggerOverrides.syncToTcms}
+                      onChange={e => setRetriggerOverrides(prev => ({ ...prev, syncToTcms: e.target.checked }))} />
+                    <span>Sync results to TCMS</span>
+                  </label>
+                </div>
+                <p className="retrigger-pool-hint">
+                  When enabled, the rerun is marked official so JITA can validate reporting config and sync results to TCMS. When disabled, official is omitted and results are not synced. Sync still skips if the testcase service does not match reporting config.
+                </p>
               </div>
 
               {(retriggerOverrides.updateNos || retriggerOverrides.updatePc || retriggerOverrides.updateImage) && (

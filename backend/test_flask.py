@@ -45,6 +45,62 @@ from handover_helpers import (
     get_task_id_from_run,
     order_runs_for_test,
 )
+
+def _get_current_team():
+    """Get current team from JWT context, fallback to default team."""
+    if has_request_context() and hasattr(g, 'team'):
+        return g.team
+    return get_default_team()
+
+def _get_legacy_data_dir():
+    """Flat data/ directory used before team isolation (read fallback)."""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+
+def _get_team_data_dir(create=False):
+    """Directory for the current team's JSON (data/{TEAM}/)."""
+    env_override = (os.environ.get("REGX_TEAM_DATA_DIR") or "").strip()
+    if env_override:
+        if create:
+            os.makedirs(env_override, exist_ok=True)
+        return env_override
+    team = _get_current_team() or get_default_team() or "CDP_FT"
+    path = os.path.join(_get_legacy_data_dir(), str(team))
+    if create:
+        os.makedirs(path, exist_ok=True)
+    return path
+
+def _resolve_team_or_legacy_file(filename, for_write=False):
+    """Prefer data/{TEAM}/filename; fall back to data/filename on read."""
+    team_path = os.path.join(_get_team_data_dir(create=for_write), filename)
+    if for_write or os.path.exists(team_path):
+        return team_path
+    if (os.environ.get("REGX_TEAM_DATA_DIR") or "").strip():
+        return team_path
+    legacy = os.path.join(_get_legacy_data_dir(), filename)
+    if os.path.exists(legacy):
+        return legacy
+    return team_path
+
+def _get_team_storage_path(filename):
+    """Get team-specific storage path for a given filename."""
+    return os.path.join(_get_team_data_dir(), filename)
+
+def _get_run_plans_storage_path():
+    """Get team-specific run plans storage path."""
+    # Allow override via environment variable for testing
+    env_override = os.environ.get("REGX_RUN_PLANS_FILE")
+    if env_override:
+        return env_override
+    return _get_team_storage_path("run_plans.json")
+
+def _get_regression_config_storage_path():
+    """Get team-specific regression config storage path."""
+    return _get_team_storage_path("regression_config.json")
+
+def _get_triage_genie_storage_path():
+    """Get team-specific triage genie storage path."""
+    return _get_team_storage_path("triage_genie_jobs.json")
+
 from owner_triage_report import (
     build_owner_status_table,
     resolve_task_ids_from_payload,
@@ -84,6 +140,11 @@ from user_keys import (
     store_login_credential,
     get_login_credential,
     clear_login_credential,
+)
+from flux_client import (
+    FluxError,
+    FluxKeySetupError,
+    get_client as get_flux_client,
 )
 
 # ======================================================
@@ -320,9 +381,8 @@ TCMS_TESTDB_BASE = "https://quality-pipeline.eng.nutanix.com/testdb/api/v1"
 TCMS_USER = os.getenv("TCMS_USER", "agave_bot")
 TCMS_PASSWORD = os.getenv("TCMS_PASSWORD", "admin")
 
-TESTCASE_MGMT_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
-)
+# Tests may set this to a temp dir; production uses data/{TEAM}/.
+TESTCASE_MGMT_DATA_DIR = None
 
 
 def _jita_browser_entity_url(template, entity_id=None, entity_name=None):
@@ -399,11 +459,9 @@ HEADERS = {
 manual_tasks_store = {}
 
 # Run Plan storage file
-# Production file by default. For isolated feature testing set:
-#   REGX_RUN_PLANS_FILE=/path/to/run_plans_test.json
-# so dummy plans never write into production run_plans.json.
-_RUN_PLANS_DEFAULT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "run_plans.json")
-RUN_PLAN_STORAGE = os.environ.get("REGX_RUN_PLANS_FILE") or _RUN_PLANS_DEFAULT
+# Team-specific storage path determined dynamically based on current user's team.
+# For isolated feature testing set: REGX_RUN_PLANS_FILE=/path/to/run_plans_test.json
+# which will override the team-based path.
 
 
 def _is_dummy_run_plan(run_plan):
@@ -424,8 +482,9 @@ def _is_dummy_run_plan(run_plan):
 def load_run_plans():
     """Load run plans from JSON file, backfilling missing fields on older entries."""
     try:
-        if os.path.exists(RUN_PLAN_STORAGE):
-            with open(RUN_PLAN_STORAGE, 'r') as f:
+        storage_path = _get_run_plans_storage_path()
+        if os.path.exists(storage_path):
+            with open(storage_path, 'r') as f:
                 data = json.load(f)
             dirty = False
             for rp in data.get("run_plans", []):
@@ -452,7 +511,8 @@ def load_run_plans():
 def save_run_plans(data):
     """Save run plans to JSON file"""
     try:
-        with open(RUN_PLAN_STORAGE, 'w') as f:
+        storage_path = _get_run_plans_storage_path()
+        with open(storage_path, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving run plans: {e}")
@@ -562,13 +622,14 @@ def _run_plan_scheduler_loop():
         time.sleep(SCHEDULER_INTERVAL_SECONDS)
 
 # Triage Genie jobs storage file
-TRIAGE_GENIE_STORAGE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "triage_genie_jobs.json")
+# Team-specific storage path determined dynamically based on current user's team.
 
 def load_triage_genie_jobs():
     """Load Triage Genie jobs from JSON file"""
     try:
-        if os.path.exists(TRIAGE_GENIE_STORAGE):
-            with open(TRIAGE_GENIE_STORAGE, 'r') as f:
+        storage_path = _get_triage_genie_storage_path()
+        if os.path.exists(storage_path):
+            with open(storage_path, 'r') as f:
                 return json.load(f)
         return {"jobs": []}
     except Exception as e:
@@ -578,20 +639,22 @@ def load_triage_genie_jobs():
 def save_triage_genie_jobs(data):
     """Save Triage Genie jobs to JSON file"""
     try:
-        with open(TRIAGE_GENIE_STORAGE, 'w') as f:
+        storage_path = _get_triage_genie_storage_path()
+        with open(storage_path, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving triage genie jobs: {e}")
         raise
 
 # Regression Dashboard Configuration storage file
-REGRESSION_CONFIG_STORAGE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "regression_config.json")
+# Team-specific storage path determined dynamically based on current user's team.
 
 def load_regression_config():
     """Load regression dashboard configuration from JSON file. Migrates legacy schema."""
     try:
-        if os.path.exists(REGRESSION_CONFIG_STORAGE):
-            with open(REGRESSION_CONFIG_STORAGE, 'r') as f:
+        storage_path = _get_regression_config_storage_path()
+        if os.path.exists(storage_path):
+            with open(storage_path, 'r') as f:
                 config = json.load(f)
             # Migration: add default_tag, added_tags if missing
             added = config.get("added_tags", [])
@@ -631,14 +694,14 @@ def load_regression_config():
 def save_regression_config(data):
     """Save regression dashboard configuration to JSON file"""
     try:
-        with open(REGRESSION_CONFIG_STORAGE, 'w') as f:
+        storage_path = _get_regression_config_storage_path()
+        with open(storage_path, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving regression config: {e}")
         raise
 
 # Triage Accuracy Analyzer data storage
-TRIAGE_ACCURACY_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 TRIAGE_ACCURACY_TASKIDS_FILE = "triage_accuracy_data_taskids.json"
 
 def _sanitize_tag_for_filename(tag):
@@ -651,13 +714,15 @@ def _sanitize_tag_for_filename(tag):
     s = re.sub(r"_+", "_", s).strip("_")
     return s if s else "unknown"
 
-def _triage_accuracy_path(tag=None):
-    """Get path for triage accuracy JSON. tag=None means task_ids mode."""
-    os.makedirs(TRIAGE_ACCURACY_DATA_DIR, exist_ok=True)
+def _triage_accuracy_filename(tag=None):
     if tag:
         sanitized = _sanitize_tag_for_filename(tag)
-        return os.path.join(TRIAGE_ACCURACY_DATA_DIR, f"triage_accuracy_data_{sanitized}.json")
-    return os.path.join(TRIAGE_ACCURACY_DATA_DIR, TRIAGE_ACCURACY_TASKIDS_FILE)
+        return f"triage_accuracy_data_{sanitized}.json"
+    return TRIAGE_ACCURACY_TASKIDS_FILE
+
+def _triage_accuracy_path(tag=None, for_write=False):
+    """Get path for triage accuracy JSON. tag=None means task_ids mode."""
+    return _resolve_team_or_legacy_file(_triage_accuracy_filename(tag), for_write=for_write)
 
 def load_triage_accuracy_data(tag=None):
     """Load triage accuracy data from JSON file. tag=None for task_ids mode."""
@@ -680,7 +745,7 @@ def load_triage_accuracy_data(tag=None):
                 return None
         # Migration: copy legacy triage_accuracy_data.json to per-tag file if tag matches
         if tag:
-            legacy_path = os.path.join(TRIAGE_ACCURACY_DATA_DIR, "triage_accuracy_data.json")
+            legacy_path = _resolve_team_or_legacy_file("triage_accuracy_data.json", for_write=False)
             if os.path.exists(legacy_path):
                 with open(legacy_path, 'r') as f:
                     data = json.load(f)
@@ -696,8 +761,8 @@ def load_triage_accuracy_data(tag=None):
 def save_triage_accuracy_data(data, tag=None):
     """Save triage accuracy data to JSON file. tag=None for task_ids mode."""
     try:
-        path = _triage_accuracy_path(tag)
-        os.makedirs(TRIAGE_ACCURACY_DATA_DIR, exist_ok=True)
+        path = _triage_accuracy_path(tag, for_write=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         # Atomic write: avoid corrupt JSON if two requests save at once
         tmp_path = f"{path}.tmp.{os.getpid()}"
         with open(tmp_path, 'w') as f:
@@ -714,28 +779,67 @@ def save_triage_accuracy_data(data, tag=None):
             pass
         raise
 
+def _unlink_if_exists(path):
+    """Remove a file if present. Returns True when a file was deleted."""
+    try:
+        if path and os.path.exists(path) and os.path.isfile(path):
+            os.remove(path)
+            logger.info("Deleted file: %s", path)
+            return True
+    except OSError as e:
+        logger.warning("Could not delete %s: %s", path, e)
+    return False
+
+
+def _remove_team_and_legacy_file(filename):
+    """Delete filename from the current team dir and the flat legacy data/ dir."""
+    if not filename:
+        return
+    team_path = os.path.join(_get_team_data_dir(create=False), filename)
+    _unlink_if_exists(team_path)
+    if (os.environ.get("REGX_TEAM_DATA_DIR") or "").strip():
+        return
+    legacy_path = os.path.join(_get_legacy_data_dir(), filename)
+    if os.path.abspath(legacy_path) != os.path.abspath(team_path):
+        _unlink_if_exists(legacy_path)
+
+
 def invalidate_triage_accuracy_cache(tag=None):
     """Delete triage accuracy cache. tag=None invalidates only task_ids file; pass tag for per-tag file."""
     try:
+        if tag:
+            _remove_team_and_legacy_file(_triage_accuracy_filename(tag))
+            # Shared legacy file: only remove if it belongs to this tag
+            legacy_shared = os.path.join(_get_legacy_data_dir(), "triage_accuracy_data.json")
+            if os.path.exists(legacy_shared):
+                try:
+                    with open(legacy_shared, "r") as f:
+                        data = json.load(f)
+                    if (data.get("tag") or "").strip() == tag.strip():
+                        _unlink_if_exists(legacy_shared)
+                except (OSError, json.JSONDecodeError, AttributeError):
+                    pass
+            return
         path = _triage_accuracy_path(tag)
-        if os.path.exists(path):
-            os.remove(path)
-            logger.info(f"Invalidated triage accuracy cache: {path}")
+        _unlink_if_exists(path)
     except Exception as e:
         logger.warning(f"Could not invalidate triage accuracy cache: {e}")
 
 # --------------- Failed Analysis Saved Tags storage ---------------
-FAILED_ANALYSIS_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-FAILED_ANALYSIS_TAGS_FILE = os.path.join(FAILED_ANALYSIS_DATA_DIR, "failed_analysis_saved_tags.json")
+FAILED_ANALYSIS_TAGS_FILENAME = "failed_analysis_saved_tags.json"
 
-def _failed_analysis_results_path(tag):
+def _failed_analysis_tags_path(for_write=False):
+    return _resolve_team_or_legacy_file(FAILED_ANALYSIS_TAGS_FILENAME, for_write=for_write)
+
+def _failed_analysis_results_path(tag, for_write=False):
     sanitized = _sanitize_tag_for_filename(tag)
-    return os.path.join(FAILED_ANALYSIS_DATA_DIR, f"failed_analysis_{sanitized}.json")
+    return _resolve_team_or_legacy_file(f"failed_analysis_{sanitized}.json", for_write=for_write)
 
 def load_failed_analysis_tags():
     try:
-        if os.path.exists(FAILED_ANALYSIS_TAGS_FILE):
-            with open(FAILED_ANALYSIS_TAGS_FILE, 'r') as f:
+        path = _failed_analysis_tags_path(for_write=False)
+        if os.path.exists(path):
+            with open(path, 'r') as f:
                 data = json.load(f)
                 if isinstance(data, dict) and "tags" in data:
                     return data
@@ -746,8 +850,9 @@ def load_failed_analysis_tags():
 
 def save_failed_analysis_tags(data):
     try:
-        os.makedirs(FAILED_ANALYSIS_DATA_DIR, exist_ok=True)
-        with open(FAILED_ANALYSIS_TAGS_FILE, 'w') as f:
+        path = _failed_analysis_tags_path(for_write=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving failed analysis tags: {e}")
@@ -755,7 +860,7 @@ def save_failed_analysis_tags(data):
 
 def load_failed_analysis_results(tag):
     try:
-        path = _failed_analysis_results_path(tag)
+        path = _failed_analysis_results_path(tag, for_write=False)
         if os.path.exists(path):
             with open(path, 'r') as f:
                 return json.load(f)
@@ -766,8 +871,8 @@ def load_failed_analysis_results(tag):
 
 def save_failed_analysis_results(tag, data):
     try:
-        os.makedirs(FAILED_ANALYSIS_DATA_DIR, exist_ok=True)
-        path = _failed_analysis_results_path(tag)
+        path = _failed_analysis_results_path(tag, for_write=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
@@ -776,10 +881,8 @@ def save_failed_analysis_results(tag, data):
 
 def delete_failed_analysis_results(tag):
     try:
-        path = _failed_analysis_results_path(tag)
-        if os.path.exists(path):
-            os.remove(path)
-            logger.info(f"Deleted failed analysis cache: {path}")
+        sanitized = _sanitize_tag_for_filename(tag)
+        _remove_team_and_legacy_file(f"failed_analysis_{sanitized}.json")
     except Exception as e:
         logger.warning(f"Could not delete failed analysis cache for tag '{tag}': {e}")
 
@@ -1009,13 +1112,45 @@ def fetch_regression_tasks(tag=None, task_ids=None, include_tag_extras=True):
 # ======================================================
 # API-2: Fetch Agave Task
 # ======================================================
-def fetch_agave_task(task_id):
-    resp = session.get(
-        f"{JITA_BASE}/agave_tasks/{task_id}",
-        timeout=30
-    )
+def fetch_agave_task(task_id, auth=None):
+    kwargs = {"timeout": 30}
+    resolved_auth = auth
+    if resolved_auth is None:
+        try:
+            resolved_auth = _current_user_jita_auth() or globals().get("JITA_SVC_AUTH")
+        except RuntimeError:
+            resolved_auth = globals().get("JITA_SVC_AUTH")
+    if resolved_auth:
+        kwargs["auth"] = resolved_auth
+    resp = session.get(f"{JITA_BASE}/agave_tasks/{task_id}", **kwargs)
     resp.raise_for_status()
-    return resp.json().get("data", {})
+    payload = resp.json() if resp is not None else {}
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        return payload.get("data") or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def nutest_branch_from_agave_task(task):
+    """Return JITA nutest-py3-tests_branch (or nested framework branch)."""
+    if not isinstance(task, dict):
+        return ""
+    for key in ("nutest-py3-tests_branch", "nutest_py3_tests_branch", "nutest_branch"):
+        val = str(task.get(key) or "").strip()
+        if val:
+            return val
+    framework = str(task.get("test_framework") or "nutest-py3-tests").strip() or "nutest-py3-tests"
+    keyed = str(task.get("%s_branch" % framework) or "").strip()
+    if keyed:
+        return keyed
+    tfm = task.get("test_framework_metadata")
+    if isinstance(tfm, dict):
+        for nested_key in ("framework", "test"):
+            nested = tfm.get(nested_key)
+            if isinstance(nested, dict):
+                val = str(nested.get("branch") or "").strip()
+                if val:
+                    return val
+    return ""
 
 # ======================================================
 # Flask Endpoint
@@ -5115,6 +5250,25 @@ def create_run_plan():
         logger.error(f"Error creating run plan: {e}")
         return jsonify({"error": str(e)}), 500
 
+def _normalize_run_plan_jp_ids(raw_ids):
+    """Return cleaned job-profile id strings from a run-plan request or stored list."""
+    ids = []
+    seen = set()
+    for jp_id in raw_ids or []:
+        if isinstance(jp_id, dict):
+            jp_id = jp_id.get("$oid") or jp_id.get("_id") or ""
+            if isinstance(jp_id, dict):
+                jp_id = jp_id.get("$oid") or ""
+        if not jp_id or not isinstance(jp_id, str):
+            continue
+        jp_id = jp_id.strip()
+        if not jp_id or jp_id in seen:
+            continue
+        seen.add(jp_id)
+        ids.append(jp_id)
+    return ids
+
+
 @app.route("/mcp/regression/run-plan/<run_plan_id>", methods=["PUT"])
 @jwt_required
 def update_run_plan(run_plan_id):
@@ -5126,9 +5280,9 @@ def update_run_plan(run_plan_id):
         # Find and update run plan
         for i, rp in enumerate(data.get("run_plans", [])):
             if rp.get("id") == run_plan_id:
-                # Check if already triggered (restrict edits)
+                # Check if already triggered (restrict some edits)
                 if rp.get("last_triggered"):
-                    # Only allow editing schedule_date, name, branch, service_account, tag_name, is_dummy
+                    # Allow schedule_date, name, branch, service_account, tag_name, is_dummy
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data["schedule_date"]
                         rp["schedule_triggered"] = False
@@ -5159,17 +5313,19 @@ def update_run_plan(run_plan_id):
                     elif "name" in req_data:
                         rp["is_dummy"] = _is_dummy_run_plan(rp)
                     
-                    # Validate and filter job profiles if provided
-                    if "job_profiles" in req_data:
-                        new_job_profiles = req_data.get("job_profiles", [])
-                        new_job_profiles = [jp_id for jp_id in new_job_profiles if jp_id and isinstance(jp_id, str) and jp_id.strip()]
-                        if not new_job_profiles:
-                            return jsonify({"error": "At least one valid job profile is required"}), 400
-                        rp["job_profiles"] = new_job_profiles
-                    
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data.get("schedule_date")
                         rp["schedule_triggered"] = False
+
+                # Add/remove job profiles is always allowed (including after last_triggered).
+                removed_job_profiles = []
+                if "job_profiles" in req_data:
+                    old_job_profiles = _normalize_run_plan_jp_ids(rp.get("job_profiles"))
+                    new_job_profiles = _normalize_run_plan_jp_ids(req_data.get("job_profiles", []))
+                    if not new_job_profiles:
+                        return jsonify({"error": "At least one valid job profile is required"}), 400
+                    rp["job_profiles"] = new_job_profiles
+                    removed_job_profiles = [j for j in old_job_profiles if j not in set(new_job_profiles)]
                 
                 save_run_plans(data)
                 
@@ -5177,13 +5333,17 @@ def update_run_plan(run_plan_id):
                 # Tag name remains unchanged (auto-generated on create)
                 tag_name = rp.get("tag_name")
                 if "job_profiles" in req_data and tag_name:
-                    job_profiles = rp.get("job_profiles", [])
-                    job_profiles = [jp_id for jp_id in job_profiles if jp_id and isinstance(jp_id, str) and jp_id.strip()]
+                    job_profiles = _normalize_run_plan_jp_ids(rp.get("job_profiles"))
                     
                     if job_profiles:
                         logger.info(f"Ensuring tag '{tag_name}' exists in tester_tags for {len(job_profiles)} job profile(s)")
                         updated_count, failed = update_job_profiles_tester_tags(job_profiles, tag_name, action="add")
                         logger.info(f"Updated tester_tags: {updated_count} succeeded, {len(failed)} failed")
+                    if removed_job_profiles:
+                        logger.info(
+                            f"Removing tag '{tag_name}' from {len(removed_job_profiles)} dropped job profile(s)"
+                        )
+                        update_job_profiles_tester_tags(removed_job_profiles, tag_name, action="remove")
                 
                 return jsonify({"success": True, "run_plan": rp})
         
@@ -5438,6 +5598,77 @@ def trigger_run_plan(run_plan_id):
         logger.error(f"Error triggering run plan {run_plan_id}: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+# JITA PUT /job_profiles/:id only accepts these image_build_selection values.
+# GET often returns "None" / null; sending that back makes JITA reject the PUT.
+_JITA_IMAGE_BUILD_SELECTIONS = (
+    "By Commit",
+    "By Latest Smoke Passed",
+    "By Latest Build Passed",
+)
+_JITA_JP_PUT_READONLY_FIELDS = (
+    "_id",
+    "created_at",
+    "updated_at",
+    "created_by_user",
+    "last_triggered",
+    "scheduled_jobs",
+)
+
+
+def _apply_image_component_update(updated_profile, comp_data):
+    """Apply Image Branch fields to match JITA UI PUT shape (in place)."""
+    branch = (comp_data.get("branch") or "").strip()
+    update_type = comp_data.get("update_type") or ""
+    build_type = comp_data.get("build_type") or ""
+    tag = comp_data.get("tag") or ""
+    commit_id = (comp_data.get("commit_id") or "").strip()
+    gbn = comp_data.get("gbn")
+
+    if branch:
+        updated_profile["image_branch"] = branch
+    if build_type:
+        updated_profile["image_build_type"] = build_type
+
+    if update_type == "tag" and tag:
+        updated_profile["image_build_selection"] = tag
+        # JITA UI sends JSON null (not "") when selecting by tag.
+        updated_profile["image_commit"] = None
+        updated_profile.pop("image_gbn", None)
+    elif update_type == "commit":
+        updated_profile["image_build_selection"] = "By Commit"
+        updated_profile["image_commit"] = commit_id or None
+        if gbn not in (None, ""):
+            try:
+                updated_profile["image_gbn"] = int(gbn) if isinstance(gbn, str) else gbn
+            except (ValueError, TypeError):
+                updated_profile["image_gbn"] = gbn
+
+    return updated_profile
+
+
+def _prepare_jita_jp_put_payload(profile):
+    """Build a JITA job-profile PUT body: drop read-only GET fields and fix image enums."""
+    payload = {}
+    for key, value in (profile or {}).items():
+        if key in _JITA_JP_PUT_READONLY_FIELDS:
+            continue
+        if isinstance(value, (set, tuple)):
+            payload[key] = list(value)
+        elif value is Ellipsis:
+            payload[key] = None
+        else:
+            payload[key] = value
+
+    if payload.get("image_commit") == "":
+        payload["image_commit"] = None
+
+    selection = payload.get("image_build_selection")
+    if selection not in _JITA_IMAGE_BUILD_SELECTIONS:
+        payload.pop("image_build_selection", None)
+
+    return payload
+
+
 @app.route("/mcp/regression/run-plan/<run_plan_id>/batch-update", methods=["POST"])
 @jwt_required
 def batch_update_job_profiles(run_plan_id):
@@ -5598,6 +5829,18 @@ def batch_update_job_profiles(run_plan_id):
                         PRISM_CENTRAL["build"] = PC_BUILD
                         resource_manager_json["PRISM_CENTRAL"] = PRISM_CENTRAL
                         updated_profile["resource_manager_json"] = resource_manager_json
+
+                    elif component == "IMAGE":
+                        _apply_image_component_update(updated_profile, comp_data)
+                        logger.info(
+                            "Batch update IMAGE %s: branch=%s type=%s selection=%s commit=%s gbn=%s",
+                            job_id,
+                            updated_profile.get("image_branch"),
+                            updated_profile.get("image_build_type"),
+                            updated_profile.get("image_build_selection"),
+                            updated_profile.get("image_commit"),
+                            updated_profile.get("image_gbn"),
+                        )
                 
                 # Update test framework branch if provided
                 if req_data.get("nutest_branch"):
@@ -5703,15 +5946,8 @@ def batch_update_job_profiles(run_plan_id):
                     updated_profile["run_tests_with_additional_tags"] = new_additional_tags
                     logger.info(f"Overwriting run_tests_with_additional_tags for {job_id}: {new_additional_tags}")
 
-                # Ensure JSON serializable (following reference script pattern)
-                serializable_payload = {}
-                for k, v in updated_profile.items():
-                    if isinstance(v, (set, tuple)):
-                        serializable_payload[k] = list(v)
-                    elif v is Ellipsis:
-                        serializable_payload[k] = None
-                    else:
-                        serializable_payload[k] = v
+                # JITA PUT /api/v2/job_profiles/<id> — same writable shape as the JITA UI.
+                serializable_payload = _prepare_jita_jp_put_payload(updated_profile)
                 
                 # PUT update (use service account for batch updates)
                 put_resp = requests.put(
@@ -7871,15 +8107,43 @@ def _load_rdm_patterns():
 RDM_PATTERNS = _load_rdm_patterns()
 
 
+# Hostnames in installer-error lines: "pitpf06-4: The target node..." or
+# "Nodes: kylun01-1: Received \"fatal\"...". Require a digit so "Error:" / "Reason:"
+# are not treated as nodes.
+_INSTALLER_NODE_LINE_RE = re.compile(
+    r"(?:^|\n)\s*(?:Nodes?:\s*)?([A-Za-z][\w.-]*\d[\w.-]*):\s+\S"
+)
+
+
+def _extract_installer_error_nodes(message):
+    """Return every node listed under an RDM 'Installer errors:' block."""
+    if not message:
+        return []
+    installer = re.search(r"Installer errors\s*:", message, re.IGNORECASE)
+    if not installer:
+        return []
+    seen = dict()
+    for name in _INSTALLER_NODE_LINE_RE.findall(message[installer.end():]):
+        if name.lower() in ("nodes", "node"):
+            continue
+        seen.setdefault(name, None)
+    return list(seen)
+
+
 def _extract_node_names(message):
     """Extract node names from RDM failure messages.
 
-    Combines results from multiple extraction strategies so multi-node
-    failures (where different nodes appear in different formats) are
-    all captured.  Returns deduplicated list preserving first-seen order.
+    Prefer every hostname in an Installer errors block (multi-node failures
+    list one node per line after a single 'Nodes:' prefix). Otherwise combine
+    other extraction strategies. Returns a deduplicated list in first-seen order.
     """
+    if not message:
+        return []
+    installer_nodes = _extract_installer_error_nodes(message)
+    if installer_nodes:
+        return installer_nodes
     seen = dict()
-    for n in re.findall(r'([\w-]+):\s*Received\s+"fatal"\s+in\s+waiting\s+for\s+event', message):
+    for n in re.findall(r'([\w.-]+):\s*Received\s+"fatal"\s+in\s+waiting\s+for\s+event', message):
         seen.setdefault(n, None)
     for n in re.findall(r"(?:Nodes?:\s*)([a-zA-Z][\w\-]*\d+[\-\d]*)", message):
         seen.setdefault(n, None)
@@ -9878,6 +10142,7 @@ def delete_saved_tag(tag_name):
         return jsonify({"error": "Tag not found"}), 404
     save_failed_analysis_tags(data)
     delete_failed_analysis_results(tag_name)
+    invalidate_triage_accuracy_cache(tag_name)
     return jsonify({"success": True, "tags": data["tags"]})
 
 
@@ -10204,7 +10469,7 @@ def _group_tests_for_rerun(tests, parent_task_id=None):
     return tests_by_task
 
 
-def _rerun_selected_tests(tests, overrides=None, parent_task_id=None):
+def _rerun_selected_tests(tests, overrides=None, parent_task_id=None, sync_to_tcms=False):
     """
     Re-run selected tests via JITA agave_tasks/{id}/rerun.
     Returns a dict (not a Flask response) so other workflows can reuse it.
@@ -10246,7 +10511,7 @@ def _rerun_selected_tests(tests, overrides=None, parent_task_id=None):
                 })
                 continue
 
-            payload = _build_rerun_payload(task_data, task_tests, overrides, current_username)
+            payload = _build_rerun_payload(task_data, task_tests, overrides, current_username, sync_to_tcms)
             rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
             logger.info(f"[retrigger] POST {rerun_url} with {len(task_tests)} test(s): {task_tests}")
             resp = requests.post(
@@ -10322,6 +10587,7 @@ def retrigger_failed_testcases():
             return jsonify({"error": "No tests provided"}), 400
 
         overrides = data.get("overrides", {})
+        sync_to_tcms = data.get("sync_to_tcms", False)
 
         current_username = g.current_user.get("sub", "")
         user_auth = _get_user_credentials(current_username)
@@ -10389,7 +10655,7 @@ def retrigger_failed_testcases():
 
                 # Pass UI overrides through as entered. Do not look up commits
                 # or branches from the Jita commits API.
-                payload = _build_rerun_payload(task_data, task_tests, task_overrides, trigger_username)
+                payload = _build_rerun_payload(task_data, task_tests, task_overrides, trigger_username, sync_to_tcms)
 
                 # POST to rerun endpoint (raw JSON body, matching Jita UI)
                 rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
@@ -10628,13 +10894,16 @@ def _original_nested_params(task_data):
     return out
 
 
-def _build_rerun_payload(task_data, task_tests, overrides, username):
+def _build_rerun_payload(task_data, task_tests, overrides, username, sync_to_tcms=False):
     """
     Build a Jita /agave_tasks/{id}/rerun payload matching the official UI.
 
     Jita copies the original task and applies this body. Selected tests must
     include test_result_id (and name) so only those rows are rerun. Remaining
     fields are copied from the original task, then user overrides are applied.
+
+    sync_to_tcms: when True, add tester_tags "official" (JITA Mark Official).
+    When False, strip "official" so Reporting Config Validation does not sync.
     """
     import copy
 
@@ -10832,6 +11101,16 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
             tester_tags.append("rdm__virtual")
     elif overrides.get("override_pool") and resource_type in physical_resource_types:
         tester_tags = [tag for tag in tester_tags if tag != "rdm__virtual"]
+
+    # JITA "Sync To TCMS" is driven by tester_tags including "official"
+    # (Mark Official), then Reporting Config Validation. Honor the checkbox
+    # after all other tag mutations so an original-task or override "official"
+    # cannot bypass an unchecked Sync results to TCMS.
+    if sync_to_tcms:
+        if "official" not in tester_tags:
+            tester_tags.append("official")
+    else:
+        tester_tags = [tag for tag in tester_tags if tag != "official"]
 
     if "match_resource_spec" in overrides and overrides.get("match_resource_spec") is not None:
         skip_match = not bool(overrides.get("match_resource_spec"))
@@ -11058,6 +11337,10 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         payload["retain_resources_config"] = retain
     if nested_params:
         payload["nested_params"] = nested_params
+    
+    # Add TCMS sync flag if enabled
+    if sync_to_tcms:
+        payload["sync_to_tcms"] = True
 
     return {k: v for k, v in payload.items() if v is not None and v != ""}
 
@@ -11241,6 +11524,9 @@ def _tcms_nutest_target_branch(branch):
     return b or "master"
 
 
+_TCMS_PACKAGE_TYPES = frozenset({"tar", "aws", "rpm", "iso", "ova", "qcow2"})
+
+
 def _extract_mongo_oid(value):
     if isinstance(value, dict):
         return str(value.get("$oid") or "").strip()
@@ -11249,46 +11535,124 @@ def _extract_mongo_oid(value):
     return str(value).strip()
 
 
-def _resolve_tcms_all_testcase_oid(tc_name, branch_key):
+def _parse_tcms_target(target, target_service=None):
     """
-    Resolve NutestPy3Tests all_test_cases document oid (+ current tags) by name.
+    Parse milestone `target` into (service, target_branch, package_type).
+
+    Examples:
+      AOS-ganges-7.5.2-stable-tar        → (AOS, ganges-7.5.2-stable, tar)
+      PC-ganges-7.5.2-stable-pc-tar      → (PC, ganges-7.5.2-stable-pc, tar)
+      Clusters-ganges-7.5.2-stable-aws   → (Clusters, ganges-7.5.2-stable, aws)
+      NCC-ncc-5.3.2-release-tar          → (NCC, ncc-5.3.2-release, tar)
+      PC-master-tar                      → (PC, master, tar)
+    """
+    raw = (target or "").strip()
+    svc = (target_service or "").strip()
+    rest = raw
+    if svc and raw.startswith(svc + "-"):
+        rest = raw[len(svc) + 1:]
+    elif not svc and raw:
+        # Best-effort: first token is the service
+        head, _, tail = raw.partition("-")
+        if tail:
+            svc, rest = head, tail
+    if not rest:
+        return svc, "", ""
+    branch, sep, pkg = rest.rpartition("-")
+    if sep and pkg in _TCMS_PACKAGE_TYPES:
+        return svc, branch, pkg
+    return svc, rest, ""
+
+
+def _tcms_all_testcase_lookup_specs(branch_key, tc=None):
+    """
+    Candidate (service, branch, package) filters for testdb all_test_cases.
+
+    Prefer NutestPy3Tests/tar (historical tag store on master / 7.6 / 7.5).
+    Patch milestones such as 7.5.2 often have no NutestPy3Tests docs — only
+    AOS/PC/Clusters/NCC rows whose target_branch is encoded in `target`
+    (e.g. ganges-7.5.2-stable-pc). Fall back to that parsed identity.
+    """
+    specs = []
+    seen = set()
+
+    def _add(service, tbranch, pkg):
+        service = (service or "").strip()
+        tbranch = (tbranch or "").strip()
+        pkg = (pkg or "").strip()
+        if not service or not tbranch:
+            return
+        key = (service, tbranch, pkg)
+        if key in seen:
+            return
+        seen.add(key)
+        spec = {
+            "target_service": service,
+            "target_branch": tbranch,
+            "deleted": False,
+        }
+        if pkg:
+            spec["target_package_type"] = pkg
+        specs.append(spec)
+
+    nutest_branch = _tcms_nutest_target_branch(branch_key)
+    _add("NutestPy3Tests", nutest_branch, "tar")
+
+    if isinstance(tc, dict):
+        svc, tbranch, pkg = _parse_tcms_target(tc.get("target"), tc.get("target_service"))
+        if svc:
+            _add(svc, tbranch or nutest_branch, pkg)
+            if tbranch and pkg:
+                _add(svc, tbranch, "")
+    return specs
+
+
+def _query_tcms_all_testcase(name, spec):
+    """Return (oid, tags) for one testdb all_test_cases filter, or (None, [])."""
+    raw_query = json.dumps({
+        "$and": [
+            spec,
+            {"test_case.name": name},
+            {"test_case.deprecated": False},
+        ]
+    })
+    url = (
+        f"{TCMS_TESTDB_BASE}/all_test_cases"
+        f"?raw_query={urllib.parse.quote(raw_query)}&sort=name&limit=1"
+    )
+    resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
+    if resp.status_code != 200:
+        return None, []
+    rows = resp.json().get("data") or []
+    if not rows:
+        return None, []
+    row = rows[0]
+    oid = _extract_mongo_oid(row.get("_id"))
+    tags = (row.get("additional_data") or {}).get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+    return (oid or None), tags
+
+
+def _resolve_tcms_all_testcase_oid(tc_name, branch_key, tc=None):
+    """
+    Resolve testdb all_test_cases document oid (+ current tags) by name.
 
     Tag write API is /all_test_cases/tags/{oid} and needs this oid — NOT the
     milestone aggregate _id stored as local 'oid'.
+
+    Tries NutestPy3Tests first, then the milestone row's target_service /
+    target (required for patch branches like 7.5.2 that have no Nutest docs).
     """
     name = (tc_name or "").strip()
     if not name:
         return None, []
-    target_branch = _tcms_nutest_target_branch(branch_key)
     try:
-        raw_query = json.dumps({
-            "$and": [
-                {
-                    "target_service": "NutestPy3Tests",
-                    "target_branch": target_branch,
-                    "target_package_type": "tar",
-                    "deleted": False,
-                },
-                {"test_case.name": name},
-                {"test_case.deprecated": False},
-            ]
-        })
-        url = (
-            f"{TCMS_TESTDB_BASE}/all_test_cases"
-            f"?raw_query={urllib.parse.quote(raw_query)}&sort=name&limit=1"
-        )
-        resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
-        if resp.status_code != 200:
-            return None, []
-        rows = resp.json().get("data") or []
-        if not rows:
-            return None, []
-        row = rows[0]
-        oid = _extract_mongo_oid(row.get("_id"))
-        tags = (row.get("additional_data") or {}).get("tags") or []
-        if not isinstance(tags, list):
-            tags = []
-        return (oid or None), tags
+        for spec in _tcms_all_testcase_lookup_specs(branch_key, tc):
+            oid, tags = _query_tcms_all_testcase(name, spec)
+            if oid:
+                return oid, tags
+        return None, []
     except Exception as exc:
         logger.warning("Failed to resolve TCMS all_test_cases oid for %s: %s", name, exc)
         return None, []
@@ -11421,7 +11785,7 @@ def _apply_testcase_tag_ops(testcase_oids, tags, branch, team, action="add"):
 
     def _refresh_tcms(name, tc, prefer_remote_tags):
         """Resolve oid (+ optional remote tags). Returns (tcms_oid, tags, resolved_ok)."""
-        resolved_oid, remote_tags = _resolve_tcms_all_testcase_oid(name, branch)
+        resolved_oid, remote_tags = _resolve_tcms_all_testcase_oid(name, branch, tc)
         tcms_oid = (tc.get("tcms_oid") or "").strip()
         current = list(tc.get("tags") or [])
         resolved_ok = bool(resolved_oid)
@@ -11766,46 +12130,23 @@ def _fetch_tags_for_testcases(testcases, branch_key):
     if not testcases:
         return testcases
 
-    name_map = {tc["name"]: tc for tc in testcases if tc.get("name")}
-    target_branch = _tcms_nutest_target_branch(branch_key)
-
+    named = [tc for tc in testcases if tc.get("name")]
     batch_size = 50
-    names = list(name_map.keys())
 
-    def _fetch_batch(batch_names):
-        for tc_name in batch_names:
+    def _fetch_batch(batch_tcs):
+        for tc in batch_tcs:
             try:
-                raw_query = json.dumps({
-                    "$and": [
-                        {
-                            "target_service": "NutestPy3Tests",
-                            "target_branch": target_branch,
-                            "target_package_type": "tar",
-                            "deleted": False,
-                        },
-                        {"test_case.name": tc_name},
-                        {"test_case.deprecated": False},
-                    ]
-                })
-                url = (
-                    f"{TCMS_TESTDB_BASE}/all_test_cases"
-                    f"?raw_query={urllib.parse.quote(raw_query)}&sort=name&limit=1"
-                )
-                resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
-                if resp.status_code == 200:
-                    data = resp.json().get("data", [])
-                    if data and tc_name in name_map:
-                        row = data[0]
-                        tags = (row.get("additional_data") or {}).get("tags", []) or []
-                        name_map[tc_name]["tags"] = tags if isinstance(tags, list) else []
-                        name_map[tc_name]["tcms_oid"] = _extract_mongo_oid(row.get("_id"))
+                oid, tags = _resolve_tcms_all_testcase_oid(tc.get("name"), branch_key, tc)
+                if oid:
+                    tc["tcms_oid"] = oid
+                    tc["tags"] = tags if isinstance(tags, list) else []
             except Exception as exc:
-                logger.warning(f"Failed to fetch tags for {tc_name}: {exc}")
+                logger.warning(f"Failed to fetch tags for {tc.get('name')}: {exc}")
 
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = []
-        for i in range(0, len(names), batch_size):
-            batch = names[i:i + batch_size]
+        for i in range(0, len(named), batch_size):
+            batch = named[i:i + batch_size]
             futures.append(pool.submit(_fetch_batch, batch))
         for fut in as_completed(futures):
             fut.result()
@@ -11813,11 +12154,21 @@ def _fetch_tags_for_testcases(testcases, branch_key):
     return testcases
 
 
+def _testcase_mgmt_data_dir():
+    """Team-scoped testcase cache dir; tests may set TESTCASE_MGMT_DATA_DIR."""
+    if TESTCASE_MGMT_DATA_DIR:
+        return TESTCASE_MGMT_DATA_DIR
+    env = (os.environ.get("REGX_TEAM_DATA_DIR") or "").strip()
+    if env:
+        return env
+    return _get_team_data_dir()
+
+
 def _tc_data_file(branch, team):
     """Return canonical path for a per-branch/team JSON file (short branch key)."""
     key = _normalize_tc_branch_key(branch)
     safe_name = f"testcase_management_{key}_{team}.json".replace("/", "_")
-    return os.path.join(TESTCASE_MGMT_DATA_DIR, safe_name)
+    return os.path.join(_testcase_mgmt_data_dir(), safe_name)
 
 
 def _tc_data_candidate_paths(branch, team):
@@ -11829,23 +12180,29 @@ def _tc_data_candidate_paths(branch, team):
     """
     key = _normalize_tc_branch_key(branch)
     team = (team or "CDP").strip() or "CDP"
-    paths = [_tc_data_file(key, team)]
+    data_dir = _testcase_mgmt_data_dir()
+    names = [f"testcase_management_{key}_{team}.json".replace("/", "_")]
     if key != "master" and re.match(r"^\d+(?:\.\d+)+$", key):
-        legacy = os.path.join(
-            TESTCASE_MGMT_DATA_DIR,
-            f"testcase_management_ganges-{key}-stable_{team}.json".replace("/", "_"),
-        )
-        if legacy not in paths:
-            paths.append(legacy)
-    # Also accept an accidental full-name canonical path if someone saved raw
+        names.append(f"testcase_management_ganges-{key}-stable_{team}.json".replace("/", "_"))
     raw = (branch or "").strip()
     if raw and raw != key:
-        alt = os.path.join(
-            TESTCASE_MGMT_DATA_DIR,
-            f"testcase_management_{raw}_{team}.json".replace("/", "_"),
-        )
-        if alt not in paths:
-            paths.append(alt)
+        names.append(f"testcase_management_{raw}_{team}.json".replace("/", "_"))
+    paths = []
+    for name in names:
+        path = os.path.join(data_dir, name)
+        if path not in paths:
+            paths.append(path)
+    # Also read leftover files from flat data/ when not in a test override.
+    if not TESTCASE_MGMT_DATA_DIR and not (os.environ.get("REGX_TEAM_DATA_DIR") or "").strip():
+        try:
+            legacy_root = _get_legacy_data_dir()
+        except NameError:
+            legacy_root = None
+        if legacy_root and os.path.abspath(legacy_root) != os.path.abspath(data_dir):
+            for name in names:
+                path = os.path.join(legacy_root, name)
+                if path not in paths:
+                    paths.append(path)
     return paths
 
 
@@ -11907,7 +12264,7 @@ def _save_tc_data(branch, team, data):
     Persist testcase cache to canonical short-key path AND any legacy candidate
     paths so load cannot prefer a stale ganges-* file after tag edits.
     """
-    os.makedirs(TESTCASE_MGMT_DATA_DIR, exist_ok=True)
+    os.makedirs(_testcase_mgmt_data_dir(), exist_ok=True)
     key = _normalize_tc_branch_key(branch)
     team = (team or "CDP").strip() or "CDP"
     if isinstance(data, dict):
@@ -11917,7 +12274,10 @@ def _save_tc_data(branch, team, data):
             data["last_updated"] = datetime.utcnow().isoformat() + "Z"
     payload = json.dumps(data, indent=2, default=str)
     written = []
+    write_dir = os.path.abspath(_testcase_mgmt_data_dir())
     for fpath in _tc_data_candidate_paths(key, team):
+        if os.path.abspath(os.path.dirname(fpath)) != write_dir:
+            continue
         try:
             with open(fpath, "w") as f:
                 f.write(payload)
@@ -11929,6 +12289,16 @@ def _save_tc_data(branch, team, data):
         fpath = _tc_data_file(key, team)
         with open(fpath, "w") as f:
             f.write(payload)
+
+
+def _delete_tc_data_files(branch):
+    """Remove per-branch testcase_management_*.json caches for all teams."""
+    deleted = []
+    for team in TESTCASE_MGMT_TEAMS:
+        for path in _tc_data_candidate_paths(branch, team):
+            if _unlink_if_exists(path):
+                deleted.append(path)
+    return deleted
 
 
 @app.route("/mcp/regression/testcase-mgmt/fetch-data", methods=["GET"])
@@ -12442,6 +12812,24 @@ def testcase_mgmt_branches():
         "teams": TESTCASE_MGMT_TEAMS,
         "custom_release_supported": True,
     })
+
+
+@app.route("/mcp/regression/testcase-mgmt/branches", methods=["DELETE"])
+@jwt_required
+def testcase_mgmt_delete_branch():
+    """Delete cached testcase_management_*.json files for a branch (all teams)."""
+    branch = (request.args.get("branch") or "").strip()
+    if not branch:
+        return jsonify({"error": "branch query param is required"}), 400
+    deleted = _delete_tc_data_files(branch)
+    logger.info("Deleted testcase management cache for branch %s: %s", branch, deleted)
+    return jsonify({
+        "success": True,
+        "branch": _normalize_tc_branch_key(branch),
+        "deleted": [os.path.basename(p) for p in deleted],
+    })
+
+
 # Dynamic Job Profile APIs
 # ======================================================
 
@@ -18973,16 +19361,23 @@ def jita_analysis():
 # Use abspath so the path is correct regardless of cwd when backend is started
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_BACKEND_DIR)
-HANDOVER_RECORDS_PATH = (os.getenv("HANDOVER_RECORDS_PATH") or "").strip() or os.path.join(_PROJECT_ROOT, "data", "handover_records.json")
+
+def _handover_records_path(for_write=False):
+    """Team-scoped handover file; HANDOVER_RECORDS_PATH env overrides for tests."""
+    env_path = (os.getenv("HANDOVER_RECORDS_PATH") or "").strip()
+    if env_path:
+        return env_path
+    return _resolve_team_or_legacy_file("handover_records.json", for_write=for_write)
 
 def _load_handover_records():
     """Load handover records from JSON file"""
     try:
-        parent = os.path.dirname(HANDOVER_RECORDS_PATH)
-        if not os.path.exists(parent):
+        path = _handover_records_path(for_write=False)
+        parent = os.path.dirname(path)
+        if parent and not os.path.exists(parent):
             os.makedirs(parent, exist_ok=True)
-        if os.path.exists(HANDOVER_RECORDS_PATH):
-            with open(HANDOVER_RECORDS_PATH, "r") as f:
+        if os.path.exists(path):
+            with open(path, "r") as f:
                 data = json.load(f)
                 return data.get("records", [])
     except Exception as e:
@@ -18993,9 +19388,11 @@ def _load_handover_records():
 def _save_handover_records(records):
     """Save handover records to JSON file"""
     try:
-        parent = os.path.dirname(HANDOVER_RECORDS_PATH)
-        os.makedirs(parent, exist_ok=True)
-        with open(HANDOVER_RECORDS_PATH, "w") as f:
+        path = _handover_records_path(for_write=True)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w") as f:
             json.dump({"records": records, "updated_at": datetime.utcnow().isoformat()}, f, indent=2)
     except Exception as e:
         logger.error(f"Could not save handover records: {e}")
@@ -20460,6 +20857,133 @@ def failed_analysis_deep_ai():
     except Exception as e:
         logger.error("Error in failed-analysis deep-ai: %s", e, exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ======================================================
+# Flux Quick Fix proxy (Failed Testcase Analysis)
+# ======================================================
+def _flux_error_response(exc):
+    if isinstance(exc, FluxError):
+        return jsonify(exc.to_dict()), exc.status_code
+    logger.exception("Unexpected Flux error: %s", exc)
+    return jsonify({"error": str(exc)}), 500
+
+
+def _flux_client_or_error():
+    username = _current_username()
+    if not username:
+        return None, (jsonify({"error": "Not authenticated"}), 401)
+    
+    # Get stored Flux credentials from user_keys
+    flux_username = get_user_key(username, "flux_username")
+    flux_password = get_user_key(username, "flux_password")
+    
+    if not flux_username or not flux_password:
+        return None, (jsonify({
+            "error": "Flux username and password required. Configure them in Settings → API Keys.",
+            "require_key_setup": True,
+            "missing_key": "flux_username" if not flux_username else "flux_password",
+        }), 403)
+    
+    return get_flux_client(flux_username, flux_password), None
+
+
+@app.route("/mcp/regression/flux/quick-fix", methods=["POST"])
+@app.route("/api/mcp/regression/flux/quick-fix", methods=["POST"])
+@jwt_required
+def flux_quick_fix():
+    """Queue a Flux quick-fix for a failed test's Jira ticket."""
+    client, err = _flux_client_or_error()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    jira_key = (body.get("jira_key") or "").strip()
+    raw_branch = (body.get("target_branch") or "").strip()
+    target_branch = _tcms_nutest_target_branch(raw_branch) if raw_branch else ""
+    log_url = (body.get("log_url") or "").strip() or None
+    if not jira_key:
+        return jsonify({"error": "jira_key is required"}), 400
+    if not target_branch:
+        return jsonify({"error": "target_branch is required"}), 400
+
+    username = _current_username()
+    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+    gerrit_http_password = get_user_key(username, "gerrit_http_password") if username else None
+    missing = None
+    if not cursor_api_key:
+        missing = "cursor_api_key"
+    elif not gerrit_http_password:
+        missing = "gerrit_http_password"
+    if missing:
+        return jsonify(FluxKeySetupError(missing).to_dict()), 403
+
+    try:
+        result = client.start_quick_fix(
+            jira_key=jira_key,
+            target_branch=target_branch,
+            log_url=log_url,
+            cursor_api_key=cursor_api_key,
+            gerrit_http_password=gerrit_http_password,
+            send_test_fix=body.get("send_test_fix", True),
+            update_jira=body.get("update_jira", True),
+            pause_for_review=body.get("pause_for_review", True),
+        )
+        return jsonify(result)
+    except FluxError as exc:
+        return _flux_error_response(exc)
+
+
+@app.route("/mcp/regression/flux/tickets/<int:record_id>", methods=["GET"])
+@app.route("/api/mcp/regression/flux/tickets/<int:record_id>", methods=["GET"])
+@jwt_required
+def flux_get_ticket(record_id):
+    """Poll a Flux ticket/record by id."""
+    client, err = _flux_client_or_error()
+    if err:
+        return err
+    try:
+        return jsonify(client.get_ticket(record_id))
+    except FluxError as exc:
+        return _flux_error_response(exc)
+
+
+@app.route("/mcp/regression/flux/tickets/<int:record_id>/resume", methods=["POST"])
+@app.route("/api/mcp/regression/flux/tickets/<int:record_id>/resume", methods=["POST"])
+@jwt_required
+def flux_resume_ticket(record_id):
+    """Resume a paused Flux pipeline (Create Gerrit CR)."""
+    client, err = _flux_client_or_error()
+    if err:
+        return err
+    try:
+        return jsonify(client.resume_ticket(record_id))
+    except FluxError as exc:
+        return _flux_error_response(exc)
+
+
+@app.route("/mcp/regression/flux/nutest-branch", methods=["GET"])
+@app.route("/api/mcp/regression/flux/nutest-branch", methods=["GET"])
+@jwt_required
+def flux_nutest_branch():
+    """Look up nutest-py3-tests_branch from JITA agave_tasks/{id}."""
+    task_id = (request.args.get("task_id") or "").strip()
+    if not task_id:
+        return jsonify({"error": "task_id is required"}), 400
+    try:
+        task = fetch_agave_task(task_id) or {}
+        branch = nutest_branch_from_agave_task(task)
+        return jsonify({
+            "task_id": task_id,
+            "nutest_branch": branch,
+            "nutest-py3-tests_branch": branch,
+        })
+    except requests.exceptions.HTTPError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", 502) or 502
+        logger.warning("JITA agave_tasks lookup failed for %s: %s", task_id, exc)
+        return jsonify({"error": "Failed to fetch JITA task %s" % task_id}), status if 400 <= status < 500 else 502
+    except Exception as exc:
+        logger.warning("JITA agave_tasks lookup failed for %s: %s", task_id, exc)
+        return jsonify({"error": "Failed to fetch JITA task %s" % task_id}), 502
 
 
 # ======================================================

@@ -70,12 +70,21 @@ export default function ManageTestSets({ embedded = false }) {
       const values = argMaps
         .filter((m) => Object.prototype.hasOwnProperty.call(m || {}, key))
         .map((m) => m[key]);
-      const sig = new Set(values.map(stringifyArgValue));
-      const multiple = sig.size > 1;
+      const samples = [];
+      const seen = new Set();
+      values.forEach((v) => {
+        const s = stringifyArgValue(v);
+        if (!seen.has(s)) {
+          seen.add(s);
+          samples.push(s);
+        }
+      });
+      const multiple = samples.length > 1;
       return {
         key,
         value: multiple ? null : values[0],
         multiple_values: multiple,
+        value_samples: multiple ? samples : [],
       };
     });
   };
@@ -417,7 +426,19 @@ export default function ManageTestSets({ embedded = false }) {
       setErrorMsg('Select args to edit or add a new key before applying');
       return;
     }
-    if (!window.confirm(`Go ahead and apply changes to ${selectedCount} selected test set(s)?`)) return;
+    const overwriteKeys = Object.keys(selectedArgEdits)
+      .map((id) => {
+        const sep = id.indexOf(':');
+        const category = sep >= 0 ? id.slice(0, sep) : '';
+        const key = sep >= 0 ? id.slice(sep + 1) : '';
+        const rows = category === 'framework' ? commonFrameworkArgs : commonTestArgs;
+        return rows.some((r) => r.key === key && r.multiple_values) ? key : null;
+      })
+      .filter(Boolean);
+    const overwriteNote = overwriteKeys.length
+      ? `\n\nThis will overwrite differing values for: ${overwriteKeys.join(', ')}`
+      : '';
+    if (!window.confirm(`Go ahead and apply changes to ${selectedCount} selected test set(s)?${overwriteNote}`)) return;
     setApplying(true);
     setErrorMsg(null);
     setSuccessMsg(null);
@@ -533,43 +554,57 @@ export default function ManageTestSets({ embedded = false }) {
     }
   };
 
-  const renderExistingArgRows = (title, category, rows) => (
-    <div
-      className="djp-section"
-      style={{ marginTop: 10, border: '1px solid #e2e8f0', borderRadius: 8, background: '#ffffff' }}
-    >
-      <h3 style={{ margin: '0 0 10px', fontSize: 15, fontWeight: 700, color: '#0f172a' }}>{title}</h3>
-      {rows.length === 0 ? (
-        <p style={{ color: '#64748b', fontSize: 13 }}>No arguments found.</p>
-      ) : (
-        <div style={{ display: 'grid', gap: 8, maxHeight: 420, overflowY: 'auto' }}>
-          {rows.map((row) => {
-            const id = `${category}:${row.key}`;
-            const enabled = Object.prototype.hasOwnProperty.call(selectedArgEdits, id);
-            const displayValue = row.multiple_values ? 'Multiple Values' : String(row.value ?? '');
-            return (
-              <div key={id} style={{ display: 'grid', gridTemplateColumns: '24px 1fr 1fr', gap: 10, alignItems: 'center' }}>
-                <input
-                  type="checkbox"
-                  checked={enabled}
-                  onChange={(e) => setArgEditEnabled(category, row.key, e.target.checked, row.multiple_values ? '' : row.value)}
-                />
-                <div style={{ fontFamily: 'monospace', fontSize: 12, color: '#1f2937' }}>{row.key}</div>
-                <input
-                  className="djp-input"
-                  type="text"
-                  disabled={!enabled}
-                  value={enabled ? selectedArgEdits[id] : displayValue}
-                  onChange={(e) => updateArgEditValue(category, row.key, e.target.value)}
-                  style={!enabled && row.multiple_values ? { color: '#b45309', fontStyle: 'italic' } : undefined}
-                />
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
+  const renderExistingArgRows = (title, category, rows) => {
+    const hasConflicts = rows.some((row) => row.multiple_values);
+    return (
+      <div
+        className="djp-section"
+        style={{ marginTop: 10, border: '1px solid #e2e8f0', borderRadius: 8, background: '#ffffff' }}
+      >
+        <h3 style={{ margin: '0 0 10px', fontSize: 15, fontWeight: 700, color: '#0f172a' }}>{title}</h3>
+        {hasConflicts && (
+          <p style={{ color: '#b45309', fontSize: 12, margin: '0 0 10px' }}>
+            Comma-separated values differ across the selected test sets. Checking a key and applying overwrites it on every selected test set that already has the key.
+          </p>
+        )}
+        {rows.length === 0 ? (
+          <p style={{ color: '#64748b', fontSize: 13 }}>No arguments found.</p>
+        ) : (
+          <div style={{ display: 'grid', gap: 8, maxHeight: 420, overflowY: 'auto' }}>
+            {rows.map((row) => {
+              const id = `${category}:${row.key}`;
+              const conflict = !!row.multiple_values;
+              const enabled = Object.prototype.hasOwnProperty.call(selectedArgEdits, id);
+              const joinedValues = (row.value_samples || []).join(', ');
+              const displayValue = conflict ? joinedValues : String(row.value ?? '');
+              const conflictTitle = 'Different values across selected test sets. Edit and apply to overwrite all of them.';
+              return (
+                <div key={id} style={{ display: 'grid', gridTemplateColumns: '24px 1fr 1fr', gap: 10, alignItems: 'center' }}>
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    title={conflict ? conflictTitle : undefined}
+                    onChange={(e) => setArgEditEnabled(category, row.key, e.target.checked, conflict ? '' : row.value)}
+                  />
+                  <div style={{ fontFamily: 'monospace', fontSize: 12, color: '#1f2937' }}>{row.key}</div>
+                  <input
+                    className="djp-input"
+                    type="text"
+                    disabled={!enabled}
+                    value={enabled ? selectedArgEdits[id] : displayValue}
+                    placeholder={conflict ? joinedValues : undefined}
+                    onChange={(e) => updateArgEditValue(category, row.key, e.target.value)}
+                    title={conflict ? conflictTitle : undefined}
+                    style={!enabled && conflict ? { color: '#b45309', fontStyle: 'italic' } : undefined}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const renderNewArgRows = (title, category, rows) => (
     <div
@@ -753,7 +788,7 @@ export default function ManageTestSets({ embedded = false }) {
               {applying ? 'Applying...' : 'Apply Changes'}
             </button>
             <span style={{ fontSize: 12, color: '#64748b', alignSelf: 'center' }}>
-              Listing uses JITA Test Args / Test Framework Options (fresh GET per test set). Checking a key never copies it onto another test set. Use Add New to introduce a key.
+              Listing uses JITA Test Args / Test Framework Options (fresh GET per test set). Checking a key never copies it onto another test set. Editing a comma-separated (differing) value overwrites it on selected test sets that already have the key. Use Add New to introduce a key.
             </span>
           </div>
 

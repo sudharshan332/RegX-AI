@@ -8,12 +8,20 @@ SAMPLE_NODE_MESSAGE = (
     'Nodes: kylun01-1: Received "fatal" in waiting for event "Running CVM Installer": boom'
 )
 
+MULTI_NODE_INSTALLER_MESSAGE = (
+    "Installer errors:\n\n"
+    "Nodes: pitpf06-4: The target node is not in a valid cluster (imaged by fnd)\n\n"
+    "pitpf07-2: The target node is not in a valid cluster (imaged by fnd)\n\n"
+    "pitpf10-3: The target node is not in a valid cluster (imaged by fnd)\n\n"
+    "pitpf05-2: The target node is not in a valid cluster (imaged by fnd)\n"
+)
+
 
 def _load_helpers():
     path = os.path.join(os.path.dirname(__file__), "..", "test_flask.py")
     with open(path, encoding="utf-8") as fh:
         src = fh.read()
-    start = src.index("def _extract_node_names(")
+    start = src.index("_INSTALLER_NODE_LINE_RE = re.compile(")
     end = src.index("\ndef fetch_jita_deployments(")
     ns = {"re": re}
     exec(src[start:end], ns)  # noqa: S102
@@ -80,6 +88,15 @@ class TestRdmSkillAnalysisMapping(unittest.TestCase):
         self.assertIn("kylun01-1", mapped["failed_nodes"])
         self.assertIn("regx_rerun_disable-kylun01-1", mapped["suggested_comment"])
         self.assertEqual(mapped["suggested_next_action"], "disable_node_and_rerun")
+
+    def test_multi_node_installer_errors_include_all_nodes(self):
+        mapped = self._normalize({}, MULTI_NODE_INSTALLER_MESSAGE)
+        expected = ["pitpf06-4", "pitpf07-2", "pitpf10-3", "pitpf05-2"]
+        self.assertEqual(mapped["failed_nodes"], expected)
+        self.assertEqual(mapped["recommended_action"], "disable_node_and_rerun")
+        for name in expected:
+            self.assertIn("regx_rerun_disable-%s" % name, mapped["suggested_comment"])
+        self.assertIn("Rerun cause due to node issue", mapped["suggested_comment"])
 
     def test_product_create_jira_uses_eng(self):
         mapped = self._normalize({

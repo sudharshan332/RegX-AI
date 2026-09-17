@@ -18,10 +18,36 @@ SAMPLE_MESSAGE = """Installer errors:
 Nodes: kylun01-1: Received "fatal" in waiting for event "Running CVM Installer": An exception was raised: Traceback (most recent call last):
 """
 
+MULTI_NODE_INSTALLER_MESSAGE = """Installer errors:
+
+Nodes: pitpf06-4: The target node is not in a valid cluster (imaged by fnd)
+
+pitpf07-2: The target node is not in a valid cluster (imaged by fnd)
+
+pitpf10-3: The target node is not in a valid cluster (imaged by fnd)
+
+pitpf05-2: The target node is not in a valid cluster (imaged by fnd)
+"""
+
+MULTI_NODE_NAMES = ["pitpf06-4", "pitpf07-2", "pitpf10-3", "pitpf05-2"]
+
 NODE_EXTRACT_PATTERNS = [
     r'([\w-]+):\s*Received\s+"fatal"\s+in\s+waiting\s+for\s+event',
     r"(?:Nodes?:\s*)([a-zA-Z][\w\-]*\d+[-\d]*)",
 ]
+
+
+def _load_extract_helpers():
+    path = os.path.join(os.path.dirname(__file__), "..", "test_flask.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    start = src.index("def _extract_installer_error_nodes(")
+    if "_INSTALLER_NODE_LINE_RE" in src[:start]:
+        start = src.rfind("_INSTALLER_NODE_LINE_RE = re.compile(", 0, start)
+    end = src.index("\ndef _ticket_keys_from_rdm_skill(")
+    ns = {"re": re}
+    exec(src[start:end], ns)  # noqa: S102
+    return ns
 
 
 class TestCvmInstallerNodePattern(unittest.TestCase):
@@ -75,6 +101,27 @@ class TestCvmInstallerNodePattern(unittest.TestCase):
             comment,
             "regx_rerun_disable-kylun01-1 Rerun cause due to node issue",
         )
+
+    def test_extract_all_nodes_from_multi_node_installer_errors(self):
+        extract = _load_extract_helpers()["_extract_node_names"]
+        nodes = extract(MULTI_NODE_INSTALLER_MESSAGE)
+        self.assertEqual(nodes, MULTI_NODE_NAMES)
+
+    def test_multi_node_comment_includes_every_installer_node(self):
+        pattern = self._find("installer_node_failure")
+        extract = _load_extract_helpers()["_extract_node_names"]
+        nodes = extract(MULTI_NODE_INSTALLER_MESSAGE)
+        comment = ", ".join(
+            pattern["comment_template"].replace("{node_name}", n) for n in nodes
+        )
+        self.assertEqual(nodes, MULTI_NODE_NAMES)
+        for name in MULTI_NODE_NAMES:
+            self.assertIn("regx_rerun_disable-%s" % name, comment)
+        self.assertIn("Rerun cause due to node issue", comment)
+
+    def test_extract_keeps_single_installer_node(self):
+        extract = _load_extract_helpers()["_extract_node_names"]
+        self.assertEqual(extract(SAMPLE_MESSAGE), ["kylun01-1"])
 
     def test_patterns_file_is_valid_json(self):
         with open(PATTERN_FILE, "r", encoding="utf-8") as f:
