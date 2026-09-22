@@ -3841,6 +3841,36 @@ a.glean-snippet-title:hover {
   flex-wrap: wrap;
   margin: 8px 0 12px;
 }
+.deep-ai-flux-panel {
+  margin: 0 0 12px;
+  padding: 10px;
+  border: 1px solid #d5dbdb;
+  background: #fbfcfd;
+  border-radius: 4px;
+}
+.deep-ai-flux-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e8449;
+  margin-bottom: 4px;
+}
+.deep-ai-flux-branch-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #34495e;
+  margin: 6px 0 4px;
+}
+.deep-ai-flux-branch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.deep-ai-flux-branch-input {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
 .deep-ai-action-tags {
   display: flex;
   flex-wrap: wrap;
