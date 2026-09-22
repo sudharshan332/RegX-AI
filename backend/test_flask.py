@@ -6824,6 +6824,1653 @@ def fetch_jira_ticket(ticket_id, token=None, fields=None):
         return None
 
 
+
+
+def is_create_eng_ticket_intent(text):
+    """True when the user asks to create/file an ENG/Jira ticket."""
+    t = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not t:
+        return False
+    # Common typos from chat input
+    t = (
+        t.replace("creaet", "create")
+        .replace("ticet", "ticket")
+        .replace("tiket", "ticket")
+    )
+    # Viewing an existing key is not create ("open ticket ENG-123")
+    if re.search(r"\b(open|show|view|get)\b.{0,24}\b[a-z][a-z0-9]+-\d+\b", t):
+        if not re.search(r"\b(create|file|raise|submit)\b", t):
+            return False
+    # Require an explicit create/file verb near ticket/eng/jira
+    return bool(
+        re.search(
+            r"\b(create|file|raise|submit)\b.{0,40}\b(eng\s+)?(jira\s+)?ticket\b"
+            r"|\b(create|file|raise|submit)\b.{0,20}\beng\b"
+            r"|\bnew\s+(eng\s+)?(jira\s+)?ticket\b"
+            r"|\b(create|file)\s+eng\b",
+            t,
+        )
+    )
+
+
+def is_flux_quick_fix_intent(text):
+    """True when the user asks to trigger Flux Quick Fix from Deep AI chat."""
+    t = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"\bflux(\s+quick)?(\s+fix)?\b"
+            r"|\bquick\s*fix\b"
+            r"|\b(fix|patch)\b.{0,24}\b(via|with|using)\s+flux\b"
+            r"|\btrigger\b.{0,16}\bflux\b",
+            t,
+        )
+    )
+
+
+def is_create_cr_intent(text):
+    """True when the user asks to create/file a Gerrit CR / change request."""
+    t = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"\b(create|file|raise|submit|open|push)\b.{0,40}\b(cr|change request|gerrit)\b"
+            r"|\b(create|file|raise)\b.{0,20}\bhandoff\b"
+            r"|\bcr\s+for\s+(the\s+)?fix\b",
+            t,
+        )
+    )
+
+
+# Branches accepted by auto_handoff / auto_deprecate MCP tools.
+_HANDOFF_ALLOWED_BRANCHES = ("master", "ganges-7.6-stable", "ganges-7.6-stable-pc")
+
+
+def _infer_gerrit_target_branch(ticket_ctx):
+    """
+    Infer the Gerrit / handoff branch from the failed JITA run.
+
+    Prefer nutest-py3-tests branch (where test-code CRs land), then NOS branch /
+    current_branch. Maps release aliases onto the handoff-allowed set when possible.
+
+    Returns dict:
+      gerrit_branch  – branch for refs/for/<branch> (best effort, may be raw)
+      handoff_branch – one of master / ganges-7.6-stable / ganges-7.6-stable-pc, or ""
+      raw_branch     – original string from context
+      source         – which field was used
+    """
+    ctx = ticket_ctx or {}
+    candidates = [
+        ("nutest_branch", ctx.get("nutest_branch")),
+        ("nutest-py3-tests_branch", ctx.get("nutest-py3-tests_branch")),
+        ("gerrit_branch", ctx.get("gerrit_branch")),
+        ("cr_branch", ctx.get("cr_branch")),
+        ("nos_branch", ctx.get("nos_branch")),
+        ("current_branch", ctx.get("current_branch")),
+        ("branch", ctx.get("branch")),
+    ]
+    raw = ""
+    source = ""
+    for key, val in candidates:
+        val = str(val or "").strip()
+        if val:
+            raw = val
+            source = key
+            break
+
+    service = str(ctx.get("service") or "").strip().lower()
+    package = str(ctx.get("package_type") or ctx.get("metadata_services") or "").strip().lower()
+    blob = " ".join([raw, service, package, str(ctx.get("label") or "")]).lower()
+    is_pc = bool(
+        re.search(r"(^|[^a-z])pc([^a-z]|$)|-pc\b|prism[_\s-]?central|pc_tar|pc-tar", blob)
+        or service in {"pc", "prism_central", "prism-central"}
+    )
+
+    low = raw.lower().strip()
+    gerrit_branch = raw or "master"
+    handoff_branch = ""
+
+    if not low or low in {"master", "main"}:
+        gerrit_branch = "master"
+        handoff_branch = "master"
+    elif low == "ganges-7.6-stable-pc" or (is_pc and ("7.6" in low or "ganges" in low)):
+        gerrit_branch = "ganges-7.6-stable-pc"
+        handoff_branch = "ganges-7.6-stable-pc"
+    elif low == "ganges-7.6-stable" or re.search(r"\b7\.6\b", low) or "ganges" in low:
+        gerrit_branch = "ganges-7.6-stable"
+        handoff_branch = "ganges-7.6-stable"
+    elif low in _HANDOFF_ALLOWED_BRANCHES:
+        gerrit_branch = low
+        handoff_branch = low
+    else:
+        # Unknown/older branch: keep raw for git push; handoff only if exact match.
+        gerrit_branch = raw
+        handoff_branch = raw if raw in _HANDOFF_ALLOWED_BRANCHES else ""
+
+    return {
+        "gerrit_branch": gerrit_branch,
+        "handoff_branch": handoff_branch,
+        "raw_branch": raw or gerrit_branch,
+        "source": source or "default",
+        "is_pc": is_pc,
+    }
+
+
+def format_cr_branch_system_hint(ticket_ctx, branch_info=None):
+    """Build the [System] block injected into create-CR follow-ups."""
+    ctx = ticket_ctx or {}
+    info = branch_info or _infer_gerrit_target_branch(ctx)
+    testcase = (ctx.get("testcase_name") or "").strip()
+    gerrit_branch = info.get("gerrit_branch") or "master"
+    handoff_branch = info.get("handoff_branch") or ""
+    lines = [
+        "[System] CR branch context from this failed run — do NOT ask the user and "
+        "do NOT default to master unless the run was on master.",
+        f"- Failed-run / target branch: `{gerrit_branch}` (source: {info.get('source')}, raw: {info.get('raw_branch')})",
+        f"- Gerrit push ref MUST be: `refs/for/{gerrit_branch}`",
+    ]
+    if testcase:
+        lines.append(f"- Testcase: `{testcase}`")
+    if ctx.get("created_ticket") or ctx.get("jira_duplicates"):
+        tickets = []
+        if ctx.get("created_ticket"):
+            tickets.append(str(ctx["created_ticket"]))
+        for t in ctx.get("jira_duplicates") or []:
+            if t and str(t) not in tickets:
+                tickets.append(str(t))
+        if tickets:
+            lines.append(f"- Related ENG ticket(s): {', '.join(tickets[:5])}")
+    if handoff_branch:
+        lines.append(
+            f"- For auto_handoff / auto_deprecate, pass `branch=\"{handoff_branch}\"` "
+            f"(allowed: master | ganges-7.6-stable | ganges-7.6-stable-pc)."
+        )
+        lines.append(
+            "- Prefer: validate with action=auto first, show the user the result, "
+            "then only execute start/complete/approve after they confirm."
+        )
+    else:
+        lines.append(
+            f"- Branch `{gerrit_branch}` is not in the auto_handoff allow-list. "
+            f"For a code-fix CR, prepare the change against `{gerrit_branch}` and "
+            f"push to `refs/for/{gerrit_branch}`. Do not force master."
+        )
+    lines.append(
+        "- Do NOT claim a CR was created unless a tool call (auto_handoff/auto_deprecate) "
+        "or push succeeded. Include the CR URL when available."
+    )
+    return "\n".join(lines)
+
+
+def is_investigate_ticket_intent(text):
+    """True when user asks about ENG ticket status / fix / linked CR."""
+    t = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not t:
+        return False
+    has_ticket_ref = bool(re.search(r"\beng-\d+\b", t) or re.search(r"\b(ticket|jira|eng)\b", t))
+    asks_status = bool(
+        re.search(
+            r"\b(status|fixed|resolved|fix|cr|change request|gerrit|what('?s| is) "
+            r"(the )?(issue|problem)|has it been|duplicate)\b",
+            t,
+        )
+    )
+    return has_ticket_ref and asks_status
+
+
+def extract_eng_ticket_keys(text, extra=None):
+    """Extract ENG-#### keys from free text and optional lists."""
+    keys = []
+    for m in re.finditer(r"\b([A-Z][A-Z0-9]+-\d+)\b", text or "", flags=re.I):
+        key = m.group(1).upper()
+        if key not in keys:
+            keys.append(key)
+    for item in extra or []:
+        if isinstance(item, str) and re.match(r"^[A-Z][A-Z0-9]+-\d+$", item.strip().upper()):
+            key = item.strip().upper()
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
+def investigate_eng_ticket(ticket_key, token=None):
+    """
+    Fetch ENG ticket status, resolution, and linked Gerrit CRs via Jira REST.
+
+    Returns dict suitable for follow-up answers (ok/error + fields).
+    """
+    key = (ticket_key or "").strip().upper()
+    if not key or not re.match(r"^[A-Z][A-Z0-9]+-\d+$", key):
+        return {"ok": False, "error": "Invalid ticket key", "key": key}
+
+    jira_token = resolve_jira_token(token)
+    if not jira_token:
+        return {
+            "ok": False,
+            "key": key,
+            "error": (
+                "Jira token not available. Open User Settings → API Keys and add "
+                "your Atlassian Jira Personal Token."
+            ),
+        }
+
+    headers = get_jira_headers(jira_token)
+    try:
+        resp = session.get(
+            f"{JIRA_BASE}/issue/{key}",
+            headers=headers,
+            params={
+                "fields": (
+                    "summary,status,resolution,issuetype,assignee,components,"
+                    "labels,updated,created,description,comment,fixVersions,versions"
+                ),
+            },
+            timeout=30,
+            verify=False,
+        )
+        if resp.status_code != 200:
+            return {
+                "ok": False,
+                "key": key,
+                "error": f"Jira fetch failed ({resp.status_code}): {(resp.text or '')[:400]}",
+            }
+
+        data = resp.json() or {}
+        fields = data.get("fields") or {}
+        status = ((fields.get("status") or {}).get("name") or "").strip()
+        resolution = ((fields.get("resolution") or {}).get("name") or "").strip()
+        issue_type = ((fields.get("issuetype") or {}).get("name") or "").strip()
+        summary = (fields.get("summary") or "").strip()
+        assignee = ((fields.get("assignee") or {}).get("displayName") or "").strip()
+        components = [
+            (c.get("name") or "").strip()
+            for c in (fields.get("components") or [])
+            if (c.get("name") or "").strip()
+        ]
+        labels = fields.get("labels") or []
+        description = (fields.get("description") or "") or ""
+        if len(description) > 2500:
+            description = description[:2500] + "…"
+
+        # Linked Gerrit CRs via Jira development / stash integration
+        crs = []
+        issue_id = data.get("id") or ""
+        if issue_id:
+            try:
+                dev_resp = session.get(
+                    "https://jira.nutanix.com/rest/dev-status/latest/issue/detail",
+                    headers=headers,
+                    params={
+                        "issueId": issue_id,
+                        "applicationType": "stash",
+                        "dataType": "pullrequest",
+                    },
+                    timeout=30,
+                    verify=False,
+                )
+                if dev_resp.status_code == 200:
+                    for detail in (dev_resp.json() or {}).get("detail") or []:
+                        for pr in detail.get("pullRequests") or []:
+                            crs.append({
+                                "id": pr.get("id") or "",
+                                "name": pr.get("name") or "",
+                                "status": pr.get("status") or "",
+                                "url": pr.get("url") or "",
+                            })
+            except Exception as dev_err:
+                logger.warning("Dev-status fetch failed for %s: %s", key, dev_err)
+
+        # Also scrape remote links for Gerrit URLs
+        try:
+            rl_resp = session.get(
+                f"{JIRA_BASE}/issue/{key}/remotelink",
+                headers=headers,
+                timeout=20,
+                verify=False,
+            )
+            if rl_resp.status_code == 200:
+                for link in rl_resp.json() or []:
+                    obj = link.get("object") or {}
+                    url = (obj.get("url") or "").strip()
+                    title = (obj.get("title") or "").strip()
+                    if url and ("gerrit" in url.lower() or "nugerrit" in url.lower()):
+                        if not any(c.get("url") == url for c in crs):
+                            crs.append({
+                                "id": title or url.rsplit("/", 1)[-1],
+                                "name": title,
+                                "status": "",
+                                "url": url,
+                            })
+        except Exception as rl_err:
+            logger.warning("Remote-link fetch failed for %s: %s", key, rl_err)
+
+        status_l = status.lower()
+        resolution_l = resolution.lower()
+        is_fixed = (
+            resolution_l in {"fixed", "done", "resolved", "completed"}
+            or status_l in {"resolved", "closed", "done", "fixed"}
+        )
+        is_open = status_l in {
+            "open", "in progress", "reopened", "need info", "pending review",
+            "pending merge", "to do", "selected for development",
+        }
+
+        return {
+            "ok": True,
+            "key": key,
+            "url": f"https://jira.nutanix.com/browse/{key}",
+            "summary": summary,
+            "status": status,
+            "resolution": resolution or None,
+            "issue_type": issue_type,
+            "assignee": assignee or None,
+            "components": components,
+            "labels": labels,
+            "description": description,
+            "is_fixed": is_fixed,
+            "is_open": is_open,
+            "crs": crs,
+            "updated": fields.get("updated"),
+            "created": fields.get("created"),
+        }
+    except Exception as e:
+        logger.error("investigate_eng_ticket(%s) failed: %s", key, e, exc_info=True)
+        return {"ok": False, "key": key, "error": str(e)}
+
+
+def format_eng_investigation_answer(info, glean_snippets=None):
+    """Render investigate_eng_ticket result as markdown for follow_up_answer."""
+    if not info or not info.get("ok"):
+        return f"Could not investigate ticket: {(info or {}).get('error') or 'unknown error'}"
+
+    lines = [
+        f"### [{info['key']}]({info['url']}) — ticket investigation",
+        "",
+        f"**Summary:** {info.get('summary') or 'N/A'}",
+        f"**Type:** {info.get('issue_type') or 'N/A'}",
+        f"**Status:** {info.get('status') or 'N/A'}"
+        + (f" (resolution: {info['resolution']})" if info.get("resolution") else ""),
+        f"**Fixed?** {'Yes' if info.get('is_fixed') else ('No — still open' if info.get('is_open') else 'Unclear from status')}",
+    ]
+    if info.get("assignee"):
+        lines.append(f"**Assignee:** {info['assignee']}")
+    if info.get("components"):
+        lines.append(f"**Components:** {', '.join(info['components'])}")
+
+    crs = info.get("crs") or []
+    lines.append("")
+    lines.append("#### Linked CR(s)")
+    if crs:
+        for cr in crs:
+            label = cr.get("id") or cr.get("name") or "CR"
+            url = cr.get("url") or ""
+            status = cr.get("status") or ""
+            if url:
+                lines.append(f"- [{label}]({url})" + (f" — {status}" if status else ""))
+            else:
+                lines.append(f"- {label}" + (f" — {status}" if status else ""))
+    else:
+        lines.append("- No Gerrit CR linked in Jira development/remote links.")
+
+    if info.get("description"):
+        lines.extend(["", "#### Issue description (trimmed)", "```", info["description"][:1200], "```"])
+
+    if glean_snippets:
+        lines.extend(["", "#### Glean / product knowledge"])
+        for snip in glean_snippets[:5]:
+            lines.append(f"- {snip}")
+
+    return "\n".join(lines)
+
+
+def _issue_type_from_classification(classification):
+    """
+    Deep-analysis ENG creates use issue type Test (matches real ENG test bugs).
+    Bug type requires extra fields (Impact, Bug Found With, Hypervisor Specific) we
+    do not fill — so only return Bug when the user explicitly asks for it.
+    """
+    cls = (classification or "").strip().lower()
+    if cls in {"bug", "product bug"} or cls == "bug issue":
+        return "Bug"
+    return "Test"
+
+
+# Known ENG Primary Component parents (customfield_15160 cascading select).
+_ENG_PRIMARY_COMPONENT_ALIASES = (
+    (re.compile(r"\bstargate\b", re.I), "Stargate"),
+    (re.compile(r"\bcurator\b", re.I), "Curator"),
+    (re.compile(r"\bcassandra\b", re.I), "Cassandra"),
+    (re.compile(r"\bcerebro\b", re.I), "Cerebro"),
+    (re.compile(r"\bhades\b", re.I), "Hades"),
+    (re.compile(r"\bcastor\b", re.I), "Castor"),
+    (re.compile(r"\binsights?\b", re.I), "Insights"),
+    (re.compile(r"\bprism\b|\bpc\b|manageability", re.I), "Prism"),
+    (re.compile(r"\bexternal[_\s]?storage\b|\bblockstore\b|\bnvmf\b", re.I), "External Storage"),
+    (re.compile(r"\bandur\b", re.I), "Anduril"),
+    (re.compile(r"\bmagneto\b", re.I), "Magneto"),
+    (re.compile(r"\bcanvas\b", re.I), "Canvas"),
+)
+
+# ENG Test Type (customfield_18062) — only these four options are valid.
+_ENG_TEST_TYPE_CANDIDATES = (
+    "Test Bug",
+    "Product Bug",
+    "New Test",
+    "Test Task",
+)
+_ENG_TEST_TYPE_ALIASES = {
+    "nutest": "Test Bug",
+    "nu test": "Test Bug",
+    "pytest": "Test Bug",
+    "automation": "Test Bug",
+    "system test": "Test Bug",
+    "functional": "Test Bug",
+    "regression": "Test Bug",
+    "integration": "Test Bug",
+    "test": "Test Bug",
+    "testbug": "Test Bug",
+    "test bug": "Test Bug",
+    "product": "Product Bug",
+    "product bug": "Product Bug",
+    "product issue": "Product Bug",
+    "new test": "New Test",
+    "test task": "Test Task",
+}
+
+# Observed valid ENG "Regression?" options (customfield_13260). Plain "Yes" is invalid.
+_ENG_REGRESSION_YES = "Yes-build-to-build"
+_ENG_REGRESSION_NO = "No"
+
+# Cache: (issue_type) -> createmeta field map
+_eng_createmeta_cache = {}
+_eng_createmeta_lock = threading.Lock()
+
+
+def _build_eng_ticket_summary(ticket_ctx):
+    explicit = (ticket_ctx.get("summary") or "").strip()
+    if explicit:
+        return explicit[:255]
+    testcase = (ticket_ctx.get("testcase_name") or "").strip()
+    root = re.sub(r"\s+", " ", (ticket_ctx.get("root_cause") or "").strip())
+    short_root = root[:140] if root else "Failed testcase triage"
+    short_tc = testcase.split(".")[-1] if testcase else "testcase"
+    return f"{short_tc} — {short_root}"[:255]
+
+
+def _oid_str(value):
+    if isinstance(value, dict) and value.get("$oid"):
+        return str(value["$oid"]).strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _parse_jita_log_url_parts(test_log_url):
+    """
+    Parse task/result ids + lab/infra from a JITA test_log_url.
+    Supports both API proxy URLs and raw /logs/<task>/<result>/ paths.
+    """
+    url = (test_log_url or "").strip()
+    out = {"task_id": "", "result_dir": "", "lab": "phx1", "infra": "nutest", "raw_path": ""}
+    if not url:
+        return out
+    m = re.search(r"[?&]lab=([^&]+)", url, flags=re.I)
+    if m:
+        out["lab"] = m.group(1)
+    m = re.search(r"[?&]infra=([^&]+)", url, flags=re.I)
+    if m:
+        out["infra"] = m.group(1)
+    m = re.search(r"(?:[?&]url=)?(/logs/([a-f0-9]{24})/([a-f0-9]{24}))", url, flags=re.I)
+    if not m:
+        m = re.search(r"/logs/([a-f0-9]{24})/([a-f0-9]{24})", url, flags=re.I)
+        if m:
+            out["task_id"] = m.group(1)
+            out["result_dir"] = m.group(2)
+            out["raw_path"] = f"/logs/{m.group(1)}/{m.group(2)}"
+            return out
+        return out
+    out["raw_path"] = m.group(1)
+    out["task_id"] = m.group(2)
+    out["result_dir"] = m.group(3)
+    return out
+
+
+def _jita_api_log_url(path_under_logs, lab="phx1", infra="nutest"):
+    path = (path_under_logs or "").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    return (
+        f"https://jita.eng.nutanix.com/api/v2/log?log_type=test_log"
+        f"&url={path}&lab={lab}&infra={infra}"
+    )
+
+
+def _build_eng_ticket_links(ticket_ctx):
+    """Build Triage-Genie-style Jita / Log / Triage Genie / Triage Genie JSON links."""
+    testcase = (ticket_ctx.get("testcase_name") or "").strip()
+    test_log_url = (ticket_ctx.get("test_log_url") or "").strip()
+    task_id = (
+        _oid_str(ticket_ctx.get("agave_task_id"))
+        or _oid_str(ticket_ctx.get("task_id"))
+        or ""
+    )
+    result_id = (
+        _oid_str(ticket_ctx.get("testcase_id"))
+        or _oid_str(ticket_ctx.get("test_result_id"))
+        or ""
+    )
+    parts = _parse_jita_log_url_parts(test_log_url)
+    if not task_id:
+        task_id = parts.get("task_id") or ""
+    lab = parts.get("lab") or "phx1"
+    infra = parts.get("infra") or "nutest"
+    raw_path = parts.get("raw_path") or ""
+    if not raw_path and task_id and parts.get("result_dir"):
+        raw_path = f"/logs/{task_id}/{parts['result_dir']}"
+    if not raw_path and task_id and result_id:
+        # Fallback: some runs use result id as log dir.
+        raw_path = f"/logs/{task_id}/{result_id}"
+
+    log_link = ""
+    if test_log_url and "log_type=test_log" in test_log_url:
+        log_link = test_log_url
+    elif raw_path:
+        log_link = _jita_api_log_url(raw_path, lab=lab, infra=infra)
+    elif test_log_url:
+        log_link = test_log_url
+
+    jita_link = ""
+    if task_id:
+        jita_link = (
+            f"https://jita.eng.nutanix.com/results?task_ids={task_id}"
+            f"&active_tab=2&merge_tests=false"
+        )
+
+    tg_link = ""
+    if result_id:
+        tg_link = f"http://triage-genie.eng.nutanix.com/review/{result_id}"
+    elif task_id:
+        tg_link = f"http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids={task_id}"
+
+    tg_json_link = ""
+    tc_path = convert_testcase_name_to_path(testcase)
+    if raw_path and tc_path:
+        tg_json_link = _jita_api_log_url(
+            f"{raw_path.rstrip('/')}/{tc_path}/normalized_logs/triage_genie.json",
+            lab=lab,
+            infra=infra,
+        )
+
+    return {
+        "jita": jita_link,
+        "log": log_link,
+        "triage_genie": tg_link,
+        "triage_genie_json": tg_json_link,
+        "task_id": task_id,
+        "result_id": result_id,
+        "raw_path": raw_path,
+        "lab": lab,
+        "infra": infra,
+    }
+
+
+def _extract_steps_from_steps_log(steps_log, limit=40):
+    """Pull unique STEP descriptions from steps.log as a Test Steps fallback."""
+    if not steps_log:
+        return ""
+    steps = []
+    seen = set()
+    for line in str(steps_log).splitlines():
+        m = re.search(r"\bSTEP\b.*?\(T[SB]\)\s+(.*)$", line)
+        if not m:
+            continue
+        text = m.group(1).strip().strip("-").strip()
+        if not text or set(text) <= {"-", "="} or text in seen:
+            continue
+        seen.add(text)
+        steps.append(text)
+        if len(steps) >= limit:
+            break
+    return "\n".join(steps)
+
+
+def _fetch_last_pass_info(testcase_name, branch="", timeout=12):
+    """Best-effort last successful run for Regression line (may be unavailable)."""
+    testcase_name = (testcase_name or "").strip()
+    if not testcase_name:
+        return {}
+    branch = (branch or "").strip()
+    raw_query = {"test": testcase_name, "status": "Succeeded"}
+    if branch:
+        raw_query["branch"] = branch
+    try:
+        resp = session.post(
+            f"{JITA_BASE}/reports/agave_test_results",
+            json={
+                "raw_query": raw_query,
+                "only": "_id,test,status,start_time,end_time,branch",
+                "start": 0,
+                "limit": 1,
+                "sort": "-start_time",
+                "merge": True,
+            },
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return {}
+        rows = (resp.json() or {}).get("data") or []
+        if not rows:
+            return {}
+        row = rows[0]
+        ts = row.get("start_time") or row.get("end_time")
+        when = ""
+        if isinstance(ts, dict) and "$date" in ts:
+            when = datetime.utcfromtimestamp(ts["$date"] / 1000).strftime("%Y-%m-%dT%H:%M:%S")
+        elif isinstance(ts, (int, float)):
+            # seconds or ms
+            val = float(ts)
+            if val > 1e12:
+                val = val / 1000.0
+            when = datetime.utcfromtimestamp(val).strftime("%Y-%m-%dT%H:%M:%S")
+        elif isinstance(ts, str):
+            when = ts
+        return {
+            "branch": (row.get("branch") or branch or "").strip(),
+            "at": when,
+        }
+    except Exception as e:
+        logger.debug("last-pass lookup failed for %s: %s", testcase_name, e)
+        return {}
+
+
+def _enrich_eng_ticket_context(ticket_ctx):
+    """
+    Fill NOS/PC commits, exception/traceback, log URL, and links from JITA so the
+    ENG description matches Triage Genie style for this specific test run.
+    """
+    ctx = dict(ticket_ctx or {})
+    testcase = (ctx.get("testcase_name") or "").strip()
+    result_id = _oid_str(ctx.get("testcase_id") or ctx.get("test_result_id"))
+    task_id = _oid_str(ctx.get("agave_task_id") or ctx.get("task_id"))
+
+    detailed = {}
+    if result_id:
+        detailed = fetch_detailed_test_result(result_id) or {}
+        if detailed:
+            if not testcase:
+                test_obj = detailed.get("test") or {}
+                testcase = (test_obj.get("name") if isinstance(test_obj, dict) else "") or ""
+                ctx["testcase_name"] = testcase
+            if not task_id:
+                task_id = _oid_str(detailed.get("agave_task_id"))
+                if task_id:
+                    ctx["agave_task_id"] = task_id
+            if not (ctx.get("test_log_url") or "").strip() and detailed.get("test_log_url"):
+                ctx["test_log_url"] = detailed.get("test_log_url")
+            if not (ctx.get("exception") or "").strip() and detailed.get("exception"):
+                ctx["exception"] = detailed.get("exception")
+            if not (ctx.get("exception_summary") or "").strip() and detailed.get("exception_summary"):
+                ctx["exception_summary"] = detailed.get("exception_summary")
+            if not (ctx.get("nos_branch") or "").strip() and detailed.get("branch"):
+                ctx["nos_branch"] = detailed.get("branch")
+            if not (ctx.get("nos_commit") or "").strip() and detailed.get("commit_id"):
+                ctx["nos_commit"] = detailed.get("commit_id")
+            if not (ctx.get("nos_gbn") or ctx.get("gbn")) and detailed.get("gbn") is not None:
+                ctx["nos_gbn"] = detailed.get("gbn")
+
+    if task_id and (
+        not ctx.get("nos_commit")
+        or not ctx.get("pc_commit")
+        or not ctx.get("nos_branch")
+        or not ctx.get("pc_branch")
+        or not ctx.get("nutest_branch")
+        or not ctx.get("nutest-py3-tests_branch")
+    ):
+        try:
+            task = fetch_agave_task(task_id) or {}
+        except Exception as e:
+            logger.debug("fetch_agave_task(%s) failed: %s", task_id, e)
+            task = {}
+        if task:
+            ctx.setdefault("nos_branch", task.get("branch") or "")
+            ctx.setdefault("nos_commit", task.get("commit_id") or "")
+            if task.get("gbn") is not None:
+                ctx.setdefault("nos_gbn", task.get("gbn"))
+            ctx.setdefault("pc_branch", task.get("image_branch") or task.get("branch") or "")
+            ctx.setdefault("pc_commit", task.get("image_commit") or task.get("commit_id") or "")
+            if task.get("image_gbn") is not None:
+                ctx.setdefault("pc_gbn", task.get("image_gbn"))
+            elif task.get("gbn") is not None:
+                ctx.setdefault("pc_gbn", task.get("gbn"))
+            # Test-repo branch is the one Gerrit CRs for nutest fixes should target.
+            if task.get("nutest-py3-tests_branch"):
+                ctx.setdefault("nutest_branch", task.get("nutest-py3-tests_branch"))
+                ctx.setdefault("nutest-py3-tests_branch", task.get("nutest-py3-tests_branch"))
+            if task.get("service"):
+                ctx.setdefault("service", task.get("service"))
+            if task.get("label"):
+                ctx.setdefault("label", task.get("label"))
+            if task.get("package_type"):
+                ctx.setdefault("package_type", task.get("package_type"))
+
+    # Default PC from NOS when PC fields still blank.
+    if not (ctx.get("pc_branch") or "").strip():
+        ctx["pc_branch"] = ctx.get("nos_branch") or ctx.get("current_branch") or "master"
+    if not (ctx.get("pc_commit") or "").strip():
+        ctx["pc_commit"] = ctx.get("nos_commit") or ""
+    if ctx.get("pc_gbn") is None and ctx.get("nos_gbn") is not None:
+        ctx["pc_gbn"] = ctx.get("nos_gbn")
+    if not (ctx.get("nos_branch") or "").strip():
+        ctx["nos_branch"] = ctx.get("current_branch") or ctx.get("branch") or "master"
+
+    # Failed-with one-liner
+    if not (ctx.get("failed_with") or "").strip():
+        ctx["failed_with"] = (
+            (ctx.get("root_cause") or "").strip()
+            or (ctx.get("exception_summary") or "").strip()
+            or (ctx.get("ai_summary") or "").strip()
+        )
+
+    # Test steps: explicit > steps.log STEP lines
+    if not (ctx.get("test_steps") or "").strip():
+        links = _build_eng_ticket_links(ctx)
+        tc_path = convert_testcase_name_to_path(testcase)
+        steps_text = ""
+        if links.get("raw_path") and tc_path:
+            steps_url = _jita_api_log_url(
+                f"{links['raw_path'].rstrip('/')}/{tc_path}/steps.log",
+                lab=links.get("lab") or "phx1",
+                infra=links.get("infra") or "nutest",
+            )
+            steps_text = _extract_steps_from_steps_log(
+                fetch_log_from_url(steps_url, timeout=20)
+            )
+        if steps_text:
+            ctx["test_steps"] = steps_text
+
+    # Last pass (best-effort; skip quietly on timeout)
+    if not ctx.get("last_pass_at"):
+        lp = _fetch_last_pass_info(
+            testcase,
+            branch=(ctx.get("nos_branch") or ctx.get("current_branch") or ""),
+        )
+        if lp.get("at"):
+            ctx["last_pass_at"] = lp["at"]
+            ctx["last_pass_branch"] = lp.get("branch") or ctx.get("nos_branch") or "master"
+
+    ctx["_eng_links"] = _build_eng_ticket_links(ctx)
+    branch_info = _infer_gerrit_target_branch(ctx)
+    ctx["gerrit_branch"] = branch_info.get("gerrit_branch")
+    ctx["handoff_branch"] = branch_info.get("handoff_branch")
+    ctx["cr_branch"] = branch_info.get("gerrit_branch")
+    ctx["_branch_info"] = branch_info
+    return ctx
+
+
+def _build_eng_ticket_description(ticket_ctx):
+    """
+    Build ENG description in Triage Genie style:
+
+      Test case *name*
+      Failed with:
+      ...
+      NOS:*branch* commit (gbn)
+      PC :*branch* commit (gbn)
+      Regression: *Yes-build-to-build*, Last pass on branch *master*, at *ts*
+      Links: [Jita|...] | [Log|...] | [Triage Genie|...] | [Triage Genie JSON|...]
+      Test Steps: {noformat}...{noformat}
+      Traceback: {code}...{code}
+    """
+    ctx = ticket_ctx or {}
+    testcase = (ctx.get("testcase_name") or "").strip()
+    failed_with = re.sub(r"\s+", " ", (ctx.get("failed_with") or ctx.get("root_cause") or "").strip())
+    if len(failed_with) > 600:
+        failed_with = failed_with[:597].rstrip() + "..."
+
+    nos_branch = (ctx.get("nos_branch") or ctx.get("current_branch") or ctx.get("branch") or "master").strip()
+    nos_commit = (ctx.get("nos_commit") or "").strip()
+    nos_gbn = ctx.get("nos_gbn") if ctx.get("nos_gbn") is not None else ctx.get("gbn")
+    pc_branch = (ctx.get("pc_branch") or nos_branch).strip()
+    pc_commit = (ctx.get("pc_commit") or nos_commit).strip()
+    pc_gbn = ctx.get("pc_gbn") if ctx.get("pc_gbn") is not None else nos_gbn
+
+    regression = (ctx.get("regression") or _ENG_REGRESSION_YES).strip() or _ENG_REGRESSION_YES
+    last_pass_branch = (ctx.get("last_pass_branch") or nos_branch).strip()
+    last_pass_at = (ctx.get("last_pass_at") or "").strip()
+
+    links = ctx.get("_eng_links") or _build_eng_ticket_links(ctx)
+    link_bits = []
+    if links.get("jita"):
+        link_bits.append(f"[Jita|{links['jita']}]")
+    if links.get("log"):
+        link_bits.append(f"[Log|{links['log']}]")
+    if links.get("triage_genie"):
+        link_bits.append(f"[Triage Genie|{links['triage_genie']}]")
+    if links.get("triage_genie_json"):
+        link_bits.append(f"[Triage Genie JSON|{links['triage_genie_json']}]")
+
+    lines = []
+    if testcase:
+        lines.append(f"Test case *{testcase}*")
+    else:
+        lines.append("Test case *unknown*")
+    lines.append("Failed with:")
+    lines.append(failed_with or "See traceback / deep analysis below.")
+    lines.append("")
+    nos_line = f"NOS:*{nos_branch}*"
+    if nos_commit:
+        nos_line += f" {nos_commit}"
+    if nos_gbn not in (None, ""):
+        nos_line += f" ({nos_gbn})"
+    pc_line = f"PC :*{pc_branch}*"
+    if pc_commit:
+        pc_line += f" {pc_commit}"
+    if pc_gbn not in (None, ""):
+        pc_line += f" ({pc_gbn})"
+    lines.append(nos_line)
+    lines.append(pc_line)
+
+    reg_line = f"Regression: *{regression}*"
+    if last_pass_at:
+        reg_line += f", Last pass on branch *{last_pass_branch}*, at *{last_pass_at}*"
+    lines.append(reg_line)
+
+    if link_bits:
+        lines.append("Links: " + " | ".join(link_bits))
+    lines.append("")
+
+    test_steps = (ctx.get("test_steps") or "").strip()
+    if test_steps:
+        lines.append("Test Steps:")
+        lines.append("{noformat}")
+        lines.append(test_steps[:6000])
+        lines.append("{noformat}")
+        lines.append("")
+
+    expected = (ctx.get("expected_results") or "").strip()
+    if expected:
+        lines.append(f"Expected results - {expected}")
+        lines.append("")
+
+    traceback = (ctx.get("exception") or ctx.get("traceback") or "").strip()
+    if traceback:
+        lines.append("Traceback:")
+        lines.append("{code}")
+        lines.append(traceback[:12000])
+        lines.append("{code}")
+        lines.append("")
+
+    # Keep deep-analysis extras after the TG-style block (does not replace it).
+    extras = []
+    report = (ctx.get("triage_report") or "").strip()
+    if report and "Failed with:" not in report[:80]:
+        extras.append("h3. RegX-AI Deep Analysis\n" + report[:8000])
+    fix = (ctx.get("suggested_fix") or "").strip()
+    if fix:
+        extras.append("h3. Suggested Fix\n" + fix[:3000])
+    related = []
+    for c in ctx.get("related_components") or []:
+        name = (c if isinstance(c, str) else str(c)).strip()
+        if name and name not in related:
+            related.append(name)
+    # related components are appended later by create_eng_jira_ticket too; skip here
+
+    body = "\n".join(lines).rstrip()
+    if extras:
+        body = body + "\n\n----\n" + "\n\n".join(extras)
+    body = body + "\n\n----\n_Created via RegX-AI Cursor Deep Analysis_"
+    return body
+
+
+def _infer_primary_component(ticket_ctx):
+    """Infer ENG Primary Component parent from analysis / testcase path."""
+    explicit = (ticket_ctx.get("primary_component") or "").strip()
+    if explicit:
+        return explicit
+    haystacks = []
+    for c in ticket_ctx.get("related_components") or []:
+        haystacks.append(str(c))
+    for c in ticket_ctx.get("components") or []:
+        haystacks.append(str(c))
+    haystacks.append(ticket_ctx.get("testcase_name") or "")
+    haystacks.append(ticket_ctx.get("root_cause") or "")
+    haystacks.append(ticket_ctx.get("triage_report") or "")
+    blob = " ".join(haystacks)
+    for pattern, name in _ENG_PRIMARY_COMPONENT_ALIASES:
+        if pattern.search(blob):
+            return name
+    # Path heuristic: cdp.<service>....
+    tc = (ticket_ctx.get("testcase_name") or "").strip().lower()
+    parts = tc.split(".")
+    if len(parts) >= 2 and parts[0] == "cdp":
+        svc = parts[1].replace("_", " ").title()
+        # Prefer known alias casing
+        for _, name in _ENG_PRIMARY_COMPONENT_ALIASES:
+            if name.lower() == svc.lower() or name.lower().replace(" ", "_") == parts[1]:
+                return name
+        return svc
+    return ""
+
+
+def resolve_sourcegraph_token(explicit_token=None):
+    """Resolve Sourcegraph token from request/user settings/env."""
+    tok = (explicit_token or "").strip()
+    if tok and "****" not in tok:
+        return tok
+    username = _current_username()
+    if username:
+        saved = (get_user_key(username, "sourcegraph_token") or "").strip()
+        if saved:
+            return saved
+    return (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+
+
+def _infer_affects_version(ticket_ctx):
+    """Infer Affects Version as a valid ENG Jira version name (not git branch)."""
+    for key in ("affects_version", "version", "nos_version", "current_branch", "branch"):
+        raw = (ticket_ctx.get(key) or "").strip()
+        if not raw:
+            continue
+        low = raw.lower()
+        if "master" in low:
+            return "master"
+        # Branch ganges-7.6-stable → Jira version "7.6" (not the branch name)
+        m = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", raw)
+        if m:
+            return m.group(1)
+        if "ganges" in low:
+            return "7.6"
+    blob = " ".join([
+        str(ticket_ctx.get("triage_report") or ""),
+        str(ticket_ctx.get("root_cause") or ""),
+    ])
+    if re.search(r"\bmaster\b", blob, flags=re.I):
+        return "master"
+    m = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", blob)
+    if m:
+        return m.group(1)
+    return "master"
+
+
+def _infer_test_type(ticket_ctx):
+    """Map to a valid ENG Test Type option (never NuTest — not a Jira option)."""
+    explicit = (ticket_ctx.get("test_type") or "").strip()
+    if explicit:
+        mapped = _ENG_TEST_TYPE_ALIASES.get(explicit.lower())
+        if mapped:
+            return mapped
+        if explicit in _ENG_TEST_TYPE_CANDIDATES:
+            return explicit
+        # Unknown string — fall through to classification-based default
+    cls = (ticket_ctx.get("classification") or "").strip().lower()
+    if "product" in cls:
+        return "Product Bug"
+    return "Test Bug"
+
+
+def _infer_regression_flag(ticket_ctx):
+    """ENG Regression? options are e.g. No / Yes-build-to-build (not plain Yes)."""
+    explicit = ticket_ctx.get("regression")
+    if isinstance(explicit, bool):
+        return _ENG_REGRESSION_YES if explicit else _ENG_REGRESSION_NO
+    if isinstance(explicit, str) and explicit.strip():
+        val = explicit.strip()
+        low = val.lower()
+        if low in {"no", "n", "false", "0"}:
+            return _ENG_REGRESSION_NO
+        if low in {"yes", "y", "true", "1"} or low.startswith("yes"):
+            # Preserve already-valid option strings
+            if val in (_ENG_REGRESSION_YES, "Yes-release-to-release", "Yes-build-to-build"):
+                return val if val != "Yes" else _ENG_REGRESSION_YES
+            if "release" in low:
+                return "Yes-release-to-release"
+            return _ENG_REGRESSION_YES
+        return val
+    # Deep analysis in RegX is almost always a regression failure.
+    return _ENG_REGRESSION_YES
+
+
+def _fetch_eng_createmeta_fields(issue_type="Test", token=None):
+    """
+    Fetch/cached ENG createmeta fields (allowedValues for versions + custom fields).
+
+    Nutanix Jira returns 404 for the legacy
+    /issue/createmeta?projectKeys=...&expand=projects.issuetypes.fields API.
+    Use the per-issuetype endpoint instead:
+      GET /issue/createmeta/ENG/issuetypes
+      GET /issue/createmeta/ENG/issuetypes/{id}
+    """
+    issue_type = (issue_type or "Test").strip() or "Test"
+    with _eng_createmeta_lock:
+        cached = _eng_createmeta_cache.get(issue_type)
+        if cached:
+            return cached
+
+    jira_token = resolve_jira_token(token)
+    if not jira_token:
+        return {}
+
+    headers = get_jira_headers(jira_token)
+    try:
+        types_resp = session.get(
+            f"{JIRA_BASE}/issue/createmeta/ENG/issuetypes",
+            headers=headers,
+            timeout=45,
+            verify=False,
+        )
+        if types_resp.status_code != 200:
+            logger.warning(
+                "ENG createmeta issuetypes failed (%s): %s",
+                types_resp.status_code,
+                (types_resp.text or "")[:300],
+            )
+            return {}
+        type_id = None
+        for itype in (types_resp.json() or {}).get("values") or []:
+            if (itype.get("name") or "").strip().lower() == issue_type.lower():
+                type_id = itype.get("id")
+                break
+        if not type_id:
+            logger.warning("ENG createmeta: issuetype %r not found", issue_type)
+            return {}
+
+        fields_resp = session.get(
+            f"{JIRA_BASE}/issue/createmeta/ENG/issuetypes/{type_id}",
+            headers=headers,
+            timeout=60,
+            verify=False,
+        )
+        if fields_resp.status_code != 200:
+            logger.warning(
+                "ENG createmeta fields failed (%s): %s",
+                fields_resp.status_code,
+                (fields_resp.text or "")[:300],
+            )
+            return {}
+
+        # New API returns a list of field descriptors under "values".
+        fields = {}
+        for field in (fields_resp.json() or {}).get("values") or []:
+            fid = field.get("fieldId") or field.get("key")
+            if fid:
+                fields[fid] = field
+
+        with _eng_createmeta_lock:
+            _eng_createmeta_cache[issue_type] = fields
+        return fields
+    except Exception as e:
+        logger.warning("ENG createmeta error: %s", e)
+        return {}
+
+
+def _allowed_option_values(field_meta):
+    """Return list of {id, value/name, children?} from createmeta field."""
+    out = []
+    for opt in (field_meta or {}).get("allowedValues") or []:
+        entry = {
+            "id": opt.get("id"),
+            "value": opt.get("value") or opt.get("name") or "",
+            "name": opt.get("name") or opt.get("value") or "",
+            "children": [
+                {
+                    "id": c.get("id"),
+                    "value": c.get("value") or c.get("name") or "",
+                    "name": c.get("name") or c.get("value") or "",
+                }
+                for c in (opt.get("children") or [])
+            ],
+        }
+        if entry["value"] or entry["name"]:
+            out.append(entry)
+    return out
+
+
+def _pick_allowed_option(preferred, options, fallbacks=None):
+    """Pick best matching allowed option value string (case-insensitive)."""
+    candidates = []
+    if preferred:
+        candidates.append(str(preferred).strip())
+    for fb in fallbacks or []:
+        if fb and str(fb).strip() not in candidates:
+            candidates.append(str(fb).strip())
+    if not options:
+        return candidates[0] if candidates else ""
+
+    by_lower = {}
+    for opt in options:
+        key = (opt.get("value") or opt.get("name") or "").strip()
+        if key:
+            by_lower[key.lower()] = key
+
+    for cand in candidates:
+        hit = by_lower.get(cand.lower())
+        if hit:
+            return hit
+    # Substring / startswith soft match
+    for cand in candidates:
+        cl = cand.lower()
+        for low, orig in by_lower.items():
+            if cl in low or low in cl or low.startswith(cl) or cl.startswith(low):
+                return orig
+    # Last resort: first allowed option
+    first = (options[0].get("value") or options[0].get("name") or "").strip()
+    return first
+
+
+def _pick_cascading_primary_component(preferred, options, context_blob=""):
+    """
+    Build ENG Primary Component payload: {"value": Parent, "child": {"value": Child}}.
+    Cascading select rejects parent-only on some Jira configs; real ENG tickets always set child.
+    """
+    parent = _pick_allowed_option(
+        preferred,
+        options,
+        fallbacks=["Stargate", "Curator", "Cassandra"],
+    )
+    if not parent:
+        return None
+
+    parent_opt = None
+    for opt in options or []:
+        key = (opt.get("value") or opt.get("name") or "").strip()
+        if key.lower() == parent.lower():
+            parent_opt = opt
+            break
+    children = (parent_opt or {}).get("children") or []
+    if not children:
+        return {"value": parent}
+
+    child_names = [
+        (c.get("value") or c.get("name") or "").strip()
+        for c in children
+        if (c.get("value") or c.get("name"))
+    ]
+    blob = (context_blob or "").lower()
+    picked_child = ""
+    # Prefer a child whose token appears in testcase/root-cause text.
+    for name in child_names:
+        token = name.lower().replace(parent.lower(), "").strip("-_ ")
+        if token and len(token) >= 3 and token.replace(" ", "") in blob.replace(" ", "").replace("_", ""):
+            picked_child = name
+            break
+    if not picked_child:
+        other = next((n for n in child_names if n.lower().endswith("-other") or n.lower() == "other"), "")
+        picked_child = other or child_names[0]
+    return {"value": parent, "child": {"value": picked_child}}
+
+
+def _pick_allowed_version(preferred, version_options):
+    """Pick a valid ENG version name from createmeta versions list."""
+    names = []
+    for opt in version_options or []:
+        n = (opt.get("name") or opt.get("value") or "").strip()
+        if n:
+            names.append(n)
+    if not names:
+        # Safe defaults used by existing ENG tickets
+        return preferred if preferred in {"master", "Triage", "7.6", "7.5.1"} else "master"
+
+    by_lower = {n.lower(): n for n in names}
+    prefs = []
+    if preferred:
+        prefs.append(preferred)
+        # Map branch-like → release number
+        m = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", preferred)
+        if m:
+            prefs.append(m.group(1))
+        if "master" in preferred.lower():
+            prefs.append("master")
+        if "7.6" in preferred or "ganges" in preferred.lower():
+            prefs.extend(["7.6", "master"])
+    prefs.extend(["master", "7.6", "7.5.1"])
+
+    for p in prefs:
+        hit = by_lower.get(p.lower())
+        if hit:
+            return hit
+    for p in prefs:
+        pl = p.lower()
+        for low, orig in by_lower.items():
+            if pl in low or low.startswith(pl):
+                return orig
+    return by_lower.get("master") or names[0]
+
+
+def is_confirm_eng_ticket_intent(text):
+    """User confirming a pending ENG ticket draft (yes / create with overrides)."""
+    t = re.sub(r"[*`_]", "", (text or "").strip().lower())
+    t = re.sub(r"\s+", " ", t)
+    if not t:
+        return False
+    if re.match(r"^(yes|y|ok|okay|confirm|proceed|go ahead|create it|looks good|lgtm)\b", t):
+        return True
+    # Field override reply while a draft is pending
+    return bool(
+        re.search(
+            r"\b(primary component|affects version|fix version|test case|test type|regression)\s*[:=]",
+            t,
+            flags=re.I,
+        )
+    )
+
+
+def parse_eng_ticket_field_overrides(text):
+    """Parse 'Primary Component: Stargate' style overrides from user reply."""
+    overrides = {}
+    if not text:
+        return overrides
+    patterns = {
+        "primary_component": r"primary\s*component\s*[:=]\s*([^\n,;]+)",
+        "affects_version": r"affects\s*version(?:/s)?\s*[:=]\s*([^\n,;]+)",
+        "fix_version": r"fix\s*version(?:/s)?\s*[:=]\s*([^\n,;]+)",
+        "testcase_name": r"test\s*case(?:\s*name)?\s*[:=]\s*([^\n,;]+)",
+        "test_type": r"test\s*type\s*[:=]\s*([^\n,;]+)",
+        "regression": r"regression\??\s*[:=]\s*([^\n,;]+)",
+        "issue_type": r"issue\s*type\s*[:=]\s*([^\n,;]+)",
+        "summary": r"summary\s*[:=]\s*([^\n]+)",
+    }
+    for key, pat in patterns.items():
+        m = re.search(pat, text, flags=re.I)
+        if m:
+            overrides[key] = m.group(1).strip().strip("\"'")
+    return overrides
+
+
+def build_eng_ticket_draft(ticket_ctx):
+    """
+    Infer ENG-required fields from deep-analysis context.
+
+    Returns draft dict with proposed values + missing list for user confirmation.
+    """
+    ctx = dict(ticket_ctx or {})
+    testcase = (ctx.get("testcase_name") or "").strip()
+    primary = _infer_primary_component(ctx)
+    affects = _infer_affects_version(ctx)
+    fix_version = (ctx.get("fix_version") or "Triage").strip() or "Triage"
+    test_type = _infer_test_type(ctx)
+    regression = _infer_regression_flag(ctx)
+    issue_type = (ctx.get("issue_type") or "").strip() or _issue_type_from_classification(
+        ctx.get("classification")
+    )
+    summary = _build_eng_ticket_summary(ctx)
+
+    draft = {
+        "summary": summary,
+        "issue_type": issue_type,
+        "testcase_name": testcase,
+        "primary_component": primary,
+        "affects_version": affects,
+        "fix_version": fix_version,
+        "test_type": test_type,
+        "regression": regression,
+        "inferred_from_analysis": True,
+    }
+
+    missing = []
+    if not testcase:
+        missing.append("testcase_name")
+    if not primary:
+        missing.append("primary_component")
+    if not affects:
+        missing.append("affects_version")
+    if not test_type:
+        missing.append("test_type")
+
+    draft["missing"] = missing
+    # Confirmation only when inference could not fill required ENG fields.
+    draft["needs_confirmation"] = bool(missing)
+    return draft
+
+
+def format_eng_ticket_draft_prompt(draft):
+    """Ask the user to confirm inferred ENG fields before create."""
+    lines = [
+        "ENG requires a few fields before I can create the ticket. "
+        "I inferred these from the analysis — reply **yes** to create, or override any field:",
+        "",
+        f"- **Summary:** {draft.get('summary')}",
+        f"- **Issue Type:** {draft.get('issue_type')}",
+        f"- **Primary Component:** {draft.get('primary_component') or '❓ needed (e.g. Stargate)'}",
+        f"- **Test Case Name:** {draft.get('testcase_name') or '❓ needed'}",
+        f"- **Affects Version/s:** {draft.get('affects_version') or '❓ needed (e.g. master)'}",
+        f"- **Fix Version/s:** {draft.get('fix_version') or 'Triage'}",
+        f"- **Test Type:** {draft.get('test_type') or '❓ needed (e.g. Test Bug)'}",
+        f"- **Regression?:** {draft.get('regression') or 'Yes-build-to-build'}",
+        "",
+        "Example override:",
+        "`yes; Primary Component: Stargate; Affects Version: master; Test Type: Test Bug`",
+    ]
+    if draft.get("missing"):
+        lines.insert(
+            1,
+            "**Still missing (please provide):** " + ", ".join(draft["missing"]),
+        )
+        lines.insert(2, "")
+    return "\n".join(lines)
+
+
+def create_eng_jira_ticket(ticket_ctx, token=None, require_confirm=False):
+    """
+    Create an ENG Jira issue from deep-analysis context.
+
+    Infers required ENG fields from the chat/analysis and creates immediately
+    on simple asks like "create eng ticket". Only prompts the user when a
+    required field cannot be inferred (or require_confirm=True).
+
+    Returns dict:
+      - ok + key/url on success
+      - needs_user_input + draft + follow_up_answer when user input needed
+      - ok False + error on hard failure
+    """
+    ctx = dict(ticket_ctx or {})
+    draft = build_eng_ticket_draft(ctx)
+
+    # Auto-create when analysis has enough data. Ask only if something is missing
+    # (or caller explicitly wants confirmation).
+    if draft.get("missing") or (require_confirm and not ctx.get("confirm")):
+        return {
+            "ok": False,
+            "needs_user_input": True,
+            "draft": draft,
+            "follow_up_answer": format_eng_ticket_draft_prompt(draft),
+            "error": (
+                "Missing required ENG fields: " + ", ".join(draft["missing"])
+                if draft.get("missing")
+                else "ENG required fields need confirmation before create"
+            ),
+        }
+
+    jira_token = resolve_jira_token(token)
+    if not jira_token:
+        return {
+            "ok": False,
+            "error": (
+                "Jira token not available. Open User Settings → API Keys and add "
+                "your Atlassian Jira Personal Token."
+            ),
+        }
+
+    summary = draft["summary"]
+    issue_type = draft["issue_type"]
+    testcase = draft["testcase_name"]
+    primary = draft["primary_component"]
+    affects = draft["affects_version"]
+    fix_version = draft["fix_version"]
+    test_type = draft["test_type"]
+    regression = draft["regression"]
+
+    # Enrich with JITA run metadata (NOS/PC/commits/links/steps/traceback) so the
+    # description matches Triage Genie for this specific testcase run.
+    ctx["regression"] = regression
+    try:
+        ctx = _enrich_eng_ticket_context(ctx)
+    except Exception as enrich_err:
+        logger.warning("ENG ticket context enrich failed: %s", enrich_err)
+    description = _build_eng_ticket_description(ctx)
+    if ctx.get("testcase_name") and not testcase:
+        testcase = ctx["testcase_name"]
+        draft["testcase_name"] = testcase
+
+
+    # Resolve against live ENG createmeta so values are valid option/version names.
+    meta = _fetch_eng_createmeta_fields(issue_type, token=jira_token)
+    primary_payload = {"value": primary}
+    if meta:
+        pc_opts = _allowed_option_values(meta.get("customfield_15160"))
+        context_blob = " ".join([
+            str(testcase or ""),
+            str(ctx.get("root_cause") or ""),
+            str(ctx.get("triage_report") or ""),
+            " ".join(str(c) for c in (ctx.get("related_components") or [])),
+        ])
+        cascaded = _pick_cascading_primary_component(primary, pc_opts, context_blob)
+        if cascaded:
+            primary_payload = cascaded
+            primary = cascaded.get("value") or primary
+        else:
+            primary = _pick_allowed_option(
+                primary, pc_opts, fallbacks=["Stargate", "Curator", "Cassandra"]
+            ) or primary
+            primary_payload = {"value": primary}
+        regression = _pick_allowed_option(
+            regression,
+            _allowed_option_values(meta.get("customfield_13260")),
+            fallbacks=[_ENG_REGRESSION_YES, _ENG_REGRESSION_NO, "Yes-build-to-build", "No"],
+        ) or regression
+        # Normalize aliases like NuTest → Test Bug before matching allowed values.
+        test_type = _infer_test_type({**ctx, "test_type": test_type})
+        test_type = _pick_allowed_option(
+            test_type,
+            _allowed_option_values(meta.get("customfield_18062")),
+            fallbacks=list(_ENG_TEST_TYPE_CANDIDATES),
+        ) or test_type
+        affects = _pick_allowed_version(
+            affects, _allowed_option_values(meta.get("versions"))
+        ) or affects
+        fix_version = _pick_allowed_version(
+            fix_version, _allowed_option_values(meta.get("fixVersions"))
+        ) or fix_version
+        draft.update({
+            "primary_component": primary,
+            "regression": regression,
+            "test_type": test_type,
+            "affects_version": affects,
+            "fix_version": fix_version,
+        })
+    else:
+        # Createmeta unavailable — still never send invalid NuTest.
+        test_type = _infer_test_type({**ctx, "test_type": test_type})
+        draft["test_type"] = test_type
+        primary_payload = {"value": primary}
+
+    related = []
+    for c in ctx.get("related_components") or []:
+        name = (c if isinstance(c, str) else str(c)).strip()
+        if name and name not in related:
+            related.append(name)
+    if related:
+        description = (
+            description.rstrip()
+            + "\n\nh3. Related Components (from analysis)\n"
+            + ", ".join(related)
+        )
+
+    labels = ["ai-qa-triage", "regx-ai"]
+    for lab in ctx.get("labels") or []:
+        lab = str(lab).strip()
+        if lab and lab not in labels:
+            labels.append(lab)
+
+    environment = (ctx.get("test_log_url") or ctx.get("environment") or "").strip()
+
+    fields = {
+        "project": {"key": "ENG"},
+        "summary": summary,
+        "issuetype": {"name": issue_type},
+        "description": description,
+        "labels": labels,
+        "versions": [{"name": affects}],
+        "fixVersions": [{"name": fix_version}],
+        "customfield_15160": primary_payload,  # Primary Component (cascading)
+        "customfield_13260": {"value": regression},  # Regression?
+        "customfield_18060": [testcase[:255]],  # Test Case Name
+        "customfield_18062": {"value": test_type},  # Test Type
+    }
+    if environment:
+        fields["environment"] = environment
+
+    headers = get_jira_headers(jira_token)
+
+    def _post_create(payload_fields):
+        return session.post(
+            f"{JIRA_BASE}/issue",
+            headers=headers,
+            json={"fields": payload_fields},
+            timeout=60,
+            verify=False,
+        )
+
+    try:
+        resp = _post_create(fields)
+
+        # Auto-heal invalid required option/version values (no user yes-loop).
+        if resp.status_code >= 400:
+            err_json = {}
+            try:
+                err_json = resp.json() or {}
+            except Exception:
+                err_json = {}
+            errors = err_json.get("errors") or {}
+            retry_fields = dict(fields)
+            changed = False
+
+            if "customfield_18062" in errors:
+                for candidate in _ENG_TEST_TYPE_CANDIDATES:
+                    if candidate == retry_fields.get("customfield_18062", {}).get("value"):
+                        continue
+                    trial = dict(retry_fields)
+                    trial["customfield_18062"] = {"value": candidate}
+                    trial_resp = _post_create(trial)
+                    if trial_resp.status_code in (200, 201):
+                        resp = trial_resp
+                        test_type = candidate
+                        retry_fields = trial
+                        changed = False
+                        break
+                    resp = trial_resp
+                    err_json = {}
+                    try:
+                        err_json = trial_resp.json() or {}
+                    except Exception:
+                        pass
+                    errors = err_json.get("errors") or {}
+                    if "customfield_18062" not in errors:
+                        retry_fields = trial
+                        changed = True
+                        break
+
+            if resp.status_code >= 400 and "customfield_13260" in errors:
+                for candidate in (_ENG_REGRESSION_YES, _ENG_REGRESSION_NO, "Yes-release-to-release"):
+                    trial = dict(retry_fields)
+                    trial["customfield_13260"] = {"value": candidate}
+                    trial_resp = _post_create(trial)
+                    if trial_resp.status_code in (200, 201):
+                        resp = trial_resp
+                        regression = candidate
+                        retry_fields = trial
+                        break
+                    resp = trial_resp
+
+            if resp.status_code >= 400 and "versions" in (errors or {}):
+                for candidate in ("master", "7.6", "7.5.1", "Triage"):
+                    trial = dict(retry_fields)
+                    trial["versions"] = [{"name": candidate}]
+                    trial_resp = _post_create(trial)
+                    if trial_resp.status_code in (200, 201):
+                        resp = trial_resp
+                        affects = candidate
+                        retry_fields = trial
+                        break
+                    resp = trial_resp
+
+            if resp.status_code >= 400 and "fixVersions" in (errors or {}):
+                for candidate in ("Triage", "master", "7.6"):
+                    trial = dict(retry_fields)
+                    trial["fixVersions"] = [{"name": candidate}]
+                    trial_resp = _post_create(trial)
+                    if trial_resp.status_code in (200, 201):
+                        resp = trial_resp
+                        fix_version = candidate
+                        retry_fields = trial
+                        break
+                    resp = trial_resp
+
+            fields = retry_fields
+            if changed and resp.status_code >= 400:
+                resp = _post_create(fields)
+
+        # Strip only non-required invalid fields (e.g. bad optional labels).
+        if resp.status_code >= 400:
+            err_json = {}
+            try:
+                err_json = resp.json() or {}
+            except Exception:
+                err_json = {}
+            errors = err_json.get("errors") or {}
+            optional_bad = [k for k in errors if k in {"components", "environment", "labels", "customfield_10011"}]
+            if optional_bad:
+                logger.warning(
+                    "ENG ticket create optional field rejected %s — retrying without them",
+                    optional_bad,
+                )
+                retry_fields = dict(fields)
+                for k in optional_bad:
+                    retry_fields.pop(k, None)
+                resp = _post_create(retry_fields)
+
+        if resp.status_code not in (200, 201):
+            err_body = ""
+            try:
+                err_body = json.dumps(resp.json())[:800]
+            except Exception:
+                err_body = (resp.text or "")[:800]
+            return {
+                "ok": False,
+                "error": f"Jira create failed ({resp.status_code}): {err_body}",
+            }
+
+        draft.update({
+            "primary_component": primary,
+            "regression": regression,
+            "test_type": test_type,
+            "affects_version": affects,
+            "fix_version": fix_version,
+        })
+
+        data = resp.json() or {}
+        key = data.get("key") or ""
+        if not key:
+            return {"ok": False, "error": "Jira create returned no issue key"}
+
+        url = f"https://jira.nutanix.com/browse/{key}"
+        duplicates_linked = []
+        for dup in ctx.get("jira_duplicates") or []:
+            dup_key = str(dup).strip().upper()
+            if not dup_key or not re.match(r"^[A-Z][A-Z0-9]+-\d+$", dup_key):
+                continue
+            try:
+                link_resp = session.post(
+                    f"{JIRA_BASE}/issueLink",
+                    headers=headers,
+                    json={
+                        "type": {"name": "Duplicate"},
+                        "inwardIssue": {"key": key},
+                        "outwardIssue": {"key": dup_key},
+                    },
+                    timeout=30,
+                    verify=False,
+                )
+                if link_resp.status_code in (200, 201):
+                    duplicates_linked.append(dup_key)
+            except Exception as link_err:
+                logger.warning("Failed linking %s as duplicate of %s: %s", key, dup_key, link_err)
+
+        return {
+            "ok": True,
+            "key": key,
+            "url": url,
+            "summary": summary,
+            "issue_type": issue_type,
+            "draft": {**draft, "test_type": test_type},
+            "duplicates_linked": duplicates_linked,
+        }
+    except Exception as e:
+        logger.error("Error creating ENG Jira ticket: %s", e, exc_info=True)
+        return {"ok": False, "error": str(e)}
+
+
 def search_glean(query_text):
     """Search Glean for similar issues"""
     try:
@@ -18288,25 +19935,182 @@ def cursor_ai_result_callback():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/mcp/regression/cursor-ai/create-eng-ticket", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/create-eng-ticket", methods=["POST"])
+@jwt_required
+def cursor_ai_create_eng_ticket():
+    """Create an ENG Jira ticket from Cursor/Deep AI analysis context via Jira REST."""
+    try:
+        body = request.get_json(force=True) or {}
+        ticket_ctx = body.get("ticket_context") or body
+        require_confirm = bool(body.get("require_confirm"))
+        if body.get("confirm") is True or ticket_ctx.get("confirm"):
+            ticket_ctx = dict(ticket_ctx)
+            ticket_ctx["confirm"] = True
+        result = create_eng_jira_ticket(ticket_ctx, require_confirm=require_confirm)
+        if result.get("needs_user_input"):
+            return jsonify({
+                "success": True,
+                "needs_user_input": True,
+                "draft": result.get("draft"),
+                "analysis": {
+                    "follow_up_answer": result.get("follow_up_answer"),
+                    "pending_ticket_draft": result.get("draft"),
+                },
+            })
+        if not result.get("ok"):
+            return jsonify({
+                "success": False,
+                "error": result.get("error") or "Failed to create ENG ticket",
+            }), 400
+        return jsonify({
+            "success": True,
+            "key": result.get("key"),
+            "url": result.get("url"),
+            "summary": result.get("summary"),
+            "issue_type": result.get("issue_type"),
+            "duplicates_linked": result.get("duplicates_linked") or [],
+            "analysis": {
+                "follow_up_answer": (
+                    f"Created ENG ticket [{result.get('key')}]({result.get('url')})\n\n"
+                    f"**Summary:** {result.get('summary')}\n"
+                    f"**Type:** {result.get('issue_type')}"
+                    + (
+                        f"\n**Linked duplicates:** {', '.join(result.get('duplicates_linked') or [])}"
+                        if result.get("duplicates_linked")
+                        else ""
+                    )
+                ),
+                "created_ticket": result.get("key"),
+                "created_ticket_url": result.get("url"),
+                "pending_ticket_draft": None,
+            },
+        })
+    except Exception as e:
+        logger.error("Error in cursor-ai create-eng-ticket: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/mcp/regression/cursor-ai/follow-up", methods=["POST"])
 @app.route("/api/mcp/regression/cursor-ai/follow-up", methods=["POST"])
 @jwt_required
 def cursor_ai_follow_up():
     """Send a follow-up question to an existing Cursor AI analysis session.
-    The agent retains full conversation context from the initial triage."""
+    The agent retains full conversation context from the initial triage.
+
+    Phase 3: intercept create-ENG and Flux Quick Fix intents before bridge call.
+    """
     try:
         body = request.get_json(force=True) or {}
         session_id = body.get("session_id", "")
         question = body.get("question", "")
         recovery_context = body.get("recovery_context", {}) or {}
+        ticket_context = body.get("ticket_context") or {}
         mode = (body.get("mode", "agent") or "agent").strip().lower()
         if mode not in {"ask", "agent", "plan"}:
             mode = "agent"
 
-        if not session_id:
-            return jsonify({"error": "session_id is required"}), 400
         if not question:
             return jsonify({"error": "question is required"}), 400
+
+        latest = recovery_context.get("latest_analysis") or {}
+        ticket_ctx = dict(ticket_context or {})
+        for key in (
+            "testcase_name", "testcase_id", "agave_task_id", "root_cause",
+            "classification", "suggested_fix", "triage_report", "jira_duplicates",
+            "related_components", "failing_code", "exception_summary", "test_log_url",
+            "nutest_branch", "current_branch", "pending_ticket_draft", "created_ticket",
+        ):
+            if not ticket_ctx.get(key) and (latest.get(key) or recovery_context.get(key)):
+                ticket_ctx[key] = latest.get(key) or recovery_context.get(key)
+
+        pending_draft = latest.get("pending_ticket_draft") or ticket_ctx.get("pending_ticket_draft")
+        confirm_ticket = bool(pending_draft) and is_confirm_eng_ticket_intent(question)
+        create_ticket = is_create_eng_ticket_intent(question) or confirm_ticket
+
+        if create_ticket:
+            if confirm_ticket and pending_draft:
+                ticket_ctx = {**pending_draft, **ticket_ctx, "confirm": True}
+                overrides = parse_eng_ticket_field_overrides(question)
+                ticket_ctx.update({k: v for k, v in overrides.items() if v})
+            try:
+                ticket_ctx = _enrich_eng_ticket_context(ticket_ctx)
+            except Exception as enrich_err:
+                logger.debug("follow-up eng enrich skipped: %s", enrich_err)
+            created = create_eng_jira_ticket(
+                ticket_ctx,
+                require_confirm=bool(body.get("require_confirm")),
+            )
+            if created.get("needs_user_input"):
+                analysis = {
+                    "follow_up_answer": created.get("follow_up_answer")
+                    or format_eng_ticket_draft_prompt(created.get("draft") or {}),
+                    "pending_ticket_draft": created.get("draft") or {},
+                }
+                return jsonify({
+                    "success": True,
+                    "session_id": session_id,
+                    "needs_user_input": True,
+                    "draft": created.get("draft"),
+                    "analysis": analysis,
+                })
+            if not created.get("ok"):
+                return jsonify({
+                    "success": False,
+                    "error": created.get("error") or "Failed to create ENG ticket",
+                }), 400
+            return jsonify({
+                "success": True,
+                "session_id": session_id,
+                "analysis": {
+                    "follow_up_answer": (
+                        f"Created ENG ticket [{created.get('key')}]({created.get('url')})\n\n"
+                        f"**Summary:** {created.get('summary')}\n"
+                        f"**Type:** {created.get('issue_type')}"
+                    ),
+                    "created_ticket": created.get("key"),
+                    "created_ticket_url": created.get("url"),
+                    "jira_duplicates": [created.get("key")],
+                    "pending_ticket_draft": None,
+                    "suggested_action": "approve_tag_jita",
+                },
+            })
+
+        if is_flux_quick_fix_intent(question):
+            classification = str(
+                ticket_ctx.get("classification")
+                or latest.get("classification")
+                or ""
+            )
+            is_test_issue = "test" in classification.lower()
+            if not is_test_issue:
+                return jsonify({
+                    "success": True,
+                    "session_id": session_id,
+                    "analysis": {
+                        "follow_up_answer": (
+                            "Flux Quick Fix is only offered for **Test Issue** classifications. "
+                            f"Current classification is `{classification or 'Unknown'}`. "
+                            "Create/link an ENG ticket for product/infra issues instead."
+                        ),
+                        "suggested_action": None,
+                    },
+                })
+            return jsonify({
+                "success": True,
+                "session_id": session_id,
+                "analysis": {
+                    "follow_up_answer": (
+                        "Ready to run **Flux Quick Fix** for this test issue. "
+                        "Confirm in the UI to start Flux (never auto-started)."
+                    ),
+                    "suggested_action": "flux_quick_fix",
+                    "requires_confirmation": True,
+                },
+            })
+
+        if not session_id:
+            return jsonify({"error": "session_id is required"}), 400
 
         # Get user API keys for Cursor SDK
         username = _current_username()
