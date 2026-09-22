@@ -6,6 +6,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from handover_helpers import categorize_bug_type_from_issuetype
+
 
 def _load_helpers():
     """Load Jira ticket helpers from test_flask without starting the Flask app."""
@@ -17,7 +19,10 @@ def _load_helpers():
     end = src.index("def _fetch_ticket_issuetype(")
     chunk = src[start:end]
 
-    ns = {"re": __import__("re")}
+    ns = {
+        "re": __import__("re"),
+        "categorize_bug_type_from_issuetype": categorize_bug_type_from_issuetype,
+    }
     exec(chunk, ns)  # noqa: S102
     return ns
 
@@ -58,6 +63,7 @@ class TestJiraTicketDetails(unittest.TestCase):
         self.assertEqual(detail["status"], "Open")
         self.assertEqual(detail["issue_type"], "Unknown")
         self.assertIsNone(detail["bug_type"])
+        self.assertIsNone(detail.get("created"))
 
     def test_extract_categorizes_test_and_bug(self):
         extract = self.h["_extract_jira_ticket_detail"]
@@ -75,15 +81,17 @@ class TestJiraTicketDetails(unittest.TestCase):
             "fields": {
                 "issuetype": {"name": "Bug"},
                 "status": {"name": "In Progress"},
+                "created": "2026-09-21T10:15:00.000+0000",
             }
         })
         self.assertEqual(bug_detail["bug_type"], "Product Bug")
+        self.assertEqual(bug_detail["created"], "2026-09-21T10:15:00.000+0000")
 
     def test_extract_missing_payload(self):
         extract = self.h["_extract_jira_ticket_detail"]
         self.assertEqual(
             extract(None),
-            {"status": "N/A", "issue_type": "N/A", "bug_type": None},
+            {"status": "N/A", "issue_type": "N/A", "bug_type": None, "created": None},
         )
 
 

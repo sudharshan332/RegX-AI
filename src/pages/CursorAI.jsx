@@ -37,6 +37,14 @@ const MCP_SERVERS = [
   { id: 'auto-handoff', name: 'Auto Handoff', description: 'Automated CR creation and handoff' },
 ];
 
+const SOURCE_LABELS = {
+  regression_context: 'Local data',
+  local: 'Local data',
+  rag: 'Local retrieval',
+  ai: 'RAG + AI',
+  cursor: 'Cursor',
+};
+
 const SYNCABLE_SKILLS = [
   { id: 'triage-rdm-deployment-failure', label: 'triage-rdm-deployment-failure' },
   { id: 'triage-cdp-test-failure', label: 'triage-cdp-test-failure' },
@@ -121,9 +129,10 @@ export default function CursorAI() {
       const branches = data.branch_summary || {};
       const failed = Array.isArray(data.failed_tests) ? data.failed_tests : [];
       const label = scope.tag || `${(scope.taskIds || []).length} task(s)`;
-      const scopeLine = scope.taskIds && scope.taskIds.length
-        ? `Scope — task_ids (${scope.taskIds.length}): ${scope.taskIds.join(', ')}`
-        : `Scope — tag: ${scope.tag}`;
+      // Prefer tag line; never dump hundreds of task IDs into chat context.
+      const scopeLine = scope.tag
+        ? `Scope — tag: ${scope.tag}`
+        : `Scope — task_ids (${(scope.taskIds || []).length}) [ids omitted]`;
 
       const branchLines = Object.entries(branches)
         .map(([b, s]) => `  - ${b}: tasks=${s.total_tasks || 0}, tests=${s.total_tests || 0}, failed=${s.failed_tests || 0}`)
@@ -150,7 +159,13 @@ export default function CursorAI() {
         (branchLines ? `Per-branch:\n${branchLines}\n` : '') +
         (failed.length ? `${failedHeader}\n${failedLines}${failedMore}` : (failedTotal ? `${failedHeader}` : 'No failed testcases.'));
 
-      const ctx = { label, ctxStr, scopeKey };
+      const ctx = {
+        label,
+        ctxStr,
+        scopeKey,
+        tag: scope.tag || null,
+        taskIds: scope.taskIds || [],
+      };
       setRegressionCtx(ctx);
       return ctx;
     } catch (_) {
@@ -220,6 +235,8 @@ export default function CursorAI() {
           agent_id: chatAgentId || '',
           session_id: chatSessionId || '',
           regression_context: contextStr,
+          tag: ctx?.tag || readRegressionScopeFromLocalStorage().tag || '',
+          task_ids: ctx?.taskIds || readRegressionScopeFromLocalStorage().taskIds || [],
         }),
       });
 
@@ -250,6 +267,7 @@ export default function CursorAI() {
             mode,
             model,
             tools_used: [],
+            source: '',
           }]);
         }
       };
@@ -274,7 +292,10 @@ export default function CursorAI() {
             if (event.session_id) setChatSessionId(event.session_id);
             ensureAssistant();
             const finalReply = (event.reply && event.reply.trim()) || acc;
-            patchLast({ content: finalReply });
+            patchLast({
+              content: finalReply,
+              ...(event.source ? { source: event.source } : {}),
+            });
           } else if (event.type === 'error') {
             if (assistantAdded) {
               patchLast({ role: 'error', content: event.message || 'Chat failed' });
@@ -456,6 +477,12 @@ export default function CursorAI() {
                 <div className="hint-item" onClick={() => setInput('Create a triage summary for the current regression run')}>
                   Create triage summary
                 </div>
+                <div className="hint-item" onClick={() => setInput('Who owns ENG-977205?')}>
+                  Look up a ticket owner
+                </div>
+                <div className="hint-item" onClick={() => setInput('Was this test handed over?')}>
+                  Check handover records
+                </div>
               </div>
             </div>
           )}
@@ -484,6 +511,9 @@ export default function CursorAI() {
                   <div className="message-meta">
                     <span className="meta-mode">{msg.mode}</span>
                     <span className="meta-model">{msg.model}</span>
+                    {msg.source && SOURCE_LABELS[msg.source] && (
+                      <span className="meta-source">{SOURCE_LABELS[msg.source]}</span>
+                    )}
                   </div>
                 )}
               </div>

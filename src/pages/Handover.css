@@ -318,3 +318,236 @@
     text-align: center;
   }
 }
+
+.ho-records-wrap {
+  margin-top: 12px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.ho-records-scroll {
+  overflow: auto;
+  max-height: min(70vh, 760px);
+}
+
+.ho-records-scroll table.ho-table,
+.ho-records-table {
+  min-width: 1100px;
+  width: 100%;
+  border: 0 !important;
+  overflow: visible;
+}
+
+.ho-records-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  white-space: nowrap;
+  padding: 10px 12px !important;
+  background: #f8fafc !important;
+}
+
+.ho-records-table tbody td {
+  vertical-align: middle !important;
+  padding: 10px 12px !important;
+}
+
+.ho-records-table .col-type { width: 118px; }
+.ho-records-table .col-name { min-width: 220px; max-width: 280px; }
+.ho-records-table .col-date { width: 118px; white-space: nowrap; }
+.ho-records-table .col-lst { min-width: 160px; max-width: 220px; }
+.ho-records-table .col-branch { width: 108px; max-width: 140px; }
+.ho-records-table .col-tickets { min-width: 128px; max-width: 180px; }
+.ho-records-table .col-reviewers { min-width: 120px; max-width: 160px; }
+.ho-records-table .col-whom { width: 128px; max-width: 148px; }
+.ho-records-table .col-status { width: 128px; white-space: nowrap; }
+.ho-records-table .col-actions {
+  width: 112px;
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  background: #fff;
+  box-shadow: -8px 0 8px -8px rgba(15, 23, 42, 0.12);
+}
+
+.ho-records-table tbody tr:nth-child(even) > td {
+  background: transparent;
+}
+
+.ho-records-row:hover > td {
+  background: #f8fafc !important;
+}
+
+.ho-records-row:hover > td.col-actions {
+  background: #f8fafc !important;
+}
+
+.ho-records-ellipsis {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ho-records-name {
+  font-family: "SF Mono", "Fira Code", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.ho-records-lst-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ho-records-lst-row code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  background: #f1f5f9;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11.5px;
+}
+
+.ho-records-more {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  background: #e2e8f0;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.ho-records-empty {
+  color: #94a3b8;
+}
+
+.ho-records-meta {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 3px;
+}
+
+.ho-ticket-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ho-ticket-pill {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  white-space: nowrap;
+}
+
+.ho-ticket-pill:hover {
+  background: #dbeafe;
+  text-decoration: none !important;
+}
+
+.ho-records-status {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  white-space: nowrap;
+}
+
+.ho-records-status--creating {
+  background: #ecfeff;
+  color: #0e7490;
+}
+
+.ho-records-status--pending_manual {
+  background: #fefce8;
+  color: #a16207;
+}
+
+.ho-records-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ho-records-btn {
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #e2e8f0;
+  color: #334155;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ho-records-btn--danger {
+  background: #dc2626;
+  color: white;
+}
+
+.ho-records-detail-row > td {
+  padding: 12px 16px 16px !important;
+  background: #f8fafc !important;
+  vertical-align: top !important;
+}
+
+.ho-records-detail-block {
+  margin-bottom: 10px;
+}
+
+.ho-records-detail-block:last-child {
+  margin-bottom: 0;
+}
+
+.ho-records-detail-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  margin-bottom: 4px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.ho-records-detail-path code {
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.ho-records-extra {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ho-records-kind {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.ho-records-kind--handover {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.ho-records-kind--deprecation {
+  background: #fff7ed;
+  color: #c2410c;
+}

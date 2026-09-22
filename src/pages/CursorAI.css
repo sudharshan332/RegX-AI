@@ -451,6 +451,11 @@
   color: #94a3b8;
 }
 
+.meta-source {
+  color: #0f766e;
+  font-weight: 500;
+}
+
 /* Typing Indicator */
 .typing-indicator {
   display: flex;

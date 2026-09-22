@@ -175,6 +175,75 @@ class TestGleanAiValidationPersist(unittest.TestCase):
         self.assertIsNotNone(merged["glean_candidates"]["search"]["candidates"])
 
 
+class TestPersistenceMergeAndCanonicalPaths(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._orig_data = pers._DATA_ROOT
+        pers._DATA_ROOT = self.tmp
+
+    def tearDown(self):
+        pers._DATA_ROOT = self._orig_data
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_tags_merge_legacy_and_canonical_team_file(self):
+        legacy = os.path.join(self.tmp, "failed_analysis_saved_tags.json")
+        with open(legacy, "w") as f:
+            json.dump({"tags": [{"name": "legacy-tag", "added_at": "2026-01-01T00:00:00Z"}]}, f)
+        loaded = pers.load_failed_analysis_tags(team="CDP_FT")
+        names = [t["name"] for t in loaded["tags"]]
+        self.assertIn("legacy-tag", names)
+
+        pers.save_failed_analysis_tags(
+            {"tags": [{"name": "team-tag", "added_at": "2026-02-01T00:00:00Z"}]},
+            team="CDP_FT",
+        )
+        canonical = os.path.join(self.tmp, "CDP_FT", "failed_analysis_saved_tags.json")
+        self.assertTrue(os.path.exists(canonical))
+        merged = pers.load_failed_analysis_tags(team="CDP_FT")
+        merged_names = [t["name"] for t in merged["tags"]]
+        self.assertIn("team-tag", merged_names)
+        self.assertIn("legacy-tag", merged_names)
+
+    def test_empty_team_results_do_not_hide_legacy_rows(self):
+        legacy = os.path.join(self.tmp, "failed_analysis_mytag.json")
+        with open(legacy, "w") as f:
+            json.dump({
+                "tag": "mytag",
+                "results": [{"testcase_id": "abc", "testcase_name": "t1"}],
+                "intelligent_triage": {
+                    "abc": {"decision": {"outcome": "AUTO_TRIAGE"}, "triage_analysis": {"summary": "x"}}
+                },
+            }, f)
+        # Empty team write that previously shadowed legacy:
+        team_dir = os.path.join(self.tmp, "CDP_FT", "failed_analysis")
+        os.makedirs(team_dir, exist_ok=True)
+        with open(os.path.join(team_dir, "results_mytag.json"), "w") as f:
+            json.dump({"tag": "mytag", "results": [], "count": 0}, f)
+
+        loaded = pers.load_failed_analysis_results("mytag", team="CDP_FT")
+        self.assertEqual(len(loaded.get("results") or []), 1)
+        self.assertIn("abc", loaded.get("intelligent_triage") or {})
+
+    def test_save_merges_intelligent_triage(self):
+        pers.save_failed_analysis_results(
+            "keep",
+            {
+                "tag": "keep",
+                "results": [{"testcase_id": "1"}],
+                "intelligent_triage": {"1": {"decision": {"outcome": "NEEDS_DEEP_ANALYSIS"}}},
+            },
+            team="CDP_FT",
+        )
+        pers.save_failed_analysis_results(
+            "keep",
+            {"tag": "keep", "results": [{"testcase_id": "1"}, {"testcase_id": "2"}]},
+            team="CDP_FT",
+        )
+        loaded = pers.load_failed_analysis_results("keep", team="CDP_FT")
+        self.assertEqual(len(loaded["results"]), 2)
+        self.assertIn("1", loaded["intelligent_triage"])
+
+
 class TestPersistenceTeamScoped(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

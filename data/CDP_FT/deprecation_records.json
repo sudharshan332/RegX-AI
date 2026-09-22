@@ -1,0 +1,74 @@
+{
+  "records": [
+    {
+      "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___witness_lkm_encryption",
+      "deprecation_date": "2026-09-21T14:21:59.653396",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_robo_node.lst",
+      "jira_tickets": [
+        "ENG_123123"
+      ],
+      "reviewers": [
+        "swapnil.wankhede@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "commit_message": "Deprecated 1 test(s) from test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_robo_node.lst\n\nJira: ENG_123123"
+    },
+    {
+      "test_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_one_metadata_disk_replacement",
+      "deprecation_date": "2026-09-21T18:06:12.275749",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst",
+      "jira_tickets": [
+        "ENT-124312"
+      ],
+      "reviewers": [
+        "swapnil.wankhede@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "commit_message": "Deprecated 1 test(s) from test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst\n\nJira: ENT-124312\n\nRemove"
+    },
+    {
+      "test_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_mantle_key_workflow",
+      "deprecation_date": "2026-09-21T18:27:50.347996",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_robo_encryption.lst",
+      "jira_tickets": [
+        "ENT-124312"
+      ],
+      "reviewers": [
+        "swapnil.wankhede@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "commit_message": "Deprecated 1 test(s) from test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_robo_encryption.lst\n\nJira: ENT-124312\n\nRemove"
+    },
+    {
+      "test_name": "cdp.zookeeper.zk_preupgrade_checks.test_preupgradechecks.TestPreUpgradeChecks.test_preupgrade_checks",
+      "deprecation_date": "2026-09-22T07:23:27.865880",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_upgrade_all.lst",
+      "jira_tickets": [
+        "ENG-123123"
+      ],
+      "reviewers": [
+        "swapnil.wankhede@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_upgrade_all.lst",
+        "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_upgrade_all.lst",
+        "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_upgrade_all.lst"
+      ],
+      "commit_message": "Deprecated 1 test(s) from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_upgrade_all.lst, test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_upgrade_all.lst, test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_upgrade_all.lst\n\nJira: ENG-123123"
+    }
+  ],
+  "updated_at": "2026-09-22T07:23:27.866868"
+}

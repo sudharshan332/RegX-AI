@@ -3028,6 +3028,27 @@ a.glean-snippet-title:hover {
   color: #4c1d95;
 }
 
+.rdm-mcp-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  color: #92400e;
+}
+
+.rdm-mcp-banner strong {
+  color: #b45309;
+}
+
+.triage-analysis-modal .rdm-mcp-banner {
+  margin-top: 8px;
+}
+
 .rdm-skill-actions {
   display: flex;
   flex-wrap: wrap;
@@ -3776,4 +3797,176 @@ a.glean-snippet-title:hover {
   font-family: ui-monospace, monospace;
   font-size: 13px;
   margin-bottom: 8px;
+}
+
+/* ---- Deep AI interactive chat (Phase 3) ---- */
+.deep-ai-chat-section {
+  border-top: 1px solid #ecf0f1;
+  padding-top: 12px;
+  margin-top: 8px;
+}
+.deep-ai-chat-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #566573;
+}
+.deep-ai-related-tickets {
+  margin: 8px 0 12px;
+  padding: 8px;
+  background: #f8f9fa;
+  border: 1px solid #e8eef2;
+  border-radius: 4px;
+}
+.deep-ai-related-label {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #2c3e50;
+}
+.deep-ai-related-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.deep-ai-related-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.deep-ai-flux-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 8px 0 12px;
+}
+.deep-ai-flux-panel {
+  margin: 0 0 12px;
+  padding: 10px;
+  border: 1px solid #d5dbdb;
+  background: #fbfcfd;
+  border-radius: 4px;
+}
+.deep-ai-flux-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e8449;
+  margin-bottom: 4px;
+}
+.deep-ai-flux-branch-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #34495e;
+  margin: 6px 0 4px;
+}
+.deep-ai-flux-branch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.deep-ai-flux-branch-input {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+.deep-ai-action-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+.deep-ai-action-tag {
+  appearance: none;
+  border: 1px solid #b0bec5;
+  background: #fff;
+  color: #2c3e50;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1.2;
+}
+.deep-ai-action-tag:hover:not(:disabled) {
+  border-color: #5dade2;
+  color: #1a5276;
+  background: #f4faff;
+}
+.deep-ai-action-tag.is-selected {
+  border-color: #2874a6;
+  background: #2874a6;
+  color: #fff;
+}
+.deep-ai-action-tag-flux.is-selected {
+  border-color: #1e8449;
+  background: #1e8449;
+}
+.deep-ai-action-tag:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.deep-ai-eng-panel {
+  margin: 0 0 12px;
+  padding: 10px;
+  border: 1px solid #d5dbdb;
+  background: #fbfcfd;
+  border-radius: 4px;
+}
+.deep-ai-eng-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.deep-ai-eng-panel-actions .btn-secondary.is-active {
+  border-color: #2874a6;
+  color: #1a5276;
+}
+.deep-ai-eng-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #e5e8e8;
+}
+.deep-ai-eng-details label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #34495e;
+}
+.deep-ai-eng-details input,
+.deep-ai-eng-details textarea {
+  font-weight: 400;
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid #ccd1d1;
+  border-radius: 3px;
+  color: #2c3e50;
+  background: #fff;
+}
+.deep-ai-eng-details textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+.deep-ai-eng-details-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+.deep-ai-followup-history {
+  max-height: 240px;
+  overflow: auto;
+  margin-bottom: 8px;
+}
+.triage-analysis-modal.glean-detail-modal {
+  max-width: 860px;
+}
+.triage-analysis-modal .cursor-ai-followup-bar {
+  flex: 1;
 }
