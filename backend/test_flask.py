@@ -110,6 +110,24 @@ from regression_owners import (
     load_owner_mapping,
     resolve_owner as resolve_regression_owner,
 )
+from intelligent_triage.persistence import (
+    load_failed_analysis_tags as _it_load_tags,
+    save_failed_analysis_tags as _it_save_tags,
+    load_failed_analysis_results as _it_load_results,
+    save_failed_analysis_results as _it_save_results,
+    delete_failed_analysis_results as _it_delete_results,
+)
+from intelligent_triage.thresholds import (
+    load_team_thresholds,
+    save_team_thresholds,
+    DEFAULT_THRESHOLDS,
+)
+from intelligent_triage.orchestration import (
+    build_intelligent_triage_payload,
+    persist_analysis_into_tag_payload,
+)
+from intelligent_triage.schema import merge_glean_ai_validation, set_deep_ai_started
+from intelligent_triage.decision_engine import should_auto_write_triage
 from tag_extra_task_ids import (
     append_extras_for_tag,
     classify_task_ids_against_tag,
@@ -276,6 +294,17 @@ def _current_user_jita_auth():
 # ======================================================
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
+
+# Register agent framework blueprint (Phase 2). Failures must not block Failed Analysis.
+try:
+    from api.agents import agents_bp
+    app.register_blueprint(agents_bp)
+    logging.getLogger(__name__).info("Registered agents_bp at /api/agents")
+except Exception as _agents_reg_err:
+    logging.getLogger(__name__).warning(
+        "agents_bp not registered (%s). Failed Analysis routes remain available.",
+        _agents_reg_err,
+    )
 
 # ======================================================
 # Disable SSL warnings
@@ -826,61 +855,52 @@ def invalidate_triage_accuracy_cache(tag=None):
         logger.warning(f"Could not invalidate triage accuracy cache: {e}")
 
 # --------------- Failed Analysis Saved Tags storage ---------------
+# Phase 2: prefer intelligent_triage.persistence (data/<team>/failed_analysis/).
+# Keep AiTechConf team-or-legacy helpers for any remaining flat-file callers.
+FAILED_ANALYSIS_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+FAILED_ANALYSIS_TAGS_FILE = os.path.join(FAILED_ANALYSIS_DATA_DIR, "failed_analysis_saved_tags.json")
 FAILED_ANALYSIS_TAGS_FILENAME = "failed_analysis_saved_tags.json"
 
 def _failed_analysis_tags_path(for_write=False):
     return _resolve_team_or_legacy_file(FAILED_ANALYSIS_TAGS_FILENAME, for_write=for_write)
 
 def _failed_analysis_results_path(tag, for_write=False):
+    """Team-or-legacy flat path; Phase 2 writes also go through _it_* persistence."""
     sanitized = _sanitize_tag_for_filename(tag)
     return _resolve_team_or_legacy_file(f"failed_analysis_{sanitized}.json", for_write=for_write)
 
 def load_failed_analysis_tags():
     try:
-        path = _failed_analysis_tags_path(for_write=False)
-        if os.path.exists(path):
-            with open(path, 'r') as f:
-                data = json.load(f)
-                if isinstance(data, dict) and "tags" in data:
-                    return data
-        return {"tags": []}
+        return _it_load_tags()
     except Exception as e:
         logger.error(f"Error loading failed analysis tags: {e}")
         return {"tags": []}
 
 def save_failed_analysis_tags(data):
     try:
-        path = _failed_analysis_tags_path(for_write=True)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
+        _it_save_tags(data)
     except Exception as e:
         logger.error(f"Error saving failed analysis tags: {e}")
         raise
 
 def load_failed_analysis_results(tag):
     try:
-        path = _failed_analysis_results_path(tag, for_write=False)
-        if os.path.exists(path):
-            with open(path, 'r') as f:
-                return json.load(f)
-        return None
+        return _it_load_results(tag)
     except Exception as e:
         logger.error(f"Error loading failed analysis results for tag '{tag}': {e}")
         return None
 
 def save_failed_analysis_results(tag, data):
     try:
-        path = _failed_analysis_results_path(tag, for_write=True)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
+        _it_save_results(tag, data)
     except Exception as e:
         logger.error(f"Error saving failed analysis results for tag '{tag}': {e}")
         raise
 
 def delete_failed_analysis_results(tag):
     try:
+        _it_delete_results(tag)
+        # Also clear AiTechConf team/legacy flat filenames if present.
         sanitized = _sanitize_tag_for_filename(tag)
         _remove_team_and_legacy_file(f"failed_analysis_{sanitized}.json")
     except Exception as e:
@@ -2372,7 +2392,9 @@ def delete_config_tag():
         save_regression_config(config)
         
         invalidate_triage_accuracy_cache(tag)
-        logger.info(f"Deleted tag from config and triage JSON: {tag}")
+        # Phase 2: also delete intelligent-triage / failed_analysis cache JSON for this tag.
+        delete_failed_analysis_results(tag)
+        logger.info(f"Deleted tag from config, triage JSON, and failed_analysis cache: {tag}")
         return jsonify({"added_tags": added})
     except Exception as e:
         logger.error(f"Error deleting tag: {e}")
@@ -10164,14 +10186,21 @@ def save_saved_tag_results(tag_name):
     results = body.get("results", [])
     current_branch = body.get("current_branch", "")
     cursor_ai = body.get("cursor_ai", {}) or {}
+    intelligent_triage = body.get("intelligent_triage") or {}
     payload = {
         "tag": tag_name,
         "results": results,
         "current_branch": current_branch,
         "cursor_ai": cursor_ai,
+        "intelligent_triage": intelligent_triage,
         "saved_at": datetime.utcnow().isoformat() + "Z",
         "count": len(results),
     }
+    # Preserve previously saved intelligent_triage entries when client omits the map.
+    if not intelligent_triage:
+        existing = load_failed_analysis_results(tag_name) or {}
+        if existing.get("intelligent_triage"):
+            payload["intelligent_triage"] = existing["intelligent_triage"]
     save_failed_analysis_results(tag_name, payload)
     return jsonify({"success": True, "count": len(results), "saved_at": payload["saved_at"]})
 
@@ -20699,7 +20728,12 @@ def deprecation_search():
 @app.route("/api/agents/triage/first-level-ai", methods=["POST"])
 @jwt_required
 def first_level_ai_analysis():
-    """First Level AI: failure analysis plus Triage Genie ticket validation."""
+    """First Level AI: failure analysis plus Triage Genie ticket validation.
+
+    Phase 2: returns formal intelligent_triage schema + decision engine outcome.
+    Never auto-starts Deep AI. Hybrid auto-triage write only when TG Correct/VALID
+    and ticket is open.
+    """
     try:
         request_data = request.get_json(force=True) or {}
         test_result = request_data.get("test_result") or request_data
@@ -20709,21 +20743,254 @@ def first_level_ai_analysis():
             return jsonify({"success": False, "error": "test_result is required"}), 400
 
         result = _run_first_level_ai_analysis(test_result, run_ai=True)
+        payload = build_intelligent_triage_payload(test_result, result)
+        analysis = payload["intelligent_triage"]
+        decision = payload["decision"]
+
+        # Independent confidences — never average into overall_confidence.
+        triage_confidence = payload.get("triage_confidence")
+        intermittent_confidence = payload.get("intermittent_confidence")
+
         result["user_requested"] = True
         result["analysis_result"] = {
             "analysis_type": "first_level_ai",
-            "confidence": 0.85 if result.get("tg_ticket_validation", {}).get("verdict") == "Correct" else 0.7,
+            # Back-compat field: same as triage_confidence only (not blended).
+            "confidence": triage_confidence,
+            "triage_confidence": triage_confidence,
+            "intermittent_confidence": intermittent_confidence,
         }
+        result["intelligent_triage"] = analysis
+        result["decision"] = decision
+        result["triage_confidence"] = triage_confidence
+        result["intermittent_confidence"] = intermittent_confidence
+        result["mcp_health"] = analysis.get("mcp_health")
+        result["thresholds"] = payload.get("thresholds")
+
+        # Persist into saved-tag cache when tag provided.
+        tag_name = (request_data.get("tag") or test_result.get("tag") or "").strip()
+        testcase_id = str(test_result.get("testcase_id") or "")
+        if tag_name and testcase_id:
+            try:
+                cached = load_failed_analysis_results(tag_name) or {
+                    "tag": tag_name,
+                    "results": [],
+                    "cursor_ai": {},
+                    "intelligent_triage": {},
+                }
+                cached = persist_analysis_into_tag_payload(cached, testcase_id, analysis)
+                save_failed_analysis_results(tag_name, cached)
+            except Exception as persist_err:
+                logger.warning("Could not persist intelligent_triage for %s: %s", tag_name, persist_err)
+
+        # Hybrid auto-triage write (eligible only).
+        auto_write = {
+            "attempted": False,
+            "applied": False,
+            "mode": decision.get("auto_triage_write"),
+            "detail": decision.get("auto_triage_write_detail"),
+            "error": None,
+        }
+        apply_auto = request_data.get("apply_auto_triage", True)
+        if (
+            apply_auto
+            and should_auto_write_triage(decision, analysis)
+            and testcase_id
+        ):
+            auto_write["attempted"] = True
+            try:
+                ticket = (
+                    ((analysis.get("triage_genie") or {}).get("original") or {}).get("ticket")
+                    or result.get("best_matching_ticket")
+                    or ""
+                )
+                comment = (
+                    "RegX Intelligent Triage AUTO_TRIAGE: TG validation Correct/VALID, "
+                    "ticket open. Linked %s. %s"
+                    % (ticket, (result.get("recommended_action") or "")[:400])
+                )
+                current_username = g.current_user.get("sub", "") if hasattr(g, "current_user") else ""
+                user_auth = _get_user_credentials(current_username) if current_username else None
+                if not user_auth:
+                    auto_write["error"] = "Session credentials unavailable for auto-triage write"
+                    decision["auto_triage_write"] = "recommend_only"
+                else:
+                    update_fields = {
+                        "comments": comment,
+                        "triaged_by": current_username,
+                    }
+                    if ticket:
+                        update_fields["jira_tickets"] = [ticket]
+                    put_payload = {
+                        "query": {"_id": {"$in": [{"$oid": testcase_id}]}},
+                        "data": {"$set": update_fields},
+                        "multi": True,
+                    }
+                    resp = requests.put(
+                        f"{JITA_BASE}/agave_test_results",
+                        headers={"Content-Type": "application/json"},
+                        json=put_payload,
+                        auth=user_auth,
+                        verify=False,
+                        timeout=30,
+                    )
+                    if resp.status_code == 200:
+                        auto_write["applied"] = True
+                        decision["auto_triage_write"] = "applied"
+                        analysis["auto_triage"] = {
+                            "applied": True,
+                            "jira_tickets": [ticket] if ticket else [],
+                            "comment": comment,
+                            "applied_at": datetime.utcnow().isoformat() + "Z",
+                            "applied_by": current_username,
+                            "mode": "hybrid_auto",
+                        }
+                        analysis["decision"] = decision
+                        result["intelligent_triage"] = analysis
+                        result["decision"] = decision
+                    else:
+                        auto_write["error"] = resp.text or ("HTTP %s" % resp.status_code)
+                        decision["auto_triage_write"] = "recommend_only"
+            except Exception as write_err:
+                auto_write["error"] = str(write_err)[:300]
+                decision["auto_triage_write"] = "recommend_only"
+                logger.warning("Hybrid auto-triage write failed: %s", write_err)
+
+        result["auto_triage_write"] = auto_write
+        # Explicit: Deep AI never auto-started from First Level.
+        result["deep_ai_recommended"] = bool(decision.get("deep_ai_recommended"))
+        result["deep_ai_started"] = False
         return jsonify(result)
     except Exception as e:
         logger.error("Error in first level AI analysis: %s", e, exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/mcp/regression/failed-analysis/glean-ai-validate", methods=["POST"])
+@jwt_required
+def glean_ai_validate_candidate():
+    """Human-triggered AI validation of a single Glean candidate (not auto for all)."""
+    try:
+        body = request.get_json(force=True) or {}
+        ticket = (body.get("ticket") or "").strip()
+        test_result = body.get("test_result") or {}
+        tag_name = (body.get("tag") or "").strip()
+        testcase_id = str(
+            body.get("testcase_id")
+            or test_result.get("testcase_id")
+            or ""
+        )
+        if not ticket:
+            return jsonify({"success": False, "error": "ticket is required"}), 400
+
+        exception_summary = test_result.get("exception_summary") or body.get("exception_summary") or ""
+        exception = test_result.get("exception") or body.get("exception") or ""
+        testcase_name = test_result.get("testcase_name") or body.get("testcase_name") or ""
+
+        # Reuse TG detailed validation heuristics against this candidate.
+        validation = validate_triage_genie_ticket_detailed(
+            ticket, exception_summary, exception, [{"ticket": ticket}]
+        )
+        validation["trigger"] = "human"
+        validation["match_verdict"] = validation.get("verdict")
+
+        # Optional short AI confirmation (best-effort; never fabricate tickets).
+        ai_note = ""
+        try:
+            system_prompt = (
+                "You validate whether a Jira ticket matches a test failure. "
+                "Respond with JSON only: "
+                '{"verdict":"Correct|Partial|Incorrect","reason":"...","confidence":0.0}. '
+                "Do not invent ticket IDs."
+            )
+            user_content = "\n".join([
+                "Testcase: %s" % testcase_name,
+                "Exception: %s" % (exception_summary or "")[:1500],
+                "Candidate ticket: %s" % ticket,
+                "Jira summary: %s" % (validation.get("jira_summary") or ""),
+                "Heuristic verdict: %s — %s" % (validation.get("verdict"), validation.get("reason")),
+            ])
+            ai_raw = _call_ai_chat(system_prompt, user_content, max_tokens=400)
+            parsed = _parse_first_level_ai_json(ai_raw)
+            if parsed.get("verdict") in ("Correct", "Partial", "Incorrect"):
+                validation["verdict"] = parsed["verdict"]
+                validation["match_verdict"] = parsed["verdict"]
+                if parsed.get("reason"):
+                    validation["reason"] = parsed["reason"]
+                if parsed.get("confidence") is not None:
+                    validation["ai_confidence"] = parsed["confidence"]
+            ai_note = (ai_raw or "")[:500]
+        except Exception as ai_err:
+            validation["ai_error"] = str(ai_err)[:200]
+            # Do not fabricate a stronger verdict on AI failure.
+            logger.warning("Glean AI validate chat failed: %s", ai_err)
+
+        validation["ai_note"] = ai_note
+
+        # Persist into intelligent_triage map when tag+testcase known.
+        analysis = None
+        if tag_name and testcase_id:
+            cached = load_failed_analysis_results(tag_name) or {
+                "tag": tag_name,
+                "results": [],
+                "cursor_ai": {},
+                "intelligent_triage": {},
+            }
+            existing = (cached.get("intelligent_triage") or {}).get(testcase_id) or {}
+            if not existing:
+                # Seed from a lightweight first-level search so candidates exist.
+                fl = _run_first_level_ai_analysis(test_result or body, run_ai=False)
+                seeded = build_intelligent_triage_payload(test_result or body, fl)
+                existing = seeded["intelligent_triage"]
+            analysis = merge_glean_ai_validation(existing, validation, ticket=ticket)
+            cached = persist_analysis_into_tag_payload(cached, testcase_id, analysis)
+            save_failed_analysis_results(tag_name, cached)
+
+        return jsonify({
+            "success": True,
+            "ticket": ticket,
+            "ai_validation": validation,
+            "intelligent_triage": analysis,
+            "persisted": bool(analysis),
+        })
+    except Exception as e:
+        logger.error("Error in glean-ai-validate: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/thresholds", methods=["GET"])
+@jwt_required
+def get_intelligent_triage_thresholds():
+    """Return team-specific Intelligent Triage thresholds (defaults from architecture)."""
+    try:
+        return jsonify({
+            "success": True,
+            "thresholds": load_team_thresholds(),
+            "defaults": DEFAULT_THRESHOLDS,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/thresholds", methods=["PUT"])
+@jwt_required
+def put_intelligent_triage_thresholds():
+    """Update team-specific Intelligent Triage thresholds."""
+    try:
+        body = request.get_json(force=True) or {}
+        data = body.get("thresholds") if "thresholds" in body else body
+        saved = save_team_thresholds(data if isinstance(data, dict) else {})
+        return jsonify({"success": True, "thresholds": saved})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/mcp/regression/failed-analysis/deep-ai", methods=["POST"])
 @jwt_required
 def failed_analysis_deep_ai():
-    """Deep AI: skill-based triage via Cursor bridge, plus Glean/Jira ticket hunt."""
+    """Deep AI: skill-based triage via Cursor bridge, plus Glean/Jira ticket hunt.
+
+    Phase 2: marks deep_ai_started only on this user-triggered path; never from First Level.
+    """
     try:
         body = request.get_json(force=True) or {}
         test_result = body.get("test_result") or body
@@ -20784,6 +21051,11 @@ def failed_analysis_deep_ai():
             or ""
         )
         skill_url = rdm_link if analysis_type == "skipped" else test_log_url
+        skill_used = (
+            "triage-rdm-deployment-failure"
+            if analysis_type == "skipped"
+            else "triage-cdp-test-failure"
+        )
 
         payload = {
             "testcase_name": testcase_name,
@@ -20803,6 +21075,10 @@ def failed_analysis_deep_ai():
             "analysis_type": analysis_type,
             "cursor_api_key": cursor_api_key,
             "atlassian_tokens": atlassian_tokens,
+            # Skill source of truth: prefer Sourcegraph nutest on master (bridge default);
+            # local .cursor/skills fallback is handled inside cursor-bridge.
+            "prefer_sourcegraph_skill": True,
+            "skill_fallback_local": True,
         }
 
         resp = requests.post(
@@ -20820,9 +21096,28 @@ def failed_analysis_deep_ai():
 
         data = resp.json()
         analysis = data.get("analysis") or {}
-        return jsonify({
+        session_id = data.get("session_id", "")
+        mcp_health = data.get("mcp_health") or analysis.get("mcp_health") or {
+            "sourcegraph": {
+                "service": "sourcegraph",
+                "available": True,
+                "ok": True,
+                "error": None,
+                "claimed_success": True,
+            },
+            "glean": {
+                "service": "glean",
+                "available": first_level.get("glean_available"),
+                "ok": first_level.get("glean_ok"),
+                "error": None if first_level.get("glean_ok") else "not_ok_at_first_level",
+                "claimed_success": bool(first_level.get("glean_ok")),
+            },
+        }
+
+        # Shared session model: Deep AI + Cursor AI use the same session_id.
+        response_body = {
             "success": True,
-            "session_id": data.get("session_id", ""),
+            "session_id": session_id,
             "analysis": analysis,
             "root_cause": analysis.get("root_cause"),
             "classification": analysis.get("classification"),
@@ -20836,13 +21131,53 @@ def failed_analysis_deep_ai():
             "enriched_tickets": first_level.get("enriched_tickets") or [],
             "glean_snippets": first_level.get("glean_snippets") or [],
             "glean_available": first_level.get("glean_available"),
+            "glean_ok": first_level.get("glean_ok"),
             "search_source": first_level.get("search_source"),
-            "skill_used": (
-                "triage-rdm-deployment-failure"
-                if analysis_type == "skipped"
-                else "triage-cdp-test-failure"
-            ),
-        })
+            "skill_used": skill_used,
+            "mcp_health": mcp_health,
+            "deep_ai_started": True,
+            "deep_ai_recommended": True,
+            "ux_entry": "deep_ai",  # merged UX with Cursor AI column via shared session
+        }
+
+        tag_name = (body.get("tag") or test_result.get("tag") or "").strip()
+        testcase_id = str(test_result.get("testcase_id") or "")
+        if tag_name and testcase_id:
+            try:
+                cached = load_failed_analysis_results(tag_name) or {
+                    "tag": tag_name,
+                    "results": [],
+                    "cursor_ai": {},
+                    "intelligent_triage": {},
+                }
+                existing = (cached.get("intelligent_triage") or {}).get(testcase_id)
+                if not existing:
+                    seeded = build_intelligent_triage_payload(test_result, first_level)
+                    existing = seeded["intelligent_triage"]
+                updated = set_deep_ai_started(
+                    existing,
+                    session_id=session_id,
+                    skill_used=skill_used,
+                    mcp_health=mcp_health,
+                )
+                updated["deep_ai"]["status"] = "complete"
+                updated["deep_ai"]["root_cause"] = analysis.get("root_cause")
+                updated["deep_ai"]["classification"] = analysis.get("classification")
+                updated["deep_ai"]["confidence"] = analysis.get("confidence")
+                cached = persist_analysis_into_tag_payload(cached, testcase_id, updated)
+                # Also mirror session into cursor_ai for UX merge.
+                cursor_ai = dict(cached.get("cursor_ai") or {})
+                sessions = dict(cursor_ai.get("sessions") or {})
+                if session_id:
+                    sessions[testcase_id] = session_id
+                cursor_ai["sessions"] = sessions
+                cached["cursor_ai"] = cursor_ai
+                save_failed_analysis_results(tag_name, cached)
+                response_body["intelligent_triage"] = updated
+            except Exception as persist_err:
+                logger.warning("Could not persist deep_ai session: %s", persist_err)
+
+        return jsonify(response_body)
     except requests.exceptions.ConnectionError:
         logger.error("Cursor bridge is not reachable at %s", CURSOR_BRIDGE_URL)
         return jsonify({

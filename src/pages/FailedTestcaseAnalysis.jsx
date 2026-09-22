@@ -311,7 +311,7 @@ function TgValidationBlock({ validation }) {
   );
 }
 
-function EnrichedTicketTable({ tickets }) {
+function EnrichedTicketTable({ tickets, onAiValidate, validatingTicket, showMatchScore }) {
   if (!tickets || tickets.length === 0) return null;
   return (
     <div className="glean-ticket-table-wrapper">
@@ -320,8 +320,10 @@ function EnrichedTicketTable({ tickets }) {
           <tr>
             <th>Ticket</th>
             <th>Status</th>
+            {showMatchScore ? <th>Match</th> : null}
             <th>Type</th>
             <th>Summary</th>
+            {onAiValidate ? <th>AI Validate</th> : null}
           </tr>
         </thead>
         <tbody>
@@ -338,14 +340,83 @@ function EnrichedTicketTable({ tickets }) {
                 </span>
                 {t.jira_resolution && <span className="glean-resolution">({t.jira_resolution})</span>}
               </td>
+              {showMatchScore ? (
+                <td className="glean-match-score">
+                  {t.match_score != null ? Number(t.match_score).toFixed(2) : '—'}
+                </td>
+              ) : null}
               <td className="glean-ticket-type">{t.jira_type || '-'}</td>
-              <td className="glean-ticket-summary" title={t.jira_summary || t.glean_title}>
-                {t.jira_summary || t.glean_title || '-'}
+              <td className="glean-ticket-summary" title={t.jira_summary || t.glean_title || t.title}>
+                {t.jira_summary || t.glean_title || t.title || '-'}
+                {t.ai_validation?.verdict && (
+                  <div className="glean-candidate-ai-verdict">
+                    AI: {t.ai_validation.verdict}
+                  </div>
+                )}
               </td>
+              {onAiValidate ? (
+                <td>
+                  <button
+                    type="button"
+                    className="btn-glean-ai-validate"
+                    disabled={validatingTicket === t.ticket}
+                    onClick={() => onAiValidate(t)}
+                    title="Human-triggered AI validation for this candidate (not auto-run)"
+                  >
+                    {validatingTicket === t.ticket ? 'Validating…' : '[AI Validate]'}
+                  </button>
+                </td>
+              ) : null}
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function McpHealthBadges({ mcpHealth }) {
+  if (!mcpHealth) return null;
+  const services = ['glean', 'sourcegraph', 'jira', 'triage_genie'];
+  return (
+    <div className="mcp-health-row" title="MCP / integration health — never treat failed services as successful evidence">
+      {services.map((name) => {
+        const h = mcpHealth[name];
+        if (!h) return null;
+        const ok = h.ok === true;
+        const available = h.available !== false;
+        const cls = !available || h.ok === false ? 'mcp-health-bad' : ok ? 'mcp-health-ok' : 'mcp-health-unknown';
+        return (
+          <span key={name} className={`badge mcp-health-badge ${cls}`}>
+            {name}{ok ? ' ✓' : h.ok === false ? ' ✗' : ' ?'}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function DecisionBadge({ decision }) {
+  if (!decision?.outcome) return null;
+  const outcome = decision.outcome;
+  const cls = `decision-badge decision-${String(outcome).toLowerCase()}`;
+  return (
+    <div className="decision-block">
+      <span className={`badge ${cls}`} title={(decision.reasons || []).join('; ')}>
+        {outcome}
+      </span>
+      {decision.deep_ai_recommended && !decision.deep_ai_started && (
+        <span className="badge decision-deep-recommended">Deep AI recommended</span>
+      )}
+      {decision.deep_ai_started && (
+        <span className="badge decision-deep-started">Deep AI started</span>
+      )}
+      {decision.auto_triage_write === 'recommend_only' && (
+        <span className="badge decision-recommend-only">Recommend only</span>
+      )}
+      {decision.auto_triage_write === 'applied' && (
+        <span className="badge decision-auto-applied">Auto-triage applied</span>
+      )}
     </div>
   );
 }
@@ -395,7 +466,7 @@ const COLUMNS = [
   { id: 'intelligent_triage', label: 'Intelligent Triage', defaultVisible: true },
   { id: 'auto_test_details', label: 'Auto Test Details', defaultVisible: true },
   { id: 'glean_search', label: 'Glean Search', defaultVisible: true },
-  { id: 'cursor_ai_analysis', label: 'Cursor AI Deep Analysis', defaultVisible: false },
+  { id: 'cursor_ai_analysis', label: 'Deep AI / Cursor', defaultVisible: false },
   { id: 'triage_genie_ticket', label: 'Triage Genie Ticket', defaultVisible: true },
   { id: 'triage_genie_review', label: 'Triage Genie Review', defaultVisible: true },
   { id: 'jira_tickets', label: 'Jira Tickets', defaultVisible: true },
@@ -846,6 +917,8 @@ export default function FailedTestcaseAnalysis() {
 
   // Intelligent Triage state
   const [intelligentTriageResults, setIntelligentTriageResults] = useState({});
+  const [intelligentTriageByTestcase, setIntelligentTriageByTestcase] = useState({});
+  const [gleanAiValidating, setGleanAiValidating] = useState({});
   const [firstLevelAiLoading, setFirstLevelAiLoading] = useState({});
   const [firstLevelAiResults, setFirstLevelAiResults] = useState({});
   const [deepAiLoading, setDeepAiLoading] = useState({});
@@ -992,17 +1065,63 @@ export default function FailedTestcaseAnalysis() {
       setCursorAiResults(cursorAi.results || {});
       setCursorAiSessions(cursorAi.sessions || {});
       setFollowUpHistoryByTestcase(cursorAi.follow_up_history_by_testcase || {});
+      const itMap = data.intelligent_triage || {};
+      setIntelligentTriageByTestcase(itMap);
+      const flHydrate = {};
+      const deepHydrate = {};
+      const triageOpen = {};
+      Object.entries(itMap).forEach(([tid, analysis]) => {
+        if (!analysis) return;
+        triageOpen[tid] = { analysis_type: 'ready', requires_first_level_ai: true, requires_deep_ai_analysis: true };
+        if (analysis.triage_analysis || analysis.decision) {
+          flHydrate[tid] = {
+            success: true,
+            analysis_type: 'first_level_ai',
+            issue_type: analysis.triage_analysis?.issue_type,
+            analysis: analysis.triage_analysis?.summary,
+            recommended_action: analysis.triage_analysis?.recommended_action,
+            best_matching_ticket: analysis.triage_analysis?.best_matching_ticket,
+            triage_confidence: analysis.triage_analysis?.triage_confidence,
+            intermittent_confidence: analysis.intermittent_analysis?.intermittent_confidence,
+            tg_ticket_validation: analysis.triage_genie?.ai_validation
+              ? { ...analysis.triage_genie.ai_validation, ticket: analysis.triage_genie?.original?.ticket }
+              : null,
+            enriched_tickets: analysis.glean_candidates?.search?.candidates || [],
+            glean_snippets: analysis.glean_candidates?.search?.snippets || [],
+            search_source: analysis.glean_candidates?.search?.search_source,
+            glean_ok: analysis.glean_candidates?.search?.mcp_health?.ok,
+            mcp_health: analysis.mcp_health,
+            decision: analysis.decision,
+            intelligent_triage: analysis,
+          };
+        }
+        if (analysis.deep_ai?.status && analysis.deep_ai.status !== 'not_run') {
+          deepHydrate[tid] = {
+            success: true,
+            session_id: analysis.deep_ai.session_id,
+            root_cause: analysis.deep_ai.root_cause,
+            classification: analysis.deep_ai.classification,
+            confidence: analysis.deep_ai.confidence,
+            skill_used: analysis.deep_ai.skill_used,
+            mcp_health: analysis.deep_ai.mcp_health || analysis.mcp_health,
+          };
+        }
+      });
+      if (Object.keys(triageOpen).length) setIntelligentTriageResults(prev => ({ ...prev, ...triageOpen }));
+      if (Object.keys(flHydrate).length) setFirstLevelAiResults(prev => ({ ...prev, ...flHydrate }));
+      if (Object.keys(deepHydrate).length) setDeepAiResults(prev => ({ ...prev, ...deepHydrate }));
     } catch (_) {
       setResults([]);
       setCursorAiResults({});
       setCursorAiSessions({});
       setFollowUpHistoryByTestcase({});
+      setIntelligentTriageByTestcase({});
     } finally {
       setLoading(false);
     }
   };
 
-  const saveResultsForTag = useCallback(async (tagName, rows, branch, cursorAiState = null) => {
+  const saveResultsForTag = useCallback(async (tagName, rows, branch, cursorAiState = null, intelligentTriageState = null) => {
     if (!tagName) return;
     setSavingResults(true);
     try {
@@ -1010,6 +1129,7 @@ export default function FailedTestcaseAnalysis() {
         results: rows,
         current_branch: branch,
         ...(cursorAiState ? { cursor_ai: cursorAiState } : {}),
+        ...(intelligentTriageState ? { intelligent_triage: intelligentTriageState } : {}),
       });
     } catch (_) {}
     setSavingResults(false);
@@ -1017,13 +1137,24 @@ export default function FailedTestcaseAnalysis() {
 
   useEffect(() => {
     if (inputMode !== 'tag' || !analysisTag) return;
-    if (results.length === 0 && Object.keys(cursorAiResults).length === 0 && Object.keys(followUpHistoryByTestcase).length === 0) return;
-    saveResultsForTag(analysisTag, results, currentBranch, {
-      results: cursorAiResults,
-      sessions: cursorAiSessions,
-      follow_up_history_by_testcase: followUpHistoryByTestcase,
-    });
-  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, followUpHistoryByTestcase, saveResultsForTag]);
+    if (
+      results.length === 0
+      && Object.keys(cursorAiResults).length === 0
+      && Object.keys(followUpHistoryByTestcase).length === 0
+      && Object.keys(intelligentTriageByTestcase).length === 0
+    ) return;
+    saveResultsForTag(
+      analysisTag,
+      results,
+      currentBranch,
+      {
+        results: cursorAiResults,
+        sessions: cursorAiSessions,
+        follow_up_history_by_testcase: followUpHistoryByTestcase,
+      },
+      intelligentTriageByTestcase,
+    );
+  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, followUpHistoryByTestcase, intelligentTriageByTestcase, saveResultsForTag]);
 
   const buildIncludeParam = useCallback((cols) => {
     const include = new Set(['basic', 'exception_summary', 'intermittent']);
@@ -2362,6 +2493,8 @@ export default function FailedTestcaseAnalysis() {
       const response = await api.post(`${API_BASE}/first-level-ai`, {
         test_result: buildFailedAnalysisTestResult(result),
         user_requested_ai: true,
+        tag: analysisTag || tag || selectedSavedTag || '',
+        apply_auto_triage: true,
       });
       const data = response.data || {};
       if (!data.success) {
@@ -2370,22 +2503,35 @@ export default function FailedTestcaseAnalysis() {
       const stored = {
         ...data,
         analysis_type: data.analysis_type || 'first_level_ai',
-        confidence: data.analysis_result?.confidence || 0.8,
+        confidence: data.triage_confidence ?? data.analysis_result?.triage_confidence ?? data.analysis_result?.confidence ?? 0.8,
+        triage_confidence: data.triage_confidence,
+        intermittent_confidence: data.intermittent_confidence,
         existing_issues: data.enriched_tickets || data.existing_issues || [],
+        decision: data.decision,
+        mcp_health: data.mcp_health,
+        intelligent_triage: data.intelligent_triage,
       };
       setFirstLevelAiResults(prev => ({ ...prev, [testId]: stored }));
-      if (data.enriched_tickets || data.glean_snippets) {
+      if (data.intelligent_triage) {
+        setIntelligentTriageByTestcase(prev => ({ ...prev, [testId]: data.intelligent_triage }));
+      }
+      if (data.enriched_tickets || data.glean_snippets || data.intelligent_triage?.glean_candidates) {
+        const candidates = data.intelligent_triage?.glean_candidates?.search?.candidates
+          || data.enriched_tickets
+          || [];
         setGleanSearchResults(prev => ({
           ...prev,
           [testId]: {
             ...(prev[testId] || {}),
             success: true,
             issue_type: data.issue_type,
-            enriched_tickets: data.enriched_tickets || [],
-            glean_snippets: data.glean_snippets || [],
+            enriched_tickets: candidates,
+            glean_snippets: data.glean_snippets || data.intelligent_triage?.glean_candidates?.search?.snippets || [],
             glean_jira_refs: data.glean_jira_refs || [],
             search_source: data.search_source,
             glean_ok: data.glean_ok,
+            mcp_health: data.mcp_health,
+            ai_validation: data.intelligent_triage?.glean_candidates?.ai_validation || null,
           },
         }));
       }
@@ -2393,6 +2539,7 @@ export default function FailedTestcaseAnalysis() {
         kind: 'first_level',
         testcase_name: result.testcase_name,
         testcase_id: testId,
+        resultRow: result,
         ...stored,
       });
     } catch (error) {
@@ -2403,9 +2550,69 @@ export default function FailedTestcaseAnalysis() {
     }
   };
 
+  const handleGleanAiValidate = async (result, ticketInfo) => {
+    const testId = result.testcase_id;
+    const ticket = ticketInfo?.ticket;
+    if (!testId || !ticket) return;
+    setGleanAiValidating(prev => ({ ...prev, [testId]: ticket }));
+    try {
+      const response = await api.post(`${API_BASE}/glean-ai-validate`, {
+        ticket,
+        testcase_id: testId,
+        tag: analysisTag || tag || selectedSavedTag || '',
+        test_result: buildFailedAnalysisTestResult(result),
+      });
+      const data = response.data || {};
+      if (!data.success) throw new Error(data.error || 'Validation failed');
+      if (data.intelligent_triage) {
+        setIntelligentTriageByTestcase(prev => ({ ...prev, [testId]: data.intelligent_triage }));
+        setFirstLevelAiResults(prev => ({
+          ...prev,
+          [testId]: {
+            ...(prev[testId] || {}),
+            intelligent_triage: data.intelligent_triage,
+            enriched_tickets: data.intelligent_triage?.glean_candidates?.search?.candidates || prev[testId]?.enriched_tickets,
+            glean_ai_validation: data.ai_validation,
+          },
+        }));
+      }
+      setGleanSearchResults(prev => ({
+        ...prev,
+        [testId]: {
+          ...(prev[testId] || {}),
+          ai_validation: data.ai_validation,
+          enriched_tickets: (prev[testId]?.enriched_tickets || []).map((t) => (
+            t.ticket === ticket ? { ...t, ai_validation: data.ai_validation } : t
+          )),
+        },
+      }));
+      if (triageAnalysisModal?.testcase_id === testId) {
+        setTriageAnalysisModal(prev => prev ? {
+          ...prev,
+          intelligent_triage: data.intelligent_triage || prev.intelligent_triage,
+          glean_ai_validation: data.ai_validation,
+          enriched_tickets: data.intelligent_triage?.glean_candidates?.search?.candidates || prev.enriched_tickets,
+        } : prev);
+      }
+    } catch (error) {
+      alert(`Glean AI Validate failed: ${error.response?.data?.error || error.message}`);
+    } finally {
+      setGleanAiValidating(prev => ({ ...prev, [testId]: null }));
+    }
+  };
+
   const handleDeepAiAnalysis = async (result) => {
     const testId = result.testcase_id;
     if (!testId) return;
+
+    const fl = firstLevelAiResults[testId];
+    const recommended = fl?.decision?.deep_ai_recommended || fl?.decision?.outcome === 'NEEDS_DEEP_ANALYSIS';
+    if (fl?.decision && !recommended && !fl?.decision?.deep_ai_started) {
+      const proceed = window.confirm(
+        'Deep AI is not recommended by First-Level decision for this failure. Start Deep AI anyway? (Never auto-started.)'
+      );
+      if (!proceed) return;
+    }
 
     setDeepAiLoading(prev => ({ ...prev, [testId]: true }));
     try {
@@ -2415,6 +2622,7 @@ export default function FailedTestcaseAnalysis() {
         glean_tickets: glean.enriched_tickets || [],
         glean_snippets: glean.glean_snippets || [],
         user_requested: true,
+        tag: analysisTag || tag || selectedSavedTag || '',
       });
       const data = response.data || {};
       if (!data.success) {
@@ -2422,12 +2630,17 @@ export default function FailedTestcaseAnalysis() {
       }
       setDeepAiResults(prev => ({ ...prev, [testId]: data }));
       if (data.session_id) {
+        // Shared session model with Cursor AI column.
         setCursorAiSessions(prev => ({ ...prev, [testId]: data.session_id }));
+      }
+      if (data.intelligent_triage) {
+        setIntelligentTriageByTestcase(prev => ({ ...prev, [testId]: data.intelligent_triage }));
       }
       setTriageAnalysisModal({
         kind: 'deep',
         testcase_name: result.testcase_name,
         testcase_id: testId,
+        resultRow: result,
         ...data,
       });
     } catch (error) {
@@ -3465,6 +3678,9 @@ export default function FailedTestcaseAnalysis() {
         const deepAiLoadingState = deepAiLoading[result.testcase_id];
         const deepAiResult = deepAiResults[result.testcase_id];
         const tgValidation = firstLevelResult?.tg_ticket_validation || deepAiResult?.tg_ticket_validation;
+        const decision = firstLevelResult?.decision || intelligentTriageByTestcase[result.testcase_id]?.decision;
+        const mcpHealth = firstLevelResult?.mcp_health || deepAiResult?.mcp_health || intelligentTriageByTestcase[result.testcase_id]?.mcp_health;
+        const deepRecommended = decision?.deep_ai_recommended || decision?.outcome === 'NEEDS_DEEP_ANALYSIS';
 
         return (
           <td key={colId} className="intelligent-triage-cell">
@@ -3482,19 +3698,33 @@ export default function FailedTestcaseAnalysis() {
                   </button>
                   <button
                     type="button"
-                    className="btn-deep-ai-analysis"
+                    className={`btn-deep-ai-analysis${deepRecommended ? ' deep-ai-recommended' : ''}`}
                     disabled={deepAiLoadingState}
                     onClick={() => handleDeepAiAnalysis(result)}
-                    title="Deep AI: skill-based log triage (triage-cdp-test-failure / triage-rdm-deployment-failure)"
+                    title={deepRecommended
+                      ? 'Deep AI recommended by decision engine (user-triggered only; never auto-started)'
+                      : 'Deep AI: skill-based log triage — user-triggered only'}
                   >
-                    {deepAiLoadingState ? 'Analyzing...' : deepAiResult ? 'Re-run Deep AI' : 'Deep AI Analysis'}
+                    {deepAiLoadingState ? 'Analyzing...' : deepAiResult ? 'Re-run Deep AI' : (deepRecommended ? 'Deep AI (recommended)' : 'Deep AI Analysis')}
                   </button>
                 </div>
+                {decision && <DecisionBadge decision={decision} />}
+                <McpHealthBadges mcpHealth={mcpHealth} />
                 {firstLevelResult && (
                   <div className="first-level-result">
                     <span className={`badge glean-issue-badge glean-issue-${(firstLevelResult.issue_type || '').replace(/\s+/g, '-').toLowerCase()}`}>
                       {firstLevelResult.issue_type || 'First Level AI'}
                     </span>
+                    {firstLevelResult.triage_confidence != null && (
+                      <span className="badge triage-conf-badge" title="Independent triage_confidence (not averaged with intermittent)">
+                        triage {Number(firstLevelResult.triage_confidence).toFixed(2)}
+                      </span>
+                    )}
+                    {firstLevelResult.intermittent_confidence != null && (
+                      <span className="badge intermittent-conf-badge" title="Independent intermittent_confidence">
+                        intermittent {Number(firstLevelResult.intermittent_confidence).toFixed(2)}
+                      </span>
+                    )}
                     {tgValidation && (
                       <span className={`badge ${tgVerdictClass(tgValidation.verdict)}`}>
                         TG {tgValidation.verdict || 'Missing'}
@@ -3518,6 +3748,7 @@ export default function FailedTestcaseAnalysis() {
                         kind: 'first_level',
                         testcase_name: result.testcase_name,
                         testcase_id: result.testcase_id,
+                        resultRow: result,
                         ...firstLevelResult,
                       })}
                     >
@@ -3547,6 +3778,7 @@ export default function FailedTestcaseAnalysis() {
                         kind: 'deep',
                         testcase_name: result.testcase_name,
                         testcase_id: result.testcase_id,
+                        resultRow: result,
                         ...deepAiResult,
                       })}
                     >
@@ -4517,11 +4749,37 @@ export default function FailedTestcaseAnalysis() {
             <div className="modal-body glean-detail-body">
               <div className="glean-tc-name">{triageAnalysisModal.testcase_name}</div>
 
+              {triageAnalysisModal.decision && (
+                <div className="glean-section">
+                  <h4>Decision</h4>
+                  <DecisionBadge decision={triageAnalysisModal.decision} />
+                  {(triageAnalysisModal.decision.reasons || []).length > 0 && (
+                    <ul className="decision-reasons">
+                      {triageAnalysisModal.decision.reasons.map((r, i) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              <McpHealthBadges mcpHealth={triageAnalysisModal.mcp_health || triageAnalysisModal.intelligent_triage?.mcp_health} />
+
               <div className="glean-section">
                 <h4>Failure Classification</h4>
                 <span className={`badge glean-issue-badge glean-issue-${((triageAnalysisModal.issue_type || triageAnalysisModal.classification) || '').replace(/\s+/g, '-').toLowerCase()}`}>
                   {triageAnalysisModal.issue_type || triageAnalysisModal.classification || 'Unknown'}
                 </span>
+                {triageAnalysisModal.triage_confidence != null && (
+                  <span className="badge triage-conf-badge" title="Independent triage_confidence">
+                    triage_confidence {Number(triageAnalysisModal.triage_confidence).toFixed(2)}
+                  </span>
+                )}
+                {triageAnalysisModal.intermittent_confidence != null && (
+                  <span className="badge intermittent-conf-badge" title="Independent intermittent_confidence">
+                    intermittent_confidence {Number(triageAnalysisModal.intermittent_confidence).toFixed(2)}
+                  </span>
+                )}
                 {triageAnalysisModal.skill_used && (
                   <span className="deep-ai-skill">Skill: {triageAnalysisModal.skill_used}</span>
                 )}
@@ -4534,7 +4792,13 @@ export default function FailedTestcaseAnalysis() {
               </div>
 
               <div className="glean-section">
-                <h4>Triage Genie Ticket Validation</h4>
+                <h4>Triage Genie (original evidence)</h4>
+                <div className="tg-original-ticket">
+                  {(triageAnalysisModal.intelligent_triage?.triage_genie?.original?.ticket
+                    || triageAnalysisModal.tg_ticket_validation?.ticket
+                    || '—')}
+                </div>
+                <h4>AI Validation of Triage Genie</h4>
                 <TgValidationBlock validation={triageAnalysisModal.tg_ticket_validation} />
               </div>
 
@@ -4608,10 +4872,32 @@ export default function FailedTestcaseAnalysis() {
                 </div>
               )}
 
-              {triageAnalysisModal.enriched_tickets && triageAnalysisModal.enriched_tickets.length > 0 && (
+              {((triageAnalysisModal.enriched_tickets && triageAnalysisModal.enriched_tickets.length > 0)
+                || (triageAnalysisModal.intelligent_triage?.glean_candidates?.search?.candidates || []).length > 0) && (
                 <div className="glean-section">
-                  <h4>Existing Tickets from Error Search ({triageAnalysisModal.enriched_tickets.length})</h4>
-                  <EnrichedTicketTable tickets={triageAnalysisModal.enriched_tickets} />
+                  <h4>Glean Candidates (search only — AI Validate is human-triggered)</h4>
+                  <EnrichedTicketTable
+                    tickets={
+                      triageAnalysisModal.intelligent_triage?.glean_candidates?.search?.candidates
+                      || triageAnalysisModal.enriched_tickets
+                    }
+                    showMatchScore
+                    validatingTicket={gleanAiValidating[triageAnalysisModal.testcase_id]}
+                    onAiValidate={
+                      triageAnalysisModal.resultRow
+                        ? (t) => handleGleanAiValidate(triageAnalysisModal.resultRow, t)
+                        : undefined
+                    }
+                  />
+                  {triageAnalysisModal.intelligent_triage?.glean_candidates?.ai_validation && (
+                    <div className="glean-ai-validation-persisted">
+                      <strong>Persisted Glean AI validation:</strong>{' '}
+                      {triageAnalysisModal.intelligent_triage.glean_candidates.ai_validation.verdict
+                        || triageAnalysisModal.intelligent_triage.glean_candidates.ai_validation.match_verdict}
+                      {' — '}
+                      {triageAnalysisModal.intelligent_triage.glean_candidates.ai_validation.reason}
+                    </div>
+                  )}
                 </div>
               )}
 

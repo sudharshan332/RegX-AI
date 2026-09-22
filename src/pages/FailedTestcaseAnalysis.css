@@ -3687,3 +3687,93 @@ a.glean-snippet-title:hover {
 .flux-rerun-link {
   color: #1d6fa5;
 }
+
+/* ---- Intelligent Triage Phase 2 ---- */
+.mcp-health-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0 6px;
+}
+.mcp-health-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: #ecf0f1;
+  color: #34495e;
+}
+.mcp-health-ok { background: #d5f5e3; color: #1e8449; }
+.mcp-health-bad { background: #fadbd8; color: #922b21; }
+.mcp-health-unknown { background: #fef9e7; color: #7d6608; }
+
+.decision-block {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0;
+}
+.decision-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: #d6eaf8;
+  color: #1a5276;
+}
+.decision-auto_triage { background: #d5f5e3; color: #196f3d; }
+.decision-rerun_testcase { background: #d6eaf8; color: #1a5276; }
+.decision-needs_deep_analysis { background: #fdebd0; color: #9a7b0a; }
+.decision-insufficient_evidence { background: #fadbd8; color: #7b241c; }
+.decision-human_review { background: #e8daef; color: #6c3483; }
+.decision-deep-recommended { background: #fdebd0; color: #9a7b0a; }
+.decision-deep-started { background: #d5f5e3; color: #196f3d; }
+.decision-recommend-only { background: #fef9e7; color: #7d6608; }
+.decision-auto-applied { background: #d5f5e3; color: #196f3d; }
+.decision-reasons {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #566573;
+}
+
+.triage-conf-badge { background: #d6eaf8; color: #1a5276; font-size: 10px; }
+.intermittent-conf-badge { background: #e8f8f5; color: #0e6655; font-size: 10px; }
+
+.btn-deep-ai-analysis.deep-ai-recommended {
+  border-color: #d68910;
+  box-shadow: inset 0 0 0 1px #d68910;
+}
+
+.btn-glean-ai-validate {
+  background: #fff;
+  border: 1px solid #3498db;
+  color: #2471a3;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.btn-glean-ai-validate:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.glean-match-score {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.glean-candidate-ai-verdict {
+  font-size: 11px;
+  color: #1a5276;
+  margin-top: 2px;
+}
+.glean-ai-validation-persisted {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #34495e;
+}
+.tg-original-ticket {
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  margin-bottom: 8px;
+}

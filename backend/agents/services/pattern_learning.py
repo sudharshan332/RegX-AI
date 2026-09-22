@@ -81,14 +81,20 @@ class PatternLearningService:
     """Service for managing pattern learning and user approval workflows."""
     
     def __init__(self):
+        from ..paths import (
+            intermittent_patterns_file,
+            rdm_patterns_file,
+            agents_data_dir,
+        )
         # File paths for different pattern types
-        self.intermittent_patterns_file = "/Users/sudharshan.musali/regx/RegX-AI/backend/intermittent_patterns.json"
-        self.rdm_patterns_file = "/Users/sudharshan.musali/regx/RegX-AI/data/rdm_failure_patterns.json"
+        self.intermittent_patterns_file = intermittent_patterns_file()
+        self.rdm_patterns_file = rdm_patterns_file()
         
         # Tracking files
-        self.candidates_file = "/Users/sudharshan.musali/regx/RegX-AI/backend/agents/data/pattern_candidates.json"
-        self.effectiveness_file = "/Users/sudharshan.musali/regx/RegX-AI/backend/agents/data/pattern_effectiveness.json"
-        self.approvals_file = "/Users/sudharshan.musali/regx/RegX-AI/backend/agents/data/approval_requests.json"
+        _data = agents_data_dir()
+        self.candidates_file = os.path.join(_data, "pattern_candidates.json")
+        self.effectiveness_file = os.path.join(_data, "pattern_effectiveness.json")
+        self.approvals_file = os.path.join(_data, "approval_requests.json")
         
         # Configuration
         self.approval_timeout = 1800  # 30 minutes

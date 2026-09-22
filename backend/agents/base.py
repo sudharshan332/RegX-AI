@@ -256,7 +256,11 @@ class SkillWrapperAgent(BaseAgent):
     def _resolve_skill_path(self) -> str:
         """Resolve the path to the skill directory."""
         # Assuming skills are in .cursor/skills/ directory
-        workspace_root = "/Users/sudharshan.musali/regx/RegX-AI"
+        try:
+            from .paths import workspace_root as _workspace_root
+            workspace_root = _workspace_root()
+        except Exception:
+            workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         skill_path = os.path.join(workspace_root, ".cursor", "skills", self.skill_name)
         
         if not os.path.exists(skill_path):
