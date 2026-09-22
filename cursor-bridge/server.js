@@ -18,6 +18,20 @@ const BATCH_CONCURRENCY = Math.max(
 // Set CURSOR_MCP_PROFILE=full to attach every MCP server (slower).
 const MCP_PROFILE = (process.env.CURSOR_MCP_PROFILE || "triage").toLowerCase();
 
+// Frontend model dropdown ids → Cursor SDK model ids
+const LEGACY_MODEL_ALIASES = {
+  "claude-sonnet-4-5": "claude-4-sonnet",
+  "claude-haiku-4-5": "claude-4-sonnet",
+  "claude-sonnet-4-6": "claude-sonnet-4-6",
+  "auto-smart": "claude-sonnet-4-6",
+};
+
+function resolveModelId(id) {
+  const raw = String(id || "").trim();
+  if (!raw) return FOLLOWUP_MODEL_ID;
+  return LEGACY_MODEL_ALIASES[raw] || raw;
+}
+
 const NUTEST_SOURCEGRAPH = "nugerrit.ntnxdpro.com/nutest-py3-tests";
 
 const SKILLS = {
@@ -171,6 +185,22 @@ setInterval(() => {
 
 function generateSessionId() {
   return `ses_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function tryResumeAgent(agentId, apiKey, modelId, mcpServers = {}) {
+  if (!agentId) return null;
+  try {
+    const agent = Agent.resume(String(agentId), {
+      apiKey,
+      model: { id: modelId },
+      mcpServers,
+    });
+    console.log(`[session] Resumed agent ${agentId}`);
+    return agent;
+  } catch (err) {
+    console.warn(`[session] Resume failed for ${agentId}: ${err.message}`);
+    return null;
+  }
 }
 
 function sanitizeRecoveryHistory(history = []) {
@@ -585,12 +615,15 @@ function parseAgentResult(text) {
 
 // ---------------------------------------------------------------------------
 // POST /chat
-// Lightweight conversational path for Cursor AI chat UI fallback.
+// Fast conversational path: resume prior agent when possible (Cursor-like).
 // ---------------------------------------------------------------------------
 app.post("/chat", async (req, res) => {
   const {
     message,
     system_prompt = "",
+    regression_context = "",
+    agent_id = null,
+    session_id = null,
     cursor_api_key,
     atlassian_tokens = {},
   } = req.body || {};
@@ -604,25 +637,219 @@ app.post("/chat", async (req, res) => {
     return res.status(500).json({ error: "CURSOR_API_KEY not configured on bridge" });
   }
 
-  const prompt = system_prompt
-    ? `${system_prompt}\n\n---\nUser message:\n${message}`
-    : String(message);
+  const t0 = Date.now();
+  const chatSessionId = session_id || (agent_id ? `chat_${agent_id}` : generateSessionId());
+  let session = sessions.get(chatSessionId);
+  let agent = session?.agent || null;
+  let created = false;
 
   try {
-    const agent = await Agent.create({
-      apiKey,
-      model: { id: FOLLOWUP_MODEL_ID },
-      mcpServers: buildMcpServers(atlassian_tokens, "none"),
-    });
+    if (!agent && agent_id) {
+      agent = tryResumeAgent(agent_id, apiKey, FOLLOWUP_MODEL_ID, {});
+    }
+    if (!agent) {
+      agent = await Agent.create({
+        apiKey,
+        model: { id: FOLLOWUP_MODEL_ID },
+        mcpServers: {}, // chat is text-only for speed (no MCP cold-start)
+      });
+      created = true;
+    }
+
+    const ctxBlock = regression_context
+      ? `Current regression run data (authoritative — use this for any counts/metrics; do NOT say data is unavailable):\n${String(regression_context).slice(0, 4000)}\n\n`
+      : "";
+    const prompt = created && system_prompt
+      ? `${String(system_prompt).slice(0, 2500)}\n\n${ctxBlock}---\nUser:\n${message}`
+      : `${ctxBlock}${message}`;
+
     const run = await agent.send(prompt);
     const result = await run.wait();
+    const reply = (result.result || "").trim();
+
+    sessions.set(chatSessionId, {
+      agent,
+      agentId: agent.agentId || agent_id || null,
+      testcase_name: "chat",
+      created_at: session?.created_at || Date.now(),
+      last_used: Date.now(),
+    });
+
+    console.log(`[chat] ${created ? "new" : "resume"} agent reply in ${Date.now() - t0}ms`);
     return res.json({
       success: true,
-      reply: (result.result || "").trim(),
-      agent_id: agent.agentId,
+      reply,
+      agent_id: agent.agentId || agent_id || null,
+      session_id: chatSessionId,
     });
   } catch (err) {
     console.error("[chat] Agent error:", err.message);
+    if (created && agent) {
+      agent[Symbol.asyncDispose]?.().catch(() => {});
+    }
+    return res.status(502).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /chat-stream
+// Streaming conversational path (SSE). Emits {type:delta,text} as the model
+// generates, then {type:done,...}.
+// ---------------------------------------------------------------------------
+app.post("/chat-stream", async (req, res) => {
+  const {
+    message,
+    system_prompt = "",
+    regression_context = "",
+    model = "",
+    agent_id = null,
+    session_id = null,
+    cursor_api_key,
+  } = req.body || {};
+
+  if (!message || !String(message).trim()) {
+    return res.status(400).json({ error: "message is required" });
+  }
+  const apiKey = cursor_api_key || DEFAULT_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: "CURSOR_API_KEY not configured on bridge" });
+  }
+
+  const modelId = resolveModelId(model || FOLLOWUP_MODEL_ID);
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+  const send = (obj) => {
+    try {
+      res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    } catch { /* client gone */ }
+  };
+
+  const t0 = Date.now();
+  const chatSessionId = session_id || (agent_id ? `chat_${agent_id}` : generateSessionId());
+  let session = sessions.get(chatSessionId);
+  let agent = session?.agent || null;
+  let created = false;
+
+  try {
+    if (!agent && agent_id) {
+      agent = tryResumeAgent(agent_id, apiKey, modelId, {});
+    }
+    if (!agent) {
+      agent = await Agent.create({
+        apiKey,
+        model: { id: modelId },
+        mcpServers: {}, // text-only for speed (no MCP cold-start)
+      });
+      created = true;
+    }
+
+    // Prepend live regression data on EVERY turn so data questions use real numbers.
+    const ctxBlock = regression_context
+      ? `Current regression run data (authoritative — use this for any counts/metrics; do NOT say data is unavailable):\n${String(regression_context).slice(0, 4000)}\n\n`
+      : "";
+    const prompt = created && system_prompt
+      ? `${String(system_prompt).slice(0, 2500)}\n\n${ctxBlock}---\nUser:\n${message}`
+      : `${ctxBlock}${message}`;
+
+    const run = await agent.send(prompt);
+
+    let lastFull = "";
+    let firstTokenMs = null;
+    if (typeof run.supports !== "function" || run.supports("stream")) {
+      for await (const event of run.stream()) {
+        if (event.type === "assistant" && event.message && Array.isArray(event.message.content)) {
+          let full = "";
+          for (const block of event.message.content) {
+            if (block.type === "text" && block.text) full += block.text;
+          }
+          if (full) {
+            const delta = full.startsWith(lastFull) ? full.slice(lastFull.length) : full;
+            lastFull = full;
+            if (delta) {
+              if (firstTokenMs === null) firstTokenMs = Date.now() - t0;
+              send({ type: "delta", text: delta });
+            }
+          }
+        }
+      }
+    }
+
+    const result = await run.wait();
+    const reply = (result.result || lastFull || "").trim();
+    if (!lastFull && reply) send({ type: "delta", text: reply });
+
+    sessions.set(chatSessionId, {
+      agent,
+      agentId: agent.agentId || agent_id || null,
+      testcase_name: "chat",
+      created_at: session?.created_at || Date.now(),
+      last_used: Date.now(),
+    });
+
+    send({
+      type: "done",
+      reply,
+      agent_id: agent.agentId || agent_id || null,
+      session_id: chatSessionId,
+      elapsed_ms: Date.now() - t0,
+    });
+    res.end();
+    console.log(
+      `[chat-stream] ${created ? "new" : "resume"} model=${modelId} firstToken=${firstTokenMs}ms total=${Date.now() - t0}ms`,
+    );
+  } catch (err) {
+    console.error("[chat-stream] error:", err.message);
+    send({ type: "error", message: err.message });
+    if (created && agent) agent[Symbol.asyncDispose]?.().catch(() => {});
+    try { res.end(); } catch { /* noop */ }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /chat-warm
+// Pre-creates + primes a chat agent so the first real message resumes faster.
+// ---------------------------------------------------------------------------
+app.post("/chat-warm", async (req, res) => {
+  const { cursor_api_key, model = "" } = req.body || {};
+  const apiKey = cursor_api_key || DEFAULT_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: "CURSOR_API_KEY not configured on bridge" });
+  }
+  const modelId = resolveModelId(model || FOLLOWUP_MODEL_ID);
+  const t0 = Date.now();
+  try {
+    const agent = await Agent.create({
+      apiKey,
+      model: { id: modelId },
+      mcpServers: {},
+    });
+    const run = await agent.send(
+      "You are RegX AI — a fast, concise regression-analysis assistant. " +
+        "Answer briefly and directly. Use any regression run data provided in the conversation as authoritative. " +
+        "Reply with exactly: READY",
+    );
+    await run.wait();
+    const sessionId = `chat_${agent.agentId || generateSessionId()}`;
+    sessions.set(sessionId, {
+      agent,
+      agentId: agent.agentId || null,
+      testcase_name: "chat",
+      created_at: Date.now(),
+      last_used: Date.now(),
+    });
+    console.log(`[chat-warm] primed model=${modelId} in ${Date.now() - t0}ms`);
+    return res.json({
+      success: true,
+      agent_id: agent.agentId || null,
+      session_id: sessionId,
+    });
+  } catch (err) {
+    console.error("[chat-warm] error:", err.message);
     return res.status(502).json({ error: err.message });
   }
 });

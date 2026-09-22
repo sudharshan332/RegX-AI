@@ -1,3 +1,545 @@
 {
-  "records": []
+  "records": [
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy_on_hades_temporarily_unavailable",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124213"
+      ],
+      "handover_date": "2026-09-08T16:15:26.794930",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~DellPowerFlex.test_zk_data_copy_on_network_ei",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124213"
+      ],
+      "handover_date": "2026-09-08T16:15:26.794930",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124213"
+      ],
+      "handover_date": "2026-09-08T16:15:26.794930",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zookeeper_when_ext_storage_full",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124213"
+      ],
+      "handover_date": "2026-09-08T16:15:26.794930",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy_on_node_add_removal",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124213"
+      ],
+      "handover_date": "2026-09-08T16:15:26.794930",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy_on_network_ei",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124213"
+      ],
+      "handover_date": "2026-09-08T16:15:26.794930",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy_on_hades_temporarily_unavailable",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124123"
+      ],
+      "handover_date": "2026-09-08T16:35:54.140368",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~DellPowerFlex.test_zk_data_copy_on_network_ei",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124123"
+      ],
+      "handover_date": "2026-09-08T16:35:54.140368",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124123"
+      ],
+      "handover_date": "2026-09-08T16:35:54.140368",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zookeeper_when_ext_storage_full",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124123"
+      ],
+      "handover_date": "2026-09-08T16:35:54.140368",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy_on_node_add_removal",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124123"
+      ],
+      "handover_date": "2026-09-08T16:35:54.140368",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy_on_network_ei",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-124123"
+      ],
+      "handover_date": "2026-09-08T16:35:54.140368",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy_on_hades_temporarily_unavailable",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-123412"
+      ],
+      "handover_date": "2026-09-08T16:54:46.035793",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~DellPowerFlex.test_zk_data_copy_on_network_ei",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-123412"
+      ],
+      "handover_date": "2026-09-08T16:54:46.035793",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-123412"
+      ],
+      "handover_date": "2026-09-08T16:54:46.035793",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy_on_network_ei",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-123412"
+      ],
+      "handover_date": "2026-09-08T16:54:46.035793",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zookeeper_when_ext_storage_full",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-123412"
+      ],
+      "handover_date": "2026-09-08T16:54:46.035793",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.external_storage.zookeeper.test_zk_ext_storage.ZookeeperExternalStorage~~~PureStorage.test_zk_data_copy_on_node_add_removal",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-123412"
+      ],
+      "handover_date": "2026-09-08T16:54:46.035793",
+      "by_whom": "unknown",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.0.1/CDP/REGRESSION/regression_cdp_nutest_official_external_storage_pure.lst"
+    },
+    {
+      "test_name": "cdp.hades.disk_api_tests.test_disk_v4_api.TestDiskV4API.test_add_old_disk_to_zeus_api",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG012414"
+      ],
+      "handover_date": "2026-09-09T12:30:30.785101",
+      "by_whom": "unknown",
+      "branch": "ganges-7.7-stable",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_stargate.lst"
+    },
+    {
+      "test_name": "cdp.hades.disk_api_tests.test_disk_v4_api.TestDiskV4API.test_add_old_disk_to_zeus_api_when_disk_is_hotplugged",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG012414"
+      ],
+      "handover_date": "2026-09-09T12:30:30.785101",
+      "by_whom": "unknown",
+      "branch": "ganges-7.7-stable",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_stargate.lst"
+    },
+    {
+      "test_name": "cdp.stargate.space_reservation.test_io_integrity_space_reservation.SpaceReservationIOIntegrityTest.test_io_integrity___space_reservation",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG012414"
+      ],
+      "handover_date": "2026-09-09T12:30:30.785101",
+      "by_whom": "unknown",
+      "branch": "ganges-7.7-stable",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_stargate.lst"
+    },
+    {
+      "test_name": "cdp.stargate.adaptive_rf3.io_integrity.test_adaptive_rf3.AdaptiveRF3IOIntegrity.test_adaptive_rf3___multiple_disk_failure",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG012414"
+      ],
+      "handover_date": "2026-09-09T12:30:30.785101",
+      "by_whom": "unknown",
+      "branch": "ganges-7.7-stable",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_stargate.lst"
+    },
+    {
+      "test_name": "cdp.curator.goldsuite_iointegrity.test_goldsuite.CuratorGoldSuiteTest.test_gold___multiple_disk_offline_with_disk_removal_rf3_1n_2d",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG012414"
+      ],
+      "handover_date": "2026-09-09T12:30:30.785101",
+      "by_whom": "unknown",
+      "branch": "ganges-7.7-stable",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_stargate.lst"
+    },
+    {
+      "test_name": "cdp.curator.goldsuite_iointegrity.test_goldsuite.CuratorGoldSuiteTest~~~AES.test_gold___multiple_disk_offline_with_disk_removal_rf3_1n_2d",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG012414"
+      ],
+      "handover_date": "2026-09-09T12:30:30.785101",
+      "by_whom": "unknown",
+      "branch": "ganges-7.7-stable",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_stargate.lst"
+    },
+    {
+      "test_name": "cdp.hades.hawk_armor.test_hawk_armor.TestHawkArmor.test_component_restart_cvm_node_powercycle",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG012414"
+      ],
+      "handover_date": "2026-09-09T12:30:30.785101",
+      "by_whom": "unknown",
+      "branch": "ganges-7.7-stable",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_stargate.lst"
+    },
+    {
+      "test_name": "cdp.stargate.erasure_code.vmotion.test_ec_vmotion.ECVmotionIOIntegrityTest~~~Inline_EC.test_io_integrity_snapshot",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG012414"
+      ],
+      "handover_date": "2026-09-09T12:30:30.785101",
+      "by_whom": "unknown",
+      "branch": "ganges-7.7-stable",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_stargate.lst"
+    },
+    {
+      "test_name": "cdp.curator.goldsuite_iointegrity.test_goldsuite.CuratorGoldSuiteTest.test_gold___encryption_only",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG012414"
+      ],
+      "handover_date": "2026-09-09T12:30:30.785101",
+      "by_whom": "unknown",
+      "branch": "ganges-7.7-stable",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_stargate.lst"
+    },
+    {
+      "test_name": "cdp.curator.goldsuite.test_curator_gold_suite.CuratorGoldSuiteTest.test_gold___encryption_only",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG012414"
+      ],
+      "handover_date": "2026-09-09T12:30:30.785101",
+      "by_whom": "unknown",
+      "branch": "ganges-7.7-stable",
+      "lst_file": "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_stargate.lst"
+    },
+    {
+      "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___witness_lkm_encryption",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_add_remove_node.test_robo_add_node.RoboAddNodeToOneNodeTest.test_robo_add_node_to_one_node___normal_witness",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_add_remove_node.test_robo_add_node.RoboAddNodeToOneNodeTest.test_robo_add_node_to_one_node",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___offline_HDD_witness",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_metadata_disk_replacement",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_integrity",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___offline_HDD",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___witness",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_split_brain_scenario",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_integrity_with_encryption",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_ei_on_witness_vm",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_one_metadata_disk_replacement",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_metadata_disk_replacement_with_encryption",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_encryption_io_integrity_with_cluster_restart",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_background_encryption_robo_cluster",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    },
+    {
+      "test_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_mantle_key_workflow",
+      "tickets": [],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-23123"
+      ],
+      "handover_date": "2026-09-21T12:54:45.776395",
+      "by_whom": "unknown",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_robo_node.lst"
+    }
+  ],
+  "updated_at": "2026-09-21T12:54:45.776935"
 }

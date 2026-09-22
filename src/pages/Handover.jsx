@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import api from "../api";
+import { useAuth } from "../context/AuthContext";
 import "./Handover.css";
 
 // Relative paths: the shared `api` axios instance (src/api.js) already prepends
@@ -9,8 +10,12 @@ const CREATE_LST_CR_API = "/mcp/regression/create-lst-cr";
 const VALIDATE_LST_API = "/mcp/regression/validate-lst";
 const CHECK_LST_TESTCASES_API = "/mcp/regression/check-lst-testcases";
 const DEPRECATE_LST_CR_API = "/mcp/regression/deprecate-lst-cr";
+const DEPRECATION_RECORD_API = "/mcp/regression/deprecation-record";
+const DEPRECATION_RECORD_DELETE_API = "/mcp/regression/deprecation-record-delete";
 const HANDOVER_RECORD_API = "/mcp/regression/handover-record";
 const HANDOVER_RECORD_DELETE_API = "/mcp/regression/handover-record-delete";
+const HANDOVER_RECORDS_API = "/mcp/regression/handover-records";
+const DEPRECATION_RECORDS_API = "/mcp/regression/deprecation-records";
 const DEPRECATION_SEARCH_API = "/mcp/regression/deprecation-search";
 const JIRA_VALIDATE_API = "/mcp/regression/validate-jira-ticket";
 const SEARCH_LST_FILE_API = "/mcp/regression/search-lst-file";
@@ -19,14 +24,11 @@ const SEARCH_REVIEWERS_API = "/mcp/regression/search-reviewers";
 const SEARCH_BRANCHES_API = "/mcp/regression/search-branches";
 const JIRA_URL = "https://jira.nutanix.com/browse/";
 
-function isIntransitLstPath(path) {
-  return (path || "").toLowerCase().includes("intransit");
-}
-
-function pickAutoLstSuggestion(suggested) {
-  const path = (suggested || "").trim();
-  if (!path || isIntransitLstPath(path)) return "";
-  return path;
+function isPassedTest(tc) {
+  if (!tc) return false;
+  const passCount = tc.passed_count || 0;
+  const status = (tc.status || "").toLowerCase();
+  return status === "succeeded" || passCount >= 2;
 }
 
 const btnBase = { fontSize: "13px", fontWeight: "500", border: "none", borderRadius: "8px", cursor: "pointer", transition: "all 0.15s ease", boxSizing: "border-box" };
@@ -48,8 +50,153 @@ function formatByWhom(s) {
   return beforeAt || str;
 }
 
-function getDeprecationRecordKey(r) {
-  return `${(r.test_name || "").trim()}\0${r.handover_date || ""}\0${(r.lst_file || "").trim()}`;
+const HEX_TASK_ID_RE = /^[a-f0-9]{20,}$/i;
+const HANDOVER_URL_RE = /https?:\/\/[^\s,]+/gi;
+const JIRA_KEY_RE = /^[A-Za-z][A-Za-z0-9_]+-\d+$/;
+
+function parseHandoverInput(text) {
+  const blob = String(text || "");
+  const taskIds = [];
+  const seenIds = new Set();
+  const testNames = [];
+  const seenNames = new Set();
+
+  const addId = (tid) => {
+    const t = String(tid || "").trim();
+    if (!t || seenIds.has(t)) return;
+    seenIds.add(t);
+    taskIds.push(t);
+  };
+  const addName = (name) => {
+    const n = String(name || "").trim();
+    if (!n || seenNames.has(n) || HEX_TASK_ID_RE.test(n) || JIRA_KEY_RE.test(n)) return;
+    seenNames.add(n);
+    testNames.push(n);
+  };
+
+  let remainder = blob;
+  const urlMatches = blob.match(HANDOVER_URL_RE) || [];
+  urlMatches.forEach((raw) => {
+    const url = raw.replace(/[).,\]]+$/, "");
+    try {
+      const parsed = new URL(url);
+      if ((parsed.pathname || "").includes("/agave_tasks/")) {
+        const tid = parsed.pathname.replace(/\/+$/, "").split("/").pop();
+        if (tid && tid.length >= 20) addId(tid);
+      }
+      const param = parsed.searchParams.get("task_ids") || "";
+      param.split(",").forEach((tid) => addId(tid));
+    } catch {
+      // ignore malformed URLs; leftover text is parsed as names below
+    }
+    remainder = remainder.split(raw).join("\n");
+  });
+
+  remainder.split(/[,\n]+/).forEach((segment) => {
+    const leftover = [];
+    String(segment || "").split(/\s+/).forEach((part) => {
+      const token = part.trim().replace(/[).,\]]+$/, "");
+      if (!token) return;
+      if (HEX_TASK_ID_RE.test(token)) {
+        addId(token);
+        return;
+      }
+      if (JIRA_KEY_RE.test(token)) return;
+      leftover.push(token);
+    });
+    if (leftover.length) addName(leftover.join(" "));
+  });
+
+  return { taskIds, testNames };
+}
+
+function getSavedRecordKey(kind, r) {
+  const date = kind === "deprecation" ? (r.deprecation_date || "") : (r.handover_date || "");
+  return `${kind}\0${(r.test_name || "").trim()}\0${date}\0${(r.lst_file || "").trim()}`;
+}
+
+function recordLstFiles(r) {
+  const files = [];
+  const seen = new Set();
+  const add = (raw) => {
+    const v = (raw || "").trim();
+    if (!v || seen.has(v)) return;
+    seen.add(v);
+    files.push(v);
+  };
+  if (Array.isArray(r?.lst_files)) r.lst_files.forEach(add);
+  add(r?.lst_file);
+  return files;
+}
+
+function lstFileBasename(path) {
+  const s = String(path || "").trim();
+  if (!s) return "";
+  const parts = s.split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] || s;
+}
+
+function uniqueTickets(...lists) {
+  const out = [];
+  const seen = new Set();
+  lists.forEach((list) => {
+    (list || []).forEach((raw) => {
+      const t = String(raw || "").trim();
+      if (!t || seen.has(t)) return;
+      seen.add(t);
+      out.push(t);
+    });
+  });
+  return out;
+}
+
+function TicketLinks({ tickets }) {
+  const list = uniqueTickets(tickets);
+  if (!list.length) return <span className="ho-records-empty">-</span>;
+  return (
+    <div className="ho-ticket-pills">
+      {list.map((t) => (
+        <a key={t} href={`${JIRA_URL}${t}`} target="_blank" rel="noreferrer" className="ho-ticket-pill">{t}</a>
+      ))}
+    </div>
+  );
+}
+
+function SavedRecordTickets({ record }) {
+  const tickets = uniqueTickets(record.handover_tickets, record.jira_tickets, record.tickets);
+  return <TicketLinks tickets={tickets} />;
+}
+
+function recordExtraSections(r) {
+  return [
+    ["Notes", r?.notes],
+    ["Commit message", r?.commit_message],
+    ["CR subject", r?.cr_subject],
+    ["CR description", r?.cr_description],
+  ].filter(([, value]) => String(value || "").trim());
+}
+
+function formatLstAddSummary(toAdd, alreadyPresent) {
+  const added = Array.isArray(toAdd) ? toAdd : [];
+  const already = Array.isArray(alreadyPresent) ? alreadyPresent : [];
+  const total = added.length + already.length;
+  if (!total) return "";
+  let msg = ` Added ${added.length} of ${total} selected.`;
+  if (already.length) {
+    msg += ` Skipped ${already.length} already in LST (exact line match).`;
+  }
+  return msg;
+}
+
+function formatLstRemoveSummary(removed, notPresent) {
+  const rem = Array.isArray(removed) ? removed : [];
+  const missing = Array.isArray(notPresent) ? notPresent : [];
+  let msg = ` Removed ${rem.length}.`;
+  if (missing.length) {
+    const preview = missing.slice(0, 5).join(", ");
+    msg += ` Not in LST (${missing.length}): ${preview}${missing.length > 5 ? " ..." : ""}.`;
+  }
+  return msg;
 }
 
 function ReviewerAutocomplete({ value, onChange, placeholder, disabled, style }) {
@@ -191,7 +338,8 @@ function formatDateIST(isoDateStr) {
   }
 }
 
-export default function Handover({ userInfo }) {
+export default function Handover() {
+  const { user } = useAuth();
   const [handoverJitaInput, setHandoverJitaInput] = useState("");
   const [handoverAnalysis, setHandoverAnalysis] = useState(null);
   const [loadingHandover, setLoadingHandover] = useState(false);
@@ -209,7 +357,6 @@ export default function Handover({ userInfo }) {
   const [handoverCrResult, setHandoverCrResult] = useState(null);
   const [handoverValidation, setHandoverValidation] = useState(null);
   const [handoverValidating, setHandoverValidating] = useState(false);
-  const [handoverOverrideSave, setHandoverOverrideSave] = useState(false);
   const [handoverTicketsExtra, setHandoverTicketsExtra] = useState("");
   const [handoverReviewers, setHandoverReviewers] = useState("");
   const [handoverCrPreviewOpen, setHandoverCrPreviewOpen] = useState(false);
@@ -224,11 +371,11 @@ export default function Handover({ userInfo }) {
   const [handoverJiraSkippedMessage, setHandoverJiraSkippedMessage] = useState(null);
   const [handoverValidatedProductBugTests, setHandoverValidatedProductBugTests] = useState(new Set()); // Test cases validated as Product Bug
   const [handoverSelectedTests, setHandoverSelectedTests] = useState(new Set());
-  const [handoverFetchingOverride, setHandoverFetchingOverride] = useState(false);
-  const [handoverOverrideResult, setHandoverOverrideResult] = useState(null);
   const handoverLstSuggestCacheRef = useRef(new Map());
+  const handoverAutoJiraRef = useRef(null);
   const handoverBranchSuggestTimerRef = useRef(null);
   const handoverBranchContainerRef = useRef(null);
+  const handoverFetchBranchContainerRef = useRef(null);
   // eslint-disable-next-line no-unused-vars
   const [handoverSearchingLst, setHandoverSearchingLst] = useState({});
   // eslint-disable-next-line no-unused-vars
@@ -240,10 +387,17 @@ export default function Handover({ userInfo }) {
   const [deprecationSearchQueries, setDeprecationSearchQueries] = useState([""]);
   const [deprecationResults, setDeprecationResults] = useState(null);
   const [loadingDeprecationSearch, setLoadingDeprecationSearch] = useState(false);
-  const [deprecationEditMode, setDeprecationEditMode] = useState(false);
-  const [deprecationSelectedRecordKeys, setDeprecationSelectedRecordKeys] = useState(new Set());
   const [deprecationLstFile, setDeprecationLstFile] = useState("");
+  const [deprecationLstFiles, setDeprecationLstFiles] = useState([]);
+  const [deprecationLstSuggestion, setDeprecationLstSuggestion] = useState(null);
+  const [deprecationSuggestingLst, setDeprecationSuggestingLst] = useState(false);
+  const deprecationLstSuggestCacheRef = useRef(new Map());
   const [deprecationLstBranch, setDeprecationLstBranch] = useState("");
+  const [deprecationBranchSuggestions, setDeprecationBranchSuggestions] = useState([]);
+  const [deprecationBranchLoading, setDeprecationBranchLoading] = useState(false);
+  const [deprecationShowBranchDropdown, setDeprecationShowBranchDropdown] = useState(false);
+  const deprecationBranchSuggestTimerRef = useRef(null);
+  const deprecationBranchContainerRef = useRef(null);
   const [deprecationCommitMessage, setDeprecationCommitMessage] = useState("");
   const [deprecationTicketsExtra, setDeprecationTicketsExtra] = useState("");
   const [deprecationReviewers, setDeprecationReviewers] = useState("");
@@ -253,8 +407,16 @@ export default function Handover({ userInfo }) {
   const [deprecationValidating, setDeprecationValidating] = useState(false);
   const [deprecationManualLstInstructions, setDeprecationManualLstInstructions] = useState(null);
 
+  const [recordsQuery, setRecordsQuery] = useState("");
+  const [recordsHandover, setRecordsHandover] = useState([]);
+  const [recordsDeprecation, setRecordsDeprecation] = useState([]);
+  const [recordsLoading, setRecordsLoading] = useState(false);
+  const [recordsError, setRecordsError] = useState(null);
+  const [recordsExpanded, setRecordsExpanded] = useState(new Set());
+  const [recordsEditMode, setRecordsEditMode] = useState(false);
+
   const getAuthHeaders = () => {
-    if (userInfo?.email) return { "X-User-Email": userInfo.email };
+    if (user?.email) return { "X-User-Email": user.email };
     return {};
   };
 
@@ -265,18 +427,21 @@ export default function Handover({ userInfo }) {
       : handoverAnalysis.test_cases.map((tc) => tc.test_name).filter(Boolean);
   };
 
-  const getSelectedPassedHandoverTests = () => {
-    if (!handoverAnalysis?.test_cases?.length) return [];
-    const selected = new Set(getSelectedHandoverTests());
-    return (handoverAnalysis.test_cases || [])
-      .filter((tc) => {
-        if (!selected.has(tc.test_name)) return false;
-        const status = (tc.status || "").toLowerCase();
-        const passCount = tc.passed_count || 0;
-        return status === "succeeded" || passCount >= 2;
-      })
-      .map((tc) => tc.test_name)
-      .filter(Boolean);
+  const getSelectedTestCases = () =>
+    (handoverAnalysis?.test_cases || []).filter((tc) => handoverSelectedTests.has(tc.test_name));
+
+  const selectedFailedAreProductBug = () => {
+    const selected = getSelectedTestCases();
+    if (!selected.length) return false;
+    const failed = selected.filter((tc) => !isPassedTest(tc));
+    if (!failed.length) return false;
+    return failed.every((tc) => handoverValidatedProductBugTests.has(tc.test_name));
+  };
+
+  const selectedAreHandoverReady = () => {
+    const selected = getSelectedTestCases();
+    if (!selected.length) return false;
+    return selected.every((tc) => isPassedTest(tc) || handoverValidatedProductBugTests.has(tc.test_name));
   };
 
   const getResolvedLstFiles = () => {
@@ -305,23 +470,19 @@ export default function Handover({ userInfo }) {
 
   const handleSuggestLstFile = async ({ silent = false } = {}) => {
     const branch = (handoverCreateLstBranch || "").trim();
-    const test_names = getSelectedPassedHandoverTests().slice(0, 20);
+    const test_names = handoverSelectedTests.size > 0 ? getSelectedHandoverTests().slice(0, 20) : [];
     if (!branch) {
       if (!silent) alert("Please enter Branch before suggesting LST.");
       return;
     }
     if (!test_names.length) {
-      if (!silent) alert("Please select at least one passed testcase before suggesting an LST file.");
+      if (!silent) alert("Please select at least one testcase before suggesting an LST file.");
       return;
     }
     const cacheKey = `${branch}::${[...test_names].sort().join("|")}`;
     const cached = handoverLstSuggestCacheRef.current.get(cacheKey);
     if (cached) {
       setHandoverLstSuggestion(cached);
-      const autoLst = pickAutoLstSuggestion(cached.suggested_lst_file);
-      if (autoLst && getResolvedLstFiles().length === 0 && !(handoverCreateLstFile || "").trim()) {
-        setHandoverCreateLstFiles([autoLst]);
-      }
       return;
     }
     setHandoverSuggestingLst(true);
@@ -335,12 +496,6 @@ export default function Handover({ userInfo }) {
       const data = res.data || {};
       handoverLstSuggestCacheRef.current.set(cacheKey, data);
       setHandoverLstSuggestion(data);
-      const autoLst = pickAutoLstSuggestion(data.suggested_lst_file);
-      if (autoLst) {
-        if (getResolvedLstFiles().length === 0 && !(handoverCreateLstFile || "").trim()) {
-          setHandoverCreateLstFiles([autoLst]);
-        }
-      }
       if (data.error) {
         setHandoverCrResult({ success: false, error: data.error, message: data.message });
       }
@@ -354,8 +509,8 @@ export default function Handover({ userInfo }) {
 
   useEffect(() => {
     const branch = (handoverCreateLstBranch || "").trim();
-    const passed = getSelectedPassedHandoverTests();
-    if (!branch || !passed.length || handoverDataLocked) return undefined;
+    const selected = handoverSelectedTests.size > 0 ? getSelectedHandoverTests() : [];
+    if (!branch || !selected.length || handoverDataLocked) return undefined;
     const t = setTimeout(() => {
       handleSuggestLstFile({ silent: true });
     }, 250);
@@ -366,7 +521,7 @@ export default function Handover({ userInfo }) {
   useEffect(() => {
     const q = (handoverCreateLstBranch || "").trim();
     if (handoverBranchSuggestTimerRef.current) clearTimeout(handoverBranchSuggestTimerRef.current);
-    if (!q || handoverDataLocked) {
+    if (!q) {
       setHandoverBranchSuggestions([]);
       setHandoverShowBranchDropdown(false);
       return undefined;
@@ -389,17 +544,125 @@ export default function Handover({ userInfo }) {
       if (handoverBranchSuggestTimerRef.current) clearTimeout(handoverBranchSuggestTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handoverCreateLstBranch, handoverDataLocked]);
+  }, [handoverCreateLstBranch]);
 
   useEffect(() => {
     const onDocClick = (e) => {
-      if (handoverBranchContainerRef.current && !handoverBranchContainerRef.current.contains(e.target)) {
+      const inHandoverBranch = handoverBranchContainerRef.current?.contains(e.target);
+      const inFetchBranch = handoverFetchBranchContainerRef.current?.contains(e.target);
+      if (!inHandoverBranch && !inFetchBranch) {
         setHandoverShowBranchDropdown(false);
+      }
+      if (deprecationBranchContainerRef.current && !deprecationBranchContainerRef.current.contains(e.target)) {
+        setDeprecationShowBranchDropdown(false);
       }
     };
     document.addEventListener("click", onDocClick);
     return () => document.removeEventListener("click", onDocClick);
   }, []);
+
+  useEffect(() => {
+    const q = (deprecationLstBranch || "").trim();
+    if (deprecationBranchSuggestTimerRef.current) clearTimeout(deprecationBranchSuggestTimerRef.current);
+    if (!q) {
+      setDeprecationBranchSuggestions([]);
+      setDeprecationShowBranchDropdown(false);
+      return undefined;
+    }
+    deprecationBranchSuggestTimerRef.current = setTimeout(async () => {
+      setDeprecationBranchLoading(true);
+      try {
+        const res = await api.get(SEARCH_BRANCHES_API, { params: { q }, headers: getAuthHeaders(), timeout: 20000 });
+        const results = (res.data?.results || []).filter(Boolean);
+        setDeprecationBranchSuggestions(results);
+        setDeprecationShowBranchDropdown(results.length > 0);
+      } catch {
+        setDeprecationBranchSuggestions([]);
+        setDeprecationShowBranchDropdown(false);
+      } finally {
+        setDeprecationBranchLoading(false);
+      }
+    }, 220);
+    return () => {
+      if (deprecationBranchSuggestTimerRef.current) clearTimeout(deprecationBranchSuggestTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deprecationLstBranch]);
+
+  const getDeprecationSearchTestNames = () => {
+    const names = [];
+    (deprecationSearchQueries || []).forEach((q) => {
+      String(q || "")
+        .split(/[,\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .forEach((n) => {
+          if (!names.includes(n)) names.push(n);
+        });
+    });
+    return names;
+  };
+
+  /** Searched test name(s) are the deprecation CR targets. */
+  const getDeprecationTargetTests = () => getDeprecationSearchTestNames();
+
+  const getResolvedDeprecationLstFiles = () => {
+    const out = [];
+    const seen = new Set();
+    (deprecationLstFiles || []).forEach((f) => {
+      const v = (f || "").trim();
+      if (!v || seen.has(v)) return;
+      seen.add(v);
+      out.push(v);
+    });
+    return out;
+  };
+
+  const handleSuggestDeprecationLstFile = async ({ silent = false } = {}) => {
+    const branch = (deprecationLstBranch || "").trim();
+    const test_names = getDeprecationTargetTests().slice(0, 20);
+    if (!branch) {
+      if (!silent) alert("Please enter Branch so Sourcegraph can list LST files on that revision.");
+      return;
+    }
+    if (!test_names.length) {
+      if (!silent) alert("Search by test name first.");
+      return;
+    }
+    const cacheKey = `${branch}::${[...test_names].sort().join("|")}`;
+    const cached = deprecationLstSuggestCacheRef.current.get(cacheKey);
+    if (cached) {
+      setDeprecationLstSuggestion(cached);
+      return;
+    }
+    setDeprecationSuggestingLst(true);
+    try {
+      const res = await api.post(
+        SUGGEST_LST_FILE_API,
+        { branch, test_names },
+        { headers: getAuthHeaders(), timeout: 60000 }
+      );
+      const data = res.data || {};
+      deprecationLstSuggestCacheRef.current.set(cacheKey, data);
+      setDeprecationLstSuggestion(data);
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || "Failed to list LST files.";
+      setDeprecationLstSuggestion({ error: msg, suggested_lst_file: "", candidates: [] });
+    } finally {
+      setDeprecationSuggestingLst(false);
+    }
+  };
+
+  useEffect(() => {
+    const branch = (deprecationLstBranch || "").trim();
+    const names = getDeprecationTargetTests();
+    if (!deprecationResults || deprecationResults.error || !branch || !names.length) return undefined;
+    const t = setTimeout(() => {
+      handleSuggestDeprecationLstFile({ silent: true });
+    }, 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deprecationLstBranch, deprecationSearchQueries, deprecationResults]);
 
   const openCrPreview = () => {
     const selectedTests = getSelectedHandoverTests();
@@ -430,28 +693,36 @@ export default function Handover({ userInfo }) {
   const handleHandoverAnalyze = async () => {
     const input = (handoverJitaInput || "").trim();
     if (!input) {
-      alert("Enter JITA results URL(s) and/or task ID(s), separated by comma, space, or new line.");
+      alert("Enter JITA results URL(s), task ID(s), and/or testcase name(s), separated by comma, space, or new line.");
+      return;
+    }
+    const parsed = parseHandoverInput(input);
+    const branch = (handoverCreateLstBranch || "").trim();
+    if (!parsed.taskIds.length && !parsed.testNames.length) {
+      alert("Enter JITA results URL(s), task ID(s), and/or testcase name(s), separated by comma, space, or new line.");
+      return;
+    }
+    if (parsed.testNames.length && !branch) {
+      alert("Enter Branch so the last 5 runs on that branch can be used for testcase-name lookup.");
       return;
     }
     setLoadingHandover(true);
     setHandoverAnalysis(null);
+    handoverAutoJiraRef.current = null;
     setHandoverDataLocked(false);
     setHandoverTestTickets({});
     setHandoverBugTypeMap({});
-    setHandoverOverrideSave(false);
     setHandoverJiraTicketValidation({});
     setHandoverJiraOverride(false);
     setHandoverManualLstInstructions(null);
     setHandoverCrResult(null);
     setHandoverSelectedTests(new Set());
-    setHandoverOverrideResult(null);
     setHandoverLstFileResults({});
     setHandoverTicketsExtra(""); // Clear handover tickets from previous search
     setHandoverCreateLstFile(""); // Clear LST file from previous search
     setHandoverCreateLstFiles([]);
     handoverLstSuggestCacheRef.current.clear();
     setHandoverLstSuggestion(null); // Clear LST suggestion
-    setHandoverCreateLstBranch(""); // Clear branch from previous search
     setHandoverBranchSuggestions([]);
     setHandoverShowBranchDropdown(false);
     setHandoverCommitMessage(""); // Clear commit message from previous search
@@ -464,7 +735,7 @@ export default function Handover({ userInfo }) {
     try {
       const res = await api.post(
         JITA_ANALYSIS_API,
-        { input, min_passes_for_success: 2, use_sliding_eligibility: true },
+        { input, branch, min_passes_for_success: 2, use_sliding_eligibility: true },
         { timeout: 120000, headers: { "Content-Type": "application/json" } }
       );
       if (res.data?.error) {
@@ -528,7 +799,7 @@ export default function Handover({ userInfo }) {
       } else if (err.response?.status === 500) {
         errorMsg = "Server error: " + (err.response?.data?.error || err.message || "Internal server error. Check backend logs.");
       } else if (err.response?.status === 400) {
-        errorMsg = "Invalid request: " + (err.response?.data?.error || err.message || "Please check the JITA URL format.");
+        errorMsg = "Invalid request: " + (err.response?.data?.error || err.message || "Please check the JITA URL or testcase name(s).");
       } else if (err.message) {
         errorMsg = err.message;
       }
@@ -539,12 +810,14 @@ export default function Handover({ userInfo }) {
     }
   };
 
-  const handleValidateJiraTickets = async () => {
+  const handleValidateJiraTickets = async ({ silent = false, ticketsMap, testCases } = {}) => {
     // Priority: Table input (user's latest changes) > Backend analysis
     // Extra tickets (handoverTicketsExtra) are validated separately and NOT used for Product Bug validation
+    const ticketSource = ticketsMap || handoverTestTickets || {};
+    const cases = testCases || handoverAnalysis?.test_cases || [];
     const fromTable = [];
     const ticketsByTest = {}; // Track which tickets belong to which test case (excludes extra tickets)
-    Object.entries(handoverTestTickets || {}).forEach(([testName, val]) => {
+    Object.entries(ticketSource).forEach(([testName, val]) => {
       const testTickets = (val || "").split(",").map((t) => t.trim().toUpperCase()).filter((t) => /^[A-Z]+-\d+$/.test(t));
       testTickets.forEach((t) => {
         fromTable.push(t);
@@ -555,257 +828,80 @@ export default function Handover({ userInfo }) {
     
     // Only include backend tickets if user hasn't entered tickets in table for that test case
     const fromAnalysis = [];
-    if (handoverAnalysis?.test_cases) {
-      handoverAnalysis.test_cases.forEach((tc) => {
-        const testName = tc.test_name;
-        // Only use backend tickets if user hasn't entered tickets in table for this test
-        const hasUserInput = handoverTestTickets[testName] && handoverTestTickets[testName].trim();
-        if (!hasUserInput) {
-          (tc.jira_tickets || []).forEach((t) => {
-            const ticket = (t || "").trim().toUpperCase();
-            if (ticket && /^[A-Z]+-\d+$/.test(ticket)) {
-              fromAnalysis.push(ticket);
-              if (!ticketsByTest[testName]) ticketsByTest[testName] = [];
-              ticketsByTest[testName].push(ticket);
-            }
-          });
-        }
-      });
-    }
+    cases.forEach((tc) => {
+      const testName = tc.test_name;
+      // Only use backend tickets if user hasn't entered tickets in table for this test
+      const hasUserInput = ticketSource[testName] && String(ticketSource[testName]).trim();
+      if (!hasUserInput) {
+        (tc.jira_tickets || []).forEach((t) => {
+          const ticket = (t || "").trim().toUpperCase();
+          if (ticket && /^[A-Z]+-\d+$/.test(ticket)) {
+            fromAnalysis.push(ticket);
+            if (!ticketsByTest[testName]) ticketsByTest[testName] = [];
+            ticketsByTest[testName].push(ticket);
+          }
+        });
+      }
+    });
     
     // Combine tickets for validation: Only Table input + Backend (skip handover tickets)
     // Note: Handover tickets (handoverTicketsExtra) are NOT validated - they are not bug tickets
     const tickets = [...new Set([...fromTable, ...fromAnalysis])].filter((t) => /^[A-Z]+-\d+$/.test(t));
     if (tickets.length === 0) {
-      alert("Enter at least one Jira ticket (e.g. ENG-123) in the Ticket(s) column or handover tickets field.");
+      if (!silent) alert("Enter at least one Jira ticket (e.g. ENG-123) in the Ticket(s) column or handover tickets field.");
       return;
     }
     setHandoverJiraValidating(true);
     setHandoverJiraTicketValidation({});
     setHandoverJiraSkippedMessage(null);
     const results = {};
-    for (const ticket of tickets) {
-      try {
-        const res = await api.post(JIRA_VALIDATE_API, { ticket }, { timeout: 10000, headers: { "Content-Type": "application/json" } });
-        if (res.data?.skipped) {
-          setHandoverJiraSkippedMessage(res.data.message || "Jira validation is not configured.");
-          setHandoverJiraTicketValidation({});
-          break;
-        }
-        results[ticket] = { valid: res.data.valid, issuetype: res.data.issuetype, error: res.data.error };
-      } catch (err) {
-        results[ticket] = { valid: false, issuetype: null, error: err.response?.data?.error || err.message || "Request failed" };
-      }
-    }
-    if (Object.keys(results).length > 0) setHandoverJiraTicketValidation(results);
-    
-    // Track which test cases have all their tickets validated as Product Bugs
-    // NOTE: Extra tickets (handoverTicketsExtra) are NOT included in this check - they are kept separate
-    const validatedProductBugTests = new Set();
-    Object.entries(ticketsByTest).forEach(([testName, testTickets]) => {
-      // Check if all tickets for this test case are validated as Product Bugs
-      // Only considers tickets from table input or backend analysis, NOT extra tickets
-      const allValid = testTickets.length > 0 && testTickets.every((ticket) => {
-        const validation = results[ticket.toUpperCase()];
-        return validation && validation.valid === true;
-      });
-      if (allValid) {
-        validatedProductBugTests.add(testName);
-      }
-    });
-    setHandoverValidatedProductBugTests((prev) => {
-      const next = new Set(prev);
-      validatedProductBugTests.forEach((testName) => next.add(testName));
-      return next;
-    });
-    
-    setHandoverJiraValidating(false);
-  };
-
-  const handleOverrideFetch = async () => {
-    if (!handoverAnalysis?.test_cases?.length) {
-      alert("No test cases to validate.");
-      return;
-    }
-    
-    setHandoverFetchingOverride(true);
-    setHandoverOverrideResult(null);
-    
     try {
-      // Get selected test cases or all if none selected
-      const testCasesToCheck = handoverSelectedTests.size > 0
-        ? handoverAnalysis.test_cases.filter((tc) => handoverSelectedTests.has(tc.test_name))
-        : handoverAnalysis.test_cases;
-      
-      if (testCasesToCheck.length === 0) {
-        alert("Please select at least one test case.");
-        setHandoverFetchingOverride(false);
-        return;
-      }
-      
-      // Collect all unique tickets from test cases only (NOT handover-level tickets)
-      // IMPORTANT: Table input (user's latest changes) ALWAYS overrides backend-fetched tickets
-      // If user changes ticket in table, use that new ticket instead of the old backend ticket
-      // Do NOT include handoverTicketsExtra - those are handover-level, not test-case-specific
-      const allTickets = new Set();
-      
-      // First, collect from table input (user's latest input per test case) - this OVERRIDES backend
-      // If user entered "ENG-999" in table, use that instead of backend "ENG-123"
-      testCasesToCheck.forEach((tc) => {
-        const fromTable = (handoverTestTickets[tc.test_name] || "").split(",").map((t) => t.trim().toUpperCase()).filter((t) => /^[A-Z]+-\d+$/.test(t));
-        fromTable.forEach((t) => allTickets.add(t));
-      });
-      
-      // Then, add from test case jira_tickets (from backend analysis) ONLY if user hasn't entered tickets in table
-      // If user has entered tickets in table, ignore backend tickets for that test case
-      // Do NOT include handoverTicketsExtra - override validation should only consider test-case-specific tickets
-      testCasesToCheck.forEach((tc) => {
-        const testName = tc.test_name;
-        const hasUserInput = handoverTestTickets[testName] && handoverTestTickets[testName].trim();
-        // Only use backend tickets if user hasn't entered tickets in table for this test
-        // This ensures user's latest input always takes priority
-        if (!hasUserInput) {
-          (tc.jira_tickets || []).forEach((t) => {
-            const ticket = (t || "").trim().toUpperCase();
-            if (/^[A-Z]+-\d+$/.test(ticket)) {
-              allTickets.add(ticket); // Set will automatically deduplicate
-            }
-          });
-        }
-      });
-      
-      if (allTickets.size === 0) {
-        setHandoverOverrideResult({
-          allowed: false,
-          message: "No Jira tickets found. Override is only allowed with Product Bug tickets.",
-        });
-        setHandoverFetchingOverride(false);
-        return;
-      }
-      
-      // Validate all unique tickets (each ticket validated only once)
-      // Convert Set to Array to ensure we only validate each ticket once
-      const uniqueTicketsArray = Array.from(allTickets);
-      const ticketValidations = {};
-      let hasTestBug = false;
-      let hasUntriaged = false;
-      let productBugCount = 0;
-      let testBugCount = 0;
-      
-      for (const ticket of uniqueTicketsArray) {
-        // Skip if already validated (shouldn't happen with Set, but double-check)
-        if (ticketValidations[ticket]) {
-          continue;
-        }
-        
+      for (const ticket of tickets) {
         try {
           const res = await api.post(JIRA_VALIDATE_API, { ticket }, { timeout: 10000, headers: { "Content-Type": "application/json" } });
           if (res.data?.skipped) {
-            setHandoverOverrideResult({
-              allowed: false,
-              message: "Jira validation is not configured. Cannot determine bug types.",
-            });
-            setHandoverFetchingOverride(false);
+            setHandoverJiraSkippedMessage(res.data.message || "Jira validation is not configured.");
+            setHandoverJiraTicketValidation({});
+            setHandoverValidatedProductBugTests(new Set());
             return;
           }
-          
-          ticketValidations[ticket] = {
-            valid: res.data.valid,
-            issuetype: res.data.issuetype,
-            error: res.data.error,
-          };
-          
-          if (res.data.valid) {
-            productBugCount++;
-          } else {
-            const issuetype = (res.data.issuetype || "").toLowerCase();
-            if (issuetype.includes("test bug") || issuetype.includes("testbed")) {
-              hasTestBug = true;
-              testBugCount++;
-            } else if (!issuetype || issuetype === "" || issuetype === "—") {
-              hasUntriaged = true;
-            }
-          }
+          results[ticket] = { valid: res.data.valid, issuetype: res.data.issuetype, error: res.data.error };
         } catch (err) {
-          ticketValidations[ticket] = {
-            valid: false,
-            issuetype: null,
-            error: err.response?.data?.error || err.message || "Request failed",
-          };
+          results[ticket] = { valid: false, issuetype: null, error: err.response?.data?.error || err.message || "Request failed" };
         }
       }
-      
-      // Only validate SELECTED test cases - user can uncheck problematic test cases to proceed
-      // Only block if SELECTED test cases have Test Bug or Environment in the Bug Type dropdown.
-      // Empty/unset bug type is not blocking when all tickets are Product Bug (Jira-validated).
-      let hasTestBugOrEnvironmentInMap = false;
-      const problematicTests = [];
-      testCasesToCheck.forEach((tc) => {
-        const bugType = (handoverBugTypeMap[tc.test_name] || "").trim();
-        if (!bugType) return; // No bug type selected – don't block; Jira validation decides
-        const bugTypes = bugType.split(",").map((bt) => bt.trim()).filter(Boolean);
-        const hasBlocked = bugTypes.some(
-          (bt) => bt.includes("Test Bug") || bt.includes("Environment")
-        );
-        if (hasBlocked) {
-          hasTestBugOrEnvironmentInMap = true;
-          problematicTests.push(tc.test_name);
+      if (Object.keys(results).length > 0) setHandoverJiraTicketValidation(results);
+
+      // Track which test cases have all their tickets validated as Product Bugs
+      // NOTE: Extra tickets (handoverTicketsExtra) are NOT included in this check - they are kept separate
+      const validatedProductBugTests = new Set();
+      Object.entries(ticketsByTest).forEach(([testName, testTickets]) => {
+        const allValid = testTickets.length > 0 && testTickets.every((ticket) => {
+          const validation = results[ticket.toUpperCase()];
+          return validation && validation.valid === true;
+        });
+        if (allValid) {
+          validatedProductBugTests.add(testName);
         }
       });
-      
-      // Check conditions: if out of multiple bug types, even 1 is testbug, then block
-      // Use the count of unique validated tickets (not total tickets collected)
-      const totalTickets = uniqueTicketsArray.length;
-      
-      // First check bug types from backend categorization
-      // Only validate SELECTED test cases - user can uncheck problematic test cases
-      if (hasTestBugOrEnvironmentInMap) {
-        setHandoverOverrideResult({
-          allowed: false,
-          message: `Override not allowed: The following SELECTED test case(s) contain Test Bug or Environment bug types: ${problematicTests.slice(0, 3).join(", ")}${problematicTests.length > 3 ? "..." : ""}. Please uncheck these test cases if you want to proceed with override for the remaining test cases. Only Product Bug (without Test Bug or Environment) is allowed for override.`,
-          ticketValidations,
-        });
-        setHandoverOverrideSave(false);
-      } else if (hasTestBug || hasUntriaged) {
-        // Also check from ticket validation
-        setHandoverOverrideResult({
-          allowed: false,
-          message: `Override not allowed: Found ${testBugCount} Test Bug(s) and ${hasUntriaged ? "untriaged" : ""} ticket(s). Only Product Bug tickets are allowed for override.`,
-          ticketValidations,
-        });
-        setHandoverOverrideSave(false);
-      } else if (productBugCount > 0 && productBugCount === totalTickets) {
-        // All tickets are Product Bugs AND no Test Bug/Environment in bug type map
-        setHandoverOverrideResult({
-          allowed: true,
-          message: `Override allowed: All ${productBugCount} ticket(s) are Product Bugs and no Test Bug/Environment found in bug types.`,
-          ticketValidations,
-        });
-        setHandoverOverrideSave(true);
-      } else if (productBugCount === 0) {
-        setHandoverOverrideResult({
-          allowed: false,
-          message: "Override not allowed: No Product Bug tickets found. Override is only allowed with Product Bug tickets.",
-          ticketValidations,
-        });
-        setHandoverOverrideSave(false);
-      } else {
-        setHandoverOverrideResult({
-          allowed: false,
-          message: `Override not allowed: Found ${totalTickets - productBugCount} non-Product Bug ticket(s). Only Product Bug tickets are allowed for override.`,
-          ticketValidations,
-        });
-        setHandoverOverrideSave(false);
-      }
-    } catch (err) {
-      setHandoverOverrideResult({
-        allowed: false,
-        message: `Error validating override: ${err.message}`,
-      });
+      setHandoverValidatedProductBugTests(validatedProductBugTests);
     } finally {
-      setHandoverFetchingOverride(false);
+      setHandoverJiraValidating(false);
     }
   };
+
+  useEffect(() => {
+    if (!handoverAnalysis?.test_cases?.length || handoverAnalysis.error || handoverDataLocked) {
+      if (!handoverAnalysis) handoverAutoJiraRef.current = null;
+      return undefined;
+    }
+    if (handoverAutoJiraRef.current === handoverAnalysis) return undefined;
+    handoverAutoJiraRef.current = handoverAnalysis;
+    if (!handoverSelectedTests.size) return undefined;
+    handleValidateJiraTickets({ silent: true });
+    return undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handoverAnalysis]);
 
   // eslint-disable-next-line no-unused-vars
   const handleSearchLstFile = async (testName) => {
@@ -932,9 +1028,9 @@ export default function Handover({ userInfo }) {
       return;
     }
     if (!manualOnly) {
-      const canProceed = handoverAnalysis?.all_tests_passed || handoverOverrideSave;
+      const canProceed = handoverAnalysis?.all_tests_passed || selectedAreHandoverReady();
       if (!canProceed) {
-        alert("All test cases must pass before creating LST CR, or select Override to save handover data.");
+        alert("Selected test cases must be passed or Jira-validated as Product Bug before creating LST CR.");
         return;
       }
     }
@@ -953,8 +1049,8 @@ export default function Handover({ userInfo }) {
           lst_file,
           commit_message: commitMsg,
           manual_only: !!manualOnly,
-          user_email: userInfo?.email,
-          user_name: userInfo?.name,
+          user_email: user?.email,
+          user_name: user?.name || user?.username,
           handover_tickets: handoverTicketsList,
           reviewers: reviewersList.length ? reviewersList : undefined,
           cr_subject: finalCrSubject,
@@ -1010,66 +1106,155 @@ export default function Handover({ userInfo }) {
     }
     setLoadingDeprecationSearch(true);
     setDeprecationResults(null);
+    setDeprecationLstFiles([]);
+    setDeprecationLstFile("");
+    setDeprecationLstSuggestion(null);
+    deprecationLstSuggestCacheRef.current.clear();
+    setDeprecationValidation(null);
+    setDeprecationCrResult(null);
+    setDeprecationManualLstInstructions(null);
     try {
-      // Use POST with body to avoid URL length/encoding issues with long test names
-      const res = await api.post(DEPRECATION_SEARCH_API, { q: parts });
+      const branch = (deprecationLstBranch || "").trim();
+      const res = await api.post(DEPRECATION_SEARCH_API, { q: parts, branch: branch || undefined });
       setDeprecationResults(res.data);
-      setDeprecationSelectedRecordKeys(new Set());
     } catch (err) {
       setDeprecationResults({ error: err.response?.data?.error || "Search failed.", results: [], count: 0 });
-      setDeprecationSelectedRecordKeys(new Set());
     } finally {
       setLoadingDeprecationSearch(false);
     }
   };
 
-  const handleDeprecationDeleteAll = async (testName, records) => {
-    if (!deprecationResults?.results || !records?.length) return;
-    if (!window.confirm(`Delete ${records.length} handover record(s) for "${testName}"?`)) return;
-    const toRemove = new Set(records.map((r) => getDeprecationRecordKey(r)));
-    let deleted = 0;
-    for (const r of records) {
-      try {
-        const res = await api.post(HANDOVER_RECORD_DELETE_API, {
-          test_name: r.test_name,
-          handover_date: r.handover_date,
-          lst_file: r.lst_file || "",
-        });
-        if (res.data?.success) deleted++;
-      } catch (err) {
-        console.error("Delete handover record error:", err);
-      }
+  const loadSavedRecords = async (queryText) => {
+    const q = (queryText ?? recordsQuery).trim();
+    setRecordsLoading(true);
+    setRecordsError(null);
+    try {
+      const payload = q ? { q } : {};
+      const [ho, dep] = await Promise.all([
+        api.post(HANDOVER_RECORDS_API, payload, { headers: getAuthHeaders(), timeout: 30000 }),
+        api.post(DEPRECATION_RECORDS_API, payload, { headers: getAuthHeaders(), timeout: 30000 }),
+      ]);
+      setRecordsHandover(ho.data?.results || []);
+      setRecordsDeprecation(dep.data?.results || []);
+    } catch (err) {
+      setRecordsError(err.response?.data?.error || err.message || "Failed to load records.");
+    } finally {
+      setRecordsLoading(false);
     }
-    setDeprecationResults((prev) => ({
-      ...prev,
-      results: (prev?.results || []).filter((x) => !toRemove.has(getDeprecationRecordKey(x))),
-      count: Math.max(0, (prev?.count ?? 0) - deleted),
-    }));
-    setDeprecationSelectedRecordKeys((prev) => {
+  };
+
+  const handleRecordsDelete = async (kind, r) => {
+    const testName = (r.test_name || "").trim();
+    const date = kind === "deprecation" ? (r.deprecation_date || "") : (r.handover_date || "");
+    if (!testName || !date) return;
+    if (!window.confirm(`Delete this ${kind} record for "${testName}"?`)) return;
+    try {
+      const res = await api.post(
+        kind === "deprecation" ? DEPRECATION_RECORD_DELETE_API : HANDOVER_RECORD_DELETE_API,
+        kind === "deprecation"
+          ? { test_name: testName, deprecation_date: date, lst_file: r.lst_file || "" }
+          : { test_name: testName, handover_date: date, lst_file: r.lst_file || "" },
+        { headers: getAuthHeaders() }
+      );
+      if (!res.data?.success) {
+        alert(res.data?.message || "No matching record found.");
+        return;
+      }
+      const key = getSavedRecordKey(kind, r);
+      if (kind === "deprecation") {
+        setRecordsDeprecation((prev) => prev.filter((x) => getSavedRecordKey("deprecation", x) !== key));
+      } else {
+        setRecordsHandover((prev) => prev.filter((x) => getSavedRecordKey("handover", x) !== key));
+      }
+      setRecordsExpanded((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    } catch (err) {
+      if (err.response?.status === 403) {
+        alert(err.response?.data?.error || "You can only delete records you created.");
+        return;
+      }
+      alert(err.response?.data?.error || "Failed to delete record.");
+    }
+  };
+
+  const toggleRecordsExpanded = (key) => {
+    setRecordsExpanded((prev) => {
       const next = new Set(prev);
-      records.forEach((r) => next.delete(getDeprecationRecordKey(r)));
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   };
 
+  useEffect(() => {
+    if (activeTab === "records") {
+      loadSavedRecords();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const visibleSavedRecords = useMemo(() => {
+    const ho = (recordsHandover || []).map((r) => ({
+      ...r,
+      _kind: "handover",
+      _date: r.handover_date || "",
+      _key: getSavedRecordKey("handover", r),
+    }));
+    const dep = (recordsDeprecation || []).map((r) => ({
+      ...r,
+      _kind: "deprecation",
+      _date: r.deprecation_date || "",
+      _key: getSavedRecordKey("deprecation", r),
+    }));
+    const rows = ho.concat(dep);
+    rows.sort((a, b) => String(b._date).localeCompare(String(a._date)));
+    return rows;
+  }, [recordsHandover, recordsDeprecation]);
+
+  const canEditAnyVisible = visibleSavedRecords.some((r) => r.can_delete);
+
   const handleDeprecationValidateLst = async () => {
-    const branch = (deprecationLstBranch || "master").trim() || "master";
-    const lst_file = deprecationLstFile.trim();
-    if (!lst_file) {
-      alert("Enter the LST file path.");
+    const branch = (deprecationLstBranch || "").trim();
+    const lst_files = getResolvedDeprecationLstFiles();
+    if (!branch) {
+      alert("Please enter Branch.");
       return;
     }
-    const test_names = [...new Set((deprecationResults?.results || []).filter((r) => deprecationSelectedRecordKeys.has(getDeprecationRecordKey(r))).map((r) => (r.test_name || "").trim()))];
+    if (!lst_files.length) {
+      alert("Select at least one LST file.");
+      return;
+    }
+    const test_names = getDeprecationTargetTests();
     if (!test_names.length) {
-      alert("Select at least one test case (checkbox) to check in the LST file.");
+      alert("Search by test name first.");
       return;
     }
     setDeprecationValidating(true);
     setDeprecationValidation(null);
     setDeprecationCrResult(null);
     try {
-      const res = await api.post(CHECK_LST_TESTCASES_API, { branch, lst_file, test_names }, { timeout: 30000 });
-      setDeprecationValidation(res.data);
+      const files = await Promise.all(
+        lst_files.map((lst_file) =>
+          api.post(CHECK_LST_TESTCASES_API, { branch, lst_file, test_names }, { timeout: 30000 })
+            .then((r) => ({ lst_file, ...(r.data || {}) }))
+            .catch((err) => ({
+              lst_file,
+              error: err.response?.data?.error || err.message || "Check failed",
+              present: [],
+              not_present: test_names,
+              test_names,
+            }))
+        )
+      );
+      const firstError = files.find((f) => f.error);
+      setDeprecationValidation({
+        files,
+        test_names,
+        error: firstError && files.length === 1 ? firstError.error : null,
+      });
     } catch (err) {
       let errorMsg = "Check failed";
       if (err.code === "ECONNABORTED" || err.message?.includes("timeout")) {
@@ -1079,22 +1264,27 @@ export default function Handover({ userInfo }) {
       } else {
         errorMsg = err.response?.data?.error || err.message || "Check failed";
       }
-      setDeprecationValidation({ error: errorMsg, present: [], not_present: test_names });
+      setDeprecationValidation({ error: errorMsg, present: [], not_present: test_names, files: [] });
     } finally {
       setDeprecationValidating(false);
     }
   };
 
-  const handleDeprecationCreateLstCr = async (manualOnly) => {
-    const test_names = [...new Set((deprecationResults?.results || []).filter((r) => deprecationSelectedRecordKeys.has(getDeprecationRecordKey(r))).map((r) => (r.test_name || "").trim()))];
+  const handleDeprecationSave = async () => {
+    const test_names = getDeprecationTargetTests();
     if (!test_names.length) {
-      alert("Select at least one test case (checkbox) for deprecation.");
+      alert("Search by test name first.");
       return;
     }
-    const branch = (deprecationLstBranch || "master").trim() || "master";
-    const lst_file = deprecationLstFile.trim();
-    if (!lst_file) {
-      alert("Please enter the LST file path.");
+    const branch = (deprecationLstBranch || "").trim();
+    const lst_files = getResolvedDeprecationLstFiles();
+    const lst_file = lst_files[0] || "";
+    if (!branch) {
+      alert("Please enter Branch.");
+      return;
+    }
+    if (!lst_files.length) {
+      alert("Select at least one LST file.");
       return;
     }
     setDeprecationCreateLstLoading(true);
@@ -1102,24 +1292,143 @@ export default function Handover({ userInfo }) {
     setDeprecationCrResult(null);
     const ticketsList = (deprecationTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean);
     const reviewersList = (deprecationReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
-    const commitMsg = "Deprecated " + test_names.length + " test(s) from " + lst_file + (ticketsList.length ? "\n\nJira: " + ticketsList.join(", ") : "") + (deprecationCommitMessage.trim() ? "\n\n" + deprecationCommitMessage.trim() : "");
+    const commitMsg = "Deprecated " + test_names.length + " test(s) from " + lst_files.join(", ") + (ticketsList.length ? "\n\nJira: " + ticketsList.join(", ") : "") + (deprecationCommitMessage.trim() ? "\n\n" + deprecationCommitMessage.trim() : "");
+    const notes =
+      "Deprecation saved (no Gerrit push). " +
+      "Branch: " + branch + "; LST: " + lst_files.join(", ") +
+      (reviewersList.length ? "; Reviewers: " + reviewersList.join(", ") : "") +
+      (ticketsList.length ? "; Jira: " + ticketsList.join(", ") : "");
     try {
       const res = await api.post(
-        DEPRECATE_LST_CR_API,
-        { branch, lst_file, test_names, commit_message: commitMsg, jira_tickets: ticketsList.length ? ticketsList : undefined, reviewers: reviewersList.length ? reviewersList : undefined },
+        DEPRECATION_RECORD_API,
+        {
+          branch,
+          lst_file,
+          lst_files,
+          test_names,
+          commit_message: commitMsg,
+          jira_tickets: ticketsList.length ? ticketsList : undefined,
+          reviewers: reviewersList.length ? reviewersList : undefined,
+          notes,
+          by_whom: user?.email || user?.username || user?.name || "unknown",
+          user_email: user?.email,
+          user_name: user?.name || user?.username,
+        },
         { headers: getAuthHeaders() }
+      );
+      setDeprecationCrResult({
+        success: true,
+        message: res.data?.message || "Deprecation saved.",
+        notes: res.data?.notes || notes,
+        cr_status: res.data?.cr_status || "pending_manual",
+      });
+      alert(res.data?.message || "Deprecation saved.");
+    } catch (err) {
+      const errData = err.response?.data;
+      setDeprecationCrResult({ success: false, error: errData?.error || "Failed to save deprecation", message: errData?.message });
+    } finally {
+      setDeprecationCreateLstLoading(false);
+    }
+  };
+
+  const handleDeprecationCreateLstCr = async () => {
+    const test_names = getDeprecationTargetTests();
+    if (!test_names.length) {
+      alert("Search by test name first.");
+      return;
+    }
+    const branch = (deprecationLstBranch || "").trim();
+    const lst_files = getResolvedDeprecationLstFiles();
+    const lst_file = lst_files[0] || "";
+    if (!branch) {
+      alert("Please enter Branch.");
+      return;
+    }
+    if (!lst_files.length) {
+      alert("Select at least one LST file.");
+      return;
+    }
+    setDeprecationCreateLstLoading(true);
+    setDeprecationManualLstInstructions(null);
+    setDeprecationCrResult(null);
+    const ticketsList = (deprecationTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean);
+    const reviewersList = (deprecationReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
+    const commitMsg = "Deprecated " + test_names.length + " test(s) from " + lst_files.join(", ") + (ticketsList.length ? "\n\nJira: " + ticketsList.join(", ") : "") + (deprecationCommitMessage.trim() ? "\n\n" + deprecationCommitMessage.trim() : "");
+    try {
+      // Persist a record first, then create CR
+      try {
+        await api.post(
+          DEPRECATION_RECORD_API,
+          {
+            branch,
+            lst_file,
+            lst_files,
+            test_names,
+            commit_message: commitMsg,
+            jira_tickets: ticketsList.length ? ticketsList : undefined,
+            reviewers: reviewersList.length ? reviewersList : undefined,
+            notes: "Deprecation CR requested via RegX.",
+            cr_status: "creating",
+            by_whom: user?.email || user?.username || user?.name || "unknown",
+          },
+          { headers: getAuthHeaders() }
+        );
+      } catch (_) {
+        /* record save is best-effort before CR */
+      }
+      const res = await api.post(
+        DEPRECATE_LST_CR_API,
+        {
+          branch,
+          lst_file,
+          lst_files,
+          test_names,
+          commit_message: commitMsg,
+          jira_tickets: ticketsList.length ? ticketsList : undefined,
+          reviewers: reviewersList.length ? reviewersList : undefined,
+          manual_only: false,
+        },
+        { headers: getAuthHeaders(), timeout: 600000 }
       );
       if (res.data.manual && res.data.instructions) {
         setDeprecationManualLstInstructions(res.data.instructions);
         setDeprecationCrResult({ success: true, manual: true, message: res.data.message || "Manual CR steps generated below." });
       } else if (res.data.success) {
-        setDeprecationCrResult({ success: true, cr_url: res.data.cr_url, message: res.data.message });
+        setDeprecationCrResult({
+          success: true,
+          cr_url: res.data.cr_url || res.data.gerrit_url,
+          gerrit_change_id: res.data.gerrit_change_id,
+          message: res.data.message,
+          removed: res.data.removed || [],
+          not_present: res.data.not_present || [],
+        });
+        let depMsg = "✓ Deprecation CR created successfully!";
+        if (res.data.gerrit_change_id) depMsg += ` Change ${res.data.gerrit_change_id}`;
+        if (res.data.cr_url || res.data.gerrit_url) depMsg += ` — ${res.data.cr_url || res.data.gerrit_url}`;
+        depMsg += formatLstRemoveSummary(res.data.removed, res.data.not_present);
+        alert(depMsg);
       } else {
-        setDeprecationCrResult({ success: false, message: res.data.message, error: res.data.error });
+        setDeprecationCrResult({
+          success: false,
+          message: res.data.message,
+          error: res.data.error,
+          removed: res.data.removed || [],
+          not_present: res.data.not_present || [],
+        });
+        alert(res.data.message || res.data.error || "Deprecation CR failed.");
       }
     } catch (err) {
       const errData = err.response?.data;
-      setDeprecationCrResult({ success: false, error: errData?.error || "Failed to create CR", message: errData?.message });
+      if (errData?.require_key_setup) {
+        alert(errData.message || errData.error || "Gerrit HTTP password required in Settings.");
+      }
+      setDeprecationCrResult({
+        success: false,
+        error: errData?.error || "Failed to create CR",
+        message: errData?.message,
+        git_error: errData?.git_error,
+      });
+      if (errData?.instructions) setDeprecationManualLstInstructions(errData.instructions);
     } finally {
       setDeprecationCreateLstLoading(false);
     }
@@ -1178,7 +1487,7 @@ export default function Handover({ userInfo }) {
         tickets: ticketsList?.length ? ticketsList : undefined,  // Keep for backward compatibility
         test_bug_tickets: hasPerTestBugTickets ? test_bug_tickets : undefined,  // Bug tickets (from test cases)
         handover_tickets: handoverTicketsList.length > 0 ? handoverTicketsList : undefined,  // Handover-level tickets only
-        by_whom: userInfo?.email || userInfo?.name || "unknown",
+        by_whom: user?.email || user?.username || user?.name || "unknown",
         branch: (handoverCreateLstBranch || "master").trim(),
         lst_file: (handoverCreateLstFile || "").trim(),
       });
@@ -1188,23 +1497,21 @@ export default function Handover({ userInfo }) {
     }
   };
 
-  const handleRecordHandoverAndCreateCR = async () => {
+  const handleHandoverSaveOnly = async () => {
     if (!handoverAnalysis?.test_cases?.length) {
       alert("No test cases available.");
       return;
     }
 
-    // Use selected tests if any, otherwise all tests
     const test_names = handoverSelectedTests.size > 0
       ? Array.from(handoverSelectedTests).filter((name) => handoverAnalysis.test_cases.some((tc) => tc.test_name === name))
       : handoverAnalysis.test_cases.map((tc) => tc.test_name).filter(Boolean);
-    
+
     if (test_names.length === 0) {
       alert("Please select at least one test case.");
       return;
     }
 
-    // Validate test cases for handover (check for Test Bug/Environment)
     const selectedTestCases = handoverAnalysis.test_cases.filter((tc) => test_names.includes(tc.test_name));
     const problematicTests = [];
     selectedTestCases.forEach((tc) => {
@@ -1216,21 +1523,127 @@ export default function Handover({ userInfo }) {
         problematicTests.push(tc.test_name);
       }
     });
-    
+
     if (problematicTests.length > 0) {
-      alert(`Cannot record handover: The following SELECTED test case(s) contain Test Bug or Environment bug types:\n${problematicTests.join("\n")}\n\nPlease uncheck these test cases if you want to proceed with handover for the remaining test cases. Only Product Bug (without Test Bug or Environment) is allowed.`);
+      alert(`Cannot save handover: The following SELECTED test case(s) contain Test Bug or Environment bug types:\n${problematicTests.join("\n")}`);
       return;
     }
 
-    // Check if CR can be created: allow when all tests passed, OR override saved, OR user selected only passed tests (no Jira needed)
-    const allSelectedArePassed = selectedTestCases.every((tc) => {
-      const passCount = tc.passed_count || 0;
-      const status = (tc.status || "").toLowerCase();
-      return status === "succeeded" || passCount >= 2;
+    const canProceedSave = handoverAnalysis?.all_tests_passed || selectedAreHandoverReady();
+    if (!canProceedSave) {
+      alert("Selected test cases must be passed or Jira-validated as Product Bug before saving handover.");
+      return;
+    }
+
+    const branch = (handoverCreateLstBranch || "master").trim() || "master";
+    const lst_files = getResolvedLstFiles();
+    const lst_file = lst_files[0] || "";
+    const reviewersList = (handoverReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
+    const handoverTicketsList = (handoverTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean);
+    if (!handoverTicketsList.length) {
+      alert("Please enter handover ticket(s) before saving.");
+      return;
+    }
+    if (!lst_files.length) {
+      alert("Please add at least one LST file path.");
+      return;
+    }
+
+    setHandoverCreateLstLoading(true);
+    setHandoverCrResult(null);
+
+    const test_bug_tickets = {};
+    handoverAnalysis.test_cases.forEach((tc) => {
+      if (!tc.test_name) return;
+      const fromTable = (handoverTestTickets[tc.test_name] || "").split(",").map((t) => t.trim()).filter(Boolean);
+      const fromAnalysis = fromTable.length > 0 ? [] : (tc.jira_tickets || []);
+      const bugTickets = fromTable.length > 0 ? fromTable : [...new Set(fromAnalysis)];
+      if (bugTickets.length) test_bug_tickets[tc.test_name] = bugTickets;
     });
-    const canProceedCR = handoverAnalysis?.all_tests_passed || handoverOverrideSave || allSelectedArePassed;
+    const hasPerTestBugTickets = Object.keys(test_bug_tickets).length > 0;
+    const ticketsList = hasPerTestBugTickets ? undefined : [...new Set([...(handoverAnalysis.assigned_tickets || []), ...handoverTicketsList])];
+    const finalCrSubject = (handoverCrSubject || "Testcase Handover").trim() || "Testcase Handover";
+    const finalCrDescription = (handoverCrDescription || "").trim() || buildDefaultCrDescription();
+    const notes =
+      "Handover saved without Gerrit push. Branch: " + branch +
+      "; LST: " + lst_files.join(", ") +
+      (reviewersList.length ? "; Reviewers: " + reviewersList.join(", ") : "") +
+      "; Tickets: " + handoverTicketsList.join(", ");
+
+    try {
+      const res = await api.post(HANDOVER_RECORD_API, {
+        test_names,
+        test_tickets: hasPerTestBugTickets ? test_bug_tickets : undefined,
+        tickets: ticketsList?.length ? ticketsList : undefined,
+        test_bug_tickets: hasPerTestBugTickets ? test_bug_tickets : undefined,
+        handover_tickets: handoverTicketsList,
+        by_whom: user?.email || user?.username || user?.name || "unknown",
+        branch,
+        lst_file: lst_file || "",
+        lst_files,
+        reviewers: reviewersList.length ? reviewersList : undefined,
+        notes,
+        cr_status: "pending_manual",
+        cr_subject: finalCrSubject,
+        cr_description: finalCrDescription,
+      });
+      const saveResult = {
+        success: true,
+        message: res.data?.message || "Handover saved.",
+        notes: res.data?.notes || notes,
+        cr_status: res.data?.cr_status || "pending_manual",
+      };
+      setHandoverCrResult(saveResult);
+      setHandoverDataLocked(true);
+      alert(saveResult.message);
+    } catch (err) {
+      const errData = err.response?.data;
+      setHandoverCrResult({
+        success: false,
+        error: errData?.error || "Failed to save handover.",
+        message: errData?.message || err.message,
+      });
+      alert(errData?.error || "Failed to save handover.");
+    } finally {
+      setHandoverCreateLstLoading(false);
+    }
+  };
+
+  const handleRecordHandoverAndCreateCR = async () => {
+    if (!handoverAnalysis?.test_cases?.length) {
+      alert("No test cases available.");
+      return;
+    }
+
+    const test_names = handoverSelectedTests.size > 0
+      ? Array.from(handoverSelectedTests).filter((name) => handoverAnalysis.test_cases.some((tc) => tc.test_name === name))
+      : handoverAnalysis.test_cases.map((tc) => tc.test_name).filter(Boolean);
+
+    if (test_names.length === 0) {
+      alert("Please select at least one test case.");
+      return;
+    }
+
+    const selectedTestCases = handoverAnalysis.test_cases.filter((tc) => test_names.includes(tc.test_name));
+    const problematicTests = [];
+    selectedTestCases.forEach((tc) => {
+      const bugType = (handoverBugTypeMap[tc.test_name] || "").trim();
+      if (!bugType) return;
+      const bugTypes = bugType.split(",").map((bt) => bt.trim()).filter(Boolean);
+      const hasBlocked = bugTypes.some((bt) => bt.includes("Test Bug") || bt.includes("Environment"));
+      if (hasBlocked) {
+        problematicTests.push(tc.test_name);
+      }
+    });
+
+    if (problematicTests.length > 0) {
+      alert(`Cannot record handover: The following SELECTED test case(s) contain Test Bug or Environment bug types:\n${problematicTests.join("\n")}`);
+      return;
+    }
+
+    const canProceedCR = handoverAnalysis?.all_tests_passed || selectedAreHandoverReady();
     if (!canProceedCR) {
-      alert("All test cases must pass before creating LST CR, or select Override to save handover data.");
+      alert("Selected test cases must be passed or Jira-validated as Product Bug before creating LST CR.");
       return;
     }
 
@@ -1252,12 +1665,10 @@ export default function Handover({ userInfo }) {
       return;
     }
 
-    // Set loading states
     setHandoverCreateLstLoading(true);
     setHandoverManualLstInstructions(null);
     setHandoverCrResult(null);
 
-    // Prepare handover data
     const test_bug_tickets = {};
     handoverAnalysis.test_cases.forEach((tc) => {
       if (!tc.test_name) return;
@@ -1269,33 +1680,34 @@ export default function Handover({ userInfo }) {
     const hasPerTestBugTickets = Object.keys(test_bug_tickets).length > 0;
     const ticketsList = hasPerTestBugTickets ? undefined : [...new Set([...(handoverAnalysis.assigned_tickets || []), ...handoverTicketsList])];
 
-    // Prepare CR data
-    const commitMsg = "Add " + test_names.length + " test(s) to " + lst_file + (handoverCommitMessage.trim() ? "\n\n" + handoverCommitMessage.trim() : "");
     const finalCrSubject = (handoverCrSubject || "Testcase Handover").trim() || "Testcase Handover";
     const finalCrDescription = (handoverCrDescription || "").trim() || buildDefaultCrDescription();
 
-    // Execute both operations independently
     let handoverResult = null;
     let crResult = null;
 
-    // 1. Record Handover (independent)
     try {
       await api.post(HANDOVER_RECORD_API, {
         test_names,
         test_tickets: hasPerTestBugTickets ? test_bug_tickets : undefined,
         tickets: ticketsList?.length ? ticketsList : undefined,
         test_bug_tickets: hasPerTestBugTickets ? test_bug_tickets : undefined,
-        handover_tickets: handoverTicketsList.length > 0 ? handoverTicketsList : undefined,
-        by_whom: userInfo?.email || userInfo?.name || "unknown",
+        handover_tickets: handoverTicketsList,
+        by_whom: user?.email || user?.username || user?.name || "unknown",
         branch,
         lst_file: lst_file || "",
+        lst_files,
+        reviewers: reviewersList,
+        notes: "Handover CR requested via RegX.",
+        cr_status: "creating",
+        cr_subject: finalCrSubject,
+        cr_description: finalCrDescription,
       });
       handoverResult = { success: true, message: "Handover saved successfully." };
     } catch (err) {
       handoverResult = { success: false, error: err.response?.data?.error || "Failed to save handover." };
     }
 
-    // 2. Create CR (independent)
     try {
       const res = await api.post(
         CREATE_LST_CR_API,
@@ -1304,12 +1716,11 @@ export default function Handover({ userInfo }) {
           test_names,
           lst_file: lst_file || "",
           lst_files,
-          commit_message: commitMsg,
           manual_only: false,
-          user_email: userInfo?.email,
-          user_name: userInfo?.name,
+          user_email: user?.email,
+          user_name: user?.name || user?.username,
           handover_tickets: handoverTicketsList,
-          reviewers: reviewersList.length ? reviewersList : undefined,
+          reviewers: reviewersList,
           cr_subject: finalCrSubject,
           cr_description: finalCrDescription,
         },
@@ -1319,7 +1730,14 @@ export default function Handover({ userInfo }) {
         setHandoverManualLstInstructions(res.data.instructions);
         crResult = { success: true, manual: true, message: res.data.message || "Manual CR steps generated below." };
       } else if (res.data.success) {
-        crResult = { success: true, cr_url: res.data.cr_url, message: res.data.message, already_present: res.data.already_present || [], to_add: res.data.to_add || [] };
+        crResult = {
+          success: true,
+          cr_url: res.data.cr_url || res.data.gerrit_url,
+          gerrit_change_id: res.data.gerrit_change_id,
+          message: res.data.message,
+          already_present: res.data.already_present || [],
+          to_add: res.data.to_add || [],
+        };
       } else if (res.data.already_present?.length > 0 && (!res.data.to_add || res.data.to_add.length === 0)) {
         crResult = { success: false, message: res.data.message || "All tests already in LST file.", already_present: res.data.already_present, to_add: [] };
       } else {
@@ -1345,7 +1763,7 @@ export default function Handover({ userInfo }) {
         const isConnReset = err.code === "ECONNRESET" || err.code === "ETIMEDOUT" || err.message === "Network Error"
           || (err.message && (String(err.message).includes("hang up") || String(err.message).includes("ECONNRESET") || String(err.message).includes("timeout")));
         if (isConnReset) {
-          errMsg = "Request was interrupted (connection reset or timeout). The backend may have restarted during git clone. Try again and avoid editing files while CR is being created.";
+          errMsg = "Request was interrupted (connection reset or timeout). The backend may have restarted during git clone. Try again.";
         } else if (err.response?.status >= 500) {
           errMsg = "Backend error. Check the backend terminal for details.";
         } else {
@@ -1356,29 +1774,29 @@ export default function Handover({ userInfo }) {
         success: false,
         error: errMsg,
         message: errData?.message || errMsg,
-        vpn_required: errData?.vpn_required,
         git_error: errData?.git_error,
-        raw_error: errData?.raw_error,
       };
       if (errData?.instructions) setHandoverManualLstInstructions(errData.instructions);
     }
 
-    // Set CR result state
     setHandoverCrResult(crResult);
 
-    // Show combined message
     let message = "";
     if (handoverResult.success && crResult.manual) {
       message = "✓ Handover recorded. Follow the manual git steps shown below to push the CR for review.";
     } else if (handoverResult.success && crResult.success) {
       message = "✓ Handover recorded and CR created successfully!";
-      if (crResult.cr_url) {
-        message += ` CR: ${crResult.cr_url}`;
-      }
+      if (crResult.gerrit_change_id) message += ` Change ${crResult.gerrit_change_id}`;
+      if (crResult.cr_url) message += ` — ${crResult.cr_url}`;
+      message += formatLstAddSummary(crResult.to_add, crResult.already_present);
     } else if (handoverResult.success && !crResult.success) {
       message = `✓ Handover recorded successfully, but CR failed: ${crResult.error || crResult.message || "Unknown error"}`;
+      if (crResult.already_present?.length && !crResult.to_add?.length) {
+        message += formatLstAddSummary(crResult.to_add, crResult.already_present);
+      }
     } else if (!handoverResult.success && crResult.success) {
       message = `✓ CR created successfully, but handover failed: ${handoverResult.error || "Unknown error"}`;
+      message += formatLstAddSummary(crResult.to_add, crResult.already_present);
     } else {
       message = `✗ Both operations failed. Handover: ${handoverResult.error || "Unknown error"}. CR: ${crResult.error || crResult.message || "Unknown error"}`;
     }
@@ -1397,10 +1815,10 @@ export default function Handover({ userInfo }) {
           <h1 className="ho-title">Handover &amp; Deprecation</h1>
           <p className="ho-subtitle">
             Onboard new test cases into LST files and deprecate existing ones —
-            backed by JITA results, Jira validation and Gerrit reviews.
+            backed by JITA results, Jira validation, and Gerrit CR creation.
           </p>
         </div>
-        <div className="ho-tabs" role="tablist" aria-label="Handover or Deprecation">
+        <div className="ho-tabs" role="tablist" aria-label="Handover, Deprecation, or Records">
           <button
             type="button"
             role="tab"
@@ -1419,13 +1837,22 @@ export default function Handover({ userInfo }) {
           >
             Deprecation
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "records"}
+            className={`ho-tab${activeTab === "records" ? " is-active" : ""}`}
+            onClick={() => setActiveTab("records")}
+          >
+            Records
+          </button>
         </div>
       </div>
 
       {activeTab === "handover" && (
         <>
       <p className="ho-subtitle ho-intro">
-        Paste JITA results URL(s) and/or task ID(s) in one box (comma, space, or newline separated).
+        Paste JITA results URL(s), task ID(s), and/or testcase name(s) (comma or newline separated). For test names, enter Branch so the last 5 runs on that branch are used.
       </p>
 
       <div className="ho-card">
@@ -1434,9 +1861,49 @@ export default function Handover({ userInfo }) {
           value={handoverJitaInput}
           onChange={(e) => setHandoverJitaInput(e.target.value)}
           rows={4}
+          placeholder="JITA URL(s), task ID(s), or testcase name(s)"
           style={{ width: "100%", padding: "10px 12px", fontSize: "14px", border: "1px solid #ddd", borderRadius: "4px", boxSizing: "border-box", fontFamily: "inherit", resize: "vertical" }}
         />
-        <div style={{ display: "flex", gap: "12px", marginTop: "12px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+        <div style={{ display: "flex", gap: "12px", marginTop: "12px", flexWrap: "wrap", alignItems: "flex-end", justifyContent: "space-between" }}>
+          <div ref={handoverFetchBranchContainerRef} style={{ flex: "1 1 260px", maxWidth: "360px", position: "relative" }}>
+            <label style={{ display: "block", marginBottom: "4px", fontSize: "13px", fontWeight: "500" }}>
+              Branch <span style={{ color: "#dc2626" }}>*</span>
+              <span style={{ fontWeight: "400", color: "#64748b" }}> (required for test names)</span>
+            </label>
+            <input
+              type="text"
+              value={handoverCreateLstBranch}
+              onChange={(e) => { setHandoverCreateLstBranch(e.target.value); setHandoverValidation(null); }}
+              onFocus={() => { if (handoverBranchSuggestions.length > 0) setHandoverShowBranchDropdown(true); }}
+              placeholder="master"
+              disabled={loadingHandover}
+              style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box", backgroundColor: loadingHandover ? "#f3f4f6" : "white" }}
+            />
+            {handoverShowBranchDropdown && !loadingHandover && (
+              <div style={{ position: "absolute", top: "100%", left: 0, right: 0, maxHeight: "220px", overflowY: "auto", background: "white", border: "1px solid #d1d5db", borderRadius: "4px", boxShadow: "0 4px 6px rgba(0,0,0,0.1)", zIndex: 1000, marginTop: "2px" }}>
+                {handoverBranchLoading ? (
+                  <div style={{ padding: "8px 12px", fontSize: "13px", color: "#64748b" }}>Searching branches...</div>
+                ) : handoverBranchSuggestions.length === 0 ? (
+                  <div style={{ padding: "8px 12px", fontSize: "13px", color: "#64748b" }}>No branch suggestions</div>
+                ) : (
+                  handoverBranchSuggestions.map((b) => (
+                    <button
+                      key={`fetch-${b}`}
+                      type="button"
+                      onClick={() => {
+                        setHandoverCreateLstBranch(b);
+                        setHandoverShowBranchDropdown(false);
+                        setHandoverValidation(null);
+                      }}
+                      style={{ width: "100%", textAlign: "left", padding: "8px 12px", fontSize: "13px", cursor: "pointer", border: "none", borderBottom: "1px solid #f1f5f9", background: b === handoverCreateLstBranch ? "#e0f2fe" : "white" }}
+                    >
+                      {b}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
           <button onClick={() => handleHandoverAnalyze()} disabled={loadingHandover} style={loadingHandover ? { ...btnValidateDisabled } : { ...btnSecondary }}>
             {loadingHandover ? "Loading..." : "Fetch"}
           </button>
@@ -1461,6 +1928,11 @@ export default function Handover({ userInfo }) {
                     {handoverAnalysis.total_executions} executions, {handoverAnalysis.total_passed ?? 0} passed
                   </span>
                 )}
+                {(handoverAnalysis.lookup_mode === "test_names" || handoverAnalysis.lookup_mode === "mixed") && handoverAnalysis.history_window ? (
+                  <span style={{ color: "#0f766e", background: "#ccfbf1", padding: "4px 10px", borderRadius: "6px" }}>
+                    Last {handoverAnalysis.history_window} runs on {handoverAnalysis.branch || handoverCreateLstBranch || "branch"}
+                  </span>
+                ) : null}
               </div>
 
               <table className="ho-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px", marginBottom: "16px" }}>
@@ -1490,11 +1962,7 @@ export default function Handover({ userInfo }) {
                           });
                           
                           // Get all passed test cases
-                          const passedTestCases = (handoverAnalysis.test_cases || []).filter((tc) => {
-                            const passCount = tc.passed_count || 0;
-                            const status = (tc.status || "").toLowerCase();
-                            return status === "succeeded" || passCount >= 2;
-                          });
+                          const passedTestCases = (handoverAnalysis.test_cases || []).filter((tc) => isPassedTest(tc));
                           
                           // Combine both sets
                           const allSelectableTestCases = new Set([
@@ -1526,11 +1994,7 @@ export default function Handover({ userInfo }) {
                               return hasProductBug && !hasTestBug;
                             });
                             
-                            const passedTestCases = (handoverAnalysis.test_cases || []).filter((tc) => {
-                              const passCount = tc.passed_count || 0;
-                              const status = (tc.status || "").toLowerCase();
-                              return status === "succeeded" || passCount >= 2;
-                            });
+                            const passedTestCases = (handoverAnalysis.test_cases || []).filter((tc) => isPassedTest(tc));
                             
                             // Combine both sets
                             const allSelectable = new Set([
@@ -1561,9 +2025,7 @@ export default function Handover({ userInfo }) {
                     // Block: Test Bug/Environment/Untriaged that are NOT passed
                     const bugType = (handoverBugTypeMap[tc.test_name] || tc.bug_type || "").trim();
                     const isValidatedAsProductBug = handoverValidatedProductBugTests.has(tc.test_name);
-                    const passCount = tc.passed_count || 0;
-                    const status = (tc.status || "").toLowerCase();
-                    const isPassed = status === "succeeded" || passCount >= 2;
+                    const isPassed = isPassedTest(tc);
                     
                     const isAllowedForCheckbox = (() => {
                       // If validated as Product Bug via Jira validation, allow checkbox
@@ -1624,9 +2086,14 @@ export default function Handover({ userInfo }) {
                             value={handoverTestTickets[tc.test_name] ?? ""}
                             onChange={(e) => {
                               setHandoverTestTickets((prev) => ({ ...prev, [tc.test_name]: e.target.value }));
-                              // Clear Jira validation when test tickets change (they affect Jira validation)
                               setHandoverJiraTicketValidation({});
                               setHandoverJiraSkippedMessage(null);
+                              setHandoverValidatedProductBugTests((prev) => {
+                                if (!prev.has(tc.test_name)) return prev;
+                                const next = new Set(prev);
+                                next.delete(tc.test_name);
+                                return next;
+                              });
                             }}
                             placeholder="Jira ticket(s), comma-separated"
                             disabled={isPassed || handoverDataLocked}
@@ -1653,7 +2120,7 @@ export default function Handover({ userInfo }) {
               </table>
 
               <div style={{ marginTop: "12px", display: "flex", justifyContent: "flex-end" }}>
-                <button type="button" onClick={handleValidateJiraTickets} disabled={handoverJiraValidating || handoverDataLocked} style={(handoverJiraValidating || handoverDataLocked) ? { ...btnValidateDisabled } : { ...btnValidate }}>
+                <button type="button" onClick={() => handleValidateJiraTickets()} disabled={handoverJiraValidating || handoverDataLocked} style={(handoverJiraValidating || handoverDataLocked) ? { ...btnValidateDisabled } : { ...btnValidate }}>
                   {handoverJiraValidating ? "Validating..." : "Validate Jira tickets (Product Bug)"}
                 </button>
               </div>
@@ -1700,115 +2167,21 @@ export default function Handover({ userInfo }) {
               )}
 
               {(() => {
-                // Check selected test cases
-                const selectedTestCases = handoverAnalysis.test_cases?.filter((tc) => 
-                  handoverSelectedTests.has(tc.test_name)
-                ) || [];
-                
-                // If no test cases selected, hide override section
+                const selectedTestCases = getSelectedTestCases();
                 if (selectedTestCases.length === 0) {
                   return null;
                 }
-                
-                // Check if ALL selected test cases are passed
-                const allSelectedArePassed = selectedTestCases.every((tc) => {
-                  const passCount = tc.passed_count || 0;
-                  const status = (tc.status || "").toLowerCase();
-                  return status === "succeeded" || passCount >= 2;
-                });
-                
-                // Show override section ONLY if there are FAILED test cases (i.e., NOT all are passed)
-                // If all selected are passed, don't show override section
-                if (allSelectedArePassed) {
+
+                const shouldShowCR = handoverAnalysis.all_tests_passed || selectedTestCases.every(isPassedTest) || selectedFailedAreProductBug();
+                if (!shouldShowCR) {
                   return null;
                 }
+
+                const headingText = "✓ Ready for CR";
+                const bgColor = "#ecfdf5";
+                const borderColor = "#10b981";
                 
                 return (
-                  <div style={{ marginTop: "16px", padding: "12px 16px", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
-                      <span style={{ fontSize: "14px", fontWeight: "600" }}>Override (Only with Product Bugs):</span>
-                      <button
-                        type="button"
-                        onClick={handleOverrideFetch}
-                        disabled={handoverFetchingOverride || handoverDataLocked}
-                        style={(handoverFetchingOverride || handoverDataLocked) ? { ...btnValidateDisabled } : { ...btnValidate }}
-                      >
-                        {handoverFetchingOverride ? "Checking..." : "Check Override"}
-                      </button>
-                    </div>
-                    {handoverOverrideResult && (
-                      <div style={{ marginTop: "12px", padding: "10px", background: handoverOverrideResult.allowed ? "#ecfdf5" : "#fef2f2", borderRadius: "6px", border: `1px solid ${handoverOverrideResult.allowed ? "#10b981" : "#f87171"}`, fontSize: "13px" }}>
-                        <div style={{ fontWeight: "600", marginBottom: "4px", color: handoverOverrideResult.allowed ? "#065f46" : "#991b1b" }}>
-                          {handoverOverrideResult.allowed ? "✓ Override Allowed" : "✗ Override Not Allowed"}
-                        </div>
-                        <div style={{ color: handoverOverrideResult.allowed ? "#047857" : "#dc2626" }}>{handoverOverrideResult.message}</div>
-                        {handoverOverrideResult.ticketValidations && Object.keys(handoverOverrideResult.ticketValidations).length > 0 && (
-                          <div style={{ marginTop: "8px", fontSize: "12px" }}>
-                            {Object.entries(handoverOverrideResult.ticketValidations).map(([ticket, v]) => (
-                              <div key={ticket} style={{ marginBottom: "2px" }}>
-                                <a href={`${JIRA_URL}${ticket}`} target="_blank" rel="noreferrer">{ticket}</a>
-                                {v.error ? <span style={{ color: "#dc2626" }}> — {v.error}</span> : v.valid ? <span style={{ color: "#16a34a" }}> ✓ Product Bug</span> : <span style={{ color: "#b45309" }}> — {v.issuetype || "Not Product Bug"}</span>}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-              {(() => {
-                // Check selected test cases
-                const selectedTestCases = handoverAnalysis.test_cases?.filter((tc) => 
-                  handoverSelectedTests.has(tc.test_name)
-                ) || [];
-                
-                // If no test cases selected, hide CR section
-                if (selectedTestCases.length === 0) {
-                  return null;
-                }
-                
-                const allSelectedArePassed = selectedTestCases.every((tc) => {
-                  const passCount = tc.passed_count || 0;
-                  const status = (tc.status || "").toLowerCase();
-                  return status === "succeeded" || passCount >= 2;
-                });
-                
-                // Check if there are failed test cases selected (not passed)
-                const hasFailedTestCases = selectedTestCases.some((tc) => {
-                  const passCount = tc.passed_count || 0;
-                  const status = (tc.status || "").toLowerCase();
-                  const isPassed = status === "succeeded" || passCount >= 2;
-                  return !isPassed; // Failed test case
-                });
-                
-                // Show CR section if:
-                // 1. All tests passed (from analysis), OR
-                // 2. Override saved (for failed cases), OR
-                // 3. Only passed test cases selected (direct CR, no override needed)
-                const shouldShowCR = handoverAnalysis.all_tests_passed || 
-                                     (hasFailedTestCases && handoverOverrideSave) || 
-                                     (allSelectedArePassed && !hasFailedTestCases);
-                
-                // Determine heading and styling based on selection
-                // If only passed are selected, always show "Ready for CR"
-                // If both passed and failed are selected (or override saved with failed cases), show "Override"
-                // Priority: If all selected are passed, always show "Ready for CR"
-                let headingText, bgColor, borderColor;
-                if (allSelectedArePassed) {
-                  // Only passed test cases selected - show "Ready for CR"
-                  headingText = "✓ Ready for CR";
-                  bgColor = "#ecfdf5";
-                  borderColor = "#10b981";
-                } else {
-                  // Has failed test cases or override saved - show "Override"
-                  headingText = "⚠ Override";
-                  bgColor = "#fefce8";
-                  borderColor = "#eab308";
-                }
-                
-                return shouldShowCR ? (
                 <div style={{ marginTop: "20px", padding: "16px", background: bgColor, borderRadius: "8px", border: `2px solid ${borderColor}` }}>
                   <h4 style={{ marginTop: 0, marginBottom: "12px" }}>{headingText}</h4>
                   <div ref={handoverBranchContainerRef} style={{ marginBottom: "10px", maxWidth: "360px", position: "relative" }}>
@@ -2047,30 +2420,14 @@ export default function Handover({ userInfo }) {
                   )}
                   {/* Validation requirements check */}
                   {(() => {
-                    // When ALL selected test cases are passed: Jira validation is NOT required (user can handover passed-only without Jira tickets)
-                    const selectedTestCases = handoverAnalysis.test_cases?.filter((tc) => handoverSelectedTests.has(tc.test_name)) || [];
-                    const allSelectedArePassed = selectedTestCases.length > 0 && selectedTestCases.every((tc) => {
-                      const passCount = tc.passed_count || 0;
-                      const status = (tc.status || "").toLowerCase();
-                      return status === "succeeded" || passCount >= 2;
-                    });
-                    
-                    // Step 1: Jira validation is required only when there are failed test cases (needs Product Bug tickets)
-                    const hasJiraValidation = (Object.keys(handoverJiraTicketValidation).length > 0 || handoverJiraSkippedMessage) ? true : false;
-                    const jiraValidationRequired = !allSelectedArePassed;
-                    
-                    // Step 2: LST validation must have both file_valid AND branch_valid as true
                     const hasLstValidation = handoverValidation !== null && 
                                              handoverValidation !== undefined &&
                                              handoverValidation.file_valid === true && 
                                              handoverValidation.branch_valid === true &&
                                              !handoverValidation.error;
-                    
-                    // Step 3: Enable "Record Handover" - Jira validation only required when selection includes failed tests
                     const isButtonDisabled = handoverCreateLstLoading || 
                                             handoverDataLocked ||
                                             getResolvedLstFiles().length === 0 || 
-                                            (jiraValidationRequired && !hasJiraValidation) || 
                                             !hasLstValidation;
                     
                     return (
@@ -2084,37 +2441,31 @@ export default function Handover({ userInfo }) {
                           >
                             Preview CR
                           </button>
-                          <button 
-                            onClick={handleRecordHandoverAndCreateCR} 
-                            disabled={isButtonDisabled} 
+                          <button
+                            type="button"
+                            onClick={handleHandoverSaveOnly}
+                            disabled={isButtonDisabled}
+                            style={isButtonDisabled ? { ...btnTertiaryDisabled } : { ...btnTertiary }}
+                            title="Save handover data without creating a Gerrit CR"
+                          >
+                            {handoverCreateLstLoading ? "Saving..." : "Save"}
+                          </button>
+                          <button
+                            onClick={handleRecordHandoverAndCreateCR}
+                            disabled={isButtonDisabled}
                             style={isButtonDisabled ? { ...btnPrimaryDisabled } : { ...btnPrimary }}
-                            title={isButtonDisabled ? (jiraValidationRequired && !hasJiraValidation ? "Step 1: Please validate Jira tickets first (required for failed test cases)" : (!hasLstValidation ? "Step 2: Please validate LST file" : "")) : ""}
+                            title={isButtonDisabled ? (!hasLstValidation ? "Please validate LST file" : "") : "Save handover and create Gerrit CR"}
                           >
                             {handoverCreateLstLoading ? "Processing..." : "Take handover"}
                           </button>
-                          {allSelectedArePassed && !hasLstValidation && (
+                          {!hasLstValidation && (
                             <span style={{ fontSize: "11px", color: "#64748b", fontStyle: "italic" }}>
-                              Passed tests only — Validate LST file to proceed
+                              Validate LST file to proceed
                             </span>
                           )}
-                          {allSelectedArePassed && hasLstValidation && (
+                          {hasLstValidation && (
                             <span style={{ fontSize: "11px", color: "#16a34a", fontStyle: "italic", fontWeight: "500" }}>
                               ✓ Ready for handover
-                            </span>
-                          )}
-                          {!allSelectedArePassed && hasJiraValidation && !hasLstValidation && (
-                            <span style={{ fontSize: "11px", color: "#64748b", fontStyle: "italic" }}>
-                              ✓ Jira validated. Next: Validate LST file
-                            </span>
-                          )}
-                          {!allSelectedArePassed && !hasJiraValidation && (
-                            <span style={{ fontSize: "11px", color: "#64748b", fontStyle: "italic" }}>
-                              Step 1: Validate Jira tickets first (required for failed test cases)
-                            </span>
-                          )}
-                          {!allSelectedArePassed && hasJiraValidation && hasLstValidation && (
-                            <span style={{ fontSize: "11px", color: "#16a34a", fontStyle: "italic", fontWeight: "500" }}>
-                              ✓ Both validations complete
                             </span>
                           )}
                         </div>
@@ -2148,7 +2499,6 @@ export default function Handover({ userInfo }) {
                         <button
                           type="button"
                           onClick={() => {
-                            const selectedTests = getSelectedHandoverTests();
                             setHandoverCrDescription(buildDefaultCrDescription());
                           }}
                           disabled={handoverDataLocked}
@@ -2167,15 +2517,70 @@ export default function Handover({ userInfo }) {
                     </div>
                   )}
                 </div>
-                ) : null;
+                );
               })()}
 
               {handoverCrResult && (
                 <div style={{ marginTop: "16px", padding: "12px", background: handoverCrResult.success ? "#ecfdf5" : "#fef2f2", borderRadius: "8px", border: "1px solid " + (handoverCrResult.success ? "#10b981" : "#f87171") }}>
                   {handoverCrResult.success ? (
-                    <p style={{ margin: 0 }}>✓ {handoverCrResult.message} {handoverCrResult.cr_url && <a href={handoverCrResult.cr_url} target="_blank" rel="noreferrer">View CR</a>}</p>
+                    <div>
+                      <p style={{ margin: 0 }}>
+                        ✓ {handoverCrResult.message}{" "}
+                        {(handoverCrResult.cr_url || handoverCrResult.gerrit_url) && (
+                          <a href={handoverCrResult.cr_url || handoverCrResult.gerrit_url} target="_blank" rel="noreferrer">
+                            {handoverCrResult.gerrit_change_id ? `CR ${handoverCrResult.gerrit_change_id}` : "View CR"}
+                          </a>
+                        )}
+                      </p>
+                      {(handoverCrResult.to_add?.length > 0 || handoverCrResult.already_present?.length > 0) && (
+                        <div style={{ marginTop: "10px", fontSize: "12px", color: "#065f46" }}>
+                          {handoverCrResult.to_add?.length > 0 && (
+                            <details open style={{ marginBottom: "6px" }}>
+                              <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+                                Added to LST ({handoverCrResult.to_add.length})
+                              </summary>
+                              <ul style={{ margin: "6px 0 0 18px", padding: 0 }}>
+                                {handoverCrResult.to_add.map((n) => (
+                                  <li key={n} style={{ wordBreak: "break-word" }}>{n}</li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+                          {handoverCrResult.already_present?.length > 0 && (
+                            <details style={{ marginBottom: "6px" }}>
+                              <summary style={{ cursor: "pointer", fontWeight: 600, color: "#b45309" }}>
+                                Already in LST — skipped ({handoverCrResult.already_present.length})
+                              </summary>
+                              <ul style={{ margin: "6px 0 0 18px", padding: 0, color: "#92400e" }}>
+                                {handoverCrResult.already_present.map((n) => (
+                                  <li key={n} style={{ wordBreak: "break-word" }}>{n}</li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+                        </div>
+                      )}
+                      {(handoverCrResult.notes || handoverCrResult.cr_status) && (
+                        <p style={{ margin: "8px 0 0 0", fontSize: "12px", color: "#047857" }}>
+                          {handoverCrResult.cr_status ? `Status: ${handoverCrResult.cr_status}. ` : ""}
+                          {handoverCrResult.notes || ""}
+                        </p>
+                      )}
+                    </div>
                   ) : (
-                    <p style={{ margin: 0 }}>{handoverCrResult.error || handoverCrResult.message} {handoverCrResult.raw_error && <span style={{ fontSize: "12px", color: "#64748b" }}>{handoverCrResult.raw_error}</span>}</p>
+                    <div>
+                      <p style={{ margin: 0 }}>{handoverCrResult.error || handoverCrResult.message} {handoverCrResult.raw_error && <span style={{ fontSize: "12px", color: "#64748b" }}>{handoverCrResult.raw_error}</span>}</p>
+                      {handoverCrResult.already_present?.length > 0 && (
+                        <details style={{ marginTop: "8px", fontSize: "12px" }}>
+                          <summary style={{ cursor: "pointer" }}>Already in LST ({handoverCrResult.already_present.length})</summary>
+                          <ul style={{ margin: "6px 0 0 18px", padding: 0 }}>
+                            {handoverCrResult.already_present.map((n) => (
+                              <li key={n} style={{ wordBreak: "break-word" }}>{n}</li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
@@ -2203,7 +2608,7 @@ export default function Handover({ userInfo }) {
       {activeTab === "deprecation" && (
         <div>
           <p className="ho-subtitle ho-intro">
-            Search by test name(s). On Search, Sourcegraph is queried in <strong>nutest-py3-tests</strong> first to find which .lst file(s) contain the test; that list is shown below. Handover data (LST file, date, ticket(s), by whom) is shown from the local DB. Use + to add more test name inputs.
+            Search by test name(s), then enter Branch so Sourcegraph can list LST files on that revision. Select one or more files to remove the test from. Saved rows live under the Records tab.
           </p>
           <div className="ho-card">
             <div className="ho-card__title">Find test cases</div>
@@ -2245,252 +2650,274 @@ export default function Handover({ userInfo }) {
                 <div style={{ color: "#dc3545", padding: "8px", fontSize: "14px" }}>{deprecationResults.error}</div>
               ) : (
                 <>
-                  {/* LST file(s) containing this test — from Sourcegraph (shown first) */}
-                  {(deprecationResults.sourcegraph_first_repo?.length > 0 || deprecationResults.sourcegraph_other_repos?.length > 0) ? (
-                    <div style={{ marginBottom: "16px", padding: "12px", background: "#f0fdf4", borderRadius: "6px", border: "1px solid #bbf7d0" }}>
-                      <div style={{ fontWeight: "600", marginBottom: "8px", color: "#166534" }}>LST file(s) containing this test (Sourcegraph)</div>
-                      <p style={{ margin: "0 0 8px 0", fontSize: "13px", color: "#15803d" }}>The test name was found in these .lst files in nutest-py3-tests (and other repos) via Sourcegraph.</p>
-                      {deprecationResults.sourcegraph_first_repo?.length > 0 && (
-                        <div style={{ marginBottom: "8px" }}>
-                          <span style={{ fontSize: "12px", color: "#15803d", fontWeight: "500" }}>
-                            {deprecationResults.sourcegraph_first_repo_name || "nutest-py3-tests"} — {deprecationResults.sourcegraph_first_repo.length} LST file(s):
-                          </span>
-                          <ul style={{ margin: "4px 0 0 16px", padding: 0, fontSize: "13px" }}>
-                            {deprecationResults.sourcegraph_first_repo.map((h, i) => (
-                              <li key={i}><code style={{ background: "#dcfce7", padding: "2px 6px", borderRadius: "3px" }}>{h.path}</code></li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                      {deprecationResults.sourcegraph_other_repos?.length > 0 && (
-                        <div>
-                          <span style={{ fontSize: "12px", color: "#15803d", fontWeight: "500" }}>Other repos — {deprecationResults.sourcegraph_other_repos.length} LST file(s):</span>
-                          <ul style={{ margin: "4px 0 0 16px", padding: 0, fontSize: "13px" }}>
-                            {deprecationResults.sourcegraph_other_repos.map((h, i) => (
-                              <li key={i}><code style={{ background: "#dcfce7", padding: "2px 6px", borderRadius: "3px" }}>{h.path}</code> <span style={{ color: "#64748b" }}>({h.repo})</span></li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div style={{ marginBottom: "16px", padding: "12px", background: "#fef3c7", borderRadius: "6px", border: "1px solid #fcd34d", fontSize: "13px", color: "#92400e" }}>
-                      <strong>LST files (Sourcegraph):</strong> No .lst file containing this test name was found in nutest-py3-tests (or other configured repos). The test may not be in an LST file yet, or SOURCEGRAPH_TOKEN may not be set in backend config.
-                    </div>
-                  )}
-                  <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", marginBottom: "8px" }}>
-                    <span style={{ fontSize: "14px", color: "#555" }}>
-                      {(deprecationResults.count ?? deprecationResults.results?.length ?? 0) === 0 ? "No handover records found." : "Found " + (deprecationResults.count ?? deprecationResults.results?.length ?? 0) + " handover record(s)."}
-                    </span>
-                    {deprecationResults.results?.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setDeprecationEditMode((prev) => !prev)}
-                        style={{ padding: "6px 12px", background: deprecationEditMode ? "#64748b" : "#0d9488", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "13px" }}
-                      >
-                        {deprecationEditMode ? "Done" : "Edit"}
-                      </button>
-                    )}
-                  </div>
-
-                  {deprecationResults.results?.length > 0 && (() => {
-                    const records = deprecationResults.results;
-                    const recordKeys = records.map((r) => getDeprecationRecordKey(r));
-                    const allSelected = recordKeys.length > 0 && recordKeys.every((k) => deprecationSelectedRecordKeys.has(k));
-                    return (
-                      <table className="ho-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px", marginBottom: "20px" }}>
-                        <thead>
-                          <tr style={{ background: "#f1f5f9" }}>
-                            <th style={{ padding: "8px", border: "1px solid #e2e8f0", width: "40px", textAlign: "center" }}>
-                              <input
-                                type="checkbox"
-                                checked={allSelected}
-                                onChange={(e) => {
-                                  if (e.target.checked) {
-                                    setDeprecationSelectedRecordKeys(new Set(recordKeys));
-                                    const firstLst = (deprecationResults.results || []).map((r) => (r.lst_file || "").trim()).find(Boolean);
-                                    if (firstLst) setDeprecationLstFile((prev) => (prev && prev.trim()) ? prev : firstLst);
-                                  } else {
-                                    setDeprecationSelectedRecordKeys(new Set());
-                                  }
-                                }}
-                                style={{ width: "16px", height: "16px", cursor: "pointer" }}
-                                title="Select for Create CR"
-                              />
-                            </th>
-                            <th style={{ padding: "8px", border: "1px solid #e2e8f0", textAlign: "left", minWidth: "130ch" }}>Test name</th>
-                            <th style={{ padding: "8px", border: "1px solid #e2e8f0", textAlign: "left" }}>LST file</th>
-                            <th style={{ padding: "8px", border: "1px solid #e2e8f0", textAlign: "left" }}>Branch</th>
-                            <th style={{ padding: "8px", border: "1px solid #e2e8f0", textAlign: "left", minWidth: "120px" }}>Handover date</th>
-                            <th style={{ padding: "8px", border: "1px solid #e2e8f0", textAlign: "left", minWidth: "150px" }}>Handover Ticket(s)</th>
-                            <th style={{ padding: "8px", border: "1px solid #e2e8f0", textAlign: "left", minWidth: "150px" }}>Bug Ticket</th>
-                            <th style={{ padding: "8px", border: "1px solid #e2e8f0", textAlign: "left" }}>By whom</th>
-                            {deprecationEditMode && <th style={{ padding: "8px", border: "1px solid #e2e8f0", width: "90px" }}>Actions</th>}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {records.map((r, idx) => {
-                            const testName = (r.test_name || "").trim();
-                            const recordKey = getDeprecationRecordKey(r);
-                            const rowKey = `${recordKey}-${idx}`;
-                            const isSelected = deprecationSelectedRecordKeys.has(recordKey);
-                            const tickets = r.tickets || [];
-                            const byWhom = formatByWhom(r.by_whom);
-                            return (
-                              <tr key={rowKey}>
-                                <td style={{ padding: "8px", border: "1px solid #e2e8f0", textAlign: "center" }}>
-                                  <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    onChange={() => {
-                                      setDeprecationSelectedRecordKeys((prev) => {
-                                        const next = new Set(prev);
-                                        if (next.has(recordKey)) {
-                                          next.delete(recordKey);
-                                        } else {
-                                          next.add(recordKey);
-                                          const lstFile = (r.lst_file || "").trim();
-                                          if (lstFile) setDeprecationLstFile((p) => (p && p.trim()) ? p : lstFile);
-                                        }
-                                        return next;
-                                      });
-                                    }}
-                                    style={{ width: "16px", height: "16px", cursor: "pointer" }}
-                                    title="Select for Create CR"
-                                  />
-                                </td>
-                                <td style={{ padding: "8px", border: "1px solid #e2e8f0", wordBreak: "break-word", overflowWrap: "break-word", wordWrap: "break-word", minWidth: "130ch" }}>{testName}</td>
-                                <td style={{ padding: "8px", border: "1px solid #e2e8f0", fontSize: "12px" }}>{(r.lst_file || "").trim() || "-"}</td>
-                                <td style={{ padding: "8px", border: "1px solid #e2e8f0", fontSize: "12px" }}>{(r.branch || "").trim() || "-"}</td>
-                                <td style={{ padding: "8px", border: "1px solid #e2e8f0", fontSize: "12px", whiteSpace: "nowrap" }}>{formatDateIST(r.handover_date)}</td>
-                                <td style={{ padding: "8px", border: "1px solid #e2e8f0", fontSize: "12px", verticalAlign: "top", minWidth: "150px" }}>
-                                  <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", alignItems: "flex-start" }}>
-                                    {/* Show handover_tickets if available, otherwise fall back to empty (old records won't have this) */}
-                                    {(r.handover_tickets || []).length ? (r.handover_tickets || []).map((t) => (
-                                      <a key={t} href={`${JIRA_URL}${t}`} target="_blank" rel="noreferrer" style={{ marginRight: "6px", display: "inline-block", whiteSpace: "nowrap" }}>{t}</a>
-                                    )) : <span style={{ color: "#94a3b8" }}>-</span>}
-                                  </div>
-                                </td>
-                                <td style={{ padding: "8px", border: "1px solid #e2e8f0", fontSize: "12px", verticalAlign: "top", minWidth: "150px" }}>
-                                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                                    {/* Show bug_tickets if available, otherwise fall back to tickets (for backward compatibility) */}
-                                    {((r.bug_tickets || []).length > 0 || (tickets.length > 0 && !r.handover_tickets)) ? (
-                                      <>
-                                        {(r.bug_tickets || tickets || []).map((t) => (
-                                          <a key={t} href={`${JIRA_URL}${t}`} target="_blank" rel="noreferrer" style={{ display: "inline-block", whiteSpace: "nowrap" }}>{t}</a>
-                                        ))}
-                                        {r.bug_type && (
-                                          <span style={{
-                                            padding: "2px 6px",
-                                            fontSize: "11px",
-                                            fontWeight: "500",
-                                            borderRadius: "3px",
-                                            background: "#ecfdf5",
-                                            color: "#065f46",
-                                            border: "1px solid #d1fae5",
-                                            display: "inline-block",
-                                            whiteSpace: "nowrap",
-                                            marginTop: "4px"
-                                          }}>
-                                            {r.bug_type}
-                                          </span>
-                                        )}
-                                      </>
-                                    ) : <span style={{ color: "#94a3b8" }}>-</span>}
-                                  </div>
-                                </td>
-                                <td style={{ padding: "8px", border: "1px solid #e2e8f0", fontSize: "12px" }}>{byWhom !== "-" ? byWhom : "-"}</td>
-                                {deprecationEditMode && (
-                                  <td style={{ padding: "8px", border: "1px solid #e2e8f0" }}>
-                                    <button type="button" onClick={() => handleDeprecationDeleteAll(testName, [r])} style={{ padding: "4px 10px", background: "#dc2626", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>Delete</button>
-                                  </td>
-                                )}
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    );
-                  })()}
-
-                  {deprecationResults?.results?.length > 0 && (() => {
-                    const selectedTestNames = [...new Set((deprecationResults.results || []).filter((r) => deprecationSelectedRecordKeys.has(getDeprecationRecordKey(r))).map((r) => (r.test_name || "").trim()))];
+                  {deprecationResults && !deprecationResults.error && (() => {
+                    const selectedTestNames = getDeprecationTargetTests();
                     const selectedCount = selectedTestNames.length;
+                    const resolvedDeprecationLstFiles = getResolvedDeprecationLstFiles();
+                    const hasDeprecationLst = resolvedDeprecationLstFiles.length > 0;
+                    const hasDeprecationBranch = (deprecationLstBranch || "").trim() !== "";
+                    const depActionsDisabled = deprecationCreateLstLoading || selectedCount === 0 || !hasDeprecationLst || !hasDeprecationBranch;
+                    const depValidateDisabled = deprecationValidating || selectedCount === 0 || !hasDeprecationLst || !hasDeprecationBranch;
                     return (
                       <div style={{ marginTop: "20px", padding: "16px", background: "#ecfdf5", borderRadius: "8px", border: "2px solid #10b981" }}>
-                        <h4 style={{ marginTop: 0, marginBottom: "8px", color: "#065f46" }}>Deprecate — Remove {selectedCount} selected test(s) from LST file</h4>
-                        <p style={{ marginBottom: "12px", fontSize: "14px", color: "#047857" }}>Enter LST file path and branch. Click &quot;Validate LST&quot; to check whether the selected testcases are present in that LST file. Then create a Gerrit CR to remove them.</p>
+                        <h4 style={{ marginTop: 0, marginBottom: "8px", color: "#065f46" }}>
+                          Deprecate — Remove {selectedCount} test(s) from LST file(s)
+                        </h4>
+                        <p style={{ marginBottom: "12px", fontSize: "14px", color: "#047857" }}>
+                          Enter Branch so Sourcegraph can list LST files on that revision. Select one or more files to remove the test from.
+                        </p>
                         {selectedCount > 0 && (
-                          <div style={{ marginBottom: "10px" }}>
-                            <label style={{ display: "block", marginBottom: "4px", fontSize: "13px", fontWeight: "500" }}>LST File Path</label>
+                          <div style={{ marginBottom: "12px", padding: "10px", background: "#fff", borderRadius: "6px", border: "1px solid #a7f3d0", fontSize: "13px", color: "#065f46" }}>
+                            <strong>Tests to remove:</strong>
+                            <ul style={{ margin: "6px 0 0 18px", padding: 0 }}>
+                              {selectedTestNames.map((n) => (
+                                <li key={n} style={{ wordBreak: "break-word" }}>{n}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        <div ref={deprecationBranchContainerRef} style={{ marginBottom: "10px", maxWidth: "360px", position: "relative" }}>
+                          <label style={{ display: "block", marginBottom: "4px", fontSize: "13px", fontWeight: "500" }}>Branch <span style={{ color: "#dc2626" }}>*</span></label>
+                          <input
+                            type="text"
+                            value={deprecationLstBranch}
+                            onChange={(e) => {
+                              setDeprecationLstBranch(e.target.value);
+                              setDeprecationLstFiles([]);
+                              setDeprecationValidation(null);
+                              setDeprecationCrResult(null);
+                            }}
+                            onFocus={() => { if (deprecationBranchSuggestions.length > 0) setDeprecationShowBranchDropdown(true); }}
+                            placeholder="master"
+                            style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }}
+                          />
+                          {deprecationShowBranchDropdown && (
+                            <div style={{ position: "absolute", top: "100%", left: 0, right: 0, maxHeight: "220px", overflowY: "auto", background: "white", border: "1px solid #d1d5db", borderRadius: "4px", boxShadow: "0 4px 6px rgba(0,0,0,0.1)", zIndex: 1000, marginTop: "2px" }}>
+                              {deprecationBranchLoading ? (
+                                <div style={{ padding: "8px 12px", fontSize: "13px", color: "#64748b" }}>Searching branches...</div>
+                              ) : deprecationBranchSuggestions.length === 0 ? (
+                                <div style={{ padding: "8px 12px", fontSize: "13px", color: "#64748b" }}>No branch suggestions</div>
+                              ) : (
+                                deprecationBranchSuggestions.map((b) => (
+                                  <button
+                                    key={b}
+                                    type="button"
+                                    onClick={() => {
+                                      setDeprecationLstBranch(b);
+                                      setDeprecationShowBranchDropdown(false);
+                                      setDeprecationLstFiles([]);
+                                      setDeprecationValidation(null);
+                                      setDeprecationCrResult(null);
+                                    }}
+                                    style={{ width: "100%", textAlign: "left", padding: "8px 12px", fontSize: "13px", cursor: "pointer", border: "none", borderBottom: "1px solid #f1f5f9", background: b === deprecationLstBranch ? "#e0f2fe" : "white" }}
+                                  >
+                                    {b}
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ marginBottom: "10px" }}>
+                          <label style={{ display: "block", marginBottom: "4px", fontSize: "13px", fontWeight: "500" }}>LST File Path <span style={{ color: "#dc2626" }}>*</span></label>
+                          <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", width: "100%" }}>
                             <input
                               type="text"
                               value={deprecationLstFile}
                               onChange={(e) => { setDeprecationLstFile(e.target.value); setDeprecationValidation(null); setDeprecationCrResult(null); }}
-                              placeholder="e.g. test_sets/milestones/7.3.0.98/zookeeper.lst"
-                              style={{ padding: "8px 12px", fontSize: "13px", width: "100%", maxWidth: "500px", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }}
+                              placeholder="Optional typed path, e.g. test_sets/milestones/.../foo.lst"
+                              style={{ padding: "8px 12px", fontSize: "13px", width: "100%", flex: 1, minWidth: "280px", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }}
                             />
+                            <button
+                              type="button"
+                              disabled={!(deprecationLstFile || "").trim()}
+                              onClick={() => {
+                                const f = (deprecationLstFile || "").trim();
+                                if (!f) return;
+                                setDeprecationLstFiles((prev) => Array.from(new Set([...(prev || []), f])));
+                                setDeprecationLstFile("");
+                                setDeprecationValidation(null);
+                                setDeprecationCrResult(null);
+                              }}
+                              style={!(deprecationLstFile || "").trim() ? { ...btnTertiaryDisabled } : { ...btnTertiary }}
+                            >
+                              Add LST
+                            </button>
                           </div>
-                        )}
+                          {resolvedDeprecationLstFiles.length > 0 && (
+                            <div style={{ marginTop: "8px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                              {resolvedDeprecationLstFiles.map((f) => (
+                                <span key={f} style={{ display: "inline-flex", alignItems: "center", gap: "6px", padding: "4px 8px", borderRadius: "999px", background: "#ecfeff", border: "1px solid #a5f3fc", color: "#155e75", fontSize: "12px" }}>
+                                  {f}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setDeprecationLstFiles((prev) => (prev || []).filter((x) => x !== f));
+                                      if ((deprecationLstFile || "").trim() === f) setDeprecationLstFile("");
+                                      setDeprecationValidation(null);
+                                      setDeprecationCrResult(null);
+                                    }}
+                                    style={{ border: "none", background: "none", cursor: "pointer", color: "#0e7490" }}
+                                  >
+                                    ×
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          <div style={{ marginTop: "8px", display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                            <button
+                              type="button"
+                              onClick={() => handleSuggestDeprecationLstFile({ silent: false })}
+                              disabled={deprecationSuggestingLst}
+                              style={deprecationSuggestingLst ? { ...btnTertiaryDisabled } : { ...btnTertiary }}
+                            >
+                              {deprecationSuggestingLst ? "Refreshing..." : "Refresh Suggestion"}
+                            </button>
+                            {deprecationLstSuggestion?.message && (
+                              <span style={{ fontSize: "12px", color: "#475569" }}>{deprecationLstSuggestion.message}</span>
+                            )}
+                            {deprecationLstSuggestion?.error && (
+                              <span style={{ fontSize: "12px", color: "#b91c1c" }}>{deprecationLstSuggestion.error}</span>
+                            )}
+                          </div>
+                          {!hasDeprecationBranch && (
+                            <p style={{ margin: "8px 0 0 0", fontSize: "12px", color: "#92400e" }}>
+                              Enter Branch so Sourcegraph can list LST files on that revision.
+                            </p>
+                          )}
+                          {Array.isArray(deprecationLstSuggestion?.candidates) && deprecationLstSuggestion.candidates.length > 0 && (
+                            <div style={{ marginTop: "8px", padding: "10px", border: "1px solid #dbeafe", borderRadius: "6px", background: "#f8fbff", width: "100%" }}>
+                              <div style={{ fontSize: "12px", color: "#1e3a8a", fontWeight: 600, marginBottom: "6px" }}>
+                                Click to select suggested LST files (you can select multiple)
+                              </div>
+                              {deprecationLstSuggestion.candidates.map((c) => {
+                                const file = c.lst_file || "";
+                                const selected = resolvedDeprecationLstFiles.includes(file);
+                                return (
+                                  <button
+                                    key={file}
+                                    type="button"
+                                    onClick={() => {
+                                      if (!file) return;
+                                      if (selected) {
+                                        setDeprecationLstFiles((prev) => (prev || []).filter((x) => x !== file));
+                                      } else {
+                                        setDeprecationLstFiles((prev) => Array.from(new Set([...(prev || []), file])));
+                                      }
+                                      setDeprecationValidation(null);
+                                      setDeprecationCrResult(null);
+                                    }}
+                                    style={{
+                                      width: "100%",
+                                      textAlign: "left",
+                                      marginBottom: "6px",
+                                      padding: "8px 10px",
+                                      borderRadius: "6px",
+                                      border: selected ? "1px solid #0284c7" : "1px solid #cbd5e1",
+                                      background: selected ? "#e0f2fe" : "#ffffff",
+                                      color: "#0f172a",
+                                      cursor: "pointer",
+                                      fontSize: "12px",
+                                    }}
+                                  >
+                                    <span style={{ fontWeight: selected ? 700 : 500 }}>{selected ? "✓ " : ""}{file}</span>{" "}
+                                    <span style={{ color: "#64748b" }}>({c.count} matching testcase{c.count === 1 ? "" : "s"})</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
                         <div style={{ marginBottom: "10px", display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "flex-end" }}>
-                          <div>
-                            <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Branch</label>
-                            <input type="text" value={deprecationLstBranch} onChange={(e) => { setDeprecationLstBranch(e.target.value); setDeprecationValidation(null); }} placeholder="master" style={{ padding: "8px 12px", fontSize: "13px", width: "150px", border: "1px solid #d1d5db", borderRadius: "4px" }} />
-                          </div>
                           <div style={{ flex: 1, minWidth: "200px" }}>
                             <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Commit Message</label>
                             <input type="text" value={deprecationCommitMessage} onChange={(e) => setDeprecationCommitMessage(e.target.value)} placeholder="Optional" style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }} />
                           </div>
-                          <button onClick={handleDeprecationValidateLst} disabled={deprecationValidating || selectedCount === 0 || !deprecationLstFile.trim()} style={(deprecationValidating || selectedCount === 0 || !deprecationLstFile.trim()) ? { ...btnTertiaryDisabled } : { ...btnTertiary }}>
+                          <button
+                            onClick={handleDeprecationValidateLst}
+                            disabled={depValidateDisabled}
+                            style={depValidateDisabled ? { ...btnTertiaryDisabled } : { ...btnTertiary }}
+                            title={!hasDeprecationBranch ? "Please enter Branch" : (!hasDeprecationLst ? "Select at least one LST file" : (selectedCount === 0 ? "Search or select testcases first" : ""))}
+                          >
                             {deprecationValidating ? "Checking..." : "Validate LST"}
                           </button>
                         </div>
                         {deprecationValidation && (
-                          <div style={{ marginBottom: "16px", marginTop: "4px", padding: "14px", background: deprecationValidation.error ? "#fef2f2" : "#ffffff", borderRadius: "8px", border: "2px solid " + (deprecationValidation.error ? "#dc2626" : "#10b981"), boxShadow: "0 1px 3px rgba(0,0,0,0.1)", fontSize: "14px", color: "#0f172a" }}>
+                          <div style={{ marginBottom: "16px", marginTop: "4px", padding: "14px", background: deprecationValidation.error && !(deprecationValidation.files || []).length ? "#fef2f2" : "#ffffff", borderRadius: "8px", border: "2px solid " + (deprecationValidation.error && !(deprecationValidation.files || []).length ? "#dc2626" : "#10b981"), boxShadow: "0 1px 3px rgba(0,0,0,0.1)", fontSize: "14px", color: "#0f172a" }}>
                             <div style={{ fontWeight: "700", marginBottom: "10px", color: "#0f172a", fontSize: "15px" }}>Is selected testcase present in LST?</div>
-                            {deprecationValidation.error ? (
+                            {deprecationValidation.error && !(deprecationValidation.files || []).length ? (
                               <div style={{ color: "#b91c1c" }}>{deprecationValidation.error}</div>
+                            ) : Array.isArray(deprecationValidation.files) && deprecationValidation.files.length > 0 ? (
+                              deprecationValidation.files.map((fileResult) => {
+                                const allTestNames = fileResult.test_names || deprecationValidation.test_names ||
+                                  [...(fileResult.present || []), ...(fileResult.not_present || [])];
+                                const presentList = (fileResult.present || []).map((t) => (t || "").trim());
+                                const resolvedFrom = fileResult.resolved_from || {};
+                                const ambiguous = fileResult.ambiguous || {};
+                                const isPresent = (normalizedName) => {
+                                  if (presentList.includes(normalizedName)) return true;
+                                  if (presentList.some((p) => resolvedFrom[p] === normalizedName)) return true;
+                                  if (presentList.some((p) => p.includes(normalizedName))) return true;
+                                  return false;
+                                };
+                                const displayName = (normalizedName) => {
+                                  const resolved = presentList.find((p) => resolvedFrom[p] === normalizedName)
+                                    || presentList.find((p) => p !== normalizedName && p.includes(normalizedName));
+                                  return resolved && resolved !== normalizedName
+                                    ? `${normalizedName}  →  ${resolved}`
+                                    : normalizedName;
+                                };
+                                return (
+                                  <div key={fileResult.lst_file} style={{ marginBottom: "12px" }}>
+                                    <div style={{ fontWeight: 600, fontSize: "13px", color: fileResult.error ? "#b91c1c" : "#065f46", marginBottom: "6px" }}>
+                                      {fileResult.lst_file}
+                                    </div>
+                                    {fileResult.error ? (
+                                      <div style={{ color: "#b91c1c", fontSize: "13px" }}>{fileResult.error}</div>
+                                    ) : (
+                                      <table style={{ width: "100%", minWidth: "280px", borderCollapse: "collapse", fontSize: "14px" }}>
+                                        <thead>
+                                          <tr style={{ borderBottom: "2px solid #10b981", color: "#0f172a" }}>
+                                            <th style={{ textAlign: "left", padding: "8px 10px", color: "#0f172a" }}>Testcase</th>
+                                            <th style={{ textAlign: "left", padding: "8px 10px", width: "100px", color: "#0f172a" }}>In LST</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {allTestNames.length === 0 ? (
+                                            <tr>
+                                              <td colSpan="2" style={{ padding: "8px 10px", color: "#64748b", textAlign: "center" }}>
+                                                No test cases to display
+                                              </td>
+                                            </tr>
+                                          ) : allTestNames.map((name) => {
+                                            const normalizedName = (name || "").trim();
+                                            const inLst = isPresent(normalizedName);
+                                            const amb = ambiguous[normalizedName];
+                                            return (
+                                              <tr key={`${fileResult.lst_file}:${normalizedName}`} style={{ borderBottom: "1px solid #e2e8f0" }}>
+                                                <td style={{ padding: "8px 10px", color: "#0f172a", wordBreak: "break-word" }}>
+                                                  {displayName(normalizedName)}
+                                                  {Array.isArray(amb) && amb.length > 0 && (
+                                                    <div style={{ marginTop: "4px", fontSize: "12px", color: "#b45309" }}>
+                                                      Ambiguous — matches {amb.length} lines; use the full test name.
+                                                    </div>
+                                                  )}
+                                                </td>
+                                                <td style={{ padding: "8px 10px", fontWeight: "700", color: inLst ? "#047857" : "#b45309", whiteSpace: "nowrap" }}>
+                                                  {inLst ? "✓ Yes" : "✗ No"}
+                                                </td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    )}
+                                  </div>
+                                );
+                              })
                             ) : (
-                              <table style={{ width: "100%", minWidth: "280px", borderCollapse: "collapse", fontSize: "14px" }}>
-                                <thead>
-                                  <tr style={{ borderBottom: "2px solid #10b981", color: "#0f172a" }}>
-                                    <th style={{ textAlign: "left", padding: "8px 10px", color: "#0f172a", minWidth: "130ch" }}>Testcase</th>
-                                    <th style={{ textAlign: "left", padding: "8px 10px", width: "100px", color: "#0f172a" }}>In LST</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {(() => {
-                                    // Get all test names from test_names, present, or not_present
-                                    const allTestNames = deprecationValidation.test_names || 
-                                      [...(deprecationValidation.present || []), ...(deprecationValidation.not_present || [])];
-                                    const presentList = (deprecationValidation.present || []).map(t => (t || "").trim());
-                                    
-                                    if (allTestNames.length === 0) {
-                                      return (
-                                        <tr>
-                                          <td colSpan="2" style={{ padding: "8px 10px", color: "#64748b", textAlign: "center" }}>
-                                            No test cases to display
-                                          </td>
-                                        </tr>
-                                      );
-                                    }
-                                    
-                                    return allTestNames.map((name) => {
-                                      // Normalize test names for comparison (trim whitespace)
-                                      const normalizedName = (name || "").trim();
-                                      const inLst = presentList.includes(normalizedName);
-                                      return (
-                                        <tr key={name || Math.random()} style={{ borderBottom: "1px solid #e2e8f0" }}>
-                                          <td style={{ padding: "8px 10px", color: "#0f172a", wordBreak: "break-word", overflowWrap: "break-word", wordWrap: "break-word", minWidth: "130ch" }}>{normalizedName}</td>
-                                          <td style={{ padding: "8px 10px", fontWeight: "700", color: inLst ? "#047857" : "#b45309", whiteSpace: "nowrap" }}>
-                                            {inLst ? "✓ Yes" : "✗ No"}
-                                          </td>
-                                        </tr>
-                                      );
-                                    });
-                                  })()}
-                                </tbody>
-                              </table>
+                              <div style={{ color: "#64748b" }}>No LST files to display</div>
                             )}
                           </div>
                         )}
@@ -2503,14 +2930,25 @@ export default function Handover({ userInfo }) {
                           <ReviewerAutocomplete value={deprecationReviewers} onChange={setDeprecationReviewers} placeholder="Type name (e.g. john) to search..." />
                         </div>
                         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "10px", alignItems: "center" }}>
-                          <button onClick={() => handleDeprecationCreateLstCr(false)} disabled={deprecationCreateLstLoading || !deprecationLstFile.trim()} style={(deprecationCreateLstLoading || !deprecationLstFile.trim()) ? { ...btnPrimaryDisabled } : { ...btnPrimary }}>
+                          <button onClick={handleDeprecationSave} disabled={depActionsDisabled} style={depActionsDisabled ? { ...btnTertiaryDisabled } : { ...btnTertiary }}>
+                            {deprecationCreateLstLoading ? "Saving..." : "Save"}
+                          </button>
+                          <button onClick={handleDeprecationCreateLstCr} disabled={depActionsDisabled} style={depActionsDisabled ? { ...btnPrimaryDisabled } : { ...btnPrimary }}>
                             {deprecationCreateLstLoading ? "Creating..." : "Create Gerrit CR"}
                           </button>
                         </div>
                         {deprecationCrResult && (
                           <div style={{ marginTop: "12px", padding: "10px", background: deprecationCrResult.success ? "#ecfdf5" : "#fef2f2", borderRadius: "4px", border: "1px solid " + (deprecationCrResult.success ? "#10b981" : "#f87171"), fontSize: "13px" }}>
-                            {deprecationCrResult.success && deprecationCrResult.cr_url && <p style={{ margin: "0 0 8px 0" }}><a href={deprecationCrResult.cr_url} target="_blank" rel="noreferrer">Open CR →</a></p>}
+                            {deprecationCrResult.success && (deprecationCrResult.cr_url || deprecationCrResult.gerrit_url) && (
+                              <p style={{ margin: "0 0 8px 0" }}>
+                                <a href={deprecationCrResult.cr_url || deprecationCrResult.gerrit_url} target="_blank" rel="noreferrer">
+                                  {deprecationCrResult.gerrit_change_id ? `Open CR ${deprecationCrResult.gerrit_change_id} →` : "Open CR →"}
+                                </a>
+                              </p>
+                            )}
                             {(deprecationCrResult.message || deprecationCrResult.error) && <p style={{ margin: 0 }}>{deprecationCrResult.message || deprecationCrResult.error}</p>}
+                            {deprecationCrResult.notes && <p style={{ margin: "8px 0 0 0", fontSize: "12px", color: "#047857" }}>{deprecationCrResult.notes}</p>}
+                            {deprecationCrResult.git_error && <pre style={{ marginTop: "8px", fontSize: "11px", whiteSpace: "pre-wrap" }}>{deprecationCrResult.git_error}</pre>}
                           </div>
                         )}
                         {deprecationManualLstInstructions && (
@@ -2524,6 +2962,205 @@ export default function Handover({ userInfo }) {
                   })()}
                 </>
               )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "records" && (
+        <div>
+          <p className="ho-subtitle ho-intro">
+            Browse saved handover and deprecation rows with all stored fields. Search by test name, filter by type, and delete records that no longer apply.
+          </p>
+          <div className="ho-card">
+            <div className="ho-card__title">Saved records</div>
+            <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", marginBottom: "12px" }}>
+              <input
+                type="text"
+                value={recordsQuery}
+                onChange={(e) => setRecordsQuery(e.target.value)}
+                onKeyPress={(e) => e.key === "Enter" && loadSavedRecords(e.target.value)}
+                placeholder="Search by test name, LST, ticket, reviewer..."
+                style={{ flex: 1, minWidth: "260px", padding: "8px 12px", fontSize: "14px", border: "1px solid #ddd", borderRadius: "4px", boxSizing: "border-box" }}
+              />
+              <button
+                type="button"
+                onClick={() => loadSavedRecords()}
+                disabled={recordsLoading}
+                style={{ padding: "8px 16px", background: recordsLoading ? "#94a3b8" : "#0d9488", color: "white", border: "none", borderRadius: "4px", cursor: recordsLoading ? "not-allowed" : "pointer", fontWeight: "500" }}
+              >
+                {recordsLoading ? "Loading..." : "Search"}
+              </button>
+              {canEditAnyVisible && (
+                <button
+                  type="button"
+                  onClick={() => setRecordsEditMode((v) => !v)}
+                  style={{ padding: "8px 14px", background: recordsEditMode ? "#dc2626" : "#64748b", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: "500" }}
+                >
+                  {recordsEditMode ? "Done" : "Edit"}
+                </button>
+              )}
+            </div>
+            {recordsError && (
+              <div style={{ marginTop: "8px", padding: "10px 12px", background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: "6px", color: "#991b1b", fontSize: "13px" }}>
+                {recordsError}
+              </div>
+            )}
+            {!recordsLoading && !recordsError && (
+              <p style={{ margin: "8px 0 0", fontSize: "13px", color: "#64748b" }}>
+                {visibleSavedRecords.length} record{visibleSavedRecords.length === 1 ? "" : "s"}
+              </p>
+            )}
+          </div>
+
+          {recordsLoading && (
+            <div className="ho-card" style={{ marginTop: "12px", fontSize: "14px", color: "#64748b" }}>Loading records...</div>
+          )}
+
+          {!recordsLoading && visibleSavedRecords.length === 0 && !recordsError && (
+            <div className="ho-card" style={{ marginTop: "12px", fontSize: "14px", color: "#64748b" }}>
+              No saved records match this search.
+            </div>
+          )}
+
+          {!recordsLoading && visibleSavedRecords.length > 0 && (
+            <div className="ho-card ho-records-wrap">
+              <div className="ho-records-scroll">
+                <table className="ho-table ho-records-table">
+                  <thead>
+                    <tr>
+                      <th className="col-type">Type</th>
+                      <th className="col-name">Test name</th>
+                      <th className="col-date">Date</th>
+                      <th className="col-lst">LST file(s)</th>
+                      <th className="col-branch">Branch</th>
+                      <th className="col-tickets">Tickets</th>
+                      <th className="col-tickets">Bug tickets</th>
+                      <th className="col-reviewers">Reviewers</th>
+                      <th className="col-whom">By whom</th>
+                      <th className="col-status">CR status</th>
+                      <th className="col-actions">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleSavedRecords.map((r) => {
+                      const extra = recordExtraSections(r);
+                      const lstFiles = recordLstFiles(r);
+                      const expanded = recordsExpanded.has(r._key);
+                      const reviewers = Array.isArray(r.reviewers) ? r.reviewers.filter(Boolean) : [];
+                      const bugTickets = uniqueTickets(r.bug_tickets);
+                      const statusKey = String(r.cr_status || "").replace(/\s+/g, "_");
+                      const canExpand = extra.length > 0 || lstFiles.length > 0;
+                      return (
+                        <React.Fragment key={r._key}>
+                          <tr className="ho-records-row">
+                            <td className="col-type">
+                              <span className={`ho-records-kind ho-records-kind--${r._kind}`}>
+                                {r._kind === "deprecation" ? "Deprecation" : "Handover"}
+                              </span>
+                            </td>
+                            <td className="col-name">
+                              <span className="ho-records-ellipsis ho-records-name" title={r.test_name || ""}>
+                                {r.test_name || "-"}
+                              </span>
+                            </td>
+                            <td className="col-date">{formatDateIST(r._date)}</td>
+                            <td className="col-lst">
+                              {lstFiles.length ? (
+                                <span className="ho-records-lst-row" title={lstFiles.join("\n")}>
+                                  <code>{lstFileBasename(lstFiles[0])}</code>
+                                  {lstFiles.length > 1 ? (
+                                    <span className="ho-records-more">+{lstFiles.length - 1}</span>
+                                  ) : null}
+                                </span>
+                              ) : (
+                                <span className="ho-records-empty">-</span>
+                              )}
+                            </td>
+                            <td className="col-branch">
+                              <span className="ho-records-ellipsis" title={r.branch || ""}>{r.branch || "-"}</span>
+                            </td>
+                            <td className="col-tickets">
+                              <SavedRecordTickets record={r} />
+                            </td>
+                            <td className="col-tickets">
+                              {bugTickets.length || r.bug_type ? (
+                                <div>
+                                  <TicketLinks tickets={bugTickets} />
+                                  {r.bug_type ? <div className="ho-records-meta">{r.bug_type}</div> : null}
+                                </div>
+                              ) : (
+                                <span className="ho-records-empty">-</span>
+                              )}
+                            </td>
+                            <td className="col-reviewers">
+                              {reviewers.length ? (
+                                <span className="ho-records-ellipsis" title={reviewers.join(", ")}>
+                                  {reviewers.map(formatByWhom).join(", ")}
+                                </span>
+                              ) : (
+                                <span className="ho-records-empty">-</span>
+                              )}
+                            </td>
+                            <td className="col-whom">
+                              <span className="ho-records-ellipsis" title={r.by_whom || ""}>{formatByWhom(r.by_whom)}</span>
+                            </td>
+                            <td className="col-status">
+                              {r.cr_status ? (
+                                <span className={`ho-records-status ho-records-status--${statusKey}`}>{r.cr_status}</span>
+                              ) : (
+                                <span className="ho-records-empty">-</span>
+                              )}
+                            </td>
+                            <td className="col-actions">
+                              <div className="ho-records-actions">
+                                {canExpand && (
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleRecordsExpanded(r._key)}
+                                    className="ho-records-btn"
+                                  >
+                                    {expanded ? "Hide" : "Details"}
+                                  </button>
+                                )}
+                                {recordsEditMode && r.can_delete && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRecordsDelete(r._kind, r)}
+                                    className="ho-records-btn ho-records-btn--danger"
+                                  >
+                                    Delete
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                          {expanded && canExpand && (
+                            <tr className="ho-records-detail-row">
+                              <td colSpan={11}>
+                                {lstFiles.length > 0 && (
+                                  <div className="ho-records-detail-block">
+                                    <div className="ho-records-detail-label">LST file(s)</div>
+                                    {lstFiles.map((f) => (
+                                      <div key={f} className="ho-records-detail-path"><code>{f}</code></div>
+                                    ))}
+                                  </div>
+                                )}
+                                {extra.map(([label, value]) => (
+                                  <div key={label} className="ho-records-detail-block">
+                                    <div className="ho-records-detail-label">{label}</div>
+                                    <pre className="ho-records-extra">{String(value).trim()}</pre>
+                                  </div>
+                                ))}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>

@@ -23,7 +23,7 @@
 
 The **Regression Dashboard** (RegX-AI) is a web application for managing and analyzing regression test runs. It provides:
 
-- **Regression overview** by tag or task IDs (Home) with triage counts, owner triage report, QI summary, triage accuracy, Triage Genie coverage, extra task IDs per tag, and TCMS overall QI
+- **Regression overview** by tag or task IDs (Home) with triage counts, owner triage report, QI summary, triage accuracy, extra task IDs per tag, and TCMS overall QI
 - **Run planning** and scheduling with job profiles, calendar view, bulk triggers, batch image updates, and automated scheduling
 - **Handover** — new-testcase onboarding from JITA results: LST file suggest/search, Jira validation, Gerrit CR create/deprecate, and handover records
 - **Testcase management** — browse, tag, resolve job profiles, and download resource specs via TCMS
@@ -66,7 +66,7 @@ The system follows a **client–server** architecture: a **React** frontend (por
 
 | Module | Route/Page | Backend APIs (prefix `/mcp/regression/`) | Description |
 |--------|-----------|------------------------------------------|-------------|
-| Home | `home` | `home`, `manual-tasks`, `branches`, `config`, `config/tags`, `config/tag-extra-task-ids`, `triage-count`, `owner-triage-report`, `triage-accuracy`, `triage-accuracy/export-excel`, `triage-genie-coverage`, `qi-summary`, `tcms-overall-qi`, `team-config`, `tcms/tags`, `tcms/testcases` | Overview by tag/task IDs, extra task IDs, owner triage table, triage/QI, coverage, TCMS QI |
+| Home | `home` | `home`, `manual-tasks`, `branches`, `config`, `config/tags`, `config/tag-extra-task-ids`, `triage-count`, `owner-triage-report`, `triage-accuracy`, `triage-accuracy/export-excel`, `qi-summary`, `tcms-overall-qi`, `team-config`, `tcms/tags`, `tcms/testcases` | Overview by tag/task IDs, extra task IDs, owner triage table, triage/QI, TCMS QI |
 | Run Plan | `run-plan` | `run-plan`, `run-plan/<id>` (PUT/DELETE), `run-plan/<id>/trigger`, `run-plan/<id>/batch-update`, `run-plan/<id>/history`, `run-plan/<id>/clone`, `run-plan/<id>/schedule`, `run-plan/<id>/delete-tag`, `run-plan/search-job-profiles`, `run-plan/tags`, `run-plan/bulk-trigger`, `run-plan/bulk-schedule`, `run-plan/calendar`, `run-plan/history/<id>/retry`, `run-plan/history/<id>` (DELETE), `run-plan/history/<id>/kill`, `run-plan/service-accounts` | Scheduling, triggers, batch image update, history retry/kill, calendar, bulk ops |
 | Handover | `handover` | `jita-analysis`, `handover-record`, `handover-record-delete`, `validate-jira-ticket`, `validate-lst`, `search-reviewers`, `gerrit-connectivity`, `create-lst-cr`, `check-lst-testcases`, `search-lst-file`, `deprecate-lst-cr`, `deprecation-search` | Onboard passing tests into LST files via Gerrit CR; deprecate old entries; persist handover records |
 | Testcase Management | `testcase` | `testcase-mgmt/fetch-data`, `testcase-mgmt/testcases`, `testcase-mgmt/tags/add`, `testcase-mgmt/tags/delete`, `testcase-mgmt/resource-spec/download`, `testcase-mgmt/resolve-job-profiles`, `testcase-mgmt/branches` | Browse testcases, tag management, resource spec download, job profile resolution via TCMS |
@@ -264,7 +264,6 @@ graph TD
         D[triage-count GET]
         OTR[owner-triage-report POST]
         TA[triage-accuracy GET/POST + export-excel]
-        TGC[triage-genie-coverage GET/POST]
         E[qi-summary GET]
         OQI[tcms-overall-qi GET]
         TC[team-config GET]
@@ -565,7 +564,7 @@ Reads fall back to the same filename under flat `data/` if the team file is miss
 - **Cursor AI:** chat with modes (Agent / Plan / Debug / Ask), MCP server toggles (12 servers), skill sync (`cursor-ai/sync-skills`) for RDM/CDP/Glean/Gerrit skills, Key Management panel.
 - **Agents package:** `backend/agents/` (CDP/RDM/intelligent triage agents, MCP bridge, pattern cache, Jarvis/JITA helpers).
 - **RDM patterns:** configurable matching, suggest/add, Jarvis node lists.
-- **Triage Accuracy + Genie coverage:** quality and coverage views on Home.
+- **Triage Accuracy:** quality view on Home.
 
 ### 7.2 Phase 1 — LLM-Augmented Suggestions ✅ Implemented
 
@@ -680,7 +679,6 @@ gantt
 | `src/components/PatternManagement.jsx` | RDM pattern UI |
 | `src/components/EnhancedAnalysisResult.jsx` | Rich failed-analysis result |
 | `src/components/AgentStatusPanel.jsx` | Agent job status |
-| `src/components/TriageGenieCoverageModal.jsx` | Coverage drill-down on Home |
 | `src/components/AiMarkdown.jsx` | Markdown for AI responses |
 | `src/components/TaskStatusIcon.jsx` | Floating background-task icon |
 | `src/utils/` | `authUser`, `jitaTaskIds`, `regressionScope`, `manageTestSetArgs` |

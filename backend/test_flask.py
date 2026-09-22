@@ -2,6 +2,7 @@ import json
 import time
 import logging
 import threading
+import hashlib
 import requests
 import urllib3
 import pandas as pd
@@ -40,10 +41,24 @@ from auth import (
 from handover_helpers import (
     parse_task_id_inputs,
     parse_jita_url as _parse_jita_url_helper,
+    parse_handover_input,
+    normalize_test_name_list,
     categorize_bug_type_from_issuetype,
     evaluate_sliding_eligibility,
     get_task_id_from_run,
     order_runs_for_test,
+    filter_runs_for_branch,
+    pick_runs_for_test_query,
+    select_newest_runs,
+    run_timestamp_key,
+    empty_handover_test_case,
+    AmbiguousTestNameError,
+    HANDOVER_HISTORY_WINDOW,
+    parse_record_search_queries,
+    filter_records_by_query,
+    delete_record_from_list,
+    find_record_in_list,
+    can_delete_record,
 )
 
 def _get_current_team():
@@ -164,6 +179,15 @@ from flux_client import (
     FluxError,
     FluxKeySetupError,
     get_client as get_flux_client,
+)
+from cursor_ai_rag import (
+    answer_chat_question as _rag_answer_chat_question,
+    classify_intent as _rag_classify_intent,
+    parse_attach_request as _rag_parse_attach_request,
+    INTENT_ATTACH_TICKET,
+    INTENT_CONFIRM_ATTACH,
+    INTENT_CREATE_TICKET,
+    clear_corpus_cache as _rag_clear_corpus_cache,
 )
 
 # ======================================================
@@ -2313,7 +2337,7 @@ def tag_extra_task_ids_endpoint():
             tag, len(newly_added), len(tagged_now), len(merged),
             len(rejected_tag_failed), len(rejected_not_found),
         )
-        # Full regression link grew → force TG coverage / triage-accuracy recompute
+        # Full regression link grew → force triage-accuracy recompute
         try:
             invalidate_triage_accuracy_cache(tag)
         except Exception as inv_err:
@@ -3353,34 +3377,10 @@ def _empty_triage_accuracy_payload(tag=None, task_ids=None):
     }
 
 
-def _tg_ticket_map_from_cached_payload(cached):
-    """Reuse previously fetched TG tickets by testcase id / name (no network)."""
-    ticket_map = {}
-    if not cached or not isinstance(cached, dict):
-        return ticket_map
-    for tc in cached.get("testcases") or []:
-        if not isinstance(tc, dict):
-            continue
-        ticket = (tc.get("triage_genie_ticket") or "").strip()
-        if not ticket:
-            continue
-        name = (tc.get("testcase_name") or "").strip()
-        tid = (tc.get("testcase_id") or "").strip()
-        if name:
-            ticket_map[name] = ticket
-        if tid:
-            ticket_map[tid] = ticket
-    return ticket_map
-
-
-def _compute_triage_accuracy_payload(tag=None, task_ids=None, reload=False, skip_tg_lookup=False):
+def _compute_triage_accuracy_payload(tag=None, task_ids=None, reload=False):
     """
     Compute (or load cached) triage-accuracy payload for tag / task_ids.
-    Shared by Triage Accuracy Analyzer and Triage Genie coverage moon dashboard.
-
-    skip_tg_lookup=True: skip slow per-testcase Triage Genie API calls; reuse TG
-    tickets from any prior cache by testcase name. Used by coverage Refresh so it
-    stays fast (JITA only). Full TG refresh remains on Triage Accuracy Reload.
+    Used by Triage Accuracy Analyzer.
     """
     tag = (tag or "").strip() or None
     if isinstance(task_ids, str):
@@ -3403,16 +3403,13 @@ def _compute_triage_accuracy_payload(tag=None, task_ids=None, reload=False, skip
     except Exception:
         tag_extras = []
 
-    # Always load prior cache for TG ticket reuse (even when reload skips hit)
-    prior_cache = load_triage_accuracy_data(cache_tag)
-
     # On reload: skip reading cache but keep file until new payload saves.
-    # Deleting first left coverage/accuracy empty for 10–45+ min during TG lookups.
+    # Deleting first left accuracy empty for 10–45+ min during TG lookups.
     if reload:
         cached = None
         logger.info("[Triage Accuracy] Reload requested — skipping cache, keeping file until save")
     else:
-        cached = prior_cache
+        cached = load_triage_accuracy_data(cache_tag)
     if cached and _config_matches_cached(cached, tag, task_ids):
         logger.info("[Triage Accuracy] Using cached data")
         return cached
@@ -3463,14 +3460,7 @@ def _compute_triage_accuracy_payload(tag=None, task_ids=None, reload=False, skip
         elif _rid:
             _test_result_ids.append(str(_rid))
 
-    if skip_tg_lookup:
-        tg_ticket_map = _tg_ticket_map_from_cached_payload(prior_cache)
-        logger.info(
-            "[Triage Accuracy] skip_tg_lookup — reused %s TG ticket(s) from cache (no TG API)",
-            len(tg_ticket_map),
-        )
-    else:
-        tg_ticket_map = build_triage_genie_ticket_map(_test_result_ids)
+    tg_ticket_map = build_triage_genie_ticket_map(_test_result_ids)
 
     def process_one(tr):
         try:
@@ -3556,186 +3546,6 @@ def _compute_triage_accuracy_payload(tag=None, task_ids=None, reload=False, skip
     }
     save_triage_accuracy_data(result, cache_tag)
     return result
-
-
-def _job_jita_task_ids(job):
-    """Extract JITA task OIDs from a stored / API Triage Genie job record."""
-    if not isinstance(job, dict):
-        return []
-    if job.get("jita_task_id_list"):
-        return [str(x).strip().lower() for x in job["jita_task_id_list"] if str(x).strip()]
-    raw = job.get("jita_task_ids") or ""
-    if isinstance(raw, list):
-        return [str(x).strip().lower() for x in raw if str(x).strip()]
-    return [x.strip().lower() for x in str(raw).split(",") if x.strip()]
-
-
-def _find_best_triage_genie_job(task_ids):
-    """
-    Pick TG job for the selected Full regression task set only.
-
-    Reject weak overlap (e.g. 1 shared OID out of a large run) so Open Triage Genie
-    never deep-links into an unrelated stored job.
-    """
-    wanted = set(_sorted_task_id_fingerprint(task_ids))
-    if not wanted:
-        return None
-    try:
-        jobs = (load_triage_genie_jobs() or {}).get("jobs") or []
-    except Exception:
-        jobs = []
-    best = None
-    best_score = -1
-    for job in jobs:
-        ids = set(_job_jita_task_ids(job))
-        if not ids:
-            continue
-        overlap = len(wanted & ids)
-        if overlap == 0:
-            continue
-        # Exact match wins
-        if ids == wanted:
-            return job
-        cov_wanted = overlap / len(wanted)
-        cov_job = overlap / len(ids)
-        # Require strong agreement: majority of the selected job AND of the TG job
-        if cov_wanted < 0.5 or cov_job < 0.5:
-            continue
-        score = overlap * 1000
-        if wanted <= ids:
-            score += 250
-        elif ids <= wanted:
-            score += 100
-        score += int(min(cov_wanted, cov_job) * 100)
-        if score > best_score:
-            best_score = score
-            best = job
-    return best
-
-
-def _build_triage_genie_job_url(task_ids, tag=None):
-    """
-    Build the Triage Genie URL for this Full regression task set.
-
-    Always matches JITA → Tests → "View in Triage Genie":
-      http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids=<Full_link_ids>
-
-    Optionally annotate an exact-match stored job id for display only.
-    """
-    ids_for_link = [str(t).strip() for t in (task_ids or []) if str(t).strip()]
-    if not ids_for_link:
-        return {
-            "triage_genie_url": "http://triage-genie.eng.nutanix.com/",
-            "triage_genie_job_id": None,
-            "triage_genie_job_name": tag or None,
-            "triage_genie_view_url": None,
-        }
-
-    view_in_tg_url = (
-        "http://triage-genie.eng.nutanix.com/view_tasks?jita_task_ids="
-        + ",".join(ids_for_link)
-    )
-    job_id = None
-    job_name = tag or None
-    job = _find_best_triage_genie_job(ids_for_link)
-    if job and job.get("id") is not None:
-        job_ids = set(_job_jita_task_ids(job))
-        wanted = set(_sorted_task_id_fingerprint(ids_for_link))
-        if job_ids and wanted and job_ids == wanted:
-            job_id = job.get("id")
-            job_name = job.get("name") or job_name
-
-    return {
-        "triage_genie_url": view_in_tg_url,
-        "triage_genie_job_id": job_id,
-        "triage_genie_job_name": job_name,
-        "triage_genie_view_url": view_in_tg_url,
-    }
-
-
-def _rollup_triage_genie_coverage(accuracy_payload):
-    """Build per-owner + summary coverage metrics from a triage-accuracy payload."""
-    testcases = accuracy_payload.get("testcases") or []
-    task_ids = accuracy_payload.get("task_ids") or []
-
-    def _blank_owner(name):
-        return {
-            "owner": name,
-            "total": 0,
-            "via_triage_genie": 0,
-            "jira_tagged": 0,
-            "remaining_need_tg": 0,
-            "manual_only": 0,
-            "pct_tg": 0.0,
-        }
-
-    by_owner = {}
-    for tc in testcases:
-        owner = (tc.get("regression_owner") or "Unknown").strip() or "Unknown"
-        row = by_owner.setdefault(owner, _blank_owner(owner))
-        row["total"] += 1
-        has_jira = bool((tc.get("jira_ticket") or "").strip())
-        has_tg = bool((tc.get("triage_genie_ticket") or "").strip())
-        if has_jira:
-            row["jira_tagged"] += 1
-        if has_tg:
-            row["via_triage_genie"] += 1
-        else:
-            row["remaining_need_tg"] += 1
-        if has_jira and not has_tg:
-            row["manual_only"] += 1
-
-    for row in by_owner.values():
-        row["pct_tg"] = round(100.0 * row["via_triage_genie"] / row["total"], 1) if row["total"] else 0.0
-
-    by_owner_list = sorted(
-        by_owner.values(),
-        key=lambda r: (-r["remaining_need_tg"], -r["total"], r["owner"].lower()),
-    )
-
-    total = len(testcases)
-    via_tg = sum(1 for tc in testcases if (tc.get("triage_genie_ticket") or "").strip())
-    jira_tagged = sum(1 for tc in testcases if (tc.get("jira_ticket") or "").strip())
-    remaining = total - via_tg
-    manual_only = sum(
-        1 for tc in testcases
-        if (tc.get("jira_ticket") or "").strip() and not (tc.get("triage_genie_ticket") or "").strip()
-    )
-
-    ids_for_link = [str(t).strip() for t in task_ids if str(t).strip()]
-    jita_results_url = None
-    if ids_for_link:
-        jita_results_url = (
-            "https://jita.eng.nutanix.com/results?task_ids="
-            + ",".join(ids_for_link)
-            + "&active_tab=1&merge_tests=true"
-        )
-
-    tg_link = _build_triage_genie_job_url(ids_for_link, tag=accuracy_payload.get("tag"))
-
-    return {
-        "generated_time": accuracy_payload.get("generated_time") or datetime.utcnow().isoformat(),
-        "tag": accuracy_payload.get("tag"),
-        "task_ids": ids_for_link,
-        "task_count": len(ids_for_link),
-        "summary": {
-            "total": total,
-            "via_triage_genie": via_tg,
-            "jira_tagged": jira_tagged,
-            "remaining_need_tg": remaining,
-            "manual_only": manual_only,
-            "pct_tg": round(100.0 * via_tg / total, 1) if total else 0.0,
-        },
-        "by_owner": by_owner_list,
-        "links": {
-            "jita_results_url": jita_results_url,
-            "triage_genie_url": tg_link.get("triage_genie_url"),
-            "triage_genie_view_url": tg_link.get("triage_genie_view_url"),
-            "triage_genie_home": "http://triage-genie.eng.nutanix.com/",
-            "triage_genie_job_id": tg_link.get("triage_genie_job_id"),
-            "triage_genie_job_name": tg_link.get("triage_genie_job_name"),
-        },
-    }
 
 
 def _normalize_task_ids_arg(raw):
@@ -3825,57 +3635,6 @@ def get_triage_accuracy():
         return jsonify({"error": str(ve)}), 400
     except Exception as e:
         logger.error(f"Error in triage accuracy: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/mcp/regression/triage-genie-coverage", methods=["GET", "POST"])
-@app.route("/api/mcp/regression/triage-genie-coverage", methods=["GET", "POST"])
-@jwt_required
-def get_triage_genie_coverage():
-    """
-    Per-owner Triage Genie coverage for Regression_Run_Tasks (Full link) / tag.
-    Used by the Triage Genie coverage dashboard overlay.
-    """
-    start = time.time()
-    tag, task_ids = _resolve_triage_scope_from_request()
-    if not tag and not task_ids:
-        return jsonify({"error": "Either tag or task_ids is required (or set default tag in Configuration)"}), 400
-
-    try:
-        reload = _request_wants_reload()
-        if task_ids:
-            logger.info(
-                f"[START] Triage Genie Coverage | task_ids={len(task_ids)} (Full link)"
-                + (f" | tag={tag}" if tag else "")
-                + f" | reload={reload} | skip_tg_lookup=True"
-            )
-        else:
-            logger.info(
-                f"[START] Triage Genie Coverage | tag={tag} | reload={reload} | skip_tg_lookup=True"
-            )
-        # Coverage must stay fast: never do per-testcase TG API lookups here.
-        # Reuse cached TG tickets; full TG refresh is Triage Accuracy → Reload data.
-        accuracy = _compute_triage_accuracy_payload(
-            tag=tag, task_ids=task_ids, reload=reload, skip_tg_lookup=True
-        )
-        coverage = _rollup_triage_genie_coverage(accuracy)
-        logger.info(
-            "[END] Triage Genie Coverage | owners=%s remaining=%s | time=%.2fs",
-            len(coverage.get("by_owner") or []),
-            (coverage.get("summary") or {}).get("remaining_need_tg"),
-            time.time() - start,
-        )
-        return jsonify(coverage)
-    except ValueError as ve:
-        return jsonify({"error": str(ve)}), 400
-    except TimeoutError as e:
-        logger.error(f"Timeout in triage genie coverage: {e}")
-        return jsonify({
-            "error": str(e),
-            "hint": "JITA/TG lookups timed out. Retry without Refresh first (uses cache), or wait and Refresh once.",
-        }), 504
-    except Exception as e:
-        logger.error(f"Error in triage genie coverage: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -9770,6 +9529,44 @@ def analyze_failed_testcases_stream():
     )
 
 
+def _put_jita_triage_tickets(test_id, comment, jira_tickets, username):
+    """Attach comment/jira_tickets on an agave_test_result. Returns (ok, error)."""
+    if not test_id:
+        return False, "test_id is required"
+    user_auth = _get_user_credentials(username)
+    if not user_auth:
+        return False, "credentials"
+    tickets = jira_tickets
+    if isinstance(tickets, str):
+        tickets = [tickets] if tickets else []
+    update_fields = {
+        "comments": comment or "",
+        "triaged_by": username or "",
+    }
+    if tickets is not None:
+        update_fields["jira_tickets"] = tickets
+    payload = {
+        "query": {"_id": {"$in": [{"$oid": test_id}]}},
+        "data": {"$set": update_fields},
+        "multi": True,
+    }
+    try:
+        resp = requests.put(
+            f"{JITA_BASE}/agave_test_results",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            auth=user_auth,
+            verify=False,
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.warning("[cursor-ai-chat] JITA triage put failed: %s", exc)
+        return False, str(exc)
+    if resp.status_code == 200:
+        return True, None
+    return False, (resp.text or f"HTTP {resp.status_code}")
+
+
 @app.route("/mcp/regression/failed-analysis/update-triage", methods=["PUT"])
 @jwt_required
 def update_triage_comments():
@@ -9783,38 +9580,20 @@ def update_triage_comments():
             return jsonify({"error": "test_id is required"}), 400
 
         current_username = g.current_user.get("sub", "")
-        user_auth = _get_user_credentials(current_username)
-        if not user_auth:
+        ok, err = _put_jita_triage_tickets(
+            test_id,
+            comment,
+            jira_tickets,
+            current_username,
+        )
+        if err == "credentials":
             return jsonify({
                 "error": "Session credentials expired. Please re-login to update triage.",
                 "code": "CREDENTIALS_EXPIRED"
             }), 401
-
-        update_fields = {
-            "comments": comment,
-            "triaged_by": current_username
-        }
-        if jira_tickets is not None:
-            if isinstance(jira_tickets, str):
-                jira_tickets = [jira_tickets] if jira_tickets else []
-            update_fields["jira_tickets"] = jira_tickets
-        payload = {
-            "query": {"_id": {"$in": [{"$oid": test_id}]}},
-            "data": {"$set": update_fields},
-            "multi": True
-        }
-        url = f"{JITA_BASE}/agave_test_results"
-        resp = requests.put(
-            url,
-            headers={"Content-Type": "application/json"},
-            json=payload,
-            auth=user_auth,
-            verify=False,
-            timeout=30
-        )
-        if resp.status_code == 200:
+        if ok:
             return jsonify({"success": True, "message": "Updated", "triaged_by": current_username})
-        return jsonify({"error": resp.text or f"HTTP {resp.status_code}"}), resp.status_code if resp.status_code >= 400 else 500
+        return jsonify({"error": err or "Update failed"}), 500
     except Exception as e:
         logger.error(f"Error updating triage: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -19481,12 +19260,12 @@ def get_jira_ticket_details():
         def _one(ticket_id):
             try:
                 jira_data = fetch_jira_ticket(
-                    ticket_id, token=jira_token, fields="status,issuetype"
+                    ticket_id, token=jira_token, fields="status,issuetype,created"
                 )
                 return ticket_id, _extract_jira_ticket_detail(jira_data)
             except Exception as exc:
                 logger.warning("Error fetching JIRA details for %s: %s", ticket_id, exc)
-                return ticket_id, {"status": "N/A", "issue_type": "N/A", "bug_type": None}
+                return ticket_id, {"status": "N/A", "issue_type": "N/A", "bug_type": None, "created": None}
 
         results = {}
         max_workers = min(10, len(unique_ids)) or 1
@@ -20724,7 +20503,7 @@ def cursor_ai_sync_skills():
         return jsonify({"error": str(e)}), 500
 
 
-def _cursor_bridge_chat(messages, system_prompt, mode):
+def _cursor_bridge_chat(messages, system_prompt, mode, agent_id=None, session_id=None, regression_context=None):
     """Send chat to cursor-bridge /chat using the caller's Cursor API key.
 
     Returns (response_dict, http_status). response_dict has success=True on OK.
@@ -20749,12 +20528,18 @@ def _cursor_bridge_chat(messages, system_prompt, mode):
 
     atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
+    # Keep ask/system prompts short — long MCP tool catalogs slow cold starts.
+    trimmed_system = (system_prompt or "")[:2500]
+
     try:
         bridge_resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/chat",
             json={
                 "message": last_user_msg,
-                "system_prompt": system_prompt or "",
+                "system_prompt": trimmed_system,
+                "regression_context": (regression_context or "")[:4000],
+                "agent_id": agent_id or "",
+                "session_id": session_id or "",
                 "cursor_api_key": cursor_api_key,
                 "atlassian_tokens": atlassian_tokens,
             },
@@ -20789,6 +20574,8 @@ def _cursor_bridge_chat(messages, system_prompt, mode):
             "reply": reply,
             "mode": mode,
             "model": "cursor-bridge",
+            "agent_id": bridge_data.get("agent_id") or agent_id or "",
+            "session_id": bridge_data.get("session_id") or session_id or "",
             "tools_used": [],
         }, 200
 
@@ -20807,6 +20594,690 @@ def _cursor_bridge_chat(messages, system_prompt, mode):
     }, 503
 
 
+def _build_chat_system_prompt(mode, mcp_servers):
+    """System prompt for the given mode; attach MCP catalog only for agent/debug."""
+    system_prompt = MODE_SYSTEM_PROMPTS[mode]
+    if mcp_servers and mode in ("agent", "debug"):
+        active_tools = []
+        for sid in mcp_servers:
+            cfg = MCP_SERVER_CONFIGS.get(sid)
+            if cfg:
+                active_tools.append(f"- {sid}: {cfg['description']}")
+        if active_tools:
+            system_prompt += (
+                "\n\nYou have access to the following MCP tools/servers:\n"
+                + "\n".join(active_tools)
+                + "\n\nWhen answering, reference which tools you would use and provide specific, "
+                "data-driven insights where possible."
+            )
+    return system_prompt
+
+
+@app.route("/mcp/regression/cursor-ai/chat-warm", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/chat-warm", methods=["POST"])
+@jwt_required
+def cursor_ai_chat_warm():
+    """Pre-warm a chat agent so the first real message resumes (fast) instead of cold-starting."""
+    body = request.get_json(silent=True) or {}
+    model = body.get("model", "")
+    username = _current_username()
+    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+    if not cursor_api_key:
+        return jsonify({"error": "Cursor API key required.", "require_key_setup": True}), 403
+    try:
+        r = requests.post(
+            f"{CURSOR_BRIDGE_URL}/chat-warm",
+            json={"cursor_api_key": cursor_api_key, "model": model},
+            timeout=120,
+        )
+        try:
+            data = r.json()
+        except Exception:
+            data = {"error": r.text}
+        return jsonify(data), (200 if r.status_code == 200 else 502)
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cursor Bridge is not reachable."}), 503
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Warm-up timed out."}), 504
+    except Exception as e:
+        logger.error("[cursor-ai-chat-warm] error: %s", e)
+        return jsonify({"error": str(e)}), 502
+
+
+_KNOWN_COMPONENTS = (
+    "blockstore", "stargate", "hades", "curator", "pithos", "zookeeper",
+    "cassandra", "medusa", "mantle", "xmount", "robo", "chronos", "polaris",
+    "insights", "manageability", "nutanix", "ahv", "uhura", "acropolis",
+    "castor", "lazan", "anduril", "ergon", "katana", "minerva", "prism",
+)
+
+
+def _normalize_question_text(text):
+    return re.sub(r"\s+", " ", (text or "").lower()).strip()
+
+
+def _extract_component_from_question(text):
+    """Return component token from questions like 'passed from blockstore'."""
+    t = _normalize_question_text(text)
+    if not t:
+        return None
+    for comp in _KNOWN_COMPONENTS:
+        if re.search(rf"(?<![a-z0-9_]){re.escape(comp)}(?![a-z0-9_])", t):
+            return comp
+    m = re.search(
+        r"\b(?:from|in|for|of)\s+([a-z][a-z0-9_]{2,})\b(?:\s+component)?",
+        t,
+    )
+    if m:
+        token = m.group(1)
+        if token not in (
+            "the", "this", "that", "tag", "run", "test", "tests", "testcase",
+            "testcases", "regression", "summary", "all", "total", "failed",
+            "passed", "pass", "fail", "success", "succeeded",
+        ):
+            return token
+    return None
+
+
+def _desired_status_from_question(text):
+    """Map question words to Succeeded/Failed/None (all statuses)."""
+    t = _normalize_question_text(text)
+    want_pass = bool(re.search(
+        r"\b(pass|passed|succeed|succeeded|success|green)\b", t
+    ))
+    want_fail = bool(re.search(r"\b(fail|failed|failure|red)\b", t))
+    if want_pass and not want_fail:
+        return "Succeeded"
+    if want_fail and not want_pass:
+        return "Failed"
+    return None
+
+
+def _is_component_test_question(text):
+    """True when asking for pass/fail counts/lists for a named component."""
+    t = _normalize_question_text(text)
+    if not t or not _extract_component_from_question(t):
+        return False
+    return bool(re.search(
+        r"\b(pass|passed|succeed|succeeded|success|fail|failed|failure|"
+        r"how many|count|list|which|show|status)\b",
+        t,
+    ))
+
+
+def _is_overall_summary_question(text):
+    """True for whole-run summary asks (not component-scoped)."""
+    t = _normalize_question_text(text)
+    if not t or _extract_component_from_question(t):
+        return False
+    needles = (
+        "summary",
+        "overview",
+        "success count",
+        "succeeded",
+        "pass rate",
+        "pass count",
+        "failed count",
+        "failure count",
+        "how many passed",
+        "how many failed",
+        "how many succeeded",
+        "regression run",
+        "test summary",
+        "qi summary",
+        "status summary",
+        "give me summary",
+        "give summary",
+        "what is the qi",
+        "what's the qi",
+        "what is qi",
+    )
+    if any(n in t for n in needles):
+        return True
+    # Bare "qi" / "the qi" only — do not treat ticket/create questions as a summary.
+    return bool(re.search(r"^(what('?s| is)?\s+)?(the\s+)?qi\b", t))
+
+
+def _is_regression_data_question(text):
+    """True when we can answer locally from QI / component scan (no Cursor cloud)."""
+    return _is_component_test_question(text) or _is_overall_summary_question(text)
+
+
+def _test_name_from_result(test_result):
+    test_field = test_result.get("test") if isinstance(test_result, dict) else None
+    if isinstance(test_field, dict):
+        return (test_field.get("name") or "").strip()
+    if isinstance(test_field, str):
+        return test_field.strip()
+    return (test_result.get("name") or "").strip() if isinstance(test_result, dict) else ""
+
+
+def _test_matches_component(test_name, component):
+    if not test_name or not component:
+        return False
+    parts = re.split(r"[./]", test_name.lower())
+    return component.lower() in parts
+
+
+def _normalize_test_status(status):
+    s = (status or "").strip().lower()
+    if s in ("succeeded", "success", "passed", "pass"):
+        return "Succeeded"
+    if s in ("failed", "failure", "fail"):
+        return "Failed"
+    if s in ("pending", "waiting"):
+        return "Pending"
+    if s in ("warning", "warn"):
+        return "Warning"
+    if s in ("running", "executing", "in_progress"):
+        return "Running"
+    if s in ("skipped", "skip"):
+        return "Skipped"
+    if s in ("killed",):
+        return "Killed"
+    return status or "Unknown"
+
+
+def _parse_scope_from_context(regression_context):
+    """Best-effort tag / task_ids from the dashboard context string."""
+    ctx = regression_context or ""
+    tag = None
+    m = re.search(r"Scope\s*[—\-]\s*tag:\s*(\S+)", ctx, re.I)
+    if m:
+        tag = m.group(1).strip()
+    if not tag:
+        m = re.search(r"Regression run:\s*(\S+)", ctx, re.I)
+        if m:
+            candidate = m.group(1).strip()
+            if candidate and not candidate.startswith("(") and "task" not in candidate.lower():
+                tag = candidate
+    task_ids = []
+    m = re.search(r"Scope\s*[—\-]\s*task_ids\s*\(\d+\):\s*([0-9a-f,\s]+)", ctx, re.I)
+    if m:
+        task_ids = [t.strip() for t in m.group(1).split(",") if t.strip()]
+    return tag, task_ids
+
+
+def _answer_component_test_question(question, tag=None, task_ids=None, list_limit=200):
+    """
+    Scan live agave results for the selected tag/task_ids, filter by component,
+    and return passed/failed count + list.
+    """
+    component = _extract_component_from_question(question)
+    if not component:
+        return None
+    if not tag and not task_ids:
+        return (
+            f"No regression tag/task selection is available to scan for "
+            f"**{component}** tests. Select a tag on Home, then ask again."
+        )
+
+    try:
+        # Full-regression / explicit task_ids match QI-summary scope. fetch_regression_tasks
+        # would otherwise drop them when a tag is also present.
+        if task_ids:
+            tasks = fetch_regression_tasks(tag=None, task_ids=task_ids)
+        else:
+            tasks = fetch_regression_tasks(tag=tag, task_ids=None)
+    except Exception as e:
+        logger.warning("[cursor-ai] component scan fetch_tasks failed: %s", e)
+        return f"Could not load regression tasks for this selection: {e}"
+
+    collected_ids = []
+    for task in tasks or []:
+        tid = task.get("_id", {})
+        if isinstance(tid, dict):
+            tid = tid.get("$oid")
+        if tid:
+            collected_ids.append(str(tid))
+    if not collected_ids:
+        scope = tag or f"{len(task_ids or [])} task_ids"
+        return f"No tasks found for **{scope}** — cannot scan **{component}** tests."
+
+    try:
+        results = fetch_test_results_batch_with_pagination(collected_ids)
+    except Exception as e:
+        logger.warning("[cursor-ai] component scan fetch_results failed: %s", e)
+        return f"Could not fetch test results to scan **{component}**: {e}"
+
+    matched = []
+    status_counts = defaultdict(int)
+    for r in results or []:
+        name = _test_name_from_result(r)
+        if not _test_matches_component(name, component):
+            continue
+        st = _normalize_test_status(r.get("status"))
+        status_counts[st] += 1
+        matched.append({"name": name, "status": st})
+
+    desired = _desired_status_from_question(question)
+    scope_label = tag or f"{len(collected_ids)} task(s)"
+    if not matched:
+        return (
+            f"No **{component}** testcases found in **{scope_label}** "
+            f"(scanned {len(results or [])} results across {len(collected_ids)} tasks)."
+        )
+
+    if desired:
+        filtered = [m for m in matched if m["status"] == desired]
+        label = "passed" if desired == "Succeeded" else desired.lower()
+        lines = [f"  - {m['name']}" for m in filtered[:list_limit]]
+        more = ""
+        if len(filtered) > list_limit:
+            more = f"\n  ...and {len(filtered) - list_limit} more."
+        breakdown = ", ".join(f"{k}: {v}" for k, v in sorted(status_counts.items()))
+        return (
+            f"**{component}** on **{scope_label}**: "
+            f"**{len(filtered)}** {label} "
+            f"(of {len(matched)} {component} tests; all statuses — {breakdown}).\n\n"
+            f"{label.capitalize()} testcases ({len(filtered)}):\n"
+            + ("\n".join(lines) if lines else "  (none)")
+            + more
+        )
+
+    breakdown = ", ".join(f"{k}: {v}" for k, v in sorted(status_counts.items()))
+    return (
+        f"**{component}** on **{scope_label}**: {len(matched)} tests "
+        f"({breakdown})."
+    )
+
+
+def _compact_regression_context(regression_context):
+    """Drop huge task_id dumps so overall-summary replies stay readable."""
+    ctx = (regression_context or "").strip()
+    if not ctx:
+        return ctx
+    # Replace "Scope — task_ids (N): id1, id2, ..." with count-only line.
+    ctx = re.sub(
+        r"Scope\s*[—\-]\s*task_ids\s*\((\d+)\):\s*[0-9a-f,\s]+",
+        r"Scope — task_ids (\1) [ids omitted]",
+        ctx,
+        flags=re.I,
+    )
+    return ctx
+
+
+def _sse_chat_done(reply, agent_id="", session_id="", source="regression_context"):
+    """Yield a complete SSE chat response (delta + done)."""
+    text = (reply or "").strip() or "No regression data available for the current selection."
+    yield ("data: " + json.dumps({"type": "delta", "text": text}) + "\n\n").encode()
+    yield (
+        "data: "
+        + json.dumps({
+            "type": "done",
+            "reply": text,
+            "agent_id": agent_id or "",
+            "session_id": session_id or "",
+            "source": source or "regression_context",
+        })
+        + "\n\n"
+    ).encode()
+
+
+def _format_regression_context_reply(question, regression_context):
+    ctx = _compact_regression_context(regression_context)
+    if not ctx:
+        return (
+            "No regression run is selected in the dashboard yet. "
+            "Pick a tag or task IDs on Home, then ask again."
+        )
+    return (
+        "Here is the regression run summary from the current dashboard selection "
+        "(live QI data — not from Cursor cloud):\n\n"
+        f"{ctx}\n\n"
+        f"_Asked: {question}_"
+    )
+
+
+_CHAT_ATTACH_PENDING = {}
+_CHAT_ATTACH_LOCK = threading.Lock()
+_CHAT_ATTACH_TTL = 15 * 60
+_CHAT_ATTACH_CAP = 50
+
+
+def _remember_chat_attach(username, rag_result, tag):
+    if not username or not isinstance(rag_result, dict):
+        return
+    test_ids = rag_result.get("test_ids") or []
+    key = rag_result.get("attach_key") or ""
+    if not test_ids or not key:
+        return
+    with _CHAT_ATTACH_LOCK:
+        _CHAT_ATTACH_PENDING[username] = {
+            "expires": time.time() + _CHAT_ATTACH_TTL,
+            "key": key,
+            "test_ids": list(test_ids)[:_CHAT_ATTACH_CAP],
+            "comments_by_id": rag_result.get("comments_by_id") or {},
+            "existing_tickets_by_id": rag_result.get("existing_tickets_by_id") or {},
+            "tag": tag,
+            "component": rag_result.get("component") or "",
+        }
+
+
+def _peek_chat_attach(username):
+    if not username:
+        return None
+    with _CHAT_ATTACH_LOCK:
+        rec = _CHAT_ATTACH_PENDING.get(username)
+        if not rec:
+            return None
+        if rec.get("expires", 0) < time.time():
+            _CHAT_ATTACH_PENDING.pop(username, None)
+            return None
+        return rec
+
+
+def _clear_chat_attach(username):
+    if not username:
+        return
+    with _CHAT_ATTACH_LOCK:
+        _CHAT_ATTACH_PENDING.pop(username, None)
+
+
+def _sync_failed_analysis_tickets(tag, updates):
+    """updates: {testcase_id: [tickets]}"""
+    if not tag or not updates:
+        return
+    data = load_failed_analysis_results(tag)
+    if not isinstance(data, dict):
+        return
+    rows = data.get("results") or []
+    changed = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        tid = str(row.get("testcase_id") or "").strip()
+        if tid in updates:
+            row["jira_tickets"] = updates[tid]
+            changed = True
+    if changed:
+        try:
+            save_failed_analysis_results(tag, data)
+            _rag_clear_corpus_cache()
+        except Exception as exc:
+            logger.warning("[cursor-ai-chat] could not persist FA ticket attach: %s", exc)
+
+
+def _apply_chat_attach(username, key, test_ids, comments_by_id, existing_tickets_by_id, tag):
+    key = (key or "").strip()
+    ids = [str(t).strip() for t in (test_ids or []) if str(t).strip()][:_CHAT_ATTACH_CAP]
+    if not key or not ids:
+        return "Nothing to attach. Ask to create a ticket for a component first."
+    if not username:
+        return "Log in, then reply `attach %s` to link it on Failed Analysis rows." % key
+    user_auth = _get_user_credentials(username)
+    if not user_auth:
+        return (
+            "Session credentials expired. Re-login, then reply `attach %s` "
+            "to Bulk-Update those tests."
+        ) % key
+    ok = 0
+    fail = 0
+    synced = {}
+    for tid in ids:
+        existing = list(existing_tickets_by_id.get(tid) or [])
+        merged = []
+        seen = set()
+        for t in existing + [key]:
+            nt = str(t).strip()
+            if not nt or nt.upper() in seen:
+                continue
+            seen.add(nt.upper())
+            merged.append(nt)
+        comment = comments_by_id.get(tid) or ""
+        success, err = _put_jita_triage_tickets(tid, comment, merged, username)
+        if success:
+            ok += 1
+            synced[tid] = merged
+        else:
+            fail += 1
+            logger.warning("[cursor-ai-chat] attach %s on %s failed: %s", key, tid, err)
+    if synced:
+        _sync_failed_analysis_tickets(tag, synced)
+    _clear_chat_attach(username)
+    browse = "https://jira.nutanix.com/browse/%s" % key
+    return (
+        "Attached **%s** the same way Failed Analysis Bulk Update does "
+        "(%s succeeded, %s failed). [%s](%s)"
+    ) % (key, ok, fail, key, browse)
+
+
+def _try_chat_ticket_attach(question, tag, username):
+    """Handle `yes` / `attach KEY` using the last create-ticket offer."""
+    intent = _rag_classify_intent(question)
+    key, is_confirm = _rag_parse_attach_request(question)
+    pending = _peek_chat_attach(username)
+    if intent == INTENT_CONFIRM_ATTACH or (is_confirm and not key):
+        if not pending:
+            return None
+        key = key or pending.get("key") or ""
+    elif intent == INTENT_ATTACH_TICKET:
+        if not key:
+            return None
+        if not pending:
+            return (
+                "No pending attach. Ask **create a ticket for the <component> issue** first "
+                "so I can reuse the existing Failed Analysis key, then `attach %s`."
+            ) % key
+    else:
+        return None
+    use_key = key or ((pending or {}).get("key") or "")
+    if not use_key:
+        return None
+    if not pending or (pending.get("key") or "").upper() != use_key.upper():
+        return (
+            "No pending attach for **%s**. Ask **create a ticket for the <component> issue** "
+            "first so I can reuse the existing Failed Analysis key."
+        ) % use_key
+    return _apply_chat_attach(
+        username,
+        use_key,
+        pending.get("test_ids") or [],
+        pending.get("comments_by_id") or {},
+        pending.get("existing_tickets_by_id") or {},
+        pending.get("tag") or tag,
+    )
+
+
+def _rag_rdm_pattern_dicts():
+    """Raw RDM pattern dicts for RAG (compiled regex objects are not useful text)."""
+    try:
+        path = _rdm_patterns_file()
+        if path and os.path.exists(path):
+            data = _read_rdm_patterns_json(path)
+            return data.get("patterns") or []
+    except Exception as e:
+        logger.warning("[cursor-ai-rag] could not load RDM patterns: %s", e)
+    return []
+
+
+def _try_cursor_ai_rag_answer(question, regression_context="", tag=None):
+    """Retrieve from local RegX JSON; LLM only for synthesis. None = fall through."""
+    try:
+        return _rag_answer_chat_question(
+            question,
+            tag=tag,
+            regression_context=regression_context,
+            loaders={
+                "failed_analysis": load_failed_analysis_results,
+                "triage_accuracy": load_triage_accuracy_data,
+                "handover": _load_handover_records,
+                "deprecation": _load_deprecation_records,
+                "rdm_patterns": _rag_rdm_pattern_dicts,
+            },
+            call_ai=_call_ai_chat,
+        )
+    except Exception as e:
+        logger.warning("[cursor-ai-rag] answer failed: %s", e)
+        return None
+
+
+def _local_or_rag_chat_reply(question, regression_context="", tag=None, task_ids=None, username=None):
+    """Answer from component scan / QI summary / RAG. Never dump QI for unrelated asks.
+
+    Returns (reply, source) or (None, None) to fall through to Cursor Bridge.
+    """
+    attach_reply = _try_chat_ticket_attach(question, tag, username)
+    if attach_reply:
+        return attach_reply, "local"
+    if _is_regression_data_question(question):
+        reply = _try_local_regression_answer(
+            question,
+            regression_context=regression_context,
+            tag=tag,
+            task_ids=task_ids,
+        )
+        if reply:
+            return reply, "regression_context"
+    rag_result = _try_cursor_ai_rag_answer(
+        question,
+        regression_context=regression_context,
+        tag=tag,
+    )
+    if rag_result and rag_result.get("reply"):
+        _remember_chat_attach(username, rag_result, tag)
+        return rag_result["reply"], rag_result.get("source") or "rag"
+    return None, None
+
+
+def _try_local_regression_answer(question, regression_context="", tag=None, task_ids=None):
+    """
+    Prefer component-scoped live scan; otherwise overall QI summary.
+    Returns reply string or None if we should not short-circuit.
+    """
+    parsed_tag, parsed_ids = _parse_scope_from_context(regression_context)
+    use_tag = (tag or "").strip() or parsed_tag
+    use_ids = list(task_ids or []) or parsed_ids
+
+    if _is_component_test_question(question):
+        return _answer_component_test_question(
+            question,
+            tag=None if use_ids else use_tag,
+            task_ids=use_ids or None,
+        )
+    if regression_context and _is_overall_summary_question(question):
+        return _format_regression_context_reply(question, regression_context)
+    return None
+
+
+@app.route("/mcp/regression/cursor-ai/chat-stream", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/chat-stream", methods=["POST"])
+@jwt_required
+def cursor_ai_chat_stream():
+    """Streaming interactive chat (SSE) via Cursor Bridge — tokens arrive as generated."""
+    body = request.get_json(force=True) or {}
+    messages = body.get("messages", [])
+    mode = body.get("mode", "ask")
+    model = body.get("model", "")
+    mcp_servers = body.get("mcp_servers", [])
+    agent_id = body.get("agent_id") or ""
+    session_id = body.get("session_id") or ""
+    regression_context = body.get("regression_context") or ""
+    scope_tag = (body.get("tag") or "").strip() or None
+    scope_task_ids = body.get("task_ids") or []
+    if isinstance(scope_task_ids, str):
+        scope_task_ids = [t.strip() for t in scope_task_ids.split(",") if t.strip()]
+    elif not isinstance(scope_task_ids, list):
+        scope_task_ids = []
+    else:
+        scope_task_ids = [str(t).strip() for t in scope_task_ids if str(t).strip()]
+
+    if not messages:
+        return jsonify({"error": "messages are required"}), 400
+    if mode not in MODE_SYSTEM_PROMPTS:
+        return jsonify({"error": f"Invalid mode: {mode}. Use: agent, plan, debug, ask"}), 400
+
+    last_user_msg = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user_msg = (m.get("content") or "").strip()
+            break
+    if not last_user_msg:
+        return jsonify({"error": "No user message for chat"}), 400
+
+    # Local-first: component counts / QI summary / RAG over failed analysis etc.
+    # Runs for every mode so Agent does not dump the whole QI blob for unrelated asks.
+    local_reply, local_source = _local_or_rag_chat_reply(
+        last_user_msg,
+        regression_context=regression_context,
+        tag=scope_tag,
+        task_ids=scope_task_ids,
+        username=_current_username(),
+    )
+    if local_reply:
+        return Response(
+            stream_with_context(_sse_chat_done(
+                local_reply,
+                agent_id,
+                session_id,
+                source=local_source or "local",
+            )),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    username = _current_username()
+    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+    if not cursor_api_key:
+        return jsonify({
+            "error": "Cursor API key required for chat. Add it under Settings → API Keys.",
+            "require_key_setup": True,
+        }), 403
+
+    system_prompt = _build_chat_system_prompt(mode, mcp_servers)[:2500]
+
+    def gen():
+        try:
+            with requests.post(
+                f"{CURSOR_BRIDGE_URL}/chat-stream",
+                json={
+                    "message": last_user_msg,
+                    "system_prompt": system_prompt,
+                    "regression_context": (regression_context or "")[:4000],
+                    "model": model,
+                    "agent_id": agent_id,
+                    "session_id": session_id,
+                    "cursor_api_key": cursor_api_key,
+                },
+                stream=True,
+                timeout=600,
+            ) as bridge_resp:
+                if bridge_resp.status_code != 200:
+                    try:
+                        err = (bridge_resp.json() or {}).get("error") or bridge_resp.text
+                    except Exception:
+                        err = bridge_resp.text
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'Bridge error: {err}'})}\n\n".encode()
+                    return
+                saw_error = False
+                for chunk in bridge_resp.iter_content(chunk_size=None):
+                    if not chunk:
+                        continue
+                    text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, (bytes, bytearray)) else str(chunk)
+                    if '"type": "error"' in text or '"type":"error"' in text:
+                        saw_error = True
+                    yield chunk
+                    if saw_error:
+                        return
+        except requests.exceptions.ConnectionError:
+            msg = (
+                f"Cursor Bridge is not reachable at {CURSOR_BRIDGE_URL}. "
+                "Start it with: cd cursor-bridge && npm start"
+            )
+            yield f"data: {json.dumps({'type': 'error', 'message': msg})}\n\n".encode()
+        except requests.exceptions.Timeout:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Chat timed out (>600s).'})}\n\n".encode()
+        except Exception as stream_exc:
+            logger.error("[cursor-ai-chat-stream] error: %s", stream_exc)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(stream_exc)})}\n\n".encode()
+
+    return Response(
+        stream_with_context(gen()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.route("/mcp/regression/cursor-ai/chat", methods=["POST"])
 @app.route("/api/mcp/regression/cursor-ai/chat", methods=["POST"])
 @jwt_required
@@ -20815,9 +21286,12 @@ def cursor_ai_chat():
     try:
         body = request.get_json(force=True) or {}
         messages = body.get("messages", [])
-        mode = body.get("mode", "agent")
+        mode = body.get("mode", "ask")
         model = body.get("model", "claude-sonnet-4.6-high")
         mcp_servers = body.get("mcp_servers", [])
+        agent_id = body.get("agent_id") or ""
+        session_id = body.get("session_id") or ""
+        regression_context = body.get("regression_context") or ""
 
         if not messages:
             return jsonify({"error": "messages are required"}), 400
@@ -20825,28 +21299,46 @@ def cursor_ai_chat():
         if mode not in MODE_SYSTEM_PROMPTS:
             return jsonify({"error": f"Invalid mode: {mode}. Use: agent, plan, debug, ask"}), 400
 
-        system_prompt = MODE_SYSTEM_PROMPTS[mode]
+        last_user_msg = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                last_user_msg = (m.get("content") or "").strip()
+                break
+        scope_tag = (body.get("tag") or "").strip() or None
 
-        if mcp_servers:
-            active_tools = []
-            for sid in mcp_servers:
-                cfg = MCP_SERVER_CONFIGS.get(sid)
-                if cfg:
-                    active_tools.append(f"- {sid}: {cfg['description']}")
-            if active_tools:
-                system_prompt += (
-                    "\n\nYou have access to the following MCP tools/servers:\n"
-                    + "\n".join(active_tools)
-                    + "\n\nWhen answering, reference which tools you would use and provide specific, "
-                    "data-driven insights where possible."
-                )
+        if last_user_msg:
+            local_reply, local_source = _local_or_rag_chat_reply(
+                last_user_msg,
+                regression_context=regression_context,
+                tag=scope_tag,
+                task_ids=body.get("task_ids") or [],
+                username=_current_username(),
+            )
+            if local_reply:
+                return jsonify({
+                    "success": True,
+                    "reply": local_reply,
+                    "mode": mode,
+                    "model": model,
+                    "source": local_source or "local",
+                    "tools_used": [],
+                })
+
+        system_prompt = _build_chat_system_prompt(mode, mcp_servers)
 
         # Prefer Cursor Bridge when the user has a Cursor API key — Nutanix AI
         # enterprise key is frequently expired/unauthorized in local/dev setups.
         username = _current_username()
         cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
         if cursor_api_key:
-            bridge_body, bridge_status = _cursor_bridge_chat(messages, system_prompt, mode)
+            bridge_body, bridge_status = _cursor_bridge_chat(
+                messages,
+                system_prompt,
+                mode,
+                agent_id=agent_id,
+                session_id=session_id,
+                regression_context=regression_context,
+            )
             if bridge_body.get("success"):
                 return jsonify(bridge_body), bridge_status
             logger.warning(
@@ -20857,6 +21349,14 @@ def cursor_ai_chat():
             bridge_body, bridge_status = None, None
 
         chat_messages = [{"role": "system", "content": system_prompt}]
+        if regression_context:
+            chat_messages.append({
+                "role": "system",
+                "content": (
+                    "Current regression run data (authoritative — use for counts/metrics):\n"
+                    + str(regression_context)[:4000]
+                ),
+            })
         for msg in messages:
             role = msg.get("role", "user")
             if role in ("user", "assistant"):
@@ -20912,16 +21412,21 @@ def cursor_ai_chat():
             if isinstance(e, urllib.error.HTTPError):
                 error_body = e.read().decode() if e.fp else ""
                 logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
-            else:
-                logger.error(f"[cursor-ai-chat] Nutanix AI unreachable ({e.reason})")
-
-            if cursor_api_key and bridge_body is not None:
-                return jsonify(bridge_body), bridge_status
-
-            # No Cursor key — bridge call returns require_key_setup
-            fb_body, fb_status = _cursor_bridge_chat(messages, system_prompt, mode)
-            return jsonify(fb_body), fb_status
-
+                # Fall back to Cursor Bridge if Nutanix AI failed and we haven't tried yet
+                if not cursor_api_key:
+                    return jsonify({
+                        "error": (
+                            "Nutanix AI failed and no Cursor API key is configured. "
+                            "Add Cursor API key under Settings → API Keys."
+                        ),
+                        "require_key_setup": True,
+                        "raw_error": error_body[:300],
+                    }), 502
+                if bridge_body and bridge_body.get("error"):
+                    return jsonify(bridge_body), bridge_status or 502
+                return jsonify({"error": f"AI API error: {e.code}", "raw_error": error_body[:300]}), 502
+            logger.error(f"[cursor-ai-chat] URL error: {e}")
+            return jsonify({"error": f"AI API unreachable: {e}"}), 502
     except Exception as e:
         logger.error(f"Error in cursor-ai chat: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -20960,6 +21465,107 @@ def _parse_task_id_inputs(text):
     return parse_task_id_inputs(text)
 
 
+def _extend_unique(dest, items):
+    for item in items or []:
+        if item and item not in dest:
+            dest.append(item)
+
+
+def _query_jita_agave_test_results(raw_query, limit=50, sort_field="-start_time", timeout=90):
+    """Fetch agave_test_results rows (GET, then POST fallback). Returns a list of result dicts."""
+    raw_items = []
+    try:
+        params = {
+            "start": 0,
+            "limit": int(limit),
+            "sort": sort_field,
+            "raw_query": json.dumps(raw_query),
+        }
+        resp = requests.get(
+            f"{JITA_BASE}/agave_test_results",
+            params=params,
+            auth=JITA_SVC_AUTH,
+            verify=False,
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            raw_items = (resp.json() or {}).get("data", []) or []
+            logger.info(
+                "[jita-analysis] GET agave_test_results returned %s items",
+                len(raw_items),
+            )
+    except Exception as exc:
+        logger.warning("[jita-analysis] GET agave_test_results failed: %s", exc)
+
+    if raw_items:
+        return raw_items
+
+    try:
+        payload = {
+            "raw_query": raw_query,
+            "start": 0,
+            "limit": int(limit),
+            "sort": sort_field,
+            "merge": False,
+        }
+        resp2 = requests.post(
+            f"{JITA_BASE}/reports/agave_test_results",
+            json=payload,
+            auth=JITA_SVC_AUTH,
+            verify=False,
+            timeout=timeout,
+        )
+        if resp2.status_code == 200:
+            data2 = resp2.json() or {}
+            raw_items = data2.get("data", []) or []
+            logger.info(
+                "[jita-analysis] POST agave_test_results returned %s items",
+                len(raw_items),
+            )
+    except Exception as exc:
+        logger.warning("[jita-analysis] POST agave_test_results failed: %s", exc)
+    return raw_items
+
+
+def _fetch_handover_runs_for_test_name(test_name, branch, limit=HANDOVER_HISTORY_WINDOW):
+    """Last-N JITA runs for a test on ``branch``. Exact name, then unique suffix/substring.
+
+    Returns (resolved_name, runs). Raises AmbiguousTestNameError when several full names match.
+    """
+    test_name = (test_name or "").strip()
+    branch = (branch or "").strip()
+    if not test_name:
+        return "", []
+
+    fetch_limit = max(int(limit) * 4, 20)
+    exact_query = {"test.name": test_name}
+    if branch:
+        exact_query["system_under_test.branch"] = branch
+    items = filter_runs_for_branch(
+        _query_jita_agave_test_results(exact_query, limit=fetch_limit),
+        branch,
+    )
+    resolved, runs, ambiguous = pick_runs_for_test_query(test_name, items)
+    if ambiguous:
+        raise AmbiguousTestNameError(test_name, ambiguous)
+    if runs:
+        return resolved or test_name, select_newest_runs(runs, limit)
+
+    regex_query = {"test.name": {"$regex": re.escape(test_name), "$options": "i"}}
+    if branch:
+        regex_query["system_under_test.branch"] = branch
+    items = filter_runs_for_branch(
+        _query_jita_agave_test_results(regex_query, limit=50),
+        branch,
+    )
+    resolved, runs, ambiguous = pick_runs_for_test_query(test_name, items)
+    if ambiguous:
+        raise AmbiguousTestNameError(test_name, ambiguous)
+    if runs:
+        return resolved or test_name, select_newest_runs(runs, limit)
+    return test_name, []
+
+
 # ======================================================
 # Jira Helper Functions (for Handover)
 # ======================================================
@@ -20991,16 +21597,20 @@ def _named_jira_field(value, default="Unknown"):
 
 
 def _extract_jira_ticket_detail(jira_data):
-    """Map a Jira issue payload to status / issue_type / categorized bug_type."""
+    """Map a Jira issue payload to status / issue_type / categorized bug_type / created."""
     if not jira_data:
-        return {"status": "N/A", "issue_type": "N/A", "bug_type": None}
+        return {"status": "N/A", "issue_type": "N/A", "bug_type": None, "created": None}
     fields = jira_data.get("fields") or {}
     issue_type = _named_jira_field(fields.get("issuetype"))
     status = _named_jira_field(fields.get("status"))
+    created = fields.get("created") or None
+    if created is not None:
+        created = str(created).strip() or None
     return {
         "status": status,
         "issue_type": issue_type,
         "bug_type": _categorize_bug_type_from_issuetype(issue_type),
+        "created": created,
     }
 
 
@@ -21206,7 +21816,7 @@ def _aggregate_jita_test_cases(
 @app.route("/mcp/regression/jita-analysis", methods=["GET", "POST"])
 @jwt_required
 def jita_analysis():
-    """Fetch by tag (same as Triage), or by JITA URL(s) / task_ids. Returns test cases with aggregated pass/fail."""
+    """Fetch by tag, JITA URL(s) / task IDs, and/or testcase names (last 5 runs on branch)."""
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
@@ -21216,6 +21826,8 @@ def jita_analysis():
     task_ids_param = ""
     tag_param = ""
     input_param = ""
+    branch_param = ""
+    explicit_test_names = None
     min_passes = 1
     use_sliding = True
 
@@ -21227,9 +21839,15 @@ def jita_analysis():
             urls_param = [s.strip() for s in urls_param.split("\n") if s.strip()]
         else:
             urls_param = [(u or "").strip() for u in urls_param if (u or "").strip()]
-        task_ids_param = (data.get("task_ids") or "").strip()
+        raw_tids = data.get("task_ids") or ""
+        if isinstance(raw_tids, (list, tuple)):
+            task_ids_param = "\n".join(str(x) for x in raw_tids if str(x).strip())
+        else:
+            task_ids_param = str(raw_tids).strip()
         tag_param = (data.get("tag") or "").strip()
         input_param = (data.get("input") or "").strip()
+        branch_param = (data.get("branch") or "").strip()
+        explicit_test_names = data.get("test_names")
         min_passes = int(data.get("min_passes_for_success") or 1)
         if "use_sliding_eligibility" in data:
             use_sliding = bool(data.get("use_sliding_eligibility"))
@@ -21240,6 +21858,8 @@ def jita_analysis():
         task_ids_param = request.args.get("task_ids", "").strip()
         tag_param = request.args.get("tag", "").strip()
         input_param = request.args.get("input", "").strip()
+        branch_param = request.args.get("branch", "").strip()
+        explicit_test_names = request.args.getlist("test_names") or request.args.get("test_names")
         try:
             min_passes = int(request.args.get("min_passes_for_success") or 1)
         except Exception:
@@ -21248,6 +21868,7 @@ def jita_analysis():
             use_sliding = str(request.args.get("use_sliding_eligibility")).lower() in ("1", "true", "yes")
 
     task_ids = []
+    test_names = []
     if tag_param:
         logger.info(f"[START] JITA Analysis (by tag) | tag={tag_param}")
         try:
@@ -21258,40 +21879,92 @@ def jita_analysis():
             logger.error(f"JITA Analysis by tag failed: {e}")
             return jsonify({"error": str(e)}), 500
 
-    if not task_ids and urls_param:
-        task_ids = _parse_task_id_inputs(urls_param)
+    for blob in (urls_param, input_param, url, task_ids_param):
+        if not blob:
+            continue
+        parsed = parse_handover_input(blob)
+        _extend_unique(task_ids, parsed.get("task_ids"))
+        _extend_unique(test_names, parsed.get("test_names"))
+    _extend_unique(test_names, normalize_test_name_list(explicit_test_names))
 
-    if not task_ids and input_param:
-        task_ids = _parse_task_id_inputs(input_param)
-
-    if not task_ids and url:
-        task_ids = _parse_task_id_inputs(url)
-
-    if not task_ids and task_ids_param:
-        task_ids = _parse_task_id_inputs(task_ids_param)
-
-    if not task_ids:
+    if test_names and not branch_param:
         return jsonify({
-            "error": "Provide JITA URL(s) (e.g. https://jita.../results?task_ids=...) or task ID(s) (24-char hex, comma/space/newline separated)"
+            "error": "Enter Branch so the last 5 runs on that branch can be used for testcase-name lookup."
         }), 400
 
-    logger.info(f"[START] JITA Analysis | task_ids={len(task_ids)} | min_passes={min_passes} | sliding={use_sliding}")
+    if not task_ids and not test_names:
+        return jsonify({
+            "error": (
+                "Provide JITA URL(s) (e.g. https://jita.../results?task_ids=...), "
+                "task ID(s) (24-char hex, comma/space/newline separated), "
+                "and/or testcase name(s) (comma/newline separated) with Branch"
+            )
+        }), 400
+
+    input_task_ids = list(task_ids)
+    if input_task_ids and test_names:
+        lookup_mode = "mixed"
+    elif test_names:
+        lookup_mode = "test_names"
+    else:
+        lookup_mode = "task_ids"
+
+    logger.info(
+        "[START] JITA Analysis | task_ids=%s | test_names=%s | branch=%s | min_passes=%s | sliding=%s",
+        len(task_ids), len(test_names), branch_param or "-", min_passes, use_sliding,
+    )
     try:
-        try:
-            test_data = fetch_test_results_batch_with_pagination(task_ids, timeout=180, merge=False)
-            logger.info(f"JITA Analysis | fetched {len(test_data)} test results")
-        except Exception as fetch_err:
-            err_msg = str(fetch_err)
-            if "timeout" in err_msg.lower() or "connection" in err_msg.lower() or "network" in err_msg.lower() or "resolve" in err_msg.lower():
+        test_data = []
+        if input_task_ids:
+            try:
+                test_data = fetch_test_results_batch_with_pagination(input_task_ids, timeout=180, merge=False)
+                logger.info(f"JITA Analysis | fetched {len(test_data)} test results from task ids")
+            except Exception as fetch_err:
+                err_msg = str(fetch_err)
+                if "timeout" in err_msg.lower() or "connection" in err_msg.lower() or "network" in err_msg.lower() or "resolve" in err_msg.lower():
+                    return jsonify({
+                        "error": f"Network error while fetching JITA data: {err_msg}. Please check your VPN connection and ensure JITA server is accessible.",
+                        "task_ids": task_ids,
+                        "generated_at": datetime.utcnow().isoformat()
+                    }), 500
+                raise
+
+        missing_names = []
+        if test_names:
+            try:
+                for name in test_names:
+                    resolved, runs = _fetch_handover_runs_for_test_name(
+                        name, branch_param, limit=HANDOVER_HISTORY_WINDOW
+                    )
+                    if not runs:
+                        missing_names.append(resolved or name)
+                        continue
+                    test_data.extend(runs)
+                    for run in runs:
+                        tid = get_task_id_from_run(run)
+                        if not tid:
+                            oid = run.get("_id")
+                            if isinstance(oid, dict):
+                                tid = oid.get("$oid")
+                            elif oid:
+                                tid = str(oid)
+                        if tid:
+                            _extend_unique(task_ids, [tid])
+            except AmbiguousTestNameError as amb:
                 return jsonify({
-                    "error": f"Network error while fetching JITA data: {err_msg}. Please check your VPN connection and ensure JITA server is accessible.",
-                    "task_ids": task_ids,
-                    "generated_at": datetime.utcnow().isoformat()
-                }), 500
-            raise
+                    "error": str(amb),
+                    "query": amb.query,
+                    "candidates": amb.candidates,
+                }), 400
 
         task_metadata = []
         task_id_to_ts = {}
+        for run in test_data:
+            tid = get_task_id_from_run(run)
+            ts = run_timestamp_key(run)
+            if tid and ts and not task_id_to_ts.get(tid):
+                task_id_to_ts[tid] = ts
+
         for tid in task_ids:
             try:
                 agave = fetch_agave_task(tid)
@@ -21306,22 +21979,25 @@ def jita_analysis():
                     updated_at = str(val) if val and not isinstance(val, dict) else ""
                 else:
                     updated_at = str(raw_ts) if raw_ts else ""
-                task_id_to_ts[tid] = str(updated_at)
+                if updated_at:
+                    task_id_to_ts[tid] = str(updated_at)
+                elif tid not in task_id_to_ts:
+                    task_id_to_ts[tid] = ""
                 if len(task_metadata) < 20:
                     task_metadata.append({
                         "task_id": tid,
                         "status": agave.get("status"),
                         "label": agave.get("label"),
-                        "branch": test_branch or framework_branch,
+                        "branch": test_branch or framework_branch or branch_param or None,
                         "test_result_count": agave.get("test_result_count", {}),
                         "emails": agave.get("emails", []),
                         "test_framework_metadata": tfm,
                         "container_details": agave.get("container_details"),
-                        "updated_at": updated_at,
+                        "updated_at": updated_at or task_id_to_ts.get(tid, ""),
                     })
             except Exception as e:
                 logger.warning(f"Could not fetch agave_tasks for {tid}: {e}")
-                task_id_to_ts[tid] = ""
+                task_id_to_ts.setdefault(tid, "")
 
         def _ts_key(tid):
             v = task_id_to_ts.get(tid, "")
@@ -21341,6 +22017,14 @@ def jita_analysis():
             sorted_task_ids=sorted_task_ids,
             use_sliding_eligibility=use_sliding,
         )
+        present = {(tc.get("test_name") or "") for tc in test_cases}
+        for name in missing_names:
+            if name and name not in present:
+                test_cases.append(empty_handover_test_case(name))
+                present.add(name)
+                summary["total"] = summary.get("total", 0) + 1
+                summary["failed"] = summary.get("failed", 0) + 1
+                all_tests_passed = False
         logger.info(f"[END] JITA Analysis | all_passed={all_tests_passed} | time={time.time() - start:.2f}s")
         return jsonify({
             "task_ids": task_ids,
@@ -21357,8 +22041,18 @@ def jita_analysis():
             "total_passed": total_passed,
             "min_passes_for_success": min_passes,
             "use_sliding_eligibility": use_sliding,
+            "lookup_mode": lookup_mode,
+            "history_window": HANDOVER_HISTORY_WINDOW if test_names else None,
+            "branch": branch_param or None,
+            "test_names": test_names or None,
             "generated_at": datetime.utcnow().isoformat(),
         })
+    except AmbiguousTestNameError as amb:
+        return jsonify({
+            "error": str(amb),
+            "query": amb.query,
+            "candidates": amb.candidates,
+        }), 400
     except Exception as e:
         logger.error(f"Error in JITA analysis: {e}")
         import traceback
@@ -21409,7 +22103,22 @@ def _save_handover_records(records):
         logger.error(f"Could not save handover records: {e}")
 
 
-def _add_handover_records(test_names, tickets, by_whom, branch="", lst_file="", test_bug_types=None, test_bug_tickets=None, handover_tickets=None):
+def _add_handover_records(
+    test_names,
+    tickets,
+    by_whom,
+    branch="",
+    lst_file="",
+    test_bug_types=None,
+    test_bug_tickets=None,
+    handover_tickets=None,
+    notes="",
+    reviewers=None,
+    lst_files=None,
+    cr_status="",
+    cr_subject="",
+    cr_description="",
+):
     """Add handover records for test names"""
     records = _load_handover_records()
     now = datetime.utcnow().isoformat()
@@ -21417,6 +22126,14 @@ def _add_handover_records(test_names, tickets, by_whom, branch="", lst_file="", 
     test_bug_types = test_bug_types if isinstance(test_bug_types, dict) else {}
     test_bug_tickets = test_bug_tickets if isinstance(test_bug_tickets, dict) else {}
     handover_tickets_list = handover_tickets if isinstance(handover_tickets, list) else []
+    reviewers_list = [str(r).strip() for r in (reviewers or []) if str(r).strip()] if isinstance(reviewers, list) else []
+    lst_files_list = [str(x).strip() for x in (lst_files or []) if str(x).strip()] if isinstance(lst_files, list) else []
+    if lst_file and lst_file not in lst_files_list:
+        lst_files_list.append(lst_file)
+    notes_text = (notes or "").strip()
+    cr_status_val = (cr_status or "").strip()
+    cr_subject_val = (cr_subject or "").strip()
+    cr_description_val = (cr_description or "").strip()
     for test_name in test_names:
         if not (test_name and test_name.strip()):
             continue
@@ -21436,8 +22153,20 @@ def _add_handover_records(test_names, tickets, by_whom, branch="", lst_file="", 
             "handover_date": now,
             "by_whom": by_whom or "unknown",
             "branch": branch,
-            "lst_file": lst_file,
+            "lst_file": lst_file or (lst_files_list[0] if lst_files_list else ""),
         }
+        if lst_files_list:
+            rec["lst_files"] = lst_files_list
+        if reviewers_list:
+            rec["reviewers"] = reviewers_list
+        if notes_text:
+            rec["notes"] = notes_text
+        if cr_status_val:
+            rec["cr_status"] = cr_status_val
+        if cr_subject_val:
+            rec["cr_subject"] = cr_subject_val
+        if cr_description_val:
+            rec["cr_description"] = cr_description_val
         if test_name in test_bug_types and test_bug_types[test_name]:
             rec["bug_type"] = test_bug_types[test_name]
         records.append(rec)
@@ -21445,25 +22174,84 @@ def _add_handover_records(test_names, tickets, by_whom, branch="", lst_file="", 
     logger.info(f"[HANDOVER-RECORD] Saved {len(test_names)} record(s), by {by_whom}")
 
 
+def _record_actor_from_jwt():
+    """(email, username) of the logged-in user for record ACL."""
+    return _personal_identity_from_jwt()
+
+
+def _stamp_record_by_whom():
+    """Prefer JWT email, then username. Never trust the client body."""
+    email, username = _record_actor_from_jwt()
+    return (email or username or "").strip() or "unknown"
+
+
+def _record_can_delete(record):
+    email, username = _record_actor_from_jwt()
+    return can_delete_record(record, username, email, extra_admins=JP_DELETE_ADMIN_USERS)
+
+
+def _with_can_delete(records):
+    """Copy rows and attach a non-persisted can_delete flag."""
+    out = []
+    for r in records or []:
+        if not isinstance(r, dict):
+            continue
+        row = dict(r)
+        row["can_delete"] = bool(_record_can_delete(r))
+        out.append(row)
+    return out
+
+
+def _forbidden_record_delete():
+    return jsonify({
+        "success": False,
+        "error": "You can only delete records you created.",
+        "code": "FORBIDDEN",
+    }), 403
+
+
 def _delete_handover_record(test_name, handover_date, lst_file):
     """Delete a handover record"""
     records = _load_handover_records()
-    lst = (lst_file or "").strip()
-    date_str = (handover_date or "").strip()
-    name = (test_name or "").strip()
-    for i, r in enumerate(records):
-        if (r.get("test_name") or "").strip() == name and (r.get("handover_date") or "").strip() == date_str and (r.get("lst_file") or "").strip() == lst:
-            records.pop(i)
-            _save_handover_records(records)
-            logger.info(f"[HANDOVER-RECORD] Deleted record: {name} @ {date_str}")
-            return True
-    return False
+    remaining, removed = delete_record_from_list(
+        records, test_name, handover_date, lst_file, "handover_date"
+    )
+    if removed:
+        _save_handover_records(remaining)
+        logger.info("[HANDOVER-RECORD] Deleted record: %s @ %s", test_name, handover_date)
+    return removed
+
+
+def _delete_deprecation_record(test_name, deprecation_date, lst_file):
+    """Delete a deprecation record"""
+    records = _load_deprecation_records()
+    remaining, removed = delete_record_from_list(
+        records, test_name, deprecation_date, lst_file, "deprecation_date"
+    )
+    if removed:
+        _save_deprecation_records(remaining)
+        logger.info("[DEPRECATION-RECORD] Deleted record: %s @ %s", test_name, deprecation_date)
+    return removed
+
+
+def _record_list_queries_from_request():
+    """Optional q from GET args or POST body. Empty means list all."""
+    parts = request.args.getlist("q")
+    if not parts:
+        q0 = (request.args.get("q") or request.args.get("test_name") or "").strip()
+        parts = [q0] if q0 else []
+    if not parts and request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        q_from_body = data.get("q") or data.get("queries") or data.get("test_names")
+        if q_from_body is not None:
+            parts = q_from_body
+    return parse_record_search_queries(parts)
 
 
 @app.route("/mcp/regression/handover-record", methods=["POST"])
 @jwt_required
 def handover_record():
-    """Create a handover record"""
+    """Create a handover record (Gerrit CR push deferred — data + notes only)."""
     data = request.get_json() or {}
     test_names = data.get("test_names", [])
     tickets = data.get("tickets", [])
@@ -21471,13 +22259,47 @@ def handover_record():
     test_bug_types = data.get("test_bug_types") or {}
     test_bug_tickets = data.get("test_bug_tickets", {})
     handover_tickets = data.get("handover_tickets", [])
-    by_whom = (data.get("by_whom") or data.get("user_email") or data.get("user_name") or "").strip()
+    by_whom = _stamp_record_by_whom()
     branch = (data.get("branch") or "").strip()
     lst_file = (data.get("lst_file") or "").strip()
+    lst_files = data.get("lst_files") or []
+    reviewers = data.get("reviewers") or []
+    notes = (data.get("notes") or "").strip()
+    cr_status = (data.get("cr_status") or "").strip()
+    cr_subject = (data.get("cr_subject") or "").strip()
+    cr_description = (data.get("cr_description") or "").strip()
     if not test_names:
         return jsonify({"error": "test_names is required"}), 400
-    _add_handover_records(test_names, test_tickets if test_tickets else tickets, by_whom or "unknown", branch, lst_file, test_bug_types=test_bug_types, test_bug_tickets=test_bug_tickets, handover_tickets=handover_tickets)
-    return jsonify({"success": True, "message": "Recorded handover for %s test(s)." % len(test_names), "generated_at": datetime.utcnow().isoformat()})
+    if not notes:
+        notes = (
+            "Gerrit push temporarily disabled. Handover data saved; "
+            "create LST CR manually later."
+        )
+    if not cr_status:
+        cr_status = "pending_manual"
+    _add_handover_records(
+        test_names,
+        test_tickets if test_tickets else tickets,
+        by_whom or "unknown",
+        branch,
+        lst_file,
+        test_bug_types=test_bug_types,
+        test_bug_tickets=test_bug_tickets,
+        handover_tickets=handover_tickets,
+        notes=notes,
+        reviewers=reviewers,
+        lst_files=lst_files,
+        cr_status=cr_status,
+        cr_subject=cr_subject,
+        cr_description=cr_description,
+    )
+    return jsonify({
+        "success": True,
+        "message": "Saved handover for %s test(s). Note: Gerrit CR not created (pending manual)." % len(test_names),
+        "cr_status": cr_status,
+        "notes": notes,
+        "generated_at": datetime.utcnow().isoformat(),
+    })
 
 
 @app.route("/mcp/regression/handover-record-delete", methods=["POST"])
@@ -21490,8 +22312,193 @@ def handover_record_delete():
     lst_file = (data.get("lst_file") or "").strip()
     if not test_name or not handover_date:
         return jsonify({"error": "test_name and handover_date are required"}), 400
+    records = _load_handover_records()
+    match = find_record_in_list(records, test_name, handover_date, lst_file, "handover_date")
+    if match is not None and not _record_can_delete(match):
+        return _forbidden_record_delete()
     removed = _delete_handover_record(test_name, handover_date, lst_file)
     return jsonify({"success": removed, "message": "Record deleted." if removed else "No matching record found.", "generated_at": datetime.utcnow().isoformat()})
+
+
+@app.route("/mcp/regression/handover-records", methods=["GET", "POST"])
+@jwt_required
+def list_handover_records():
+    """List/search saved handover records. Empty q returns all, newest first."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    queries = _record_list_queries_from_request()
+    matches = filter_records_by_query(_load_handover_records(), queries, date_field="handover_date")
+    return jsonify({
+        "q": " ".join(queries),
+        "queries": queries,
+        "results": _with_can_delete(matches),
+        "count": len(matches),
+        "generated_at": datetime.utcnow().isoformat(),
+    })
+
+
+@app.route("/mcp/regression/deprecation-records", methods=["GET", "POST"])
+@jwt_required
+def list_deprecation_records():
+    """List/search saved deprecation records. Empty q returns all, newest first."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    queries = _record_list_queries_from_request()
+    matches = filter_records_by_query(_load_deprecation_records(), queries, date_field="deprecation_date")
+    return jsonify({
+        "q": " ".join(queries),
+        "queries": queries,
+        "results": _with_can_delete(matches),
+        "count": len(matches),
+        "generated_at": datetime.utcnow().isoformat(),
+    })
+
+
+@app.route("/mcp/regression/deprecation-record-delete", methods=["POST"])
+@jwt_required
+def deprecation_record_delete():
+    """Delete a deprecation record."""
+    data = request.get_json() or {}
+    test_name = (data.get("test_name") or "").strip()
+    deprecation_date = (data.get("deprecation_date") or "").strip()
+    lst_file = (data.get("lst_file") or "").strip()
+    if not test_name or not deprecation_date:
+        return jsonify({"error": "test_name and deprecation_date are required"}), 400
+    records = _load_deprecation_records()
+    match = find_record_in_list(records, test_name, deprecation_date, lst_file, "deprecation_date")
+    if match is not None and not _record_can_delete(match):
+        return _forbidden_record_delete()
+    removed = _delete_deprecation_record(test_name, deprecation_date, lst_file)
+    return jsonify({
+        "success": removed,
+        "message": "Record deleted." if removed else "No matching record found.",
+        "generated_at": datetime.utcnow().isoformat(),
+    })
+
+
+def _deprecation_records_path(for_write=False):
+    """Team-scoped pending deprecation file."""
+    env_path = (os.getenv("DEPRECATION_RECORDS_PATH") or "").strip()
+    if env_path:
+        return env_path
+    return _resolve_team_or_legacy_file("deprecation_records.json", for_write=for_write)
+
+
+def _load_deprecation_records():
+    try:
+        path = _deprecation_records_path(for_write=False)
+        parent = os.path.dirname(path)
+        if parent and not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                data = json.load(f)
+                return data.get("records", [])
+    except Exception as e:
+        logger.warning("Could not load deprecation records: %s", e)
+    return []
+
+
+def _save_deprecation_records(records):
+    try:
+        path = _deprecation_records_path(for_write=True)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({"records": records, "updated_at": datetime.utcnow().isoformat()}, f, indent=2)
+    except Exception as e:
+        logger.error("Could not save deprecation records: %s", e)
+
+
+def _add_deprecation_records(
+    test_names,
+    by_whom,
+    branch="",
+    lst_file="",
+    lst_files=None,
+    jira_tickets=None,
+    reviewers=None,
+    notes="",
+    cr_status="",
+    commit_message="",
+):
+    records = _load_deprecation_records()
+    now = datetime.utcnow().isoformat()
+    tickets_list = [str(t).strip() for t in (jira_tickets or []) if str(t).strip()] if isinstance(jira_tickets, list) else []
+    reviewers_list = [str(r).strip() for r in (reviewers or []) if str(r).strip()] if isinstance(reviewers, list) else []
+    notes_text = (notes or "").strip() or (
+        "Gerrit push temporarily disabled. Deprecation data saved; create LST CR manually later."
+    )
+    cr_status_val = (cr_status or "").strip() or "pending_manual"
+    commit_msg = (commit_message or "").strip()
+    lst_files_list = [str(x).strip() for x in (lst_files or []) if str(x).strip()] if isinstance(lst_files, list) else []
+    if lst_file and lst_file not in lst_files_list:
+        lst_files_list.append(lst_file)
+    primary_lst = lst_file or (lst_files_list[0] if lst_files_list else "")
+    for test_name in test_names:
+        name = (test_name or "").strip()
+        if not name:
+            continue
+        rec = {
+            "test_name": name,
+            "deprecation_date": now,
+            "by_whom": by_whom or "unknown",
+            "branch": branch,
+            "lst_file": primary_lst,
+            "jira_tickets": tickets_list,
+            "reviewers": reviewers_list,
+            "notes": notes_text,
+            "cr_status": cr_status_val,
+        }
+        if lst_files_list:
+            rec["lst_files"] = lst_files_list
+        if commit_msg:
+            rec["commit_message"] = commit_msg
+        records.append(rec)
+    _save_deprecation_records(records)
+    logger.info("[DEPRECATION-RECORD] Saved %s record(s), by %s", len(test_names), by_whom)
+
+
+@app.route("/mcp/regression/deprecation-record", methods=["POST"])
+@jwt_required
+def deprecation_record():
+    """Save deprecation intent without creating a Gerrit CR (push deferred)."""
+    data = request.get_json() or {}
+    test_names = [str(t).strip() for t in (data.get("test_names") or []) if str(t).strip()]
+    if not test_names:
+        return jsonify({"error": "test_names is required"}), 400
+    branch = (data.get("branch") or "").strip()
+    lst_files = _collect_lst_files_from_payload(data)
+    if not lst_files:
+        return jsonify({"error": "lst_file or lst_files is required"}), 400
+    lst_file = lst_files[0]
+    by_whom = _stamp_record_by_whom()
+    jira_tickets = data.get("jira_tickets") or data.get("tickets") or []
+    reviewers = data.get("reviewers") or []
+    notes = (data.get("notes") or "").strip()
+    commit_message = (data.get("commit_message") or "").strip()
+    _add_deprecation_records(
+        test_names,
+        by_whom or "unknown",
+        branch=branch,
+        lst_file=lst_file,
+        lst_files=lst_files,
+        jira_tickets=jira_tickets,
+        reviewers=reviewers,
+        notes=notes,
+        cr_status="pending_manual",
+        commit_message=commit_message,
+    )
+    return jsonify({
+        "success": True,
+        "message": "Saved deprecation for %s test(s). Note: Gerrit CR not created (pending manual)." % len(test_names),
+        "cr_status": "pending_manual",
+        "notes": notes or (
+            "Gerrit push temporarily disabled. Deprecation data saved; create LST CR manually later."
+        ),
+        "generated_at": datetime.utcnow().isoformat(),
+    })
 
 
 @app.route("/mcp/regression/validate-jira-ticket", methods=["GET", "POST"])
@@ -21566,7 +22573,7 @@ def validate_with_sourcegraph(repo_name, branch, file_path, explicit_token=None)
     """Validate branch and file exist in repo via Sourcegraph.
 
     Uses the logged-in user's Sourcegraph token (Settings) with env fallback.
-    Tries branch aliases (e.g. 7.6.0.1 → ganges-7.6-stable) before failing.
+    Tries branch aliases (e.g. 7.5.2 → ganges-7.5-stable) before failing.
     """
     results = {
         "branch_valid": None,
@@ -21750,24 +22757,65 @@ def fetch_file_content_via_sourcegraph(repo_name, rev, file_path, explicit_token
 
 
 def _check_testnames_in_lst_content(lst_content, test_names):
-    """Check which test names are present in LST file content. Returns (present_list, not_present_list)."""
+    """Check which test names are present in LST file content.
+
+    Exact match first; unique prefix/substring resolves (Sourcegraph-style) so a
+    partial query still counts as present when it maps to one LST line.
+    A trailing comma on the LST line is ignored (``foo`` matches ``foo,``).
+    Returns (present_resolved, not_present, extra) where extra may include
+    resolved_from / ambiguous maps.
+    """
     if not lst_content or not isinstance(lst_content, str):
-        return [], test_names
-    existing = set()
-    lines = lst_content.splitlines()
-    for test_name in test_names:
-        test_name = test_name.strip()
-        if not test_name:
+        return [], list(test_names or []), {}
+    from gerrit_lst_cr import match_tests_in_lst
+
+    present, not_present, resolved_from, ambiguous = match_tests_in_lst(lst_content, test_names)
+    extra = {}
+    if resolved_from:
+        extra["resolved_from"] = resolved_from
+    if ambiguous:
+        extra["ambiguous"] = ambiguous
+    return present, not_present, extra
+
+
+def _fetch_lst_content_for_check(repo_name, branch, lst_file, explicit_token=None):
+    """Fetch LST content, trying branch aliases and basename→full-path resolution."""
+    lst_file = (lst_file or "").strip()
+    branch = _handover_nutest_branch(branch)
+    last_err = None
+    resolved_path = lst_file
+
+    # Basename-only path: find full path via Sourcegraph file search
+    if lst_file and "/" not in lst_file and lst_file.lower().endswith(".lst"):
+        token = resolve_sourcegraph_token(explicit_token)
+        for rev in _branch_alias_candidates(branch):
+            hits = search_sourcegraph_for_test(
+                repo_name, lst_file, rev=rev, lst_files_only=True, sg_token=token, max_count=30
+            )
+            basename_hits = [
+                h for h in (hits or [])
+                if (h.get("path") or "").endswith("/" + lst_file) or (h.get("path") or "") == lst_file
+            ]
+            if not basename_hits and hits:
+                # Fallback: any .lst hit whose basename matches
+                basename_hits = [
+                    h for h in hits
+                    if (h.get("path") or "").replace("\\", "/").rsplit("/", 1)[-1] == lst_file
+                ]
+            if basename_hits:
+                resolved_path = basename_hits[0]["path"]
+                break
+
+    for rev in _branch_alias_candidates(branch):
+        content, err = fetch_file_content_via_sourcegraph(
+            repo_name, rev, resolved_path, explicit_token=explicit_token
+        )
+        if err:
+            last_err = err
             continue
-        for line in lines:
-            if test_name in line:
-                escaped_name = re.escape(test_name)
-                pattern = r'(^|[\s,\[\]"\'])' + escaped_name + r'([\s,\[\]"\']|$)'
-                if re.search(pattern, line):
-                    existing.add(test_name)
-    already_present = [t for t in test_names if t.strip() in existing]
-    not_present = [t for t in test_names if t.strip() not in existing]
-    return already_present, not_present
+        if content is not None:
+            return content, rev, resolved_path, None
+    return None, branch, resolved_path, last_err or "Could not fetch LST file from Sourcegraph."
 
 
 
@@ -21784,11 +22832,25 @@ def resolve_sourcegraph_token(explicit_token=None):
     return (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
 
 
+def _handover_nutest_branch(branch):
+    """Map product/search branch to nutest-py3-tests mainline (same as JP clone-to).
+
+    7.5.2 / ganges-7.5.2-stable / ganges-7.5.1-stable → ganges-7.5-stable.
+    master stays master. Used for LST validate/suggest/CR, not JITA last-5 lookup.
+    """
+    b = (branch or "").strip() or "master"
+    mapped = nutest_mainline_branch(b)
+    return (mapped or b).strip() or "master"
+
+
 def _branch_alias_candidates(branch):
     b = (branch or "").strip()
     if not b:
         return ["master"]
-    out = [b]
+    mainline = _handover_nutest_branch(b)
+    out = [mainline]
+    if b != mainline:
+        out.append(b)
     low = b.lower()
     m = re.search(r"(\d+\.\d+)", low)
     if m:
@@ -21798,7 +22860,7 @@ def _branch_alias_candidates(branch):
             "%s-stable" % v,
             v,
         ])
-    if low != "master":
+    if low != "master" and mainline.lower() != "master":
         out.append("master")
     seen = set()
     uniq = []
@@ -21816,7 +22878,7 @@ def validate_lst():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json() or {}
-    branch = (data.get("branch") or "master").strip()
+    branch = _handover_nutest_branch(data.get("branch") or "master")
     lst_file = (data.get("lst_file") or "").strip()
     repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
     if not lst_file:
@@ -22110,59 +23172,378 @@ def _validate_gerrit_credentials(gerrit_url, username, password):
         return False, str(exc)
 
 
-def _run_git(args, cwd, check=True):
-    """Run git command and return CompletedProcess."""
+def _run_git(args, cwd, check=True, timeout=None):
+    """Run git command and return CompletedProcess. timeout is seconds (None = no limit)."""
     cmd = ["git"] + list(args)
-    return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=check)
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = "echo"
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=check,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "git %s timed out after %ss. The nutest-py3-tests clone is too slow; "
+            "retry — sparse checkout should avoid a full download."
+            % (" ".join(args[:3]), timeout)
+        ) from exc
 
 
-def _clone_and_sync_handover_branch(auth_url, repo_dir, branch, tmpdir):
-    """Shallow-clone selected branch, verify HEAD, pull latest; force-reset to origin on any sync issue."""
+def _sparse_paths_for_lst_files(lst_files):
+    """Return unique file paths to materialize via sparse-checkout."""
+    out = []
+    seen = set()
+    for raw in lst_files or []:
+        path = (raw or "").strip().lstrip("./")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
+def _generate_gerrit_change_id():
+    """Generate a Gerrit-style Change-Id (I + 40 hex chars)."""
+    raw = "%s-%s-%s" % (time.time(), os.getpid(), random.random())
+    return "I" + hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _install_gerrit_commit_msg_hook(repo_dir, gerrit_url, gerrit_user=None, gerrit_pwd=None):
+    """Install Gerrit's commit-msg hook so commits get a Change-Id (Flux-style).
+
+    Tries to download tools/hooks/commit-msg from Gerrit; falls back to a small
+    local hook that appends Change-Id if missing.
+    """
+    hooks_dir = os.path.join(repo_dir, ".git", "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
+    hook_path = os.path.join(hooks_dir, "commit-msg")
+    base = (gerrit_url or "").rstrip("/")
+    urls = []
+    if base:
+        urls.append("%s/tools/hooks/commit-msg" % base)
+        if gerrit_user and gerrit_pwd:
+            auth_base = base.replace(
+                "https://",
+                "https://%s:%s@" % (urllib.parse.quote(gerrit_user), urllib.parse.quote(gerrit_pwd)),
+                1,
+            )
+            if auth_base != base:
+                urls.insert(0, "%s/tools/hooks/commit-msg" % auth_base)
+            urls.append("%s/a/tools/hooks/commit-msg" % base)
+
+    downloaded = False
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=15, verify=False)
+            if resp.status_code == 200 and resp.text and "Change-Id" in resp.text:
+                with open(hook_path, "w", encoding="utf-8") as fh:
+                    fh.write(resp.text)
+                os.chmod(hook_path, 0o755)
+                downloaded = True
+                logger.info("Installed Gerrit commit-msg hook from %s", url.split("@")[-1])
+                break
+        except Exception as exc:
+            logger.warning("Could not download commit-msg hook from Gerrit: %s", exc)
+
+    if not downloaded:
+        # Minimal hook: append Change-Id if the message does not already have one.
+        script = """#!/bin/sh
+# RegX fallback commit-msg hook (Change-Id)
+MSG_FILE="$1"
+if grep -q '^Change-Id:' "$MSG_FILE" 2>/dev/null; then
+  exit 0
+fi
+CHANGE_ID="I$(openssl rand -hex 20 2>/dev/null || python3 -c 'import hashlib,os,time; print(hashlib.sha1(("%s-%s"%(time.time(),os.urandom(8))).encode()).hexdigest())')"
+echo "" >> "$MSG_FILE"
+echo "Change-Id: $CHANGE_ID" >> "$MSG_FILE"
+exit 0
+"""
+        with open(hook_path, "w", encoding="utf-8") as fh:
+            fh.write(script)
+        os.chmod(hook_path, 0o755)
+        logger.info("Installed fallback Change-Id commit-msg hook at %s", hook_path)
+    return hook_path
+
+
+def _ensure_change_id_in_message(commit_msg):
+    """Ensure commit message body includes a Change-Id line."""
+    msg = (commit_msg or "").rstrip()
+    if re.search(r"(?m)^Change-Id:\s*I[0-9a-fA-F]{40}\s*$", msg):
+        return msg
+    return msg + "\n\nChange-Id: %s\n" % _generate_gerrit_change_id()
+
+
+def _parse_gerrit_push_result(push_output, gerrit_url, repo_path):
+    """Parse Gerrit push stdout/stderr for change number and URL (Flux-style)."""
+    text = push_output or ""
+    gerrit_url = (gerrit_url or "").rstrip("/")
+    repo_path = (repo_path or "").strip("/")
+
+    m = re.search(r"(https?://[^\s]+/c/[^\s]+/\+/(\d+))", text)
+    if m:
+        return {"gerrit_change_id": m.group(2), "gerrit_url": m.group(1).rstrip(")].,;'\"")}
+
+    m = re.search(r"/c/([^\s]+)/\+/(\d+)", text)
+    if m:
+        cid = m.group(2)
+        proj = m.group(1).strip("/")
+        return {
+            "gerrit_change_id": cid,
+            "gerrit_url": "%s/c/%s/+/%s" % (gerrit_url, proj, cid),
+        }
+
+    m = re.search(r"\+/(\d+)\b", text)
+    if m:
+        cid = m.group(1)
+        url = "%s/c/%s/+/%s" % (gerrit_url, repo_path, cid) if repo_path else "%s/#/c/%s" % (gerrit_url, cid)
+        return {"gerrit_change_id": cid, "gerrit_url": url}
+
+    return {"gerrit_change_id": "", "gerrit_url": ""}
+
+
+def _commit_and_push_gerrit_cr(repo_dir, commit_msg, push_ref, gerrit_url, repo_path, gerrit_user=None, gerrit_pwd=None):
+    """Install Change-Id hook, commit, push to refs/for, return parsed CR info."""
+    _install_gerrit_commit_msg_hook(repo_dir, gerrit_url, gerrit_user=gerrit_user, gerrit_pwd=gerrit_pwd)
+    final_msg = _ensure_change_id_in_message(commit_msg)
+    _run_git(["commit", "-m", final_msg], cwd=repo_dir, check=True, timeout=60)
+    push_t0 = time.time()
+    logger.info("gerrit_cr: pushing HEAD:%s", push_ref)
+    push = _run_git(["push", "origin", "HEAD:%s" % push_ref], cwd=repo_dir, check=True, timeout=180)
+    logger.info("gerrit_cr: push done in %.1fs", time.time() - push_t0)
+    combined = "%s\n%s" % (push.stdout or "", push.stderr or "")
+    parsed = _parse_gerrit_push_result(combined, gerrit_url, repo_path)
+    if not parsed.get("gerrit_url"):
+        parsed["gerrit_url"] = "%s/q/status:open+project:%s" % (
+            gerrit_url.rstrip("/"),
+            urllib.parse.quote(repo_path, safe=""),
+        )
+    parsed["push_output"] = combined[:2000]
+    return parsed
+
+
+def _clone_and_sync_handover_branch(auth_url, repo_dir, branch, tmpdir, sparse_paths=None):
+    """Sparse shallow-clone selected branch (LST paths only), then sync to origin tip.
+
+    nutest-py3-tests is too large for a normal shallow clone (hangs on index-pack).
+    Use --filter=blob:none --sparse and only materialize the LST file(s).
+    """
     t0 = time.time()
-    logger.info("create_lst_cr: shallow clone branch=%s -> %s", branch, repo_dir)
-    clone = _run_git(
-        ["clone", "--depth", "1", "--single-branch", "--branch", branch, auth_url, repo_dir],
-        cwd=tmpdir,
-        check=False,
+    sparse_paths = _sparse_paths_for_lst_files(sparse_paths)
+    logger.info(
+        "create_lst_cr: sparse shallow clone branch=%s paths=%s -> %s",
+        branch,
+        sparse_paths or ["(full sparse root)"],
+        repo_dir,
     )
+    clone_timeout = 180
+    clone_args = [
+        "clone",
+        "--depth", "1",
+        "--filter=blob:none",
+        "--sparse",
+        "--single-branch",
+        "--branch", branch,
+        auth_url,
+        repo_dir,
+    ]
+    clone = _run_git(clone_args, cwd=tmpdir, check=False, timeout=clone_timeout)
     if clone.returncode != 0:
         err = ((clone.stderr or clone.stdout or "")[:500]).strip()
-        logger.warning("create_lst_cr: branch-specific clone failed (%s); falling back", err)
+        logger.warning("create_lst_cr: sparse branch clone failed (%s); falling back", err)
         if os.path.isdir(repo_dir):
             shutil.rmtree(repo_dir, ignore_errors=True)
-        _run_git(["clone", "--depth", "1", "--single-branch", auth_url, repo_dir], cwd=tmpdir, check=True)
-        fetch = _run_git(["fetch", "--depth", "1", "origin", branch], cwd=repo_dir, check=False)
+        clone2 = _run_git(
+            [
+                "clone",
+                "--depth", "1",
+                "--filter=blob:none",
+                "--sparse",
+                "--single-branch",
+                auth_url,
+                repo_dir,
+            ],
+            cwd=tmpdir,
+            check=True,
+            timeout=clone_timeout,
+        )
+        _ = clone2
+        fetch = _run_git(["fetch", "--depth", "1", "origin", branch], cwd=repo_dir, check=False, timeout=120)
         if fetch.returncode != 0:
-            _run_git(["fetch", "origin", branch], cwd=repo_dir, check=True)
-        checkout = _run_git(["checkout", "-B", branch, "origin/%s" % branch], cwd=repo_dir, check=False)
+            _run_git(["fetch", "origin", branch], cwd=repo_dir, check=True, timeout=120)
+        checkout = _run_git(["checkout", "-B", branch, "origin/%s" % branch], cwd=repo_dir, check=False, timeout=60)
         if checkout.returncode != 0:
-            _run_git(["checkout", "-B", branch, "FETCH_HEAD"], cwd=repo_dir, check=True)
+            _run_git(["checkout", "-B", branch, "FETCH_HEAD"], cwd=repo_dir, check=True, timeout=60)
 
-    head = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir, check=True)
+    if sparse_paths:
+        # Non-cone: exact LST file paths only (avoids downloading whole test_sets tree).
+        sc = _run_git(
+            ["sparse-checkout", "set", "--no-cone"] + sparse_paths,
+            cwd=repo_dir,
+            check=False,
+            timeout=120,
+        )
+        if sc.returncode != 0:
+            err = ((sc.stderr or sc.stdout or "")[:400]).strip()
+            logger.warning("sparse-checkout --no-cone failed (%s); trying cone parents", err)
+            parents = []
+            for p in sparse_paths:
+                parent = os.path.dirname(p)
+                if parent and parent not in parents:
+                    parents.append(parent)
+            if parents:
+                _run_git(["sparse-checkout", "set"] + parents, cwd=repo_dir, check=True, timeout=120)
+
+    head = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir, check=True, timeout=30)
     current = (head.stdout or "").strip()
     if current != branch:
         logger.warning("create_lst_cr: HEAD is %r, expected %r; forcing checkout", current, branch)
-        _run_git(["fetch", "origin", branch], cwd=repo_dir, check=False)
-        _run_git(["checkout", "-B", branch, "origin/%s" % branch], cwd=repo_dir, check=True)
+        _run_git(["fetch", "--depth", "1", "origin", branch], cwd=repo_dir, check=False, timeout=120)
+        _run_git(["checkout", "-B", branch, "origin/%s" % branch], cwd=repo_dir, check=True, timeout=60)
 
-    pull = _run_git(["pull", "--ff-only", "origin", branch], cwd=repo_dir, check=False)
-    if pull.returncode != 0:
-        err = ((pull.stderr or pull.stdout or "")[:500]).strip()
-        logger.warning(
-            "create_lst_cr: pull --ff-only failed (%s); force reset to origin/%s",
-            err,
-            branch,
+    # Sync tip without re-pulling the whole tree when possible
+    fetch = _run_git(["fetch", "--depth", "1", "origin", branch], cwd=repo_dir, check=False, timeout=120)
+    if fetch.returncode != 0:
+        _run_git(["fetch", "origin", branch], cwd=repo_dir, check=False, timeout=120)
+    reset = _run_git(["reset", "--hard", "origin/%s" % branch], cwd=repo_dir, check=False, timeout=60)
+    if reset.returncode != 0:
+        pull = _run_git(["pull", "--ff-only", "origin", branch], cwd=repo_dir, check=False, timeout=120)
+        if pull.returncode != 0:
+            logger.warning(
+                "create_lst_cr: sync failed; force reset. pull=%s reset=%s",
+                ((pull.stderr or "")[:200]),
+                ((reset.stderr or "")[:200]),
+            )
+            _run_git(["fetch", "origin", branch], cwd=repo_dir, check=True, timeout=120)
+            _run_git(["reset", "--hard", "origin/%s" % branch], cwd=repo_dir, check=True, timeout=60)
+    _run_git(["clean", "-fd"], cwd=repo_dir, check=False, timeout=30)
+
+    if sparse_paths:
+        # Re-apply sparse after reset so LST files are present
+        _run_git(
+            ["sparse-checkout", "set", "--no-cone"] + sparse_paths,
+            cwd=repo_dir,
+            check=False,
+            timeout=120,
         )
-        _run_git(["fetch", "origin", branch], cwd=repo_dir, check=True)
-        _run_git(["reset", "--hard", "origin/%s" % branch], cwd=repo_dir, check=True)
-        _run_git(["clean", "-fd"], cwd=repo_dir, check=False)
 
-    head = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir, check=True)
+    head = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir, check=True, timeout=30)
     current = (head.stdout or "").strip()
     if current != branch:
         raise RuntimeError("After sync, HEAD is %r but expected branch %r" % (current, branch))
 
     logger.info("create_lst_cr: clone+sync done in %.1fs branch=%s", time.time() - t0, branch)
+
+
+def _lst_cr_via_gerrit_rest(
+    branch,
+    lst_files,
+    test_names,
+    reviewers,
+    commit_message,
+    gerrit_user,
+    gerrit_pwd,
+    gerrit_url,
+    repo_path,
+    mode="append",
+    handover_tickets=None,
+    owner=None,
+):
+    """Create an LST CR with Gerrit Change Edit. mode is 'append' or 'remove'."""
+    from gerrit_lst_cr import (
+        GerritLstClient,
+        GerritRestError,
+        append_missing_tests,
+        remove_tests,
+    )
+
+    client = GerritLstClient(gerrit_url, gerrit_user, gerrit_pwd, repo_path)
+    file_contents = {}
+    per_file = []
+    removed_all = []
+    not_present_all = []
+    total_changed = 0
+    tickets = handover_tickets or []
+    owner_name = (owner or gerrit_user or "").strip()
+    for lf in lst_files:
+        try:
+            content = client.get_file(branch, lf)
+        except GerritRestError as exc:
+            if exc.payload.get("gerrit_status") == 404 or "404" in (exc.message or ""):
+                raise GerritRestError(
+                    "File '%s' was not found on branch '%s'." % (lf, branch),
+                    400,
+                    {"error": "LST file not found on branch."},
+                ) from exc
+            raise
+        if mode == "remove":
+            new_content, removed, not_present = remove_tests(content, test_names)
+            removed_all.extend(removed)
+            not_present_all.extend(not_present)
+            if removed:
+                file_contents[lf] = new_content
+                total_changed += len(removed)
+            per_file.append({"lst_file": lf, "removed": removed, "not_present": not_present})
+        else:
+            new_content, already, to_add = append_missing_tests(
+                content,
+                test_names,
+                owner=owner_name,
+                branch=branch,
+                tickets=tickets,
+                lst_path=lf,
+            )
+            logger.info(
+                "create_lst_cr append %s: requested=%s to_add=%s already_present=%s",
+                lf,
+                len(test_names),
+                len(to_add),
+                len(already),
+            )
+            if to_add:
+                file_contents[lf] = new_content
+                total_changed += len(to_add)
+            per_file.append({"lst_file": lf, "already_present": already, "to_add": to_add})
+
+    if total_changed == 0:
+        if mode == "remove":
+            return {
+                "success": False,
+                "message": "None of the selected tests were found in the LST file.",
+                "removed": [],
+                "not_present": list(dict.fromkeys(not_present_all)),
+                "files": per_file,
+            }
+        return {
+            "success": False,
+            "message": "All selected tests are already present in selected LST file(s).",
+            "files": per_file,
+            "already_present": [x for p in per_file for x in p.get("already_present") or []],
+            "to_add": [],
+        }
+
+    published = client.publish_lst_edits(branch, commit_message, file_contents, reviewers)
+    published["files"] = per_file
+    published["message"] = (
+        "Deprecation CR created via Gerrit (no clone)."
+        if mode == "remove"
+        else "CR created via Gerrit (no clone)."
+    )
+    if mode == "remove":
+        published["removed"] = list(dict.fromkeys(removed_all))
+        # Use per-file unresolved queries, not raw test_names vs resolved LST names.
+        published["not_present"] = list(dict.fromkeys(not_present_all))
+    else:
+        published["already_present"] = [x for p in per_file for x in p.get("already_present") or []]
+        published["to_add"] = [x for p in per_file for x in p.get("to_add") or []]
+    published["generated_at"] = datetime.utcnow().isoformat()
+    return published
 
 
 def _gerrit_identity_for_user():
@@ -22181,6 +23562,24 @@ def _gerrit_identity_for_user():
     return gerrit_user, http_pwd, email or ""
 
 
+def _collect_lst_files_from_payload(data):
+    """Merge lst_file + lst_files from a request body, unique, order preserved."""
+    data = data or {}
+    lst_file = (data.get("lst_file") or "").strip()
+    lst_files = data.get("lst_files") or []
+    if not isinstance(lst_files, list):
+        lst_files = []
+    out = []
+    seen = set()
+    for raw in list(lst_files) + ([lst_file] if lst_file else []):
+        path = str(raw or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
 @app.route("/mcp/regression/create-lst-cr", methods=["POST"])
 @jwt_required
 def create_lst_cr():
@@ -22189,9 +23588,8 @@ def create_lst_cr():
         return jsonify({}), 200
 
     data = request.get_json() or {}
-    branch = (data.get("branch") or "master").strip()
-    lst_file = (data.get("lst_file") or "").strip()
-    lst_files = data.get("lst_files") or []
+    branch = _handover_nutest_branch(data.get("branch") or "master")
+    lst_files = _collect_lst_files_from_payload(data)
     test_names = data.get("test_names") or []
     reviewers = [str(r).strip() for r in (data.get("reviewers") or []) if str(r).strip()]
     cr_subject = (data.get("cr_subject") or "Testcase Handover").strip() or "Testcase Handover"
@@ -22203,11 +23601,6 @@ def create_lst_cr():
         handover_tickets = [str(x).strip() for x in handover_tickets if str(x).strip()]
     manual_only = bool(data.get("manual_only"))
 
-    if not isinstance(lst_files, list):
-        lst_files = []
-    lst_files = [str(x).strip() for x in lst_files if str(x).strip()]
-    if lst_file and lst_file not in lst_files:
-        lst_files.append(lst_file)
     if not lst_files:
         return jsonify({"error": "lst_file or lst_files is required"}), 400
     test_names = [str(t).strip() for t in test_names if str(t or "").strip()]
@@ -22260,6 +23653,45 @@ def create_lst_cr():
         }), 403
 
     repo_path = (os.getenv("HANDOVER_REPO_PATH") or "nutest-py3-tests").strip("/")
+
+    from gerrit_lst_cr import GerritRestError, force_git_clone, git_fallback_enabled
+
+    if not cr_description:
+        reviewers_line = ", ".join(reviewers) if reviewers else ""
+        tickets_line = ", ".join(handover_tickets) if handover_tickets else ""
+        tests_line = ", ".join(test_names[:15]) + (" ..." if len(test_names) > 15 else "")
+        cr_description = (
+            "Reviewers               : %s\n"
+            "Tickets resolved        : %s\n"
+            "Tests run               : %s\n"
+            "Target release          : %s\n"
+            "Code review URL         : "
+        ) % (reviewers_line, tickets_line, tests_line, branch)
+    commit_msg = cr_subject + "\n\n" + cr_description
+
+    if not force_git_clone():
+        try:
+            logger.info("create_lst_cr: Gerrit REST edit branch=%s files=%s", branch, lst_files)
+            result = _lst_cr_via_gerrit_rest(
+                branch, lst_files, test_names, reviewers, commit_msg,
+                gerrit_user, gerrit_pwd, gerrit_url, repo_path, mode="append",
+                handover_tickets=handover_tickets,
+                owner=gerrit_user,
+            )
+            return jsonify(result)
+        except GerritRestError as exc:
+            if not git_fallback_enabled():
+                return jsonify({
+                    "error": exc.payload.get("error") or exc.message,
+                    "message": exc.message,
+                }), exc.status_code if 400 <= exc.status_code < 500 else 502
+            logger.warning("create_lst_cr REST failed, git fallback: %s", exc.message)
+        except Exception as exc:
+            if not git_fallback_enabled():
+                logger.exception("create_lst_cr REST failed")
+                return jsonify({"error": str(exc), "message": "Unexpected error during CR creation."}), 500
+            logger.warning("create_lst_cr REST failed, git fallback: %s", exc)
+
     clone_url = "%s/a/%s" % (gerrit_url, repo_path)
 
     tmpdir = tempfile.mkdtemp(prefix="regx_handover_")
@@ -22269,12 +23701,14 @@ def create_lst_cr():
             "https://",
             "https://%s:%s@" % (urllib.parse.quote(gerrit_user), urllib.parse.quote(gerrit_pwd)),
         )
-        _clone_and_sync_handover_branch(auth_url, repo_dir, branch, tmpdir)
+        _clone_and_sync_handover_branch(auth_url, repo_dir, branch, tmpdir, sparse_paths=lst_files)
         if git_email:
             _run_git(["config", "user.email", git_email], cwd=repo_dir, check=False)
         display_name = (_current_username() or gerrit_user.split("@")[0] or gerrit_user).strip()
         _run_git(["config", "user.name", display_name], cwd=repo_dir, check=False)
         logger.info("create_lst_cr: applying LST edits on branch=%s files=%s", branch, lst_files)
+
+        from gerrit_lst_cr import append_missing_tests as _append_missing_tests
 
         per_file = []
         total_to_add = 0
@@ -22287,11 +23721,17 @@ def create_lst_cr():
                 }), 400
             with open(abs_lst, "r", encoding="utf-8", errors="ignore") as fh:
                 old_content = fh.read()
-            already_present, to_add = _check_testnames_in_lst_content(old_content, test_names)
+            new_content, already_present, to_add = _append_missing_tests(
+                old_content,
+                test_names,
+                owner=gerrit_user,
+                branch=branch,
+                tickets=handover_tickets,
+                lst_path=lf,
+            )
             if to_add:
-                append_block = "\n" + "\n".join(to_add) + "\n"
-                with open(abs_lst, "a", encoding="utf-8") as fh:
-                    fh.write(append_block)
+                with open(abs_lst, "w", encoding="utf-8") as fh:
+                    fh.write(new_content)
                 _run_git(["add", lf], cwd=repo_dir, check=True)
             per_file.append({"lst_file": lf, "already_present": already_present, "to_add": to_add})
             total_to_add += len(to_add)
@@ -22320,21 +23760,28 @@ def create_lst_cr():
 
         commit_msg = cr_subject + "\n\n" + cr_description
         logger.info("create_lst_cr: committing %s test(s) on branch=%s", total_to_add, branch)
-        _run_git(["commit", "-m", commit_msg], cwd=repo_dir, check=True)
-        push_t0 = time.time()
-        logger.info("create_lst_cr: pushing HEAD:%s", push_ref)
-        _run_git(["push", "origin", "HEAD:%s" % push_ref], cwd=repo_dir, check=True)
-        logger.info("create_lst_cr: push done in %.1fs", time.time() - push_t0)
+        parsed = _commit_and_push_gerrit_cr(
+            repo_dir,
+            commit_msg,
+            push_ref,
+            gerrit_url,
+            repo_path,
+            gerrit_user=gerrit_user,
+            gerrit_pwd=gerrit_pwd,
+        )
+        cr_url = parsed.get("gerrit_url") or "%s/q/status:open+owner:%s+project:%s+branch:%s" % (
+            gerrit_url,
+            urllib.parse.quote(gerrit_user, safe=""),
+            urllib.parse.quote(repo_path, safe=""),
+            urllib.parse.quote(branch, safe=""),
+        )
 
         return jsonify({
             "success": True,
             "message": "CR created and pushed for review.",
-            "cr_url": "%s/q/status:open+owner:%s+project:%s+branch:%s" % (
-                gerrit_url,
-                urllib.parse.quote(gerrit_user, safe=""),
-                urllib.parse.quote(repo_path, safe=""),
-                urllib.parse.quote(branch, safe=""),
-            ),
+            "cr_url": cr_url,
+            "gerrit_url": cr_url,
+            "gerrit_change_id": parsed.get("gerrit_change_id") or "",
             "files": per_file,
             "already_present": [x for p in per_file for x in p["already_present"]],
             "to_add": [x for p in per_file for x in p["to_add"]],
@@ -22367,7 +23814,7 @@ def check_lst_testcases():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json() or {}
-    branch = (data.get("branch") or "master").strip()
+    branch = _handover_nutest_branch(data.get("branch") or "master")
     lst_file = (data.get("lst_file") or "").strip().replace("(pasted content)", "").strip()
     test_names = data.get("test_names") or []
     lst_file_content = data.get("lst_file_content")
@@ -22378,16 +23825,46 @@ def check_lst_testcases():
     if not test_names:
         return jsonify({"error": "test_names is required (at least one)"}), 400
     if lst_file_content:
-        already_present, not_present = _check_testnames_in_lst_content(lst_file_content, test_names)
-        return jsonify({"branch": branch, "lst_file": lst_file or "(pasted content)", "test_names": test_names, "present": already_present, "not_present": not_present, "generated_at": datetime.utcnow().isoformat()})
+        already_present, not_present, extra = _check_testnames_in_lst_content(lst_file_content, test_names)
+        payload = {
+            "branch": branch,
+            "lst_file": lst_file or "(pasted content)",
+            "test_names": test_names,
+            "present": already_present,
+            "not_present": not_present,
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+        payload.update(extra or {})
+        return jsonify(payload)
     if not lst_file:
         return jsonify({"error": "Enter LST file path or paste LST file content"}), 400
-    content, err = fetch_file_content_via_sourcegraph(repo_name, branch, lst_file)
+    content, resolved_branch, resolved_path, err = _fetch_lst_content_for_check(
+        repo_name, branch, lst_file, explicit_token=data.get("sourcegraph_token")
+    )
     if err:
-        return jsonify({"error": err, "test_names": test_names, "present": [], "not_present": test_names, "generated_at": datetime.utcnow().isoformat()}), 200
-    already_present, not_present = _check_testnames_in_lst_content(content, test_names)
-    return jsonify({"branch": branch, "lst_file": lst_file, "test_names": test_names, "present": already_present, "not_present": not_present, "generated_at": datetime.utcnow().isoformat()})
-
+        return jsonify({
+            "error": err,
+            "test_names": test_names,
+            "present": [],
+            "not_present": test_names,
+            "branch": branch,
+            "lst_file": lst_file,
+            "generated_at": datetime.utcnow().isoformat(),
+        }), 200
+    already_present, not_present, extra = _check_testnames_in_lst_content(content, test_names)
+    payload = {
+        "branch": resolved_branch or branch,
+        "input_branch": branch,
+        "resolved_branch": resolved_branch or branch,
+        "lst_file": resolved_path or lst_file,
+        "input_lst_file": lst_file,
+        "test_names": test_names,
+        "present": already_present,
+        "not_present": not_present,
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+    payload.update(extra or {})
+    return jsonify(payload)
 
 def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=False, sg_token=None, max_count=50):
     """Search Sourcegraph for files containing the test name."""
@@ -22454,7 +23931,7 @@ def suggest_lst_file():
     """Suggest the best-fit LST file for selected handover testcases."""
     data = request.get_json() or {}
     test_names = data.get("test_names") or []
-    branch = (data.get("branch") or "master").strip() or "master"
+    branch = _handover_nutest_branch(data.get("branch") or "master")
     repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
 
     test_names = [str(t).strip() for t in test_names if (t or "").strip()]
@@ -22579,7 +24056,7 @@ def search_lst_file():
     if not test_name:
         return jsonify({"error": "test_name is required", "lst_files": []}), 400
     repo_name = os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")
-    rev = (data.get("rev") or "master").strip()
+    rev = _handover_nutest_branch(data.get("rev") or "master")
     lst_files = search_sourcegraph_for_test(repo_name, test_name, rev=rev, lst_files_only=True)
     token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
     if not lst_files and not token:
@@ -22590,43 +24067,201 @@ def search_lst_file():
 @app.route("/mcp/regression/deprecate-lst-cr", methods=["POST"])
 @jwt_required
 def deprecate_lst_cr():
-    """Return the manual git steps to remove tests from an LST file and push for review.
-
-    Manual-only by design: no Gerrit credentials are needed on the server.
-    """
+    """Create Gerrit CR to remove selected tests from an LST file (Flux-style Change-Id + push parse)."""
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json() or {}
-    branch = (data.get("branch") or "master").strip()
-    lst_file = (data.get("lst_file") or "").strip()
+    branch = _handover_nutest_branch(data.get("branch") or "master")
+    lst_files = _collect_lst_files_from_payload(data)
     test_names = data.get("test_names") or []
-    reviewers = data.get("reviewers") or []
+    reviewers = [str(r).strip() for r in (data.get("reviewers") or []) if str(r).strip()]
+    commit_message = (data.get("commit_message") or "").strip()
+    jira_tickets = data.get("jira_tickets") or data.get("tickets") or []
+    if isinstance(jira_tickets, str):
+        jira_tickets = [x.strip() for x in jira_tickets.split(",") if x.strip()]
+    else:
+        jira_tickets = [str(x).strip() for x in jira_tickets if str(x).strip()]
+    manual_only = bool(data.get("manual_only"))
+
     if not test_names:
         return jsonify({"error": "test_names is required"}), 400
-    if not lst_file:
-        return jsonify({"error": "lst_file is required"}), 400
+    if not lst_files:
+        return jsonify({"error": "lst_file or lst_files is required"}), 400
     test_names = [str(t).strip() for t in test_names if (t or "").strip()]
     if not test_names:
         return jsonify({"error": "test_names is required"}), 400
+    lst_file = lst_files[0]
+
     push_ref = _build_gerrit_push_ref(branch, reviewers)
     instructions = {
-        "message": "Remove the following %s test(s) from the LST file, then push for review." % len(test_names),
-        "branch": branch, "lst_file": lst_file, "test_names": test_names,
+        "message": "Remove the following %s test(s) from the LST file(s), then push for review." % len(test_names),
+        "branch": branch, "lst_file": lst_file, "lst_files": lst_files, "test_names": test_names,
         "manual_steps": [
             "1. Clone the repository and checkout branch '%s'" % branch,
-            "2. Open the LST file: %s" % lst_file,
-            "3. Remove the following %s test name(s) from the file:" % len(test_names),
+            "2. Open the LST file(s): %s" % ", ".join(lst_files),
+            "3. Remove the following %s test name(s) from each file:" % len(test_names),
             "   " + "\n   ".join(test_names[:10]) + ("..." if len(test_names) > 10 else ""),
             "4. Commit with message: 'Deprecated %s test(s) from LST'" % len(test_names),
             "5. Push for review: git push origin HEAD:%s" % push_ref,
         ],
     }
-    return jsonify({
-        "manual": True,
-        "instructions": instructions,
-        "message": "Follow the manual steps below to push the change for review.",
-        "generated_at": datetime.utcnow().isoformat(),
-    })
+    if manual_only:
+        return jsonify({
+            "manual": True,
+            "instructions": instructions,
+            "message": "Follow the manual steps below to push the change for review.",
+            "generated_at": datetime.utcnow().isoformat(),
+        })
+
+    gerrit_user, gerrit_pwd, git_email = _gerrit_identity_for_user()
+    if not gerrit_user:
+        return jsonify({
+            "error": "Logged-in username is required for Gerrit CR creation.",
+            "message": "Could not resolve your Gerrit username from the session. Log in again and retry.",
+        }), 400
+    if not gerrit_pwd:
+        return jsonify({
+            "error": "Gerrit HTTP password missing. Save it in Settings → API Keys → Gerrit HTTP Password.",
+            "require_key_setup": True,
+            "missing_key": "gerrit_http_password",
+            "message": "Generate an HTTP password in Gerrit → Settings → HTTP Credentials, then paste it in RegX User Settings and Save.",
+        }), 403
+
+    gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
+    ok_auth, auth_msg = _validate_gerrit_credentials(gerrit_url, gerrit_user, gerrit_pwd)
+    if not ok_auth:
+        return jsonify({
+            "error": "Gerrit authentication failed.",
+            "message": "Unable to validate Gerrit HTTP password for %s: %s." % (gerrit_user, auth_msg),
+            "require_key_setup": True,
+            "missing_key": "gerrit_http_password",
+        }), 403
+
+    repo_path = (os.getenv("HANDOVER_REPO_PATH") or "nutest-py3-tests").strip("/")
+
+    from gerrit_lst_cr import GerritRestError, force_git_clone, git_fallback_enabled
+
+    if not commit_message:
+        commit_message = "Deprecated %s test(s) from %s" % (len(test_names), ", ".join(lst_files))
+        if jira_tickets:
+            commit_message += "\n\nJira: %s" % ", ".join(jira_tickets)
+
+    if not force_git_clone():
+        try:
+            logger.info("deprecate_lst_cr: Gerrit REST edit branch=%s files=%s", branch, lst_files)
+            result = _lst_cr_via_gerrit_rest(
+                branch, lst_files, test_names, reviewers, commit_message,
+                gerrit_user, gerrit_pwd, gerrit_url, repo_path, mode="remove",
+                handover_tickets=jira_tickets,
+                owner=gerrit_user,
+            )
+            return jsonify(result)
+        except GerritRestError as exc:
+            if not git_fallback_enabled():
+                return jsonify({
+                    "error": exc.payload.get("error") or exc.message,
+                    "message": exc.message,
+                    "instructions": instructions,
+                }), exc.status_code if 400 <= exc.status_code < 500 else 502
+            logger.warning("deprecate_lst_cr REST failed, git fallback: %s", exc.message)
+        except Exception as exc:
+            if not git_fallback_enabled():
+                logger.exception("deprecate_lst_cr REST failed")
+                return jsonify({"error": str(exc), "message": "Unexpected error during deprecation CR creation."}), 500
+            logger.warning("deprecate_lst_cr REST failed, git fallback: %s", exc)
+
+    clone_url = "%s/a/%s" % (gerrit_url, repo_path)
+    tmpdir = tempfile.mkdtemp(prefix="regx_deprecate_")
+    repo_dir = os.path.join(tmpdir, "repo")
+    try:
+        auth_url = clone_url.replace(
+            "https://",
+            "https://%s:%s@" % (urllib.parse.quote(gerrit_user), urllib.parse.quote(gerrit_pwd)),
+        )
+        _clone_and_sync_handover_branch(auth_url, repo_dir, branch, tmpdir, sparse_paths=lst_files)
+        if git_email:
+            _run_git(["config", "user.email", git_email], cwd=repo_dir, check=False)
+        display_name = (_current_username() or gerrit_user.split("@")[0] or gerrit_user).strip()
+        _run_git(["config", "user.name", display_name], cwd=repo_dir, check=False)
+
+        from gerrit_lst_cr import remove_tests as _remove_tests
+
+        per_file = []
+        removed_all = []
+        not_present_all = []
+        for lf in lst_files:
+            abs_lst = os.path.join(repo_dir, lf)
+            if not os.path.isfile(abs_lst):
+                return jsonify({
+                    "error": "LST file not found on branch.",
+                    "message": "File '%s' was not found on branch '%s'." % (lf, branch),
+                }), 400
+            with open(abs_lst, "r", encoding="utf-8", errors="ignore") as fh:
+                old_content = fh.read()
+            new_content, removed, not_present = _remove_tests(old_content, test_names)
+            per_file.append({"lst_file": lf, "removed": removed, "not_present": not_present})
+            removed_all.extend(removed)
+            not_present_all.extend(not_present)
+            if removed:
+                with open(abs_lst, "w", encoding="utf-8") as fh:
+                    fh.write(new_content)
+                _run_git(["add", lf], cwd=repo_dir, check=True)
+
+        if not removed_all:
+            return jsonify({
+                "success": False,
+                "message": "None of the selected tests were found in the LST file(s).",
+                "removed": [],
+                "not_present": not_present_all,
+                "files": per_file,
+            })
+
+        if not commit_message:
+            commit_message = "Deprecated %s test(s) from %s" % (len(removed_all), ", ".join(lst_files))
+            if jira_tickets:
+                commit_message += "\n\nJira: %s" % ", ".join(jira_tickets)
+
+        logger.info("deprecate_lst_cr: committing removal of %s test(s) on branch=%s", len(removed_all), branch)
+        parsed = _commit_and_push_gerrit_cr(
+            repo_dir,
+            commit_message,
+            push_ref,
+            gerrit_url,
+            repo_path,
+            gerrit_user=gerrit_user,
+            gerrit_pwd=gerrit_pwd,
+        )
+        cr_url = parsed.get("gerrit_url") or ""
+        return jsonify({
+            "success": True,
+            "message": "Deprecation CR created and pushed for review.",
+            "cr_url": cr_url,
+            "gerrit_url": cr_url,
+            "gerrit_change_id": parsed.get("gerrit_change_id") or "",
+            "removed": removed_all,
+            "not_present": not_present_all,
+            "files": per_file,
+            "push_ref": push_ref,
+            "generated_at": datetime.utcnow().isoformat(),
+        })
+    except subprocess.CalledProcessError as cpe:
+        stderr = (cpe.stderr or "").strip()
+        stdout = (cpe.stdout or "").strip()
+        msg = stderr or stdout or str(cpe)
+        return jsonify({
+            "error": "Failed to create deprecation CR via git/gerrit.",
+            "git_error": msg[:1000],
+            "message": "Create CR failed. Check Gerrit HTTP password, branch, VPN/network, and repository permissions.",
+            "instructions": instructions,
+        }), 502
+    except Exception as exc:
+        logger.exception("deprecate_lst_cr failed")
+        return jsonify({"error": str(exc), "message": "Unexpected error during deprecation CR creation."}), 500
+    finally:
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 @app.route("/mcp/regression/deprecation-search", methods=["GET", "POST"])
@@ -22634,17 +24269,20 @@ def deprecate_lst_cr():
 def deprecation_search():
     """Search handover records for deprecation. Includes Sourcegraph LST file hints for each query."""
     # Support both GET (params) and POST (body) to avoid URL length/encoding issues with long test names
+    data = {}
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
     parts = request.args.getlist("q")
     if not parts:
         q0 = (request.args.get("q") or request.args.get("test_name") or "").strip()
         parts = [q0] if q0 else []
-    if not parts and request.method == "POST":
-        data = request.get_json(silent=True) or {}
+    if not parts:
         q_from_body = data.get("q") or data.get("queries") or data.get("test_names")
         if isinstance(q_from_body, list):
             parts = [str(x).strip() for x in q_from_body if str(x).strip()]
         elif q_from_body:
             parts = [str(q_from_body).strip()]
+    branch = (data.get("branch") or request.args.get("branch") or "").strip()
     queries = []
     for p in parts:
         if not p:
@@ -22681,24 +24319,28 @@ def deprecation_search():
             unique_matches.append(r)
     unique_matches.sort(key=lambda r: r.get("handover_date") or "", reverse=True)
 
-    # Sourcegraph: search for LST files containing each query (first repo only for now)
+    # Sourcegraph: only when a branch is provided so we search that revision, not master.
     sourcegraph_first_repo = []
     sourcegraph_other_repos = []
     repo_name = os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")
-    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
-    if token and queries:
+    token = resolve_sourcegraph_token(data.get("sourcegraph_token") if isinstance(data, dict) else None)
+    if token and queries and branch:
         seen_paths = set()
-        for test_name in queries[:10]:  # Limit to first 10 queries
-            lst_files = search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=True)
-            for f in lst_files:
+        rev = _handover_nutest_branch(branch)
+        for test_name in queries[:10]:
+            lst_hits = search_sourcegraph_for_test(
+                repo_name, test_name, rev=rev, lst_files_only=True, sg_token=token
+            )
+            for f in lst_hits:
                 path = f.get("path", "")
                 if path and path not in seen_paths:
                     seen_paths.add(path)
-                    sourcegraph_first_repo.append({"path": path, "test_name": test_name})
-        sourcegraph_other_repos = []  # Can be extended with SOURCEGRAPH_OTHER_REPOS
+                    sourcegraph_first_repo.append({"path": path, "test_name": test_name, "rev": rev})
+        sourcegraph_other_repos = []
 
     return jsonify({
         "q": " ".join(queries), "queries": queries, "results": unique_matches, "count": len(unique_matches),
+        "branch": branch,
         "sourcegraph_first_repo": sourcegraph_first_repo,
         "sourcegraph_other_repos": sourcegraph_other_repos,
         "sourcegraph_first_repo_name": repo_name,

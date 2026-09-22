@@ -1,0 +1,11 @@
+{
+  "input_mode": "tag",
+  "default_tag": "752_rc1",
+  "added_tags": [
+    "cdp_master_full_reg",
+    "752_rc1"
+  ],
+  "tag": "752_rc1",
+  "task_ids": [],
+  "tag_extra_task_ids": {}
+}

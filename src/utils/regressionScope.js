@@ -2,7 +2,7 @@
  * Resolve active regression tag / Full-regression task_ids (Regression_Run_Tasks),
  * same sources as Regression Home, with optional GET /mcp/regression/config fallback.
  *
- * Full-regression IDs are tag-scoped so moon TG coverage / triage never mixes jobs.
+ * Full-regression IDs are tag-scoped so triage never mixes jobs.
  */
 import { extractJitaTaskIds, normalizeJitaTaskId } from './jitaTaskIds.js';
 

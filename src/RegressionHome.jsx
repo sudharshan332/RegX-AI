@@ -2,7 +2,6 @@ import React, { useEffect, useState } from "react";
 import api from "./api";
 import { API_BASE_URL } from "./config";
 import AiMarkdown from "./components/AiMarkdown";
-import TriageGenieCoverageModal from "./components/TriageGenieCoverageModal";
 import {
   buildJitaResultsUrls,
   extractJitaTaskIds,
@@ -11,6 +10,7 @@ import {
   normalizeJitaTaskIdList,
 } from "./utils/jitaTaskIds";
 import { shouldRefetchOwnerJiraDetails } from "./utils/dashboardRefreshAfterAppend";
+import { classifyBugAge, resolveRunStartDate } from "./utils/bugAge";
 import {
   clearFullRegressionLink,
   persistFullRegressionLink,
@@ -199,15 +199,14 @@ const RISK_COLORS = {
   Low: { bg: "#dcfce7", color: "#166534" },
 };
 
-// Pie chart of bug-type totals. Hover a slice for its ticket count ("Label - N").
-// The pie is display-only; use the legend on the right to open Jira.
+// Pie chart of bug-type totals. Hover a slice for its ticket count.
 function BugPie({ segments, total, size = 150 }) {
   const cx = size / 2;
   const cy = size / 2;
   const r = size / 2 - 2;
   const active = segments.filter((s) => s.value > 0);
   const pointOnCircle = (deg) => {
-    const rad = ((deg - 90) * Math.PI) / 180; // start from 12 o'clock
+    const rad = ((deg - 90) * Math.PI) / 180;
     return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
   };
   let angle = 0;
@@ -261,7 +260,6 @@ const getStoredAdvancedOptions = () => {
   const defaults = {
     triageCount: true, // Load by default
     triageAccuracy: false, // Triage Accuracy Analyzer
-    triageGenieCoverage: false, // Triage Genie coverage
     qiSummaryReport: false,
     flakyTestInsights: false,
     aiRootCauseSummary: false,
@@ -285,7 +283,6 @@ export default function RegressionHome() {
   const [tag, setTag] = useState(getStoredTag());
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [showAddRemoveTaskIds, setShowAddRemoveTaskIds] = useState(false);
-  const [tgCoverageOpen, setTgCoverageOpen] = useState(false);
   const [configTagInput, setConfigTagInput] = useState(tag);
   const [addedTags, setAddedTags] = useState([]);
   const [defaultTag, setDefaultTag] = useState(null);
@@ -330,6 +327,7 @@ export default function RegressionHome() {
   const [loadingOwnerAi, setLoadingOwnerAi] = useState(false);
   const [ownerJiraDetails, setOwnerJiraDetails] = useState({});
   const [loadingJiraDetails, setLoadingJiraDetails] = useState(false);
+  const [oldestStartDate, setOldestStartDate] = useState(null);
   const [jiraDetailsError, setJiraDetailsError] = useState(null);
 
   // TCMS Overview & Comparison
@@ -495,10 +493,12 @@ export default function RegressionHome() {
         const aggregated = aggregateByBranch(response.data.runs, response.data.branch_start_dates || {});
         console.log("Aggregated by branch:", aggregated);
         setRows(aggregated);
+        setOldestStartDate(response.data.oldest_start_date || null);
         
       } else {
         console.error("Invalid response data or empty runs:", response.data);
         setRows([]);
+        setOldestStartDate(null);
         if (params.task_ids) {
           alert("No data was returned for the provided task IDs. Please verify the task IDs are correct and exist in the database.");
         }
@@ -507,6 +507,7 @@ export default function RegressionHome() {
     } catch (err) {
       console.error("Error fetching regression data:", err);
       setRows([]);
+      setOldestStartDate(null);
       setLoading(false);
       if (params.task_ids) {
         alert(`Failed to fetch data for the provided task IDs: ${err.message || "Unknown error"}`);
@@ -713,8 +714,10 @@ export default function RegressionHome() {
     const allStale = entries.length > 0 && entries.every(
       (d) => (d?.status === "N/A" || d?.status === "Unknown" || !d?.status) && !d?.bug_type
     );
+    const missingCreated = entries.length > 0 && entries.some((d) => d && !("created" in d));
     if (
       allStale ||
+      missingCreated ||
       shouldRefetchOwnerJiraDetails(triageCount.owner_ticket_map, ownerJiraDetails)
     ) {
       fetchOwnerJiraDetails();
@@ -774,6 +777,7 @@ export default function RegressionHome() {
           }
         } else {
           setRows([]);
+          setOldestStartDate(null);
           setTriageCount(null);
           setTriageAccuracyData(null);
           setQiSummaryReport(null);
@@ -2056,69 +2060,6 @@ export default function RegressionHome() {
 
       {/* Home Tab Content */}
       {activeTab === "home" && <>
-      {advancedOptions.triageGenieCoverage && (
-        <>
-          <button
-            type="button"
-            className="tg-coverage-genie-btn"
-            onClick={() => setTgCoverageOpen(true)}
-            title="Triage Genie coverage"
-            aria-label="Triage Genie coverage"
-          >
-            <svg
-              className="tg-coverage-genie-icon"
-              viewBox="0 0 120 120"
-              aria-hidden="true"
-              focusable="false"
-            >
-              <defs>
-                <linearGradient id="tgGenieBlue" x1="20" y1="10" x2="100" y2="110" gradientUnits="userSpaceOnUse">
-                  <stop offset="0%" stopColor="#7dd3fc" />
-                  <stop offset="45%" stopColor="#38bdf8" />
-                  <stop offset="100%" stopColor="#0284c7" />
-                </linearGradient>
-                <linearGradient id="tgGenieSmoke" x1="40" y1="70" x2="80" y2="118" gradientUnits="userSpaceOnUse">
-                  <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.95" />
-                  <stop offset="100%" stopColor="#0ea5e9" stopOpacity="0.15" />
-                </linearGradient>
-              </defs>
-              <path
-                fill="url(#tgGenieSmoke)"
-                d="M48 72c-6 8-4 16 2 22 6 6 4 14-4 18 14-2 28-8 34-18 6-10 2-20-6-26-4 8-14 10-26 4z"
-              />
-              <ellipse cx="60" cy="58" rx="28" ry="22" fill="url(#tgGenieBlue)" />
-              <path
-                fill="url(#tgGenieBlue)"
-                d="M34 52c-10 2-16 12-14 20 2 6 8 8 14 6 2-8 4-16 0-26zm52 0c10 2 16 12 14 20-2 6-8 8-14 6-2-8-4-16 0-26z"
-              />
-              <circle cx="60" cy="34" r="18" fill="url(#tgGenieBlue)" />
-              <ellipse cx="60" cy="14" rx="7" ry="9" fill="#0ea5e9" />
-              <circle cx="60" cy="6" r="4" fill="#38bdf8" />
-              <ellipse cx="53" cy="32" rx="3.2" ry="3.8" fill="#0f172a" />
-              <ellipse cx="67" cy="32" rx="3.2" ry="3.8" fill="#0f172a" />
-              <circle cx="54" cy="31" r="1" fill="#fff" />
-              <circle cx="68" cy="31" r="1" fill="#fff" />
-              <path d="M48 26q5-4 10 0" stroke="#0f172a" strokeWidth="1.6" fill="none" strokeLinecap="round" />
-              <path d="M62 26q5-4 10 0" stroke="#0f172a" strokeWidth="1.6" fill="none" strokeLinecap="round" />
-              <path
-                d="M48 40c4 8 20 8 24 0"
-                stroke="#0f172a"
-                strokeWidth="2.2"
-                fill="none"
-                strokeLinecap="round"
-              />
-              <path d="M52 40c3 5 13 5 16 0" fill="#be185d" opacity="0.85" />
-              <rect x="24" y="66" width="10" height="5" rx="2" fill="#fbbf24" />
-              <rect x="86" y="66" width="10" height="5" rx="2" fill="#fbbf24" />
-              <path d="M40 72h40" stroke="#fbbf24" strokeWidth="3" strokeLinecap="round" />
-            </svg>
-          </button>
-          <TriageGenieCoverageModal
-            open={tgCoverageOpen}
-            onClose={() => setTgCoverageOpen(false)}
-          />
-        </>
-      )}
       <div style={{ 
         display: "flex", 
         justifyContent: "space-between", 
@@ -2167,6 +2108,7 @@ export default function RegressionHome() {
                     if (advancedOptions.triageAccuracy) await fetchTriageAccuracy(selected);
                   } else {
                     setRows([]);
+                    setOldestStartDate(null);
                     setTriageCount(null);
                     setTriageAccuracyData(null);
                     setQiSummaryReport(null);
@@ -2691,37 +2633,6 @@ export default function RegressionHome() {
                     style={{ width: "18px", height: "18px", cursor: "pointer" }}
                   />
                   <span style={{ fontSize: "14px", fontWeight: "500" }}>Triage Accuracy Analyzer</span>
-                </label>
-              </div>
-
-              <div style={{ marginBottom: "15px" }}>
-                <label style={{ 
-                  display: "flex", 
-                  alignItems: "center", 
-                  gap: "10px", 
-                  marginBottom: "12px", 
-                  cursor: "pointer",
-                  padding: "8px",
-                  borderRadius: "4px",
-                  transition: "background 0.2s"
-                }}
-                onMouseEnter={(e) => e.currentTarget.style.background = "#f8f9fa"}
-                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
-                >
-                  <input
-                    type="checkbox"
-                    checked={advancedOptions.triageGenieCoverage || false}
-                    onChange={(e) => {
-                      const checked = e.target.checked;
-                      setAdvancedOptions(prev => ({
-                        ...prev,
-                        triageGenieCoverage: checked
-                      }));
-                      if (!checked) setTgCoverageOpen(false);
-                    }}
-                    style={{ width: "18px", height: "18px", cursor: "pointer" }}
-                  />
-                  <span style={{ fontSize: "14px", fontWeight: "500" }}>Triage Genie Coverage</span>
                 </label>
               </div>
 
@@ -3473,10 +3384,16 @@ export default function RegressionHome() {
                   {triageCount.owner_ticket_map && Object.keys(triageCount.owner_ticket_map).length > 0 && (() => {
                     // Aggregate bug types across every unique ticket in the current run.
                     const bugOrder = ["Product Bug", "Test Bug", "Environment", "Flaky", "Other"];
+                    const ageLabels = ["Product Bug", "Test Bug"];
                     const bugTotals = { "Product Bug": 0, "Test Bug": 0, "Environment": 0, "Flaky": 0, "Other": 0 };
                     const bugTickets = { "Product Bug": [], "Test Bug": [], "Environment": [], "Flaky": [], "Other": [] };
+                    const bugAgeTickets = {
+                      "Product Bug": { new: [], old: [] },
+                      "Test Bug": { new: [], old: [] },
+                    };
                     const otherIssueTypes = {}; // issue_type -> count, for "Other" tooltip
                     const seenTickets = new Set();
+                    const runStart = resolveRunStartDate(oldestStartDate, rows);
                     Object.values(triageCount.owner_ticket_map).forEach((tks) => {
                       Object.keys(tks).forEach((t) => {
                         if (seenTickets.has(t)) return;
@@ -3491,6 +3408,11 @@ export default function RegressionHome() {
                         const label = bt || "Other";
                         bugTotals[label] = (bugTotals[label] || 0) + 1;
                         bugTickets[label].push(t);
+                        if (bugAgeTickets[label]) {
+                          const age = classifyBugAge(info?.created, runStart);
+                          if (age === "new") bugAgeTickets[label].new.push(t);
+                          else if (age === "old") bugAgeTickets[label].old.push(t);
+                        }
                         if (label === "Other") {
                           const it = info?.issue_type && info.issue_type !== "N/A"
                             ? info.issue_type
@@ -3511,44 +3433,69 @@ export default function RegressionHome() {
                       .filter((s) => s.value > 0);
                     return (
                     <div style={{ marginTop: "20px" }}>
-                      {/* Bug-type summary: pie on the left, count-pill legend on the right.
-                          Click a slice or a legend row to open that bug type in Jira. */}
                       <div className="rh-bug-summary">
-                        <BugPie segments={donutSegments} total={classifiedTotal} />
                         <div className="rh-bug-summary-legend">
-                          <div className="rh-bug-summary-head">
-                            <span className="rh-bug-summary-title">Bugs Overview</span>
-                            <span className="rh-bug-summary-total-pill">{totalBugs}</span>
-                          </div>
                           <ul className="rh-bug-summary-list">
                             {loadingJiraDetails && Object.values(bugTotals).every((n) => n === 0) && (
                               <li className="rh-bug-summary-item" style={{ cursor: "default" }}>
                                 <span className="rh-bug-summary-name">Loading bug types…</span>
                               </li>
                             )}
-                            {bugOrder.map((label) => (
-                              bugTotals[label] > 0 ? (
-                                <li
-                                  key={label}
-                                  className="rh-bug-summary-item"
-                                  onClick={() => openBugType(label)}
-                                  title={label === "Other" ? otherTip : `Open ${bugTotals[label]} ${label} ticket(s) in Jira`}
-                                >
-                                  <span className="rh-bug-summary-name">
-                                    <span className="rh-bug-dot" style={{ background: BUG_TYPE_COLORS[label] }} />
-                                    {label}
-                                    {label === "Other" && <span className="rh-bug-summary-info">?</span>}
-                                  </span>
-                                  <span
-                                    className="rh-bug-summary-pill"
-                                    style={{ background: BUG_TYPE_COLORS[label] }}
+                            {bugOrder.map((label) => {
+                              if (!bugTotals[label]) return null;
+                              const showAge = ageLabels.includes(label);
+                              const newTickets = bugAgeTickets[label]?.new || [];
+                              const oldTickets = bugAgeTickets[label]?.old || [];
+                              const newCount = newTickets.length;
+                              const oldCount = oldTickets.length;
+                              return (
+                                <li key={label} className="rh-bug-summary-group">
+                                  <button
+                                    type="button"
+                                    className="rh-bug-summary-item"
+                                    onClick={() => openBugType(label)}
+                                    title={label === "Other" ? otherTip : `Open ${bugTotals[label]} ${label} ticket(s) in Jira`}
                                   >
-                                    {bugTotals[label]}
-                                  </span>
+                                    <span className="rh-bug-summary-name">
+                                      <span className="rh-bug-swatch" style={{ background: BUG_TYPE_COLORS[label] }} />
+                                      {label}
+                                      {label === "Other" && <span className="rh-bug-summary-info">?</span>}
+                                    </span>
+                                    <span className="rh-bug-count">{bugTotals[label]}</span>
+                                  </button>
+                                  {showAge && (
+                                    <ul className="rh-bug-sub-bullets">
+                                      <li>
+                                        <button
+                                          type="button"
+                                          onClick={() => openTickets(oldTickets)}
+                                          disabled={!oldCount}
+                                          title={oldCount ? `Open ${oldCount} old ${label} ticket(s)` : "No old tickets"}
+                                        >
+                                          Old - {oldCount}
+                                        </button>
+                                      </li>
+                                      <li>
+                                        <button
+                                          type="button"
+                                          onClick={() => openTickets(newTickets)}
+                                          disabled={!newCount}
+                                          title={newCount ? `Open ${newCount} new ${label} ticket(s)` : "No new tickets"}
+                                        >
+                                          New - {newCount}
+                                        </button>
+                                      </li>
+                                    </ul>
+                                  )}
                                 </li>
-                              ) : null
-                            ))}
+                              );
+                            })}
                           </ul>
+                        </div>
+                        <div className="rh-bug-summary-chart">
+                          <div className="rh-bug-summary-title">Bugs Overview</div>
+                          <div className="rh-bug-summary-total">Total: {totalBugs}</div>
+                          <BugPie segments={donutSegments} total={classifiedTotal} />
                         </div>
                       </div>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>

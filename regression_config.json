@@ -1,15 +1,17 @@
 {
   "input_mode": "tag",
-  "default_tag": "752_rc1",
+  "default_tag": "7.7_RUN_1",
   "added_tags": [
     "cdp_master_full_reg",
     "7.6.0.1_RC1",
     "master|Failed|17Aug2026",
     "752_1787307142510",
     "master|Full|25Jul2026",
-    "752_rc1"
+    "752_rc1",
+    "7.7_RUN_1",
+    "7.7_RUN_1_upgrade"
   ],
-  "tag": "752_rc1",
+  "tag": "7.7_RUN_1",
   "task_ids": [],
   "tag_extra_task_ids": {
     "7.6.0.1_RC1": [
@@ -107,7 +109,8 @@
       "6a8d480cb5e47506f144ceb0",
       "6a8d60ff8e79ce548138edfd",
       "6a8d640db5e47506fc0de14a",
-      "6a8e9a92b5e475885af0dcf3"
+      "6a8e9a92b5e475885af0dcf3",
+      "6aaa509cd24d829a316b8ff7"
     ]
   }
 }
