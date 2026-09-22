@@ -5676,7 +5676,7 @@ export default function FailedTestcaseAnalysis() {
                   <input
                     type="text"
                     className="cursor-ai-followup-input"
-                    placeholder="Ask follow-up: create ENG ticket, Flux fix, …"
+                    placeholder="Ask a follow-up, or use action tags above…"
                     value={followUpInput}
                     onChange={e => setFollowUpInput(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter' && !followUpLoading) handleFollowUp(); }}
