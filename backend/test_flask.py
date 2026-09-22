@@ -7854,6 +7854,12 @@ def _build_eng_ticket_description(ticket_ctx):
     fix = (ctx.get("suggested_fix") or "").strip()
     if fix:
         extras.append("h3. Suggested Fix\n" + fix[:3000])
+    user_notes = (
+        (ctx.get("additional_details") or ctx.get("user_notes") or ctx.get("notes") or "")
+        .strip()
+    )
+    if user_notes:
+        extras.append("h3. Additional Details (from triage chat)\n" + user_notes[:4000])
     related = []
     for c in ctx.get("related_components") or []:
         name = (c if isinstance(c, str) else str(c)).strip()
