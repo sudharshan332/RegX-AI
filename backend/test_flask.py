@@ -6734,6 +6734,79 @@ def _current_username():
         return ""
 
 
+def resolve_user_settings_tokens(username=None):
+    """Load API tokens for the logged-in user from User Settings (never MCP env)."""
+    uname = (username or _current_username() or "").strip()
+    out = {
+        "username": uname,
+        "cursor_api_key": None,
+        "atlassian_jira_token": None,
+        "atlassian_confluence_token": None,
+        "sourcegraph_token": None,
+        "gerrit_http_password": None,
+        "flux_username": None,
+        "flux_password": None,
+        "missing": [],
+    }
+    if not uname:
+        out["missing"] = list(out.keys() - {"username", "missing"})
+        return out
+    for key in (
+        "cursor_api_key",
+        "atlassian_jira_token",
+        "atlassian_confluence_token",
+        "sourcegraph_token",
+        "gerrit_http_password",
+        "flux_username",
+        "flux_password",
+    ):
+        val = get_user_key(uname, key)
+        if val and str(val).strip():
+            out[key] = str(val).strip()
+        else:
+            out["missing"].append(key)
+    return out
+
+
+def build_atlassian_tokens_for_bridge(username=None):
+    """Atlassian token map for cursor-bridge MCP, from User Settings only."""
+    toks = resolve_user_settings_tokens(username)
+    atlassian = {}
+    if toks.get("atlassian_jira_token"):
+        atlassian["jira"] = toks["atlassian_jira_token"]
+    if toks.get("atlassian_confluence_token"):
+        atlassian["confluence"] = toks["atlassian_confluence_token"]
+    return atlassian
+
+
+def mcp_token_status_for_user(username=None):
+    """Human-readable MCP/token readiness for the logged-in user."""
+    toks = resolve_user_settings_tokens(username)
+    status = {
+        "atlassian": {
+            "ok": bool(toks.get("atlassian_jira_token")),
+            "error": None if toks.get("atlassian_jira_token") else (
+                "Atlassian Jira Personal Token missing in User Settings → API Keys. "
+                "Save and Validate the token, then retry."
+            ),
+        },
+        "sourcegraph": {
+            "ok": bool(toks.get("sourcegraph_token")),
+            "error": None if toks.get("sourcegraph_token") else (
+                "Sourcegraph token missing in User Settings → API Keys "
+                "(optional for some Deep AI paths)."
+            ),
+        },
+        "cursor": {
+            "ok": bool(toks.get("cursor_api_key")),
+            "error": None if toks.get("cursor_api_key") else (
+                "Cursor API key missing in User Settings → API Keys."
+            ),
+        },
+    }
+    return status
+
+
 def _current_user_email():
     """Login user email for Jarvis 'Disabled by' comments."""
     try:
@@ -6826,17 +6899,28 @@ def fetch_jira_ticket(ticket_id, token=None, fields=None):
 
 
 
+def _normalize_create_eng_typos(text):
+    """Normalize common chat typos before create-ENG intent matching."""
+    t = re.sub(r"\s+", " ", (text or "").strip().lower())
+    t = re.sub(r"\bcreat\b", "create", t)
+    t = re.sub(r"\bcreaet\b", "create", t)
+    t = re.sub(r"\bcrate\b", "create", t)
+    t = re.sub(r"\bcretae\b", "create", t)
+    t = t.replace("ticet", "ticket").replace("tiket", "ticket").replace("ticekt", "ticket")
+    return t
+
+
 def is_create_eng_ticket_intent(text):
     """True when the user asks to create/file an ENG/Jira ticket."""
     t = re.sub(r"\s+", " ", (text or "").strip().lower())
     if not t:
         return False
-    # Common typos from chat input
-    t = (
-        t.replace("creaet", "create")
-        .replace("ticet", "ticket")
-        .replace("tiket", "ticket")
-    )
+    # Common typos from chat input (inline so lightweight tests can exec this fn)
+    t = re.sub(r"\bcreat\b", "create", t)
+    t = re.sub(r"\bcreaet\b", "create", t)
+    t = re.sub(r"\bcrate\b", "create", t)
+    t = re.sub(r"\bcretae\b", "create", t)
+    t = t.replace("ticet", "ticket").replace("tiket", "ticket").replace("ticekt", "ticket")
     # Viewing an existing key is not create ("open ticket ENG-123")
     if re.search(r"\b(open|show|view|get)\b.{0,24}\b[a-z][a-z0-9]+-\d+\b", t):
         if not re.search(r"\b(create|file|raise|submit)\b", t):
@@ -6845,11 +6929,71 @@ def is_create_eng_ticket_intent(text):
     return bool(
         re.search(
             r"\b(create|file|raise|submit)\b.{0,40}\b(eng\s+)?(jira\s+)?ticket\b"
-            r"|\b(create|file|raise|submit)\b.{0,20}\beng\b"
+            r"|\b(create|file|raise|submit)\b.{0,24}\beng\b"
             r"|\bnew\s+(eng\s+)?(jira\s+)?ticket\b"
             r"|\b(create|file)\s+eng\b",
             t,
         )
+    )
+
+
+def rewrite_agent_jira_credential_errors(text, username=None):
+    """
+    Replace agent/MCP env credential errors with User Settings guidance.
+
+    Deep AI skills (jira_helper) look at mcp.json / JIRA_* env vars. RegX creates
+    tickets via User Settings → Atlassian Jira Personal Token instead.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return raw
+    low = raw.lower()
+    markers = (
+        "jira credentials are not configured",
+        "mcp.json",
+        "jira_personal_token",
+        "jira_url",
+        "atlassian_jira_token",
+        "atlassian mcp",
+        "ticket creation attempted but blocked",
+    )
+    if not any(m in low for m in markers):
+        return raw
+    status = mcp_token_status_for_user(username)
+    if status["atlassian"]["ok"]:
+        return (
+            "Ticket creation must use your **User Settings → API Keys → Atlassian Jira "
+            "Personal Token** (not MCP env / ~/.cursor/mcp.json). "
+            "Ask again with **create ENG ticket** — RegX will create it via Jira REST "
+            "using your saved token."
+        )
+    return (
+        "MCP / Jira connection issue: " + (status["atlassian"]["error"] or "")
+    ).strip()
+
+
+def format_mcp_token_connection_error(service, username=None):
+    """User-facing MCP connection failure tied to missing/invalid User Settings tokens."""
+    status = mcp_token_status_for_user(username)
+    svc = (service or "").strip().lower()
+    if svc in {"atlassian", "jira", "confluence"}:
+        err = status["atlassian"]["error"] or (
+            "Atlassian token invalid or missing in User Settings → API Keys."
+        )
+        return f"MCP connection issue (Atlassian/Jira): {err}"
+    if svc in {"sourcegraph", "gw-sourcegraph"}:
+        err = status["sourcegraph"]["error"] or (
+            "Sourcegraph token missing in User Settings → API Keys."
+        )
+        return f"MCP connection issue (Sourcegraph): {err}"
+    if svc in {"cursor", "cursor_api_key"}:
+        err = status["cursor"]["error"] or (
+            "Cursor API key missing in User Settings → API Keys."
+        )
+        return f"MCP connection issue (Cursor): {err}"
+    return (
+        "MCP connection issue due to invalid or missing token in "
+        "User Settings → API Keys. Save and Validate the required token, then retry."
     )
 
 
@@ -10459,21 +10603,17 @@ def rdm_skill_analyze():
             return jsonify({"success": False, "error": "testcase_name or rdm_link is required"}), 400
 
         username = _current_username()
-        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        user_toks = resolve_user_settings_tokens(username)
+        cursor_api_key = user_toks.get("cursor_api_key")
         if not cursor_api_key:
             return jsonify({
                 "success": False,
-                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "error": format_mcp_token_connection_error("cursor", username),
                 "require_key_setup": True,
+                "mcp_token_status": mcp_token_status_for_user(username),
             }), 403
 
-        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
-        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
-        atlassian_tokens = {}
-        if atlassian_jira_token:
-            atlassian_tokens["jira"] = atlassian_jira_token
-        if atlassian_confluence_token:
-            atlassian_tokens["confluence"] = atlassian_confluence_token
+        atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
         rdm_info = None
         if task_id and (not rdm_link or not rdm_message):
@@ -19690,23 +19830,17 @@ def cursor_ai_analyze_testcase():
 
         # Get user API keys for Cursor SDK
         username = _current_username()
-        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
-        
+        user_toks = resolve_user_settings_tokens(username)
+        cursor_api_key = user_toks.get("cursor_api_key")
+
         if not cursor_api_key:
             return jsonify({
-                "error": "Cursor API key required. Please configure your API keys in Settings.",
-                "require_key_setup": True
+                "error": format_mcp_token_connection_error("cursor", username),
+                "require_key_setup": True,
+                "mcp_token_status": mcp_token_status_for_user(username),
             }), 403
 
-        # Get Atlassian tokens (optional)
-        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
-        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
-        
-        atlassian_tokens = {}
-        if atlassian_jira_token:
-            atlassian_tokens["jira"] = atlassian_jira_token
-        if atlassian_confluence_token:
-            atlassian_tokens["confluence"] = atlassian_confluence_token
+        atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
         exception_summary = body.get("exception_summary", "")
         exception = body.get("exception", "")
@@ -19806,25 +19940,19 @@ def cursor_ai_analyze_batch():
         if not testcases:
             return jsonify({"error": "testcases array is required"}), 400
 
-        # Get user API keys for Cursor SDK
+        # Get user API keys for Cursor SDK (login user's User Settings)
         username = _current_username()
-        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
-        
+        user_toks = resolve_user_settings_tokens(username)
+        cursor_api_key = user_toks.get("cursor_api_key")
+
         if not cursor_api_key:
             return jsonify({
-                "error": "Cursor API key required. Please configure your API keys in Settings.",
-                "require_key_setup": True
+                "error": format_mcp_token_connection_error("cursor", username),
+                "require_key_setup": True,
+                "mcp_token_status": mcp_token_status_for_user(username),
             }), 403
 
-        # Get Atlassian tokens (optional)
-        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
-        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
-        
-        atlassian_tokens = {}
-        if atlassian_jira_token:
-            atlassian_tokens["jira"] = atlassian_jira_token
-        if atlassian_confluence_token:
-            atlassian_tokens["confluence"] = atlassian_confluence_token
+        atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
         # Enrich each testcase with logs if missing
         enriched = []
@@ -19939,7 +20067,7 @@ def cursor_ai_result_callback():
 @app.route("/api/mcp/regression/cursor-ai/create-eng-ticket", methods=["POST"])
 @jwt_required
 def cursor_ai_create_eng_ticket():
-    """Create an ENG Jira ticket from Cursor/Deep AI analysis context via Jira REST."""
+    """Create an ENG Jira ticket via Jira REST using the login user's User Settings token."""
     try:
         body = request.get_json(force=True) or {}
         ticket_ctx = body.get("ticket_context") or body
@@ -19947,7 +20075,20 @@ def cursor_ai_create_eng_ticket():
         if body.get("confirm") is True or ticket_ctx.get("confirm"):
             ticket_ctx = dict(ticket_ctx)
             ticket_ctx["confirm"] = True
-        result = create_eng_jira_ticket(ticket_ctx, require_confirm=require_confirm)
+        # Always use the logged-in user's Atlassian Jira Personal Token from User Settings.
+        user_toks = resolve_user_settings_tokens()
+        jira_token = user_toks.get("atlassian_jira_token") or ""
+        if not jira_token:
+            return jsonify({
+                "success": False,
+                "error": format_mcp_token_connection_error("jira"),
+                "mcp_token_status": mcp_token_status_for_user(),
+            }), 400
+        result = create_eng_jira_ticket(
+            ticket_ctx,
+            token=jira_token,
+            require_confirm=require_confirm,
+        )
         if result.get("needs_user_input"):
             return jsonify({
                 "success": True,
@@ -19959,9 +20100,13 @@ def cursor_ai_create_eng_ticket():
                 },
             })
         if not result.get("ok"):
+            err = result.get("error") or "Failed to create ENG ticket"
+            if "token" in err.lower() or "credential" in err.lower():
+                err = format_mcp_token_connection_error("jira")
             return jsonify({
                 "success": False,
-                "error": result.get("error") or "Failed to create ENG ticket",
+                "error": err,
+                "mcp_token_status": mcp_token_status_for_user(),
             }), 400
         return jsonify({
             "success": True,
@@ -20029,6 +20174,14 @@ def cursor_ai_follow_up():
         create_ticket = is_create_eng_ticket_intent(question) or confirm_ticket
 
         if create_ticket:
+            user_toks = resolve_user_settings_tokens()
+            jira_token = user_toks.get("atlassian_jira_token") or ""
+            if not jira_token:
+                return jsonify({
+                    "success": False,
+                    "error": format_mcp_token_connection_error("jira"),
+                    "mcp_token_status": mcp_token_status_for_user(),
+                }), 400
             if confirm_ticket and pending_draft:
                 ticket_ctx = {**pending_draft, **ticket_ctx, "confirm": True}
                 overrides = parse_eng_ticket_field_overrides(question)
@@ -20039,6 +20192,7 @@ def cursor_ai_follow_up():
                 logger.debug("follow-up eng enrich skipped: %s", enrich_err)
             created = create_eng_jira_ticket(
                 ticket_ctx,
+                token=jira_token,
                 require_confirm=bool(body.get("require_confirm")),
             )
             if created.get("needs_user_input"):
@@ -20055,9 +20209,13 @@ def cursor_ai_follow_up():
                     "analysis": analysis,
                 })
             if not created.get("ok"):
+                err = created.get("error") or "Failed to create ENG ticket"
+                if "token" in err.lower() or "credential" in err.lower():
+                    err = format_mcp_token_connection_error("jira")
                 return jsonify({
                     "success": False,
-                    "error": created.get("error") or "Failed to create ENG ticket",
+                    "error": err,
+                    "mcp_token_status": mcp_token_status_for_user(),
                 }), 400
             return jsonify({
                 "success": True,
@@ -20112,25 +20270,19 @@ def cursor_ai_follow_up():
         if not session_id:
             return jsonify({"error": "session_id is required"}), 400
 
-        # Get user API keys for Cursor SDK
+        # Get user API keys for Cursor SDK (login user's User Settings)
         username = _current_username()
-        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
-        
+        user_toks = resolve_user_settings_tokens(username)
+        cursor_api_key = user_toks.get("cursor_api_key")
+
         if not cursor_api_key:
             return jsonify({
-                "error": "Cursor API key required. Please configure your API keys in Settings.",
-                "require_key_setup": True
+                "error": format_mcp_token_connection_error("cursor", username),
+                "require_key_setup": True,
+                "mcp_token_status": mcp_token_status_for_user(username),
             }), 403
 
-        # Get Atlassian tokens (optional)
-        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
-        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
-        
-        atlassian_tokens = {}
-        if atlassian_jira_token:
-            atlassian_tokens["jira"] = atlassian_jira_token
-        if atlassian_confluence_token:
-            atlassian_tokens["confluence"] = atlassian_confluence_token
+        atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
         resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/follow-up",
@@ -20148,13 +20300,30 @@ def cursor_ai_follow_up():
             return jsonify({"error": "Session expired or not found. Run a new analysis first."}), 404
         if resp.status_code != 200:
             error_msg = resp.json().get("error", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
-            return jsonify({"error": f"Bridge error: {error_msg}"}), 502
+            rewritten = rewrite_agent_jira_credential_errors(str(error_msg), username)
+            # Map MCP auth failures to User Settings token guidance
+            low = str(error_msg).lower()
+            if "atlassian" in low or "jira" in low or "401" in low or "403" in low:
+                if not atlassian_tokens.get("jira"):
+                    rewritten = format_mcp_token_connection_error("jira", username)
+            return jsonify({
+                "error": f"Bridge error: {rewritten}",
+                "mcp_token_status": mcp_token_status_for_user(username),
+            }), 502
 
         data = resp.json()
+        analysis = data.get("analysis", {}) or {}
+        if isinstance(analysis, dict):
+            for field in ("follow_up_answer", "root_cause", "triage_report", "suggested_fix"):
+                if analysis.get(field):
+                    analysis[field] = rewrite_agent_jira_credential_errors(
+                        analysis.get(field), username
+                    )
         return jsonify({
             "success": True,
             "session_id": session_id,
-            "analysis": data.get("analysis", {}),
+            "analysis": analysis,
+            "mcp_token_status": mcp_token_status_for_user(username),
         })
 
     except requests.exceptions.ConnectionError:
@@ -20553,23 +20722,16 @@ def _cursor_bridge_chat(messages, system_prompt, mode):
         return {"error": "No user message for Cursor Bridge chat"}, 400
 
     username = _current_username()
-    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+    user_toks = resolve_user_settings_tokens(username)
+    cursor_api_key = user_toks.get("cursor_api_key")
     if not cursor_api_key:
         return {
-            "error": (
-                "Cursor API key required for chat (Nutanix AI key is invalid/unavailable). "
-                "Add it under Settings → API Keys."
-            ),
+            "error": format_mcp_token_connection_error("cursor", username),
             "require_key_setup": True,
+            "mcp_token_status": mcp_token_status_for_user(username),
         }, 403
 
-    atlassian_tokens = {}
-    jira_tok = get_user_key(username, "atlassian_jira_token") if username else None
-    conf_tok = get_user_key(username, "atlassian_confluence_token") if username else None
-    if jira_tok:
-        atlassian_tokens["jira"] = jira_tok
-    if conf_tok:
-        atlassian_tokens["confluence"] = conf_tok
+    atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
     try:
         bridge_resp = requests.post(
@@ -22803,21 +22965,17 @@ def failed_analysis_deep_ai():
             return jsonify({"success": False, "error": "testcase_name is required"}), 400
 
         username = _current_username()
-        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        user_toks = resolve_user_settings_tokens(username)
+        cursor_api_key = user_toks.get("cursor_api_key")
         if not cursor_api_key:
             return jsonify({
                 "success": False,
-                "error": "Cursor API key required. Please configure your API keys in Settings.",
+                "error": format_mcp_token_connection_error("cursor", username),
                 "require_key_setup": True,
+                "mcp_token_status": mcp_token_status_for_user(username),
             }), 403
 
-        atlassian_jira_token = get_user_key(username, "atlassian_jira_token") if username else None
-        atlassian_confluence_token = get_user_key(username, "atlassian_confluence_token") if username else None
-        atlassian_tokens = {}
-        if atlassian_jira_token:
-            atlassian_tokens["jira"] = atlassian_jira_token
-        if atlassian_confluence_token:
-            atlassian_tokens["confluence"] = atlassian_confluence_token
+        atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
         first_level = _run_first_level_ai_analysis(test_result, run_ai=False)
         exception_summary = test_result.get("exception_summary") or ""
@@ -22917,6 +23075,31 @@ def failed_analysis_deep_ai():
                 "claimed_success": bool(first_level.get("glean_ok")),
             },
         }
+        # Overlay login-user User Settings token readiness for dependent MCPs
+        token_status = mcp_token_status_for_user(username)
+        mcp_health = dict(mcp_health) if isinstance(mcp_health, dict) else {}
+        mcp_health["atlassian"] = {
+            "service": "atlassian",
+            "available": bool(atlassian_tokens.get("jira")),
+            "ok": token_status["atlassian"]["ok"],
+            "error": token_status["atlassian"]["error"],
+            "claimed_success": token_status["atlassian"]["ok"],
+            "source": "user_settings",
+        }
+        mcp_health["cursor"] = {
+            "service": "cursor",
+            "available": bool(cursor_api_key),
+            "ok": token_status["cursor"]["ok"],
+            "error": token_status["cursor"]["error"],
+            "claimed_success": token_status["cursor"]["ok"],
+            "source": "user_settings",
+        }
+        if isinstance(analysis, dict):
+            for field in ("root_cause", "suggested_fix", "triage_report", "follow_up_answer"):
+                if analysis.get(field):
+                    analysis[field] = rewrite_agent_jira_credential_errors(
+                        analysis.get(field), username
+                    )
 
         # Shared session model: Deep AI + Cursor AI use the same session_id.
         response_body = {

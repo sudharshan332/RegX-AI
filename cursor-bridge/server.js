@@ -83,6 +83,12 @@ function buildMcpServers(atlassianTokens = {}, profile = MCP_PROFILE) {
   return selected;
 }
 
+const JIRA_CREATE_FORBID = `CRITICAL — Jira ticket creation:
+- Do NOT create, update, or file Jira/ENG tickets yourself.
+- Do NOT run jira_helper.py, shell exports of JIRA_URL / JIRA_PERSONAL_TOKEN, or Atlassian MCP create/update tools.
+- Do NOT claim credentials are missing because of ~/.cursor/mcp.json or env vars — RegX uses the login user's User Settings → Atlassian Jira Personal Token via a dedicated API.
+- If the user asks to create an ENG/Jira ticket, reply that RegX will create it from User Settings when they say "create ENG ticket" (or that create already ran server-side).`;
+
 function buildFollowUpPrompt(question, mode) {
   const selectedMode = ["ask", "agent", "plan"].includes(String(mode).toLowerCase())
     ? String(mode).toLowerCase()
@@ -100,6 +106,7 @@ Rules:
 - Do NOT call MCP tools unless the answer is impossible without one specific fact.
 - Do NOT re-run full triage or re-read skill docs.
 - Keep the answer concise and evidence-based.
+${JIRA_CREATE_FORBID}
 
 Respond ONLY with this JSON:
 \`\`\`json
@@ -124,6 +131,7 @@ Requested interaction mode: ${selectedMode}
 ${modeInstruction}
 
 Prefer answering from existing context. Use MCP tools only when the question needs new evidence.
+${JIRA_CREATE_FORBID}
 
 Respond ONLY with JSON:
 \`\`\`json
