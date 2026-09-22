@@ -62,7 +62,7 @@ const ALL_MCP_SERVERS = {
 };
 
 // Lean set for triage — fewer MCP round-trips than attaching every server.
-const TRIAGE_MCP_KEYS = ["gw-sourcegraph", "gw-jita"];
+const TRIAGE_MCP_KEYS = ["gw-sourcegraph", "gw-jita", "gw-glean"];
 
 /**
  * Build MCP servers with optional per-request Atlassian tokens.

@@ -262,6 +262,12 @@ Foundation/imaging, pool, nested AHV, etc.):
 
 A similar ticket is a hypothesis, not proof. Only set \`recommended_action\`
 to \`link_existing\` when the ticket describes the same root cause.
+Prefer a **recent** matching DIAL or ENG ticket over creating a new one.
+
+If **gw-glean** or **gw-sourcegraph** MCP tools fail, time out, or are missing,
+record that in \`mcp_status\` (do not guess they succeeded). Continue triage
+from the RDM failure message and any pre-fetched tickets. Do not invent
+skill-file citations when Sourcegraph is unavailable.
 
 Validate whether the Triage Genie suggested ticket is **Correct** or
 **Incorrect** for THIS failure.
@@ -275,9 +281,11 @@ Pick **one**:
 | Matching open ENG or DIAL ticket | \`link_existing\` | \`regx_rerun (DIAL-23079)\` or \`regx_rerun (ENG-xxxxx)\` |
 | Intermittent / one-off infra, safe to retry | \`rerun\` | \`regx_rerun\` |
 | Bad node named in the RDM error | \`disable_node_and_rerun\` | \`regx_rerun_disable-<node> Rerun cause due to node issue\` |
-| New Foundation / infra / product bug, no matching ticket | \`create_jira\` | \`regx_rerun\` (ticket will be filed by the user) |
+| New Foundation / infra / lab / plugin bug, no matching ticket | \`create_jira\` | \`regx_rerun\` (ticket will be filed by the user) |
+| New product / AOS / hypervisor / genesis bug, no matching ticket | \`create_jira\` | \`regx_rerun\` (ticket will be filed by the user) |
 
 \`suggested_jira_project\`: **DIAL** for Foundation/infra/lab; **ENG** for product.
+Do **not** file a JIRA ticket yourself.
 
 ### Step 3 — Return structured results
 
@@ -303,6 +311,11 @@ After completing the skill's triage workflow, return your findings as JSON:
   "recommended_action": "link_existing | create_jira | rerun | disable_node_and_rerun",
   "suggested_comment": "regx_rerun (DIAL-23079)",
   "suggested_jira_project": "DIAL",
+  "mcp_status": {
+    "glean": "ok | unavailable",
+    "sourcegraph": "ok | unavailable",
+    "notes": "tool errors only; empty if both MCPs worked"
+  },
   "tg_ticket_validation": {
     "ticket": "ENG-XXXXX or empty",
     "verdict": "Correct | Incorrect | Partial | Missing",

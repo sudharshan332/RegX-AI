@@ -79,6 +79,11 @@ Once connected, you can ask me:
 
 ## Troubleshooting
 
+The Cursor bridge triage profile (`CURSOR_MCP_PROFILE=triage`, default) attaches
+`gw-sourcegraph`, `gw-jita`, and `gw-glean`. AI RDM Failure Analysis needs Glean
+MCP for ticket matching; if it is missing, the Failed Analysis page shows a
+**Glean MCP unavailable** banner.
+
 ### MCP Server Still Not Showing Up?
 
 1. **Check the server is running:**

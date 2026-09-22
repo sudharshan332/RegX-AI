@@ -9867,6 +9867,66 @@ def _normalize_rdm_skill_analysis(analysis, rdm_message=""):
     }
 
 
+_RDM_MCP_GLEAN_URL = "https://panacea-dev.eng.nutanix.com/mcp/glean"
+_RDM_MCP_SOURCEGRAPH_URL = "https://panacea-dev.eng.nutanix.com/mcp/sourcegraph"
+
+
+def _probe_mcp_endpoint(url):
+    """Best-effort liveness check. 4xx still means the gateway is up."""
+    try:
+        resp = requests.get(url, timeout=4)
+        ok = resp.status_code < 500
+        return {
+            "ok": ok,
+            "status": "ok" if ok else "unavailable",
+            "status_code": resp.status_code,
+        }
+    except Exception as exc:
+        return {"ok": False, "status": "unavailable", "error": str(exc)[:200]}
+
+
+def _probe_rdm_mcp_health():
+    return {
+        "glean": _probe_mcp_endpoint(_RDM_MCP_GLEAN_URL),
+        "sourcegraph": _probe_mcp_endpoint(_RDM_MCP_SOURCEGRAPH_URL),
+    }
+
+
+def _agent_mcp_entry_unavailable(entry):
+    if entry is None:
+        return False
+    if isinstance(entry, bool):
+        return entry is False
+    if isinstance(entry, dict):
+        if entry.get("ok") is False:
+            return True
+        status = str(entry.get("status") or entry.get("state") or "").strip().lower()
+        return status in ("unavailable", "down", "error", "failed")
+    status = str(entry).strip().lower()
+    return status in ("unavailable", "down", "error", "failed", "false")
+
+
+def _merge_rdm_mcp_health(probe, agent_status):
+    """Treat MCP as down if the probe failed or the agent reported a tool error."""
+    probe = probe or {}
+    agent_status = agent_status if isinstance(agent_status, dict) else {}
+    merged = {}
+    for key in ("glean", "sourcegraph"):
+        p = probe.get(key) or {}
+        a = agent_status.get(key)
+        probe_ok = bool(p.get("ok", True)) if p else True
+        ok = probe_ok and not _agent_mcp_entry_unavailable(a)
+        merged[key] = {
+            "ok": ok,
+            "status": "ok" if ok else "unavailable",
+            "probe": p,
+            "agent": a,
+        }
+    notes = str(agent_status.get("notes") or "").strip()
+    merged["notes"] = notes
+    return merged
+
+
 def fetch_jita_deployments(task_id):
     """Fetch JITA deployments for a given agave_task_id (paginated)."""
     deployments = []
@@ -10417,14 +10477,18 @@ def rdm_skill_analyze():
 
         glean_tickets = []
         glean_snippets = []
+        glean_rest_ok = False
         try:
             search = search_existing_tickets_for_failure(
                 rdm_message, rdm_message, testcase_name
             )
             glean_tickets = _enrich_tickets_with_jira(search.get("tickets") or [])
             glean_snippets = search.get("snippets") or []
+            glean_rest_ok = bool(search.get("glean_ok"))
         except Exception as glean_err:
             logger.warning("Glean search failed for RDM skill analysis: %s", glean_err)
+
+        mcp_probe = _probe_rdm_mcp_health()
 
         payload = {
             "testcase_name": testcase_name or "rdm_skipped_testcase",
@@ -10462,6 +10526,10 @@ def rdm_skill_analyze():
         bridge = resp.json()
         analysis = bridge.get("analysis") or {}
         mapped = _normalize_rdm_skill_analysis(analysis, rdm_message=rdm_message)
+        mcp_health = _merge_rdm_mcp_health(mcp_probe, analysis.get("mcp_status") or {})
+        glean_mcp_ok = bool((mcp_health.get("glean") or {}).get("ok"))
+        glean_ok = False if not glean_mcp_ok else glean_rest_ok
+        search_source = "glean_mcp" if glean_mcp_ok else ("glean_rest" if glean_tickets else "unavailable")
         suggested_pattern = _suggest_rdm_pattern_from_message(
             rdm_message, rdm_link=rdm_link, nodes=mapped.get("failed_nodes") or []
         )
@@ -10488,6 +10556,9 @@ def rdm_skill_analyze():
             "glean_snippets": glean_snippets,
             "ai_summary": analysis.get("root_cause") or analysis.get("triage_report") or "",
             "suggested_pattern": suggested_pattern,
+            "mcp_health": mcp_health,
+            "glean_ok": glean_ok,
+            "search_source": search_source,
             **mapped,
         })
     except requests.exceptions.ConnectionError:
@@ -10499,7 +10570,7 @@ def rdm_skill_analyze():
     except requests.exceptions.Timeout:
         return jsonify({
             "success": False,
-            "error": "AI Skill Analysis timed out (>600s).",
+            "error": "AI RDM Failure Analysis timed out (>600s).",
         }), 504
     except Exception as e:
         logger.error("RDM skill analyze error: %s", e, exc_info=True)
