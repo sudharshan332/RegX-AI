@@ -1076,13 +1076,16 @@ export default function FailedTestcaseAnalysis() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // Fetch saved tags on mount
+  // Fetch saved tags on mount (team + legacy failed_analysis_saved_tags.json)
   useEffect(() => {
     const fetchSavedTags = async () => {
       try {
         const { data } = await api.get(`${API_BASE}/saved-tags`);
         setSavedTags(data.tags || []);
-      } catch (_) {}
+      } catch (err) {
+        console.warn('Failed to load saved tags', err);
+        setSavedTags([]);
+      }
     };
     fetchSavedTags();
   }, []);
@@ -1121,6 +1124,58 @@ export default function FailedTestcaseAnalysis() {
     }
   };
 
+  const hydrateIntelligentTriageFromMap = (itMap) => {
+    const flHydrate = {};
+    const deepHydrate = {};
+    const triageOpen = {};
+    Object.entries(itMap || {}).forEach(([tid, analysis]) => {
+      if (!analysis) return;
+      triageOpen[tid] = { analysis_type: 'ready', requires_first_level_ai: true, requires_deep_ai_analysis: true };
+      if (analysis.triage_analysis || analysis.decision) {
+        flHydrate[tid] = {
+          success: true,
+          cached: true,
+          analysis_type: 'first_level_ai',
+          issue_type: analysis.triage_analysis?.issue_type,
+          analysis: analysis.triage_analysis?.summary,
+          recommended_action: analysis.triage_analysis?.recommended_action,
+          best_matching_ticket: analysis.triage_analysis?.best_matching_ticket,
+          triage_confidence: analysis.triage_analysis?.triage_confidence,
+          intermittent_confidence: analysis.intermittent_analysis?.intermittent_confidence,
+          tg_ticket_validation: analysis.triage_genie?.ai_validation
+            ? { ...analysis.triage_genie.ai_validation, ticket: analysis.triage_genie?.original?.ticket }
+            : null,
+          enriched_tickets: analysis.glean_candidates?.search?.candidates || [],
+          glean_snippets: analysis.glean_candidates?.search?.snippets || [],
+          search_source: analysis.glean_candidates?.search?.search_source,
+          glean_ok: analysis.glean_candidates?.search?.mcp_health?.ok,
+          mcp_health: analysis.mcp_health,
+          decision: analysis.decision,
+          intelligent_triage: analysis,
+        };
+      }
+      if (analysis.deep_ai?.status && analysis.deep_ai.status !== 'not_run') {
+        deepHydrate[tid] = {
+          success: true,
+          cached: true,
+          session_id: analysis.deep_ai.session_id,
+          root_cause: analysis.deep_ai.root_cause,
+          classification: analysis.deep_ai.classification,
+          confidence: analysis.deep_ai.confidence,
+          skill_used: analysis.deep_ai.skill_used,
+          suggested_fix: analysis.deep_ai.suggested_fix,
+          failing_code: analysis.deep_ai.failing_code,
+          related_components: analysis.deep_ai.related_components,
+          jira_duplicates: analysis.deep_ai.jira_duplicates,
+          triage_report: analysis.deep_ai.triage_report,
+          mcp_health: analysis.deep_ai.mcp_health || analysis.mcp_health,
+          intelligent_triage: analysis,
+        };
+      }
+    });
+    return { flHydrate, deepHydrate, triageOpen };
+  };
+
   const handleSelectSavedTag = async (tagName) => {
     setSelectedSavedTag(tagName);
     if (!tagName) return;
@@ -1152,55 +1207,20 @@ export default function FailedTestcaseAnalysis() {
       setFollowUpHistoryByTestcase(cursorAi.follow_up_history_by_testcase || {});
       const itMap = data.intelligent_triage || {};
       setIntelligentTriageByTestcase(itMap);
-      const flHydrate = {};
-      const deepHydrate = {};
-      const triageOpen = {};
-      Object.entries(itMap).forEach(([tid, analysis]) => {
-        if (!analysis) return;
-        triageOpen[tid] = { analysis_type: 'ready', requires_first_level_ai: true, requires_deep_ai_analysis: true };
-        if (analysis.triage_analysis || analysis.decision) {
-          flHydrate[tid] = {
-            success: true,
-            analysis_type: 'first_level_ai',
-            issue_type: analysis.triage_analysis?.issue_type,
-            analysis: analysis.triage_analysis?.summary,
-            recommended_action: analysis.triage_analysis?.recommended_action,
-            best_matching_ticket: analysis.triage_analysis?.best_matching_ticket,
-            triage_confidence: analysis.triage_analysis?.triage_confidence,
-            intermittent_confidence: analysis.intermittent_analysis?.intermittent_confidence,
-            tg_ticket_validation: analysis.triage_genie?.ai_validation
-              ? { ...analysis.triage_genie.ai_validation, ticket: analysis.triage_genie?.original?.ticket }
-              : null,
-            enriched_tickets: analysis.glean_candidates?.search?.candidates || [],
-            glean_snippets: analysis.glean_candidates?.search?.snippets || [],
-            search_source: analysis.glean_candidates?.search?.search_source,
-            glean_ok: analysis.glean_candidates?.search?.mcp_health?.ok,
-            mcp_health: analysis.mcp_health,
-            decision: analysis.decision,
-            intelligent_triage: analysis,
-          };
-        }
-        if (analysis.deep_ai?.status && analysis.deep_ai.status !== 'not_run') {
-          deepHydrate[tid] = {
-            success: true,
-            session_id: analysis.deep_ai.session_id,
-            root_cause: analysis.deep_ai.root_cause,
-            classification: analysis.deep_ai.classification,
-            confidence: analysis.deep_ai.confidence,
-            skill_used: analysis.deep_ai.skill_used,
-            mcp_health: analysis.deep_ai.mcp_health || analysis.mcp_health,
-          };
-        }
-      });
-      if (Object.keys(triageOpen).length) setIntelligentTriageResults(prev => ({ ...prev, ...triageOpen }));
-      if (Object.keys(flHydrate).length) setFirstLevelAiResults(prev => ({ ...prev, ...flHydrate }));
-      if (Object.keys(deepHydrate).length) setDeepAiResults(prev => ({ ...prev, ...deepHydrate }));
+      const { flHydrate, deepHydrate, triageOpen } = hydrateIntelligentTriageFromMap(itMap);
+      // Replace (do not merge) so switching tags does not keep stale analyses.
+      setIntelligentTriageResults(triageOpen);
+      setFirstLevelAiResults(flHydrate);
+      setDeepAiResults(deepHydrate);
     } catch (_) {
       setResults([]);
       setCursorAiResults({});
       setCursorAiSessions({});
       setFollowUpHistoryByTestcase({});
       setIntelligentTriageByTestcase({});
+      setIntelligentTriageResults({});
+      setFirstLevelAiResults({});
+      setDeepAiResults({});
     } finally {
       setLoading(false);
     }
@@ -1293,14 +1313,10 @@ export default function FailedTestcaseAnalysis() {
     const include = buildIncludeParam(visibleColumns);
     const searchParams = new URLSearchParams({ include });
     const isTagMode = inputMode === 'tag' && tag.trim();
+    // Keep prior First Level / Deep AI maps across re-analyze; backend merges by testcase_id.
+    // Do NOT wipe saved results_<tag>.json before streaming (that shadowed legacy caches).
     if (isTagMode) {
       searchParams.set('tag', tag.trim());
-      try {
-        await api.put(`${API_BASE}/saved-tags/${encodeURIComponent(tag.trim())}/results`, {
-          results: [],
-          current_branch: '',
-        });
-      } catch (_) {}
     } else if (inputMode === 'task_ids' && parsedTaskIds.length) {
       searchParams.set('task_ids', parsedTaskIds.join(','));
     }
@@ -1408,12 +1424,40 @@ export default function FailedTestcaseAnalysis() {
       setAnalyzing(false);
       setStreamPhase('');
 
-      // Auto-save results for tag mode if the tag is in the saved tags list
+      // Auto-save results for tag mode if the tag is in the saved tags list.
+      // Preserve intelligent_triage / cursor AI already in React state (and on disk via server merge).
       if (isTagMode && collectedRows.length > 0) {
         const tagName = tag.trim();
         const tagEntry = savedTags.find(t => (typeof t === 'string' ? t : t.name) === tagName);
         if (tagEntry) {
-          await saveResultsForTag(tagName, collectedRows, branch);
+          await saveResultsForTag(
+            tagName,
+            collectedRows,
+            branch,
+            {
+              results: cursorAiResults,
+              sessions: cursorAiSessions,
+              follow_up_history_by_testcase: followUpHistoryByTestcase,
+            },
+            intelligentTriageByTestcase,
+          );
+          // Re-load from disk so First Level / Deep AI for matching testcase_ids stay hydrated.
+          try {
+            const { data } = await api.get(`${API_BASE}/saved-tags/${encodeURIComponent(tagName)}/results`);
+            const itMap = data.intelligent_triage || intelligentTriageByTestcase || {};
+            setIntelligentTriageByTestcase(itMap);
+            const { flHydrate, deepHydrate, triageOpen } = hydrateIntelligentTriageFromMap(itMap);
+            setIntelligentTriageResults(prev => ({ ...prev, ...triageOpen }));
+            setFirstLevelAiResults(prev => ({ ...prev, ...flHydrate }));
+            setDeepAiResults(prev => ({ ...prev, ...deepHydrate }));
+            if (data.cursor_ai) {
+              setCursorAiResults(data.cursor_ai.results || cursorAiResults);
+              setCursorAiSessions(data.cursor_ai.sessions || cursorAiSessions);
+              setFollowUpHistoryByTestcase(
+                data.cursor_ai.follow_up_history_by_testcase || followUpHistoryByTestcase
+              );
+            }
+          } catch (_) {}
         }
       }
     } catch (err) {
@@ -2928,9 +2972,21 @@ export default function FailedTestcaseAnalysis() {
     }));
   };
 
-  const handleFirstLevelAiAnalysis = async (result) => {
+  const handleFirstLevelAiAnalysis = async (result, { force = false } = {}) => {
     const testId = result.testcase_id;
     if (!testId) return;
+
+    // Prefer already-hydrated analysis after tag load / page restore.
+    if (!force && firstLevelAiResults[testId]?.intelligent_triage) {
+      setTriageAnalysisModal({
+        kind: 'first_level',
+        testcase_name: result.testcase_name,
+        testcase_id: testId,
+        resultRow: result,
+        ...firstLevelAiResults[testId],
+      });
+      return;
+    }
 
     setFirstLevelAiLoading(prev => ({ ...prev, [testId]: true }));
     try {
@@ -2939,6 +2995,7 @@ export default function FailedTestcaseAnalysis() {
         user_requested_ai: true,
         tag: analysisTag || tag || selectedSavedTag || '',
         apply_auto_triage: true,
+        force: !!force,
       });
       const data = response.data || {};
       if (!data.success) {
@@ -3045,9 +3102,24 @@ export default function FailedTestcaseAnalysis() {
     }
   };
 
-  const handleDeepAiAnalysis = async (result) => {
+  const handleDeepAiAnalysis = async (result, { force = false } = {}) => {
     const testId = result.testcase_id;
     if (!testId) return;
+
+    if (!force && deepAiResults[testId]?.root_cause) {
+      setFollowUpHistory(followUpHistoryByTestcase[testId] || []);
+      setFollowUpMode('ask');
+      resetDeepAiActionUi();
+      setTriageAnalysisModal({
+        kind: 'deep',
+        testcase_name: result.testcase_name,
+        testcase_id: testId,
+        resultRow: result,
+        session_id: deepAiResults[testId].session_id || cursorAiSessions[testId] || null,
+        ...deepAiResults[testId],
+      });
+      return;
+    }
 
     const fl = firstLevelAiResults[testId];
     const recommended = fl?.decision?.deep_ai_recommended || fl?.decision?.outcome === 'NEEDS_DEEP_ANALYSIS';
@@ -3067,6 +3139,7 @@ export default function FailedTestcaseAnalysis() {
         glean_snippets: glean.glean_snippets || [],
         user_requested: true,
         tag: analysisTag || tag || selectedSavedTag || '',
+        force: !!force,
       });
       const data = response.data || {};
       if (!data.success) {
