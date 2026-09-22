@@ -185,6 +185,15 @@ def _merge_cursor_ai(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, A
     return out
 
 
+def _merge_flux_quick_fix(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge flux_quick_fix maps keyed by testcase_id (later wins)."""
+    out = dict(base or {})
+    for tid, job in (extra or {}).items():
+        if tid and job:
+            out[str(tid)] = job
+    return out
+
+
 def _score_results_payload(data: Dict[str, Any]) -> Tuple[int, int, int]:
     """Prefer payloads with more failure rows, then more IT analyses, then cursor AI."""
     results_n = len(data.get("results") or [])
@@ -208,6 +217,7 @@ def load_failed_analysis_results(tag: str, team: Optional[str] = None) -> Option
     merged = dict(best)
     it_map: Dict[str, Any] = {}
     cursor: Dict[str, Any] = {}
+    flux_map: Dict[str, Any] = {}
     for data in loaded:
         for tid, analysis in (data.get("intelligent_triage") or {}).items():
             if not tid or not analysis:
@@ -224,11 +234,14 @@ def load_failed_analysis_results(tag: str, team: Optional[str] = None) -> Option
             elif analysis.get("decision") and not prev.get("decision"):
                 it_map[tid_s] = analysis
         cursor = _merge_cursor_ai(cursor, data.get("cursor_ai") or {})
+        flux_map = _merge_flux_quick_fix(flux_map, data.get("flux_quick_fix") or {})
 
     if it_map:
         merged["intelligent_triage"] = it_map
     if cursor:
         merged["cursor_ai"] = cursor
+    if flux_map:
+        merged["flux_quick_fix"] = flux_map
     if not merged.get("tag"):
         merged["tag"] = tag
     return merged
@@ -237,17 +250,18 @@ def load_failed_analysis_results(tag: str, team: Optional[str] = None) -> Option
 def save_failed_analysis_results(tag: str, data: Dict[str, Any], team: Optional[str] = None) -> None:
     """Write results under data/<team>/failed_analysis/results_<tag>.json.
 
-    Merges with any previously saved intelligent_triage / cursor_ai so a results-only
-    write cannot wipe prior First Level / Deep AI analyses.
+    Merges with any previously saved intelligent_triage / cursor_ai / flux_quick_fix so a
+    results-only write cannot wipe prior First Level / Deep AI / Flux analyses.
     """
     path = _team_results_path(tag, team, for_write=True)
     existing = _read_json(path) if os.path.exists(path) else None
     if not isinstance(existing, dict):
         existing = {}
 
-    # Pull IT/cursor from sibling/legacy candidates without re-entering save.
+    # Pull IT/cursor/flux from sibling/legacy candidates without re-entering save.
     prior_it: Dict[str, Any] = {}
     prior_cursor: Dict[str, Any] = {}
+    prior_flux: Dict[str, Any] = {}
     prior_results: List[Any] = []
     for cand in _results_candidates(tag, team):
         if cand == path:
@@ -259,6 +273,7 @@ def save_failed_analysis_results(tag: str, data: Dict[str, Any], team: Optional[
             if tid and analysis and str(tid) not in prior_it:
                 prior_it[str(tid)] = analysis
         prior_cursor = _merge_cursor_ai(prior_cursor, other.get("cursor_ai") or {})
+        prior_flux = _merge_flux_quick_fix(prior_flux, other.get("flux_quick_fix") or {})
         if not prior_results and other.get("results"):
             prior_results = list(other.get("results") or [])
 
@@ -273,6 +288,11 @@ def save_failed_analysis_results(tag: str, data: Dict[str, Any], team: Optional[
     cursor_out = _merge_cursor_ai(cursor_out, out.get("cursor_ai") or {})
     if cursor_out:
         out["cursor_ai"] = cursor_out
+
+    flux_out = _merge_flux_quick_fix(prior_flux, existing.get("flux_quick_fix") or {})
+    flux_out = _merge_flux_quick_fix(flux_out, out.get("flux_quick_fix") or {})
+    if flux_out:
+        out["flux_quick_fix"] = flux_out
 
     incoming_results = out.get("results")
     if incoming_results is None or (
