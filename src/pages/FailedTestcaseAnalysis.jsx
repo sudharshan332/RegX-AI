@@ -940,6 +940,13 @@ export default function FailedTestcaseAnalysis() {
     additional_details: '',
   });
   const [engCreateLoading, setEngCreateLoading] = useState(false);
+  const [deepAiFluxForm, setDeepAiFluxForm] = useState({
+    branch: '',
+    loading: false,
+    error: null,
+    taskId: '',
+    starting: false,
+  });
 
   // Retrigger state
   const [retriggerModalOpen, setRetriggerModalOpen] = useState(false);
@@ -1996,12 +2003,118 @@ export default function FailedTestcaseAnalysis() {
   };
 
   const handleFluxFromDeepChat = (result) => {
+    // Open Flux tag panel with on-page target branch selection (no confirm dialog).
     if (!result) return;
-    const ok = window.confirm(
-      'Start Flux Quick Fix for this test issue? This requires your confirmation and is never auto-started.'
-    );
-    if (!ok) return;
-    handleFluxQuickFix(result);
+    setDeepAiActionTag('flux');
+    prepareDeepAiFluxForm(result);
+  };
+
+  const prepareDeepAiFluxForm = async (result) => {
+    if (!result) return;
+    const taskId = String(result.agave_task_id || '').trim();
+    const fallback = fluxNutestTargetBranch(result, currentBranch);
+    setDeepAiFluxForm({
+      branch: fallback,
+      loading: Boolean(taskId),
+      error: taskId ? null : 'No Jita Task ID on this row; enter or select the nutest target branch.',
+      taskId,
+      starting: false,
+    });
+    if (!taskId) return;
+    try {
+      const { data } = await api.get(`${FLUX_API}/nutest-branch`, {
+        params: { task_id: taskId },
+        timeout: 30000,
+      });
+      const fromJita = fluxNutestTargetBranch(
+        { 'nutest-py3-tests_branch': data?.nutest_branch || data?.['nutest-py3-tests_branch'] },
+        fallback,
+      );
+      setDeepAiFluxForm(prev => ({
+        ...prev,
+        branch: fromJita || prev.branch || '',
+        loading: false,
+        error: fromJita ? null : (data?.error || 'JITA did not return nutest-py3-tests_branch.'),
+      }));
+    } catch (err) {
+      const message = err.response?.data?.error || err.message || 'Failed to fetch nutest branch from JITA';
+      setDeepAiFluxForm(prev => ({
+        ...prev,
+        loading: false,
+        error: message,
+        branch: prev.branch || fallback,
+      }));
+    }
+  };
+
+  const startDeepAiFluxQuickFix = async (result) => {
+    if (!result) return;
+    const testId = result.testcase_id;
+    const jiraKey = fluxFirstJiraKey(result);
+    const targetBranch = fluxNutestTargetBranch({ nutest_branch: deepAiFluxForm.branch }, currentBranch);
+    if (!testId) return;
+    if (!jiraKey) {
+      alert('Add a Jira ticket first.');
+      return;
+    }
+    if (!targetBranch) {
+      alert('Select or enter a nutest target branch (for example ganges-7.5-stable).');
+      return;
+    }
+    setDeepAiFluxForm(prev => ({ ...prev, starting: true, error: null }));
+    updateFluxJob(testId, {
+      status: 'starting',
+      error: null,
+      ticket: null,
+      rerun: null,
+      startedAt: Date.now(),
+      resumeAttempted: false,
+    });
+    fluxResumeInFlight.current[testId] = false;
+    try {
+      const resp = await api.post(`${FLUX_API}/quick-fix`, {
+        jira_key: jiraKey,
+        target_branch: targetBranch,
+        log_url: null,
+        send_test_fix: true,
+        update_jira: true,
+        pause_for_review: true,
+        testcase_id: testId,
+        testcase_name: result.testcase_name,
+      }, { timeout: 60000 });
+      const data = resp.data || {};
+      const recordId = data.record_id || data.id;
+      updateFluxJob(testId, {
+        record_id: recordId,
+        status: data.status || 'queued',
+        ticket: data,
+        error: null,
+      });
+      appendFollowUpMessage(testId, {
+        role: 'assistant',
+        data: {
+          follow_up_answer: `Started Flux Quick Fix for ${jiraKey} on target branch \`${targetBranch}\`.`,
+          suggested_action: null,
+        },
+        mode: 'system',
+      });
+      setDeepAiFluxForm(prev => ({ ...prev, starting: false }));
+    } catch (err) {
+      const data = err.response?.data || {};
+      const message = data.error || err.message || 'Flux Quick Fix failed';
+      if (data.require_key_setup) {
+        alert(message || 'Cursor API key and Gerrit HTTP password are required. Configure them in Settings → API Keys.');
+      } else if (data.code === 'CREDENTIALS_EXPIRED') {
+        alert(message || 'Session expired. Please re-login.');
+      } else {
+        alert(message);
+      }
+      updateFluxJob(testId, {
+        status: 'error',
+        error: message,
+      });
+      setDeepAiFluxForm(prev => ({ ...prev, starting: false, error: message }));
+    }
   };
 
   const isDeepAiTestIssue = (modalOrCtx) => {
@@ -2051,6 +2164,13 @@ export default function FailedTestcaseAnalysis() {
       additional_details: '',
     });
     setEngCreateLoading(false);
+    setDeepAiFluxForm({
+      branch: '',
+      loading: false,
+      error: null,
+      taskId: '',
+      starting: false,
+    });
   };
 
   const selectDeepAiActionTag = (tag) => {
@@ -2063,6 +2183,10 @@ export default function FailedTestcaseAnalysis() {
     if (tag === 'create_eng') {
       const ctx = getDeepChatContext();
       if (ctx) setEngDetailsForm(inferEngDetailsFromContext(ctx));
+    }
+    if (tag === 'flux') {
+      const ctx = getDeepChatContext();
+      if (ctx?.resultRow) prepareDeepAiFluxForm(ctx.resultRow);
     }
   };
 
@@ -5626,15 +5750,60 @@ export default function FailedTestcaseAnalysis() {
                   )}
 
                   {deepAiActionTag === 'flux' && isDeepAiTestIssue(triageAnalysisModal) && (
-                    <div className="deep-ai-flux-row">
-                      <button
-                        type="button"
-                        className="btn-flux-quick-fix"
-                        onClick={() => handleFluxFromDeepChat(triageAnalysisModal.resultRow)}
-                      >
-                        Confirm Flux Quick Fix
-                      </button>
-                      <span className="deep-ai-chat-hint">Requires confirmation — never auto-started.</span>
+                    <div className="deep-ai-flux-panel">
+                      <div className="deep-ai-flux-panel-title">Flux Quick Fix</div>
+                      <p className="deep-ai-chat-hint">
+                        Select the nutest target branch, then start Flux on this page
+                        {deepAiFluxForm.taskId ? ` (Jita task ${deepAiFluxForm.taskId})` : ''}.
+                      </p>
+                      <label className="deep-ai-flux-branch-label" htmlFor="deep-ai-flux-target-branch">
+                        Target branch
+                      </label>
+                      <div className="deep-ai-flux-branch-row">
+                        <input
+                          id="deep-ai-flux-target-branch"
+                          type="text"
+                          list="deep-ai-flux-branch-options"
+                          className="flux-branch-input deep-ai-flux-branch-input"
+                          value={deepAiFluxForm.branch || ''}
+                          disabled={deepAiFluxForm.loading || deepAiFluxForm.starting}
+                          onChange={e => setDeepAiFluxForm(prev => ({ ...prev, branch: e.target.value }))}
+                          placeholder="e.g. master or ganges-7.6-stable"
+                        />
+                        <datalist id="deep-ai-flux-branch-options">
+                          <option value="master" />
+                          <option value="ganges-7.6-stable" />
+                          <option value="ganges-7.6-stable-pc" />
+                          <option value="ganges-7.5-stable" />
+                        </datalist>
+                        <button
+                          type="button"
+                          className="btn-flux-quick-fix"
+                          disabled={
+                            deepAiFluxForm.loading
+                            || deepAiFluxForm.starting
+                            || !(deepAiFluxForm.branch || '').trim()
+                            || !fluxFirstJiraKey(triageAnalysisModal.resultRow)
+                          }
+                          title={
+                            fluxFirstJiraKey(triageAnalysisModal.resultRow)
+                              ? 'Start Flux Quick Fix with selected target branch'
+                              : 'Add a Jira ticket first'
+                          }
+                          onClick={() => startDeepAiFluxQuickFix(triageAnalysisModal.resultRow)}
+                        >
+                          {deepAiFluxForm.starting ? 'Starting…' : 'Start Flux Quick Fix'}
+                        </button>
+                      </div>
+                      {deepAiFluxForm.loading && (
+                        <div className="flux-branch-loading">Loading nutest-py3-tests_branch from JITA…</div>
+                      )}
+                      {deepAiFluxForm.error && (
+                        <div className="flux-job-error">{deepAiFluxForm.error}</div>
+                      )}
+                      {!fluxFirstJiraKey(triageAnalysisModal.resultRow) && (
+                        <div className="flux-job-error">Add / Approve a Jira ticket before starting Flux.</div>
+                      )}
                     </div>
                   )}
 
@@ -5716,7 +5885,7 @@ export default function FailedTestcaseAnalysis() {
                                     className="btn-flux-quick-fix"
                                     onClick={() => handleFluxFromDeepChat(triageAnalysisModal.resultRow)}
                                   >
-                                    Confirm Flux Quick Fix
+                                    Select target branch
                                   </button>
                                 </div>
                               )}
