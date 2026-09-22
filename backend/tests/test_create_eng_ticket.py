@@ -318,6 +318,15 @@ class TestCreateEngJiraTicket(unittest.TestCase):
         self.assertIn("Traceback:", desc)
         self.assertIn("CHECK failed", desc)
 
+    def test_additional_details_in_description(self):
+        desc = tf._build_eng_ticket_description({
+            "testcase_name": "cdp.foo.bar.test_x",
+            "failed_with": "timeout",
+            "additional_details": "Seen only on node CVM-3 after upgrade.",
+        })
+        self.assertIn("Additional Details", desc)
+        self.assertIn("Seen only on node CVM-3", desc)
+
     def test_parse_jita_log_url_parts(self):
         parts = tf._parse_jita_log_url_parts(
             "https://jita.eng.nutanix.com/api/v2/log?log_type=test_log"

@@ -927,6 +927,19 @@ export default function FailedTestcaseAnalysis() {
   // Ask is the fast path (answer from existing analysis; minimal/no MCP).
   // Use Agent/Plan only when the user wants deeper re-investigation.
   const [followUpMode, setFollowUpMode] = useState('ask');
+  // Deep AI chat action tags: create ENG (optional details) / Flux Quick Fix
+  const [deepAiActionTag, setDeepAiActionTag] = useState(null); // 'create_eng' | 'flux' | null
+  const [engDetailsOpen, setEngDetailsOpen] = useState(false);
+  const [engDetailsForm, setEngDetailsForm] = useState({
+    summary: '',
+    primary_component: '',
+    affects_version: '',
+    fix_version: 'Triage',
+    test_type: '',
+    issue_type: '',
+    additional_details: '',
+  });
+  const [engCreateLoading, setEngCreateLoading] = useState(false);
 
   // Retrigger state
   const [retriggerModalOpen, setRetriggerModalOpen] = useState(false);
@@ -1947,6 +1960,163 @@ export default function FailedTestcaseAnalysis() {
     handleFluxQuickFix(result);
   };
 
+  const isDeepAiTestIssue = (modalOrCtx) => {
+    const cls = String(
+      modalOrCtx?.classification
+      || modalOrCtx?.issue_type
+      || modalOrCtx?.latestAnalysis?.classification
+      || ''
+    ).toLowerCase();
+    return cls.includes('test');
+  };
+
+  const inferEngDetailsFromContext = (ctx) => {
+    const analysis = ctx?.latestAnalysis || {};
+    const classification = String(analysis.classification || ctx?.classification || '').toLowerCase();
+    const isTest = classification.includes('test');
+    const comps = analysis.related_components || [];
+    const primary = Array.isArray(comps) && comps.length ? String(comps[0]) : '';
+    const branch = analysis.current_branch || analysis.nutest_branch || '';
+    let affects = 'master';
+    if (/7\.6|ganges/i.test(branch)) affects = '7.6';
+    else if (branch && branch.toLowerCase() !== 'main') affects = branch;
+    const tc = ctx?.testcaseName || analysis.testcase_name || '';
+    const shortTc = (tc.split('.').pop() || tc || 'testcase').trim();
+    const root = String(analysis.root_cause || '').trim();
+    return {
+      summary: root ? `${shortTc}: ${root.slice(0, 140)}` : shortTc,
+      primary_component: primary,
+      affects_version: affects,
+      fix_version: 'Triage',
+      test_type: isTest ? 'Test Bug' : 'Product Bug',
+      issue_type: 'Test',
+      additional_details: '',
+    };
+  };
+
+  const resetDeepAiActionUi = () => {
+    setDeepAiActionTag(null);
+    setEngDetailsOpen(false);
+    setEngDetailsForm({
+      summary: '',
+      primary_component: '',
+      affects_version: '',
+      fix_version: 'Triage',
+      test_type: '',
+      issue_type: '',
+      additional_details: '',
+    });
+    setEngCreateLoading(false);
+  };
+
+  const selectDeepAiActionTag = (tag) => {
+    if (deepAiActionTag === tag) {
+      resetDeepAiActionUi();
+      return;
+    }
+    setDeepAiActionTag(tag);
+    setEngDetailsOpen(false);
+    if (tag === 'create_eng') {
+      const ctx = getDeepChatContext();
+      if (ctx) setEngDetailsForm(inferEngDetailsFromContext(ctx));
+    }
+  };
+
+  const applyCreateEngAnalysisResult = (ctx, analysis, sessionId) => {
+    appendFollowUpMessage(ctx.testcaseId, {
+      role: 'assistant',
+      data: analysis,
+      mode: 'system',
+    });
+    applyFollowUpAnalysis(ctx, analysis);
+    if (analysis.created_ticket && ctx.resultRow) {
+      appendFollowUpMessage(ctx.testcaseId, {
+        role: 'assistant',
+        data: {
+          follow_up_answer: `Created ${analysis.created_ticket}. Use Approve on the ticket below to tag JITA.`,
+          created_ticket: analysis.created_ticket,
+          suggested_action: 'approve_tag_jita',
+        },
+        mode: 'system',
+      });
+    }
+    if (sessionId && ctx.source === 'deep') {
+      setTriageAnalysisModal(prev => (prev ? { ...prev, session_id: sessionId } : prev));
+    }
+  };
+
+  const handleCreateEngFromAction = async ({ useDetails }) => {
+    const ctx = getDeepChatContext();
+    if (!ctx) return;
+
+    const overrides = useDetails
+      ? Object.fromEntries(
+          Object.entries(engDetailsForm).map(([k, v]) => [k, String(v || '').trim()])
+            .filter(([, v]) => v)
+        )
+      : {};
+
+    const label = useDetails && Object.keys(overrides).length
+      ? 'Create ENG ticket (with details)'
+      : 'Create ENG ticket (defaults from analysis)';
+
+    setEngCreateLoading(true);
+    appendFollowUpMessage(ctx.testcaseId, { role: 'user', text: label, mode: 'system' });
+
+    const ticketContext = {
+      testcase_name: ctx.testcaseName,
+      ...ctx.latestAnalysis,
+      ...overrides,
+      confirm: true,
+    };
+
+    try {
+      const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/create-eng-ticket`, {
+        ticket_context: ticketContext,
+        require_confirm: false,
+        confirm: true,
+      });
+      if (resp.data?.success) {
+        const analysis = resp.data.analysis || {
+          follow_up_answer: resp.data.key
+            ? `Created ${resp.data.key}: ${resp.data.url || ''}`
+            : resp.data.draft
+              ? 'ENG draft ready — fill missing fields and retry.'
+              : 'ENG ticket request processed.',
+          created_ticket: resp.data.key,
+          created_ticket_url: resp.data.url,
+          pending_ticket_draft: resp.data.draft || resp.data.analysis?.pending_ticket_draft,
+        };
+        applyCreateEngAnalysisResult(ctx, analysis, resp.data.session_id || ctx.sessionId);
+        if (analysis.created_ticket) {
+          resetDeepAiActionUi();
+        } else if (analysis.pending_ticket_draft) {
+          setEngDetailsOpen(true);
+          setEngDetailsForm(prev => ({
+            ...prev,
+            ...Object.fromEntries(
+              Object.entries(analysis.pending_ticket_draft)
+                .filter(([k, v]) => k in prev && v)
+                .map(([k, v]) => [k, String(v)])
+            ),
+          }));
+        }
+      } else {
+        appendFollowUpMessage(ctx.testcaseId, {
+          role: 'error',
+          text: resp.data?.error || 'Failed to create ENG ticket',
+        });
+      }
+    } catch (err) {
+      appendFollowUpMessage(ctx.testcaseId, {
+        role: 'error',
+        text: err.response?.data?.error || err.message || 'Failed to create ENG ticket',
+      });
+    } finally {
+      setEngCreateLoading(false);
+    }
+  };
+
   const isCreateEngChatIntent = (text) => {
     const t = String(text || '')
       .toLowerCase()
@@ -2912,6 +3082,7 @@ export default function FailedTestcaseAnalysis() {
       }
       setFollowUpHistory(followUpHistoryByTestcase[testId] || []);
       setFollowUpMode('ask');
+      resetDeepAiActionUi();
       setTriageAnalysisModal({
         kind: 'deep',
         testcase_name: result.testcase_name,
@@ -4081,6 +4252,7 @@ export default function FailedTestcaseAnalysis() {
                         setFollowUpHistory(followUpHistoryByTestcase[result.testcase_id] || []);
                         setFollowUpMode('ask');
                         setFollowUpInput('');
+                        resetDeepAiActionUi();
                         setTriageAnalysisModal({
                           kind: 'deep',
                           testcase_name: result.testcase_name,
@@ -5043,7 +5215,7 @@ export default function FailedTestcaseAnalysis() {
       )}
 
       {triageAnalysisModal && (
-        <div className="modal-overlay" onClick={() => setTriageAnalysisModal(null)}>
+        <div className="modal-overlay" onClick={() => { resetDeepAiActionUi(); setTriageAnalysisModal(null); }}>
           <div className="modal-content glean-detail-modal triage-analysis-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <h3>
@@ -5053,7 +5225,7 @@ export default function FailedTestcaseAnalysis() {
                   ? 'Deep AI Analysis'
                   : 'First Level AI Analysis'}
               </h3>
-              <button type="button" className="modal-close" onClick={() => setTriageAnalysisModal(null)}>×</button>
+              <button type="button" className="modal-close" onClick={() => { resetDeepAiActionUi(); setTriageAnalysisModal(null); }}>×</button>
             </div>
             <div className="modal-body glean-detail-body">
               <div className="glean-tc-name">{triageAnalysisModal.testcase_name}</div>
@@ -5248,9 +5420,150 @@ export default function FailedTestcaseAnalysis() {
                 <div className="glean-section deep-ai-chat-section">
                   <h4>Interactive Triage Chat</h4>
                   <p className="deep-ai-chat-hint">
-                    Ask to create an ENG ticket, review related tickets and Approve to tag JITA,
-                    or for Test Issues ask to trigger Flux Quick Fix (confirmation required).
+                    Select an action tag below, or type a follow-up. Create ENG uses your User Settings
+                    Jira token (defaults from analysis, or add optional details).
                   </p>
+
+                  <div className="deep-ai-action-tags" role="group" aria-label="Deep AI actions">
+                    <button
+                      type="button"
+                      className={`deep-ai-action-tag${deepAiActionTag === 'create_eng' ? ' is-selected' : ''}`}
+                      disabled={engCreateLoading || followUpLoading}
+                      onClick={() => selectDeepAiActionTag('create_eng')}
+                    >
+                      Create ENG Ticket
+                    </button>
+                    {isDeepAiTestIssue(triageAnalysisModal) && (
+                      <button
+                        type="button"
+                        className={`deep-ai-action-tag deep-ai-action-tag-flux${deepAiActionTag === 'flux' ? ' is-selected' : ''}`}
+                        disabled={engCreateLoading || followUpLoading}
+                        onClick={() => selectDeepAiActionTag('flux')}
+                      >
+                        Flux Quick Fix
+                      </button>
+                    )}
+                  </div>
+
+                  {deepAiActionTag === 'create_eng' && (
+                    <div className="deep-ai-eng-panel">
+                      <div className="deep-ai-eng-panel-actions">
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          disabled={engCreateLoading || followUpLoading}
+                          onClick={() => handleCreateEngFromAction({ useDetails: false })}
+                        >
+                          {engCreateLoading ? 'Creating…' : 'Create with defaults'}
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn-secondary${engDetailsOpen ? ' is-active' : ''}`}
+                          disabled={engCreateLoading || followUpLoading}
+                          onClick={() => setEngDetailsOpen(v => !v)}
+                        >
+                          {engDetailsOpen ? 'Hide additional details' : 'Add additional details'}
+                        </button>
+                      </div>
+                      {engDetailsOpen && (
+                        <div className="deep-ai-eng-details">
+                          <label>
+                            Summary
+                            <input
+                              type="text"
+                              value={engDetailsForm.summary}
+                              onChange={e => setEngDetailsForm(f => ({ ...f, summary: e.target.value }))}
+                              disabled={engCreateLoading}
+                            />
+                          </label>
+                          <div className="deep-ai-eng-details-row">
+                            <label>
+                              Primary Component
+                              <input
+                                type="text"
+                                value={engDetailsForm.primary_component}
+                                onChange={e => setEngDetailsForm(f => ({ ...f, primary_component: e.target.value }))}
+                                disabled={engCreateLoading}
+                                placeholder="e.g. Stargate"
+                              />
+                            </label>
+                            <label>
+                              Affects Version
+                              <input
+                                type="text"
+                                value={engDetailsForm.affects_version}
+                                onChange={e => setEngDetailsForm(f => ({ ...f, affects_version: e.target.value }))}
+                                disabled={engCreateLoading}
+                                placeholder="e.g. master"
+                              />
+                            </label>
+                          </div>
+                          <div className="deep-ai-eng-details-row">
+                            <label>
+                              Fix Version
+                              <input
+                                type="text"
+                                value={engDetailsForm.fix_version}
+                                onChange={e => setEngDetailsForm(f => ({ ...f, fix_version: e.target.value }))}
+                                disabled={engCreateLoading}
+                              />
+                            </label>
+                            <label>
+                              Test Type
+                              <input
+                                type="text"
+                                value={engDetailsForm.test_type}
+                                onChange={e => setEngDetailsForm(f => ({ ...f, test_type: e.target.value }))}
+                                disabled={engCreateLoading}
+                                placeholder="Test Bug / Product Bug"
+                              />
+                            </label>
+                            <label>
+                              Issue Type
+                              <input
+                                type="text"
+                                value={engDetailsForm.issue_type}
+                                onChange={e => setEngDetailsForm(f => ({ ...f, issue_type: e.target.value }))}
+                                disabled={engCreateLoading}
+                                placeholder="Test"
+                              />
+                            </label>
+                          </div>
+                          <label>
+                            Additional details (optional notes on the ticket)
+                            <textarea
+                              rows={3}
+                              value={engDetailsForm.additional_details}
+                              onChange={e => setEngDetailsForm(f => ({ ...f, additional_details: e.target.value }))}
+                              disabled={engCreateLoading}
+                              placeholder="Extra context to include in the ENG description…"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            disabled={engCreateLoading || followUpLoading}
+                            onClick={() => handleCreateEngFromAction({ useDetails: true })}
+                          >
+                            {engCreateLoading ? 'Creating…' : 'Create with these details'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {deepAiActionTag === 'flux' && isDeepAiTestIssue(triageAnalysisModal) && (
+                    <div className="deep-ai-flux-row">
+                      <button
+                        type="button"
+                        className="btn-flux-quick-fix"
+                        onClick={() => handleFluxFromDeepChat(triageAnalysisModal.resultRow)}
+                      >
+                        Confirm Flux Quick Fix
+                      </button>
+                      <span className="deep-ai-chat-hint">Requires confirmation — never auto-started.</span>
+                    </div>
+                  )}
 
                   {(() => {
                     const related = [
@@ -5283,19 +5596,6 @@ export default function FailedTestcaseAnalysis() {
                       </div>
                     );
                   })()}
-
-                  {String(triageAnalysisModal.classification || triageAnalysisModal.issue_type || '').toLowerCase().includes('test') && (
-                    <div className="deep-ai-flux-row">
-                      <button
-                        type="button"
-                        className="btn-flux-quick-fix"
-                        onClick={() => handleFluxFromDeepChat(triageAnalysisModal.resultRow)}
-                      >
-                        Flux Quick Fix (confirm)
-                      </button>
-                      <span className="deep-ai-chat-hint">Or ask in chat: &quot;trigger flux quick fix&quot;</span>
-                    </div>
-                  )}
 
                   {followUpHistory.length > 0 && (
                     <div className="cursor-ai-followup-history deep-ai-followup-history">
@@ -5392,7 +5692,7 @@ export default function FailedTestcaseAnalysis() {
                   </button>
                 </div>
               )}
-              <button type="button" className="btn-secondary" onClick={() => setTriageAnalysisModal(null)}>Close</button>
+              <button type="button" className="btn-secondary" onClick={() => { resetDeepAiActionUi(); setTriageAnalysisModal(null); }}>Close</button>
             </div>
           </div>
         </div>
