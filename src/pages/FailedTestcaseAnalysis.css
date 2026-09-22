@@ -3798,3 +3798,57 @@ a.glean-snippet-title:hover {
   font-size: 13px;
   margin-bottom: 8px;
 }
+
+/* ---- Deep AI interactive chat (Phase 3) ---- */
+.deep-ai-chat-section {
+  border-top: 1px solid #ecf0f1;
+  padding-top: 12px;
+  margin-top: 8px;
+}
+.deep-ai-chat-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #566573;
+}
+.deep-ai-related-tickets {
+  margin: 8px 0 12px;
+  padding: 8px;
+  background: #f8f9fa;
+  border: 1px solid #e8eef2;
+  border-radius: 4px;
+}
+.deep-ai-related-label {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #2c3e50;
+}
+.deep-ai-related-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.deep-ai-related-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.deep-ai-flux-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 8px 0 12px;
+}
+.deep-ai-followup-history {
+  max-height: 240px;
+  overflow: auto;
+  margin-bottom: 8px;
+}
+.triage-analysis-modal.glean-detail-modal {
+  max-width: 860px;
+}
+.triage-analysis-modal .cursor-ai-followup-bar {
+  flex: 1;
+}

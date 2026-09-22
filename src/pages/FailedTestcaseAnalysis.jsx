@@ -1799,77 +1799,221 @@ export default function FailedTestcaseAnalysis() {
     setTimeout(poll, 3000);
   };
 
-  const handleFollowUp = async () => {
-    if (!followUpInput.trim() || !cursorAiDetailModal) return;
-    const sessionId = cursorAiDetailModal._session_id;
-    if (!sessionId) return;
+  const getDeepChatContext = () => {
+    if (triageAnalysisModal?.kind === 'deep') {
+      const testId = triageAnalysisModal.testcase_id;
+      return {
+        source: 'deep',
+        sessionId: triageAnalysisModal.session_id || cursorAiSessions[testId] || null,
+        testcaseId: testId,
+        testcaseName: triageAnalysisModal.testcase_name || '',
+        resultRow: triageAnalysisModal.resultRow || results.find(r => r.testcase_id === testId) || null,
+        classification: triageAnalysisModal.classification || triageAnalysisModal.issue_type || '',
+        latestAnalysis: {
+          root_cause: triageAnalysisModal.root_cause || '',
+          classification: triageAnalysisModal.classification || triageAnalysisModal.issue_type || '',
+          failing_code: triageAnalysisModal.failing_code || null,
+          suggested_fix: triageAnalysisModal.suggested_fix || '',
+          confidence: triageAnalysisModal.confidence || '',
+          related_components: triageAnalysisModal.related_components || [],
+          jira_duplicates: triageAnalysisModal.jira_duplicates
+            || (triageAnalysisModal.enriched_tickets || []).map(t => t.ticket).filter(Boolean)
+            || [],
+          triage_report: triageAnalysisModal.triage_report || '',
+          pending_ticket_draft: triageAnalysisModal.pending_ticket_draft || null,
+          created_ticket: triageAnalysisModal.created_ticket || null,
+          exception_summary: triageAnalysisModal.resultRow?.exception_summary || '',
+          test_log_url: triageAnalysisModal.resultRow?.test_log_url || '',
+          testcase_id: testId,
+          agave_task_id: triageAnalysisModal.resultRow?.agave_task_id || '',
+          nutest_branch: triageAnalysisModal.resultRow?.nutest_branch || currentBranch || '',
+          current_branch: currentBranch || '',
+        },
+      };
+    }
+    if (cursorAiDetailModal) {
+      const testId = cursorAiDetailModal._testcase_id;
+      return {
+        source: 'cursor',
+        sessionId: cursorAiDetailModal._session_id || cursorAiSessions[testId] || null,
+        testcaseId: testId,
+        testcaseName: cursorAiDetailModal.testcase_name || '',
+        resultRow: results.find(r => r.testcase_id === testId) || null,
+        classification: cursorAiDetailModal.classification || '',
+        latestAnalysis: {
+          root_cause: cursorAiDetailModal.root_cause || '',
+          classification: cursorAiDetailModal.classification || '',
+          failing_code: cursorAiDetailModal.failing_code || null,
+          suggested_fix: cursorAiDetailModal.suggested_fix || '',
+          confidence: cursorAiDetailModal.confidence || '',
+          related_components: cursorAiDetailModal.related_components || [],
+          jira_duplicates: cursorAiDetailModal.jira_duplicates || [],
+          triage_report: cursorAiDetailModal.triage_report || '',
+          pending_ticket_draft: cursorAiDetailModal.pending_ticket_draft || null,
+          created_ticket: cursorAiDetailModal.created_ticket || null,
+          testcase_id: testId,
+        },
+      };
+    }
+    return null;
+  };
 
-    const question = followUpInput.trim();
-    const selectedMode = followUpMode;
-    setFollowUpLoading(true);
-    const testcaseId = cursorAiDetailModal._testcase_id;
+  const appendFollowUpMessage = (testcaseId, message) => {
     setFollowUpHistory(prev => {
-      const next = [...prev, { role: 'user', text: question, mode: selectedMode }];
+      const next = [...prev, message];
       if (testcaseId) {
         setFollowUpHistoryByTestcase(hist => ({ ...hist, [testcaseId]: next }));
       }
       return next;
     });
+  };
+
+  const applyFollowUpAnalysis = (ctx, analysis) => {
+    if (!analysis) return;
+    if (ctx.source === 'deep') {
+      setTriageAnalysisModal(prev => (prev ? {
+        ...prev,
+        ...analysis,
+        follow_up_answer: analysis.follow_up_answer,
+        pending_ticket_draft: analysis.pending_ticket_draft,
+        created_ticket: analysis.created_ticket || prev.created_ticket,
+        created_ticket_url: analysis.created_ticket_url || prev.created_ticket_url,
+      } : prev));
+      if (ctx.testcaseId) {
+        setDeepAiResults(prev => ({
+          ...prev,
+          [ctx.testcaseId]: { ...(prev[ctx.testcaseId] || {}), ...analysis },
+        }));
+      }
+    } else if (ctx.source === 'cursor') {
+      setCursorAiDetailModal(prev => ({
+        ...prev,
+        ...analysis,
+        follow_up_answer: analysis.follow_up_answer,
+      }));
+      if (ctx.testcaseId) {
+        setCursorAiResults(prev => ({
+          ...prev,
+          [ctx.testcaseId]: { ...(prev[ctx.testcaseId] || {}), ...analysis },
+        }));
+      }
+    }
+  };
+
+  const handleApproveTicketToJita = async (ticketKey) => {
+    const ctx = getDeepChatContext();
+    const result = ctx?.resultRow;
+    const testId = ctx?.testcaseId || result?.testcase_id;
+    const ticket = String(ticketKey || '').trim().toUpperCase();
+    if (!testId || !ticket) return;
+    const existing = result?.jira_tickets || [];
+    const merged = [...new Set([...existing, ticket])];
+    const comment = commentEdits[testId] !== undefined
+      ? commentEdits[testId]
+      : (result?.comments || `Linked ${ticket} from Deep AI triage`);
+    if (!window.confirm(`Approve and tag JITA with ${ticket}?`)) return;
+    setUpdateLoading(prev => ({ ...prev, [testId]: true }));
+    try {
+      const success = await applyTriageUpdate(testId, comment, merged);
+      if (success) {
+        setResults(prev => prev.map(r => r.testcase_id === testId
+          ? { ...r, comments: comment || r.comments, jira_tickets: merged }
+          : r));
+        appendFollowUpMessage(testId, {
+          role: 'assistant',
+          data: { follow_up_answer: `Approved ${ticket} and updated JITA triage tags/comments.` },
+          mode: 'system',
+        });
+        if (ctx?.source === 'deep') {
+          setTriageAnalysisModal(prev => prev ? {
+            ...prev,
+            resultRow: { ...(prev.resultRow || result || {}), jira_tickets: merged, comments: comment },
+          } : prev);
+        }
+      }
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed to tag JITA');
+    } finally {
+      setUpdateLoading(prev => ({ ...prev, [testId]: false }));
+    }
+  };
+
+  const handleFluxFromDeepChat = (result) => {
+    if (!result) return;
+    const ok = window.confirm(
+      'Start Flux Quick Fix for this test issue? This requires your confirmation and is never auto-started.'
+    );
+    if (!ok) return;
+    handleFluxQuickFix(result);
+  };
+
+  const handleFollowUp = async () => {
+    if (!followUpInput.trim()) return;
+    const ctx = getDeepChatContext();
+    if (!ctx) return;
+
+    const question = followUpInput.trim();
+    const selectedMode = followUpMode;
+    const sessionId = ctx.sessionId;
+    setFollowUpLoading(true);
+    appendFollowUpMessage(ctx.testcaseId, { role: 'user', text: question, mode: selectedMode });
     setFollowUpInput('');
 
     try {
       const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/follow-up`, {
-        session_id: sessionId,
+        session_id: sessionId || `deep-ai-${ctx.testcaseId || 'anon'}`,
         question,
         mode: followUpMode,
+        ticket_context: {
+          testcase_name: ctx.testcaseName,
+          ...ctx.latestAnalysis,
+        },
         recovery_context: {
-          testcase_name: cursorAiDetailModal.testcase_name || '',
-          latest_analysis: {
-            root_cause: cursorAiDetailModal.root_cause || '',
-            classification: cursorAiDetailModal.classification || '',
-            failing_code: cursorAiDetailModal.failing_code || null,
-            suggested_fix: cursorAiDetailModal.suggested_fix || '',
-            confidence: cursorAiDetailModal.confidence || '',
-            related_components: cursorAiDetailModal.related_components || [],
-            jira_duplicates: cursorAiDetailModal.jira_duplicates || [],
-            triage_report: cursorAiDetailModal.triage_report || '',
-          },
+          testcase_name: ctx.testcaseName,
+          latest_analysis: ctx.latestAnalysis,
           prior_history: followUpHistory.slice(-20),
+          agave_task_id: ctx.latestAnalysis.agave_task_id || '',
+          testcase_id: ctx.testcaseId || '',
         },
       });
       if (resp.data?.success) {
-        const analysis = resp.data.analysis;
-        setFollowUpHistory(prev => {
-          const next = [...prev, { role: 'assistant', data: analysis, mode: selectedMode }];
-          if (testcaseId) {
-            setFollowUpHistoryByTestcase(hist => ({ ...hist, [testcaseId]: next }));
-          }
-          return next;
+        const analysis = resp.data.analysis || {};
+        appendFollowUpMessage(ctx.testcaseId, {
+          role: 'assistant',
+          data: analysis,
+          mode: selectedMode,
         });
-        setCursorAiDetailModal(prev => ({
-          ...prev,
-          ...analysis,
-          follow_up_answer: analysis.follow_up_answer,
-        }));
-        if (cursorAiDetailModal._testcase_id) {
-          setCursorAiResults(prev => ({
-            ...prev,
-            [cursorAiDetailModal._testcase_id]: {
-              ...prev[cursorAiDetailModal._testcase_id],
-              ...analysis,
+        applyFollowUpAnalysis(ctx, analysis);
+
+        if (analysis.suggested_action === 'flux_quick_fix' && analysis.requires_confirmation) {
+          handleFluxFromDeepChat(ctx.resultRow);
+        }
+        if (analysis.created_ticket && ctx.resultRow) {
+          // Offer approve-to-JITA after create without forcing it.
+          appendFollowUpMessage(ctx.testcaseId, {
+            role: 'assistant',
+            data: {
+              follow_up_answer: `Created ${analysis.created_ticket}. Use Approve on the ticket below to tag JITA.`,
+              created_ticket: analysis.created_ticket,
+              suggested_action: 'approve_tag_jita',
             },
-          }));
+            mode: 'system',
+          });
         }
       } else {
-        setFollowUpHistory(prev => [...prev, { role: 'error', text: resp.data?.error || 'Follow-up failed' }]);
+        appendFollowUpMessage(ctx.testcaseId, {
+          role: 'error',
+          text: resp.data?.error || 'Follow-up failed',
+        });
       }
     } catch (err) {
       const msg = err.response?.data?.error || err.message || 'Follow-up failed';
-      setFollowUpHistory(prev => [...prev, { role: 'error', text: msg }]);
+      appendFollowUpMessage(ctx.testcaseId, { role: 'error', text: msg });
     } finally {
       setFollowUpLoading(false);
     }
   };
+
 
   const getCursorAiStatusBadge = (testId) => {
     if (cursorAiLoading[testId]) return <span className="badge cursor-ai-loading">Analyzing…</span>;
@@ -2708,11 +2852,14 @@ export default function FailedTestcaseAnalysis() {
       if (data.intelligent_triage) {
         setIntelligentTriageByTestcase(prev => ({ ...prev, [testId]: data.intelligent_triage }));
       }
+      setFollowUpHistory(followUpHistoryByTestcase[testId] || []);
+      setFollowUpMode('ask');
       setTriageAnalysisModal({
         kind: 'deep',
         testcase_name: result.testcase_name,
         testcase_id: testId,
         resultRow: result,
+        session_id: data.session_id || cursorAiSessions[testId] || null,
         ...data,
       });
     } catch (error) {
@@ -3872,13 +4019,19 @@ export default function FailedTestcaseAnalysis() {
                     <button
                       type="button"
                       className="btn-view-analysis"
-                      onClick={() => setTriageAnalysisModal({
-                        kind: 'deep',
-                        testcase_name: result.testcase_name,
-                        testcase_id: result.testcase_id,
-                        resultRow: result,
-                        ...deepAiResult,
-                      })}
+                      onClick={() => {
+                        setFollowUpHistory(followUpHistoryByTestcase[result.testcase_id] || []);
+                        setFollowUpMode('ask');
+                        setFollowUpInput('');
+                        setTriageAnalysisModal({
+                          kind: 'deep',
+                          testcase_name: result.testcase_name,
+                          testcase_id: result.testcase_id,
+                          resultRow: result,
+                          session_id: deepAiResult.session_id || cursorAiSessions[result.testcase_id] || null,
+                          ...deepAiResult,
+                        });
+                      }}
                     >
                       View Deep AI
                     </button>
@@ -5032,8 +5185,155 @@ export default function FailedTestcaseAnalysis() {
                   <div className="glean-ai-analysis triage-report-block">{textOrEmpty(triageAnalysisModal.triage_report)}</div>
                 </div>
               )}
+
+              {triageAnalysisModal.kind === 'deep' && (
+                <div className="glean-section deep-ai-chat-section">
+                  <h4>Interactive Triage Chat</h4>
+                  <p className="deep-ai-chat-hint">
+                    Ask to create an ENG ticket, review related tickets and Approve to tag JITA,
+                    or for Test Issues ask to trigger Flux Quick Fix (confirmation required).
+                  </p>
+
+                  {(() => {
+                    const related = [
+                      ...(triageAnalysisModal.jira_duplicates || []),
+                      ...((triageAnalysisModal.enriched_tickets || []).map(t => t.ticket).filter(Boolean)),
+                      triageAnalysisModal.best_matching_ticket,
+                      triageAnalysisModal.created_ticket,
+                      ...((triageAnalysisModal.resultRow?.jira_tickets) || []),
+                    ].map(t => String(t || '').trim().toUpperCase()).filter(Boolean);
+                    const uniq = [...new Set(related)];
+                    if (!uniq.length) return null;
+                    return (
+                      <div className="deep-ai-related-tickets">
+                        <div className="deep-ai-related-label">Related ENG tickets — review and Approve to tag JITA:</div>
+                        <div className="deep-ai-related-list">
+                          {uniq.map(ticket => (
+                            <div key={ticket} className="deep-ai-related-row">
+                              <a href={`${JIRA_URL}${ticket}`} target="_blank" rel="noopener noreferrer" className="jira-link">{ticket}</a>
+                              <button
+                                type="button"
+                                className="btn-rdm-approve btn-rdm-approve-sm"
+                                disabled={!!updateLoading[triageAnalysisModal.testcase_id]}
+                                onClick={() => handleApproveTicketToJita(ticket)}
+                              >
+                                {updateLoading[triageAnalysisModal.testcase_id] ? '…' : 'Approve → JITA'}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {String(triageAnalysisModal.classification || triageAnalysisModal.issue_type || '').toLowerCase().includes('test') && (
+                    <div className="deep-ai-flux-row">
+                      <button
+                        type="button"
+                        className="btn-flux-quick-fix"
+                        onClick={() => handleFluxFromDeepChat(triageAnalysisModal.resultRow)}
+                      >
+                        Flux Quick Fix (confirm)
+                      </button>
+                      <span className="deep-ai-chat-hint">Or ask in chat: &quot;trigger flux quick fix&quot;</span>
+                    </div>
+                  )}
+
+                  {followUpHistory.length > 0 && (
+                    <div className="cursor-ai-followup-history deep-ai-followup-history">
+                      {followUpHistory.map((msg, i) => (
+                        <div key={i} className={`cursor-ai-followup-msg cursor-ai-followup-${msg.role}`}>
+                          {msg.role === 'user' && (
+                            <div className="cursor-ai-followup-user">
+                              <strong>You:</strong>
+                              {msg.mode && <span className="cursor-ai-followup-mode-badge">{msg.mode.toUpperCase()}</span>}
+                              {' '}
+                              {msg.text}
+                            </div>
+                          )}
+                          {msg.role === 'assistant' && (
+                            <div className="cursor-ai-followup-assistant">
+                              <strong>AI:</strong>
+                              {msg.mode && msg.mode !== 'system' && (
+                                <span className="cursor-ai-followup-mode-badge">{msg.mode.toUpperCase()}</span>
+                              )}
+                              {' '}
+                              {msg.data?.follow_up_answer || msg.data?.root_cause || JSON.stringify(msg.data, null, 2)}
+                              {msg.data?.created_ticket && (
+                                <div className="deep-ai-related-row" style={{ marginTop: 6 }}>
+                                  <a
+                                    href={msg.data.created_ticket_url || `${JIRA_URL}${msg.data.created_ticket}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="jira-link"
+                                  >
+                                    {msg.data.created_ticket}
+                                  </a>
+                                  <button
+                                    type="button"
+                                    className="btn-rdm-approve btn-rdm-approve-sm"
+                                    onClick={() => handleApproveTicketToJita(msg.data.created_ticket)}
+                                  >
+                                    Approve → JITA
+                                  </button>
+                                </div>
+                              )}
+                              {msg.data?.suggested_action === 'flux_quick_fix' && (
+                                <div style={{ marginTop: 6 }}>
+                                  <button
+                                    type="button"
+                                    className="btn-flux-quick-fix"
+                                    onClick={() => handleFluxFromDeepChat(triageAnalysisModal.resultRow)}
+                                  >
+                                    Confirm Flux Quick Fix
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {msg.role === 'error' && (
+                            <div className="cursor-ai-followup-error">{msg.text}</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            <div className="modal-footer">
+            <div className={`modal-footer${triageAnalysisModal.kind === 'deep' ? ' cursor-ai-modal-footer' : ''}`}>
+              {triageAnalysisModal.kind === 'deep' && (
+                <div className="cursor-ai-followup-bar">
+                  <select
+                    className="cursor-ai-followup-mode"
+                    value={followUpMode}
+                    onChange={e => setFollowUpMode(e.target.value)}
+                    disabled={followUpLoading}
+                    title="Follow-up AI mode"
+                  >
+                    <option value="ask">Ask (fast)</option>
+                    <option value="agent">Agent (deep)</option>
+                    <option value="plan">Plan</option>
+                  </select>
+                  <input
+                    type="text"
+                    className="cursor-ai-followup-input"
+                    placeholder="Ask follow-up: create ENG ticket, Flux fix, …"
+                    value={followUpInput}
+                    onChange={e => setFollowUpInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && !followUpLoading) handleFollowUp(); }}
+                    disabled={followUpLoading}
+                  />
+                  <button
+                    type="button"
+                    className="btn-primary cursor-ai-followup-send"
+                    onClick={handleFollowUp}
+                    disabled={followUpLoading || !followUpInput.trim()}
+                  >
+                    {followUpLoading ? 'Sending...' : 'Ask'}
+                  </button>
+                </div>
+              )}
               <button type="button" className="btn-secondary" onClick={() => setTriageAnalysisModal(null)}>Close</button>
             </div>
           </div>
