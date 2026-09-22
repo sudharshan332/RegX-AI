@@ -112,7 +112,8 @@ class IntelligentTriageAgent(BaseAgent):
     def _load_intermittent_patterns(self) -> List[Dict[str, Any]]:
         """Load intermittent patterns for setup stage failures."""
         try:
-            with open("/Users/sudharshan.musali/regx/RegX-AI/backend/intermittent_patterns.json", 'r') as f:
+            from ..paths import intermittent_patterns_file
+            with open(intermittent_patterns_file(), 'r') as f:
                 data = json.load(f)
                 patterns = data.get("intermittent_patterns", [])
                 self.logger.info(f"Loaded {len(patterns)} intermittent patterns")
@@ -124,7 +125,8 @@ class IntelligentTriageAgent(BaseAgent):
     def _load_rdm_patterns(self) -> List[Dict[str, Any]]:
         """Load RDM patterns for skipped test failures."""
         try:
-            with open("/Users/sudharshan.musali/regx/RegX-AI/data/rdm_failure_patterns.json", 'r') as f:
+            from ..paths import rdm_patterns_file
+            with open(rdm_patterns_file(), 'r') as f:
                 data = json.load(f)
                 patterns = data.get("failure_patterns", [])
                 self.logger.info(f"Loaded {len(patterns)} RDM failure patterns")

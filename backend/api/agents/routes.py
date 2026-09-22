@@ -11,16 +11,24 @@ from flask import Blueprint, request, jsonify, g
 from typing import Dict, List, Optional, Any
 import asyncio
 
-# Import agent framework components
-from ...agents.registry import agent_registry
-from ...agents.handoff import handoff_manager
-from ...agents.services.pattern_cache import PatternCache
-from ...agents.services.cost_tracker import CostTracker
-from ...agents.integration.mcp_bridge import MCPBridgeAgent
-from ...agents.base import AgentConfig
-
-# Import existing auth decorator
-from ...auth import jwt_required
+# Import agent framework components (absolute imports so blueprint works when
+# test_flask.py is run as a script with backend/ on sys.path).
+try:
+    from agents.registry import agent_registry
+    from agents.handoff import handoff_manager
+    from agents.services.pattern_cache import PatternCache
+    from agents.services.cost_tracker import CostTracker
+    from agents.integration.mcp_bridge import MCPBridgeAgent
+    from agents.base import AgentConfig
+    from auth import jwt_required
+except ImportError:
+    from ...agents.registry import agent_registry
+    from ...agents.handoff import handoff_manager
+    from ...agents.services.pattern_cache import PatternCache
+    from ...agents.services.cost_tracker import CostTracker
+    from ...agents.integration.mcp_bridge import MCPBridgeAgent
+    from ...agents.base import AgentConfig
+    from ...auth import jwt_required
 
 logger = logging.getLogger(__name__)
 

@@ -102,7 +102,11 @@ class PatternCache:
         """Load RDM failure patterns from existing data."""
         try:
             # Load from existing failed analysis data
-            data_file = "/Users/sudharshan.musali/regx/RegX-AI/data/failed_analysis_central_regression_dry_run_cdp_11-jun-2026.json"
+            from ..paths import data_dir
+            data_file = os.path.join(
+                data_dir(),
+                "failed_analysis_central_regression_dry_run_cdp_11-jun-2026.json",
+            )
             
             if os.path.exists(data_file):
                 with open(data_file, 'r') as f:

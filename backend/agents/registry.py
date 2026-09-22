@@ -56,7 +56,8 @@ class AgentRegistry:
         self.agents: Dict[str, BaseAgent] = {}
         self.agent_types: Dict[str, List[BaseAgent]] = {}
         self.agent_health: Dict[str, AgentHealth] = {}
-        self.config_dir = "/Users/sudharshan.musali/regx/RegX-AI/backend/agents/config"
+        from .paths import agents_config_dir
+        self.config_dir = agents_config_dir()
         self.is_running = False
         self.health_check_interval = 30  # seconds
         self.executor = ThreadPoolExecutor(max_workers=4)
