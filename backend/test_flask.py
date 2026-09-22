@@ -178,6 +178,7 @@ from user_keys import (
 from flux_client import (
     FluxError,
     FluxKeySetupError,
+    flux_api_base,
     get_client as get_flux_client,
 )
 from cursor_ai_rag import (
@@ -11840,20 +11841,24 @@ def save_saved_tag_results(tag_name):
     current_branch = body.get("current_branch", "")
     cursor_ai = body.get("cursor_ai", {}) or {}
     intelligent_triage = body.get("intelligent_triage") or {}
+    flux_quick_fix = body.get("flux_quick_fix") or {}
     payload = {
         "tag": tag_name,
         "results": results,
         "current_branch": current_branch,
         "cursor_ai": cursor_ai,
         "intelligent_triage": intelligent_triage,
+        "flux_quick_fix": flux_quick_fix,
         "saved_at": datetime.utcnow().isoformat() + "Z",
         "count": len(results),
     }
-    # Preserve previously saved intelligent_triage entries when client omits the map.
-    if not intelligent_triage:
+    # Preserve previously saved intelligent_triage / flux entries when client omits the map.
+    if not intelligent_triage or not flux_quick_fix:
         existing = load_failed_analysis_results(tag_name) or {}
-        if existing.get("intelligent_triage"):
+        if not intelligent_triage and existing.get("intelligent_triage"):
             payload["intelligent_triage"] = existing["intelligent_triage"]
+        if not flux_quick_fix and existing.get("flux_quick_fix"):
+            payload["flux_quick_fix"] = existing["flux_quick_fix"]
     save_failed_analysis_results(tag_name, payload)
     return jsonify({"success": True, "count": len(results), "saved_at": payload["saved_at"]})
 
@@ -25071,6 +25076,12 @@ def flux_quick_fix():
             update_jira=body.get("update_jira", True),
             pause_for_review=body.get("pause_for_review", True),
         )
+        if isinstance(result, dict):
+            payload = dict(result)
+            record_id = payload.get("record_id") or payload.get("id")
+            if record_id is not None and not payload.get("task_url"):
+                payload["task_url"] = "%s/task/%s" % (flux_api_base(), record_id)
+            return jsonify(payload)
         return jsonify(result)
     except FluxError as exc:
         return _flux_error_response(exc)
@@ -25085,7 +25096,14 @@ def flux_get_ticket(record_id):
     if err:
         return err
     try:
-        return jsonify(client.get_ticket(record_id))
+        result = client.get_ticket(record_id)
+        if isinstance(result, dict):
+            payload = dict(result)
+            rid = payload.get("record_id") or record_id
+            if rid is not None and not payload.get("task_url"):
+                payload["task_url"] = "%s/task/%s" % (flux_api_base(), rid)
+            return jsonify(payload)
+        return jsonify(result)
     except FluxError as exc:
         return _flux_error_response(exc)
 
