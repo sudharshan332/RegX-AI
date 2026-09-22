@@ -116,6 +116,7 @@ from intelligent_triage.persistence import (
     load_failed_analysis_results as _it_load_results,
     save_failed_analysis_results as _it_save_results,
     delete_failed_analysis_results as _it_delete_results,
+    get_cached_intelligent_analysis as _it_get_cached_analysis,
 )
 from intelligent_triage.thresholds import (
     load_team_thresholds,
@@ -11921,8 +11922,17 @@ def failed_analysis_history():
 @app.route("/mcp/regression/failed-analysis/saved-tags", methods=["GET"])
 @jwt_required
 def list_saved_tags():
-    """Return the list of saved tag names."""
+    """Return the list of saved tag names (merged team + legacy files)."""
     data = load_failed_analysis_tags()
+    # Ensure canonical team file exists so subsequent UIs always find tags under
+    # data/<team>/failed_analysis_saved_tags.json even when only legacy existed.
+    try:
+        from intelligent_triage.persistence import _team_tags_path
+        team_path = _team_tags_path(for_write=False)
+        if data.get("tags") and not os.path.exists(team_path):
+            save_failed_analysis_tags(data)
+    except Exception as migrate_err:
+        logger.debug("Could not migrate saved tags to team path: %s", migrate_err)
     return jsonify({"tags": data.get("tags", [])})
 
 
@@ -22705,6 +22715,9 @@ def first_level_ai_analysis():
     Phase 2: returns formal intelligent_triage schema + decision engine outcome.
     Never auto-starts Deep AI. Hybrid auto-triage write only when TG Correct/VALID
     and ticket is open.
+
+    When tag+testcase_id already have a saved intelligent_triage analysis, return
+    that cached payload unless force/force_refresh is set.
     """
     try:
         request_data = request.get_json(force=True) or {}
@@ -22713,6 +22726,59 @@ def first_level_ai_analysis():
             test_result.get("testcase_name") or test_result.get("testcase_id")
         ):
             return jsonify({"success": False, "error": "test_result is required"}), 400
+
+        tag_name = (request_data.get("tag") or test_result.get("tag") or "").strip()
+        testcase_id = str(test_result.get("testcase_id") or "")
+        force = bool(
+            request_data.get("force")
+            or request_data.get("force_refresh")
+            or request_data.get("rerun")
+        )
+
+        if tag_name and testcase_id and not force:
+            cached_analysis = _it_get_cached_analysis(tag_name, testcase_id)
+            if cached_analysis and (
+                cached_analysis.get("triage_analysis")
+                or cached_analysis.get("decision")
+            ):
+                ta = cached_analysis.get("triage_analysis") or {}
+                decision = cached_analysis.get("decision") or {}
+                glean = (cached_analysis.get("glean_candidates") or {}).get("search") or {}
+                tg = cached_analysis.get("triage_genie") or {}
+                return jsonify({
+                    "success": True,
+                    "cached": True,
+                    "analysis_type": "first_level_ai",
+                    "issue_type": ta.get("issue_type"),
+                    "analysis": ta.get("summary"),
+                    "recommended_action": ta.get("recommended_action"),
+                    "best_matching_ticket": ta.get("best_matching_ticket"),
+                    "triage_confidence": ta.get("triage_confidence")
+                        or (cached_analysis.get("intermittent_analysis") or {}).get("intermittent_confidence"),
+                    "intermittent_confidence": (
+                        (cached_analysis.get("intermittent_analysis") or {}).get("intermittent_confidence")
+                    ),
+                    "tg_ticket_validation": (
+                        {**(tg.get("ai_validation") or {}), "ticket": (tg.get("original") or {}).get("ticket")}
+                        if tg.get("ai_validation") or (tg.get("original") or {}).get("ticket")
+                        else None
+                    ),
+                    "enriched_tickets": glean.get("candidates") or [],
+                    "glean_snippets": glean.get("snippets") or [],
+                    "search_source": glean.get("search_source"),
+                    "glean_ok": (glean.get("mcp_health") or {}).get("ok"),
+                    "mcp_health": cached_analysis.get("mcp_health"),
+                    "decision": decision,
+                    "intelligent_triage": cached_analysis,
+                    "analysis_result": {
+                        "analysis_type": "first_level_ai",
+                        "confidence": ta.get("triage_confidence"),
+                        "triage_confidence": ta.get("triage_confidence"),
+                        "intermittent_confidence": (
+                            (cached_analysis.get("intermittent_analysis") or {}).get("intermittent_confidence")
+                        ),
+                    },
+                })
 
         result = _run_first_level_ai_analysis(test_result, run_ai=True)
         payload = build_intelligent_triage_payload(test_result, result)
@@ -22737,10 +22803,9 @@ def first_level_ai_analysis():
         result["intermittent_confidence"] = intermittent_confidence
         result["mcp_health"] = analysis.get("mcp_health")
         result["thresholds"] = payload.get("thresholds")
+        result["cached"] = False
 
         # Persist into saved-tag cache when tag provided.
-        tag_name = (request_data.get("tag") or test_result.get("tag") or "").strip()
-        testcase_id = str(test_result.get("testcase_id") or "")
         if tag_name and testcase_id:
             try:
                 cached = load_failed_analysis_results(tag_name) or {
@@ -22962,6 +23027,7 @@ def failed_analysis_deep_ai():
     """Deep AI: skill-based triage via Cursor bridge, plus Glean/Jira ticket hunt.
 
     Phase 2: marks deep_ai_started only on this user-triggered path; never from First Level.
+    Returns cached Deep AI when tag+testcase already have deep_ai status unless force=true.
     """
     try:
         body = request.get_json(force=True) or {}
@@ -22969,6 +23035,42 @@ def failed_analysis_deep_ai():
         testcase_name = test_result.get("testcase_name") or ""
         if not testcase_name:
             return jsonify({"success": False, "error": "testcase_name is required"}), 400
+
+        tag_name = (body.get("tag") or test_result.get("tag") or "").strip()
+        testcase_id = str(test_result.get("testcase_id") or "")
+        force = bool(body.get("force") or body.get("force_refresh") or body.get("rerun"))
+        if tag_name and testcase_id and not force:
+            cached_analysis = _it_get_cached_analysis(tag_name, testcase_id)
+            deep = (cached_analysis or {}).get("deep_ai") or {}
+            if deep.get("status") and deep.get("status") != "not_run":
+                return jsonify({
+                    "success": True,
+                    "cached": True,
+                    "session_id": deep.get("session_id"),
+                    "root_cause": deep.get("root_cause"),
+                    "classification": deep.get("classification"),
+                    "confidence": deep.get("confidence"),
+                    "suggested_fix": deep.get("suggested_fix"),
+                    "failing_code": deep.get("failing_code"),
+                    "related_components": deep.get("related_components"),
+                    "jira_duplicates": deep.get("jira_duplicates"),
+                    "triage_report": deep.get("triage_report"),
+                    "skill_used": deep.get("skill_used"),
+                    "mcp_health": deep.get("mcp_health") or (cached_analysis or {}).get("mcp_health"),
+                    "intelligent_triage": cached_analysis,
+                    "deep_ai_started": True,
+                    "deep_ai_recommended": True,
+                    "analysis": {
+                        "root_cause": deep.get("root_cause"),
+                        "classification": deep.get("classification"),
+                        "confidence": deep.get("confidence"),
+                        "suggested_fix": deep.get("suggested_fix"),
+                        "failing_code": deep.get("failing_code"),
+                        "related_components": deep.get("related_components"),
+                        "jira_duplicates": deep.get("jira_duplicates"),
+                        "triage_report": deep.get("triage_report"),
+                    },
+                })
 
         username = _current_username()
         user_toks = resolve_user_settings_tokens(username)
