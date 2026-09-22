@@ -99,10 +99,17 @@ class CostTracker:
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
-        self.data_dir = self.config.get(
-            "data_dir", 
-            "/Users/sudharshan.musali/regx/RegX-AI/backend/agents/data"
-        )
+        if "data_dir" in self.config:
+            self.data_dir = self.config["data_dir"]
+        else:
+            try:
+                from ..paths import agents_data_dir
+                self.data_dir = agents_data_dir()
+            except Exception:
+                self.data_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "data",
+                )
         
         # Ensure data directory exists
         os.makedirs(self.data_dir, exist_ok=True)

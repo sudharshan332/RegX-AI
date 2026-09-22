@@ -286,12 +286,22 @@ export default function TestcaseManagement() {
     setShowBranchDropdown(false);
   };
 
-  const handleRemoveBranch = (branchToRemove) => {
+  const handleRemoveBranch = async (branchToRemove) => {
+    if (!window.confirm(`Remove branch "${branchToRemove}" and its cached testcase_management JSON files?`)) {
+      return;
+    }
     const updated = customBranches.filter(b => b !== branchToRemove);
     setCustomBranches(updated);
     saveCustomBranches(updated);
     if (branch === branchToRemove) {
       setBranch(allBranches.find(b => b !== branchToRemove) || 'master');
+    }
+    try {
+      await api.delete(`${API_BASE_URL}/mcp/regression/testcase-mgmt/branches`, {
+        params: { branch: branchToRemove },
+      });
+    } catch (err) {
+      showToast(err.response?.data?.error || 'Failed to delete branch cache files', 'error');
     }
   };
 

@@ -516,6 +516,49 @@ class RetriggerPayloadTests(unittest.TestCase):
             "CONTAINER",
         )
 
+    def test_sync_to_tcms_flag_included_when_enabled(self):
+        """Test that sync_to_tcms flag is included in payload when enabled."""
+        payload = self.build(self.task, self.tests, {}, "user", sync_to_tcms=True)
+        self.assertTrue(payload["sync_to_tcms"])
+        self.assertIn("official", payload["tester_tags"])
+
+    def test_sync_to_tcms_flag_omitted_when_disabled(self):
+        """Test that sync_to_tcms flag is omitted from payload when disabled."""
+        payload = self.build(self.task, self.tests, {}, "user", sync_to_tcms=False)
+        self.assertNotIn("sync_to_tcms", payload)
+        self.assertNotIn("official", payload["tester_tags"])
+
+    def test_sync_to_tcms_default_false(self):
+        """Test that sync_to_tcms defaults to False when not specified."""
+        payload = self.build(self.task, self.tests, {}, "user")
+        self.assertNotIn("sync_to_tcms", payload)
+        self.assertNotIn("official", payload["tester_tags"])
+
+    def test_sync_to_tcms_disabled_strips_official_from_original_task(self):
+        """Original official regression tags must not keep TCMS sync when unchecked."""
+        self.task["tester_tags"] = ["jita3", "official", "infra__cdp"]
+        payload = self.build(self.task, self.tests, {}, "user", sync_to_tcms=False)
+        self.assertNotIn("official", payload["tester_tags"])
+        self.assertEqual(payload["tester_tags"], ["jita3", "infra__cdp"])
+
+    def test_sync_to_tcms_enabled_adds_official_when_missing(self):
+        """Checked Sync to TCMS marks the rerun official even if the original was not."""
+        self.task["tester_tags"] = ["jita3", "v3.1", "infra__cdp"]
+        payload = self.build(self.task, self.tests, {}, "user", sync_to_tcms=True)
+        self.assertTrue(payload["sync_to_tcms"])
+        self.assertEqual(payload["tester_tags"], ["jita3", "v3.1", "infra__cdp", "official"])
+
+    def test_sync_to_tcms_disabled_strips_official_from_tester_tags_override(self):
+        """A typed official tag cannot bypass an unchecked Sync results to TCMS."""
+        payload = self.build(
+            self.task, self.tests,
+            {"tester_tags": "official, cdp"},
+            "user",
+            sync_to_tcms=False,
+        )
+        self.assertNotIn("official", payload["tester_tags"])
+        self.assertEqual(payload["tester_tags"], ["cdp", "jita3"])
+
 
 class RetriggerAccountTests(unittest.TestCase):
     def setUp(self):

@@ -100,6 +100,40 @@ class TestTargetBranch(unittest.TestCase):
         self.assertEqual(fn("7.5"), "ganges-7.5-stable")
         self.assertEqual(fn("7.6.0.6"), "ganges-7.6.0.6-stable")
         self.assertEqual(fn("ganges-7.6.0.6-stable"), "ganges-7.6.0.6-stable")
+        self.assertEqual(fn("7.5.2"), "ganges-7.5.2-stable")
+        parse = ns["_parse_tcms_target"]
+        self.assertEqual(
+            parse("AOS-ganges-7.5.2-stable-tar", "AOS"),
+            ("AOS", "ganges-7.5.2-stable", "tar"),
+        )
+        self.assertEqual(
+            parse("PC-ganges-7.5.2-stable-pc-tar", "PC"),
+            ("PC", "ganges-7.5.2-stable-pc", "tar"),
+        )
+        self.assertEqual(
+            parse("Clusters-ganges-7.5.2-stable-aws", "Clusters"),
+            ("Clusters", "ganges-7.5.2-stable", "aws"),
+        )
+        self.assertEqual(
+            parse("NCC-ncc-5.3.2-release-tar", "NCC"),
+            ("NCC", "ncc-5.3.2-release", "tar"),
+        )
+        self.assertEqual(parse("PC-master-tar", "PC"), ("PC", "master", "tar"))
+        specs = ns["_tcms_all_testcase_lookup_specs"]("7.5.2", {
+            "target_service": "AOS",
+            "target": "AOS-ganges-7.5.2-stable-tar",
+        })
+        self.assertEqual(specs[0]["target_service"], "NutestPy3Tests")
+        self.assertEqual(specs[0]["target_branch"], "ganges-7.5.2-stable")
+        self.assertEqual(specs[1]["target_service"], "AOS")
+        self.assertEqual(specs[1]["target_branch"], "ganges-7.5.2-stable")
+        self.assertEqual(specs[1]["target_package_type"], "tar")
+        pc_specs = ns["_tcms_all_testcase_lookup_specs"]("7.5.2", {
+            "target_service": "PC",
+            "target": "PC-ganges-7.5.2-stable-pc-tar",
+        })
+        self.assertEqual(pc_specs[1]["target_service"], "PC")
+        self.assertEqual(pc_specs[1]["target_branch"], "ganges-7.5.2-stable-pc")
         cfg = ns["_resolve_branch_config"]
         ns["TESTCASE_MGMT_BRANCHES"] = {
             "master": {"milestone": "master", "team_prefix": "master", "test_set_regex": "test_sets/milestones/master/"},
@@ -154,7 +188,7 @@ class TestApplyTagOps(unittest.TestCase):
             return True, 200, "ok"
 
         ns["_tcms_mutate_testcase_tags"] = fake_mutate
-        ns["_resolve_tcms_all_testcase_oid"] = lambda name, branch: (
+        ns["_resolve_tcms_all_testcase_oid"] = lambda name, branch, tc=None: (
             TCMS_A if "a" in name else TCMS_B,
             list(next(
                 (t.get("tags") or [] for t in store["master__CDP"]["testcases"] if t.get("name") == name),
@@ -206,7 +240,7 @@ class TestApplyTagOps(unittest.TestCase):
             ],
         }
 
-        def fake_resolve(name, branch):
+        def fake_resolve(name, branch, tc=None):
             self.assertEqual(name, "pkg.Test.a")
             return TCMS_A, ["old"]
 
@@ -374,7 +408,7 @@ class TestApplyTagOps(unittest.TestCase):
                 return False, 404, "not found"
             return True, 200, "ok"
 
-        def fake_resolve(name, branch):
+        def fake_resolve(name, branch, tc=None):
             # First resolve(s) still return stale; after 404 retry returns real oid
             resolve_n["n"] += 1
             if resolve_n["n"] <= 1:
@@ -388,6 +422,44 @@ class TestApplyTagOps(unittest.TestCase):
         self.assertEqual(calls[0], stale)
         self.assertIn(TCMS_A, calls)
         self.assertEqual(ns["_STORE"]["master__CDP"]["testcases"][0]["tcms_oid"], TCMS_A)
+
+    def test_add_falls_back_to_milestone_target_when_nutest_missing(self):
+        """Patch branches like 7.5.2 have AOS/PC docs, not NutestPy3Tests."""
+        ns = _load_helpers()
+        apply = ns["_apply_testcase_tag_ops"]
+        ns["_STORE"]["7.5.2__CDP"] = {
+            "branch": "7.5.2",
+            "team": "CDP",
+            "testcases": [
+                {
+                    "oid": A,
+                    "name": "pkg.Test.a",
+                    "tags": [],
+                    "tcms_oid": "",
+                    "target_service": "AOS",
+                    "target": "AOS-ganges-7.5.2-stable-tar",
+                },
+            ],
+        }
+        queries = []
+
+        def fake_query(name, spec):
+            queries.append(dict(spec))
+            if spec.get("target_service") == "NutestPy3Tests":
+                return None, []
+            if spec.get("target_service") == "AOS" and spec.get("target_branch") == "ganges-7.5.2-stable":
+                return TCMS_A, []
+            return None, []
+
+        ns["_query_tcms_all_testcase"] = fake_query
+        ns["_tcms_mutate_testcase_tags"] = lambda *a, **k: (True, 200, "ok")
+        r = apply([A], ["pinned"], "7.5.2", "CDP", action="add")
+        self.assertEqual(r["success"], 1)
+        self.assertEqual(r["failed"], 0)
+        self.assertEqual(ns["_STORE"]["7.5.2__CDP"]["testcases"][0]["tcms_oid"], TCMS_A)
+        self.assertEqual(ns["_STORE"]["7.5.2__CDP"]["testcases"][0]["tags"], ["pinned"])
+        self.assertEqual(queries[0]["target_service"], "NutestPy3Tests")
+        self.assertTrue(any(q.get("target_service") == "AOS" for q in queries))
 
 
 class TestCacheLoadSave(unittest.TestCase):
@@ -404,7 +476,7 @@ class TestCacheLoadSave(unittest.TestCase):
         start = src.index("def _normalize_tc_branch_key(")
         end = src.index("def _resolve_branch_config(")
         chunk1 = src[start:end]
-        start2 = src.index("def _tc_data_file(")
+        start2 = src.index("def _testcase_mgmt_data_dir(")
         end2 = src.index("@app.route(\"/mcp/regression/testcase-mgmt/fetch-data\"")
         chunk2 = src[start2:end2]
         ns = {

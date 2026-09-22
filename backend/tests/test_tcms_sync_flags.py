@@ -14,7 +14,7 @@ def _load_tcms_helpers():
     with open(path, encoding="utf-8") as fh:
         src = fh.read()
     start = src.index("        def _set_tcms_sync_flags(")
-    end = src.index("        def _apply_retain_setup_on_failure(")
+    end = src.index("        source_testset_name = (req_data.get(\"source_testset_name\")")
     ns = {}
     exec(textwrap.dedent(src[start:end]), ns)  # noqa: S102
     return ns

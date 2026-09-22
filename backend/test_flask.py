@@ -14,6 +14,9 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import ssl
+import subprocess
+import tempfile
+import shutil
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from collections import defaultdict
@@ -34,6 +37,70 @@ from auth import (
     validate_team,
     get_default_team,
 )
+from handover_helpers import (
+    parse_task_id_inputs,
+    parse_jita_url as _parse_jita_url_helper,
+    categorize_bug_type_from_issuetype,
+    evaluate_sliding_eligibility,
+    get_task_id_from_run,
+    order_runs_for_test,
+)
+
+def _get_current_team():
+    """Get current team from JWT context, fallback to default team."""
+    if has_request_context() and hasattr(g, 'team'):
+        return g.team
+    return get_default_team()
+
+def _get_legacy_data_dir():
+    """Flat data/ directory used before team isolation (read fallback)."""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+
+def _get_team_data_dir(create=False):
+    """Directory for the current team's JSON (data/{TEAM}/)."""
+    env_override = (os.environ.get("REGX_TEAM_DATA_DIR") or "").strip()
+    if env_override:
+        if create:
+            os.makedirs(env_override, exist_ok=True)
+        return env_override
+    team = _get_current_team() or get_default_team() or "CDP_FT"
+    path = os.path.join(_get_legacy_data_dir(), str(team))
+    if create:
+        os.makedirs(path, exist_ok=True)
+    return path
+
+def _resolve_team_or_legacy_file(filename, for_write=False):
+    """Prefer data/{TEAM}/filename; fall back to data/filename on read."""
+    team_path = os.path.join(_get_team_data_dir(create=for_write), filename)
+    if for_write or os.path.exists(team_path):
+        return team_path
+    if (os.environ.get("REGX_TEAM_DATA_DIR") or "").strip():
+        return team_path
+    legacy = os.path.join(_get_legacy_data_dir(), filename)
+    if os.path.exists(legacy):
+        return legacy
+    return team_path
+
+def _get_team_storage_path(filename):
+    """Get team-specific storage path for a given filename."""
+    return os.path.join(_get_team_data_dir(), filename)
+
+def _get_run_plans_storage_path():
+    """Get team-specific run plans storage path."""
+    # Allow override via environment variable for testing
+    env_override = os.environ.get("REGX_RUN_PLANS_FILE")
+    if env_override:
+        return env_override
+    return _get_team_storage_path("run_plans.json")
+
+def _get_regression_config_storage_path():
+    """Get team-specific regression config storage path."""
+    return _get_team_storage_path("regression_config.json")
+
+def _get_triage_genie_storage_path():
+    """Get team-specific triage genie storage path."""
+    return _get_team_storage_path("triage_genie_jobs.json")
+
 from owner_triage_report import (
     build_owner_status_table,
     resolve_task_ids_from_payload,
@@ -43,6 +110,24 @@ from regression_owners import (
     load_owner_mapping,
     resolve_owner as resolve_regression_owner,
 )
+from intelligent_triage.persistence import (
+    load_failed_analysis_tags as _it_load_tags,
+    save_failed_analysis_tags as _it_save_tags,
+    load_failed_analysis_results as _it_load_results,
+    save_failed_analysis_results as _it_save_results,
+    delete_failed_analysis_results as _it_delete_results,
+)
+from intelligent_triage.thresholds import (
+    load_team_thresholds,
+    save_team_thresholds,
+    DEFAULT_THRESHOLDS,
+)
+from intelligent_triage.orchestration import (
+    build_intelligent_triage_payload,
+    persist_analysis_into_tag_payload,
+)
+from intelligent_triage.schema import merge_glean_ai_validation, set_deep_ai_started
+from intelligent_triage.decision_engine import should_auto_write_triage
 from tag_extra_task_ids import (
     append_extras_for_tag,
     classify_task_ids_against_tag,
@@ -52,6 +137,20 @@ from tag_extra_task_ids import (
     plan_accept_after_tagging,
     remove_extras_for_tag,
 )
+from dynamic_jp_clone import (
+    apply_clone_retain_exceptions,
+    apply_clone_test_defaults,
+    apply_destination_nos,
+    apply_destination_pc,
+    apply_latest_smoke_on_current_branches,
+    clear_run_tests_with_tags,
+    is_master_branch,
+    nutest_mainline_branch,
+    pc_branch_search_query,
+    resolve_clone_pc_branch,
+    restore_clone_service,
+    set_sut_branch,
+)
 from user_keys import (
     get_user_key,
     get_user_keys_masked,
@@ -59,6 +158,11 @@ from user_keys import (
     store_login_credential,
     get_login_credential,
     clear_login_credential,
+)
+from flux_client import (
+    FluxError,
+    FluxKeySetupError,
+    get_client as get_flux_client,
 )
 
 # ======================================================
@@ -85,23 +189,47 @@ _credential_cache_lock = threading.Lock()
 CREDENTIAL_TTL_SECONDS = int(os.environ.get("JWT_EXPIRY_HOURS", "24")) * 3600
 
 
+def _norm_login_username(username):
+    """Lowercase username the same way the on-disk login store does."""
+    return (username or "").strip().lower()
+
+
 def _store_user_credentials(username, password):
-    """Cache user credentials on successful login."""
+    """Cache user credentials on successful login and persist them across restarts."""
+    uname = _norm_login_username(username)
+    if not uname or not password:
+        return
     with _credential_cache_lock:
-        _credential_cache[username] = {
+        _credential_cache[uname] = {
             "password": password,
             "expires_at": time.time() + CREDENTIAL_TTL_SECONDS,
         }
+    store_login_credential(uname, password)
 
 
 def _get_user_credentials(username):
-    """Retrieve cached credentials. Returns (username, password) tuple or None."""
-    with _credential_cache_lock:
-        entry = _credential_cache.get(username)
-        if entry and entry["expires_at"] > time.time():
-            return (username, entry["password"])
-        _credential_cache.pop(username, None)
+    """Retrieve cached credentials. Returns (username, password) tuple or None.
+
+    On an in-memory miss (Flask restart), rehydrate from the on-disk login store
+    so JITA POSTs still authenticate as the logged-in user.
+    """
+    uname = _norm_login_username(username)
+    if not uname:
         return None
+    with _credential_cache_lock:
+        entry = _credential_cache.get(uname)
+        if entry and entry["expires_at"] > time.time():
+            return (uname, entry["password"])
+        _credential_cache.pop(uname, None)
+    password = get_login_credential(uname)
+    if not password:
+        return None
+    with _credential_cache_lock:
+        _credential_cache[uname] = {
+            "password": password,
+            "expires_at": time.time() + CREDENTIAL_TTL_SECONDS,
+        }
+    return (uname, password)
 
 
 # Corporate email domain used to construct a personal email from a sAMAccountName
@@ -142,16 +270,17 @@ def _current_user_jita_auth():
     basic auth, or ``None`` if unavailable.
 
     JITA attributes ``created_by`` to whoever authenticates the POST. When we
-    have the user's cached credentials (captured at login), creating entities as
-    the user makes JITA's native ``created_by`` = the real person instead of the
-    shared service account. Returns ``None`` when the cache is empty/expired
-    (e.g. token still valid but backend restarted), so callers can fall back to
-    the service account and never fail the operation.
+    have the user's cached credentials (captured at login, rehydrated from disk
+    after a restart), creating entities as the user makes JITA's native
+    ``created_by`` = the real person instead of the shared service account.
+    Returns ``None`` when memory and disk are both empty/expired, so callers can
+    fall back to the service account and never fail the operation.
     """
     payload = getattr(g, "current_user", None)
     if not isinstance(payload, dict):
         return None
-    username = (payload.get("sub") or payload.get("username") or "").strip()
+    raw = (payload.get("sub") or payload.get("username") or "").strip()
+    username = _norm_login_username(raw.split("@")[0] if raw else "")
     if not username:
         return None
     creds = _get_user_credentials(username)
@@ -165,6 +294,17 @@ def _current_user_jita_auth():
 # ======================================================
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
+
+# Register agent framework blueprint (Phase 2). Failures must not block Failed Analysis.
+try:
+    from api.agents import agents_bp
+    app.register_blueprint(agents_bp)
+    logging.getLogger(__name__).info("Registered agents_bp at /api/agents")
+except Exception as _agents_reg_err:
+    logging.getLogger(__name__).warning(
+        "agents_bp not registered (%s). Failed Analysis routes remain available.",
+        _agents_reg_err,
+    )
 
 # ======================================================
 # Disable SSL warnings
@@ -213,6 +353,32 @@ _cdp_reg_jarvis_env = {
     u.strip().lower() for u in os.getenv("CDP_REG_JARVIS_MEMBERS", "").split(",") if u.strip()
 }
 CDP_REG_JARVIS_MEMBERS = _cdp_reg_jarvis_env or _CDP_REG_JARVIS_DEFAULT_MEMBERS
+
+
+def _ensure_cdp_reg_jarvis_user_groups(payload):
+    """Merge ``cdp_reg_jarvis`` into ``user_groups`` without dropping other groups."""
+    if not isinstance(payload, dict):
+        return payload
+    groups = payload.get("user_groups")
+    if not isinstance(groups, list):
+        groups = []
+    merged = []
+    seen = set()
+    for g in list(groups) + [CDP_REG_JARVIS_GROUP]:
+        if g is None:
+            continue
+        key = str(g).strip()
+        if not key:
+            continue
+        low = key.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        merged.append(CDP_REG_JARVIS_GROUP if low == CDP_REG_JARVIS_GROUP else key)
+    payload["user_groups"] = merged
+    return payload
+
+
 # Name-regex searches are unindexed on JITA and scale with the result limit, so the
 # search endpoint needs a longer read timeout than the default one-shot GETs.
 JITA_SEARCH_TIMEOUT = int(os.getenv("JITA_SEARCH_TIMEOUT", "30"))
@@ -244,9 +410,8 @@ TCMS_TESTDB_BASE = "https://quality-pipeline.eng.nutanix.com/testdb/api/v1"
 TCMS_USER = os.getenv("TCMS_USER", "agave_bot")
 TCMS_PASSWORD = os.getenv("TCMS_PASSWORD", "admin")
 
-TESTCASE_MGMT_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
-)
+# Tests may set this to a temp dir; production uses data/{TEAM}/.
+TESTCASE_MGMT_DATA_DIR = None
 
 
 def _jita_browser_entity_url(template, entity_id=None, entity_name=None):
@@ -323,11 +488,9 @@ HEADERS = {
 manual_tasks_store = {}
 
 # Run Plan storage file
-# Production file by default. For isolated feature testing set:
-#   REGX_RUN_PLANS_FILE=/path/to/run_plans_test.json
-# so dummy plans never write into production run_plans.json.
-_RUN_PLANS_DEFAULT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "run_plans.json")
-RUN_PLAN_STORAGE = os.environ.get("REGX_RUN_PLANS_FILE") or _RUN_PLANS_DEFAULT
+# Team-specific storage path determined dynamically based on current user's team.
+# For isolated feature testing set: REGX_RUN_PLANS_FILE=/path/to/run_plans_test.json
+# which will override the team-based path.
 
 
 def _is_dummy_run_plan(run_plan):
@@ -348,8 +511,9 @@ def _is_dummy_run_plan(run_plan):
 def load_run_plans():
     """Load run plans from JSON file, backfilling missing fields on older entries."""
     try:
-        if os.path.exists(RUN_PLAN_STORAGE):
-            with open(RUN_PLAN_STORAGE, 'r') as f:
+        storage_path = _get_run_plans_storage_path()
+        if os.path.exists(storage_path):
+            with open(storage_path, 'r') as f:
                 data = json.load(f)
             dirty = False
             for rp in data.get("run_plans", []):
@@ -376,7 +540,8 @@ def load_run_plans():
 def save_run_plans(data):
     """Save run plans to JSON file"""
     try:
-        with open(RUN_PLAN_STORAGE, 'w') as f:
+        storage_path = _get_run_plans_storage_path()
+        with open(storage_path, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving run plans: {e}")
@@ -486,13 +651,14 @@ def _run_plan_scheduler_loop():
         time.sleep(SCHEDULER_INTERVAL_SECONDS)
 
 # Triage Genie jobs storage file
-TRIAGE_GENIE_STORAGE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "triage_genie_jobs.json")
+# Team-specific storage path determined dynamically based on current user's team.
 
 def load_triage_genie_jobs():
     """Load Triage Genie jobs from JSON file"""
     try:
-        if os.path.exists(TRIAGE_GENIE_STORAGE):
-            with open(TRIAGE_GENIE_STORAGE, 'r') as f:
+        storage_path = _get_triage_genie_storage_path()
+        if os.path.exists(storage_path):
+            with open(storage_path, 'r') as f:
                 return json.load(f)
         return {"jobs": []}
     except Exception as e:
@@ -502,20 +668,22 @@ def load_triage_genie_jobs():
 def save_triage_genie_jobs(data):
     """Save Triage Genie jobs to JSON file"""
     try:
-        with open(TRIAGE_GENIE_STORAGE, 'w') as f:
+        storage_path = _get_triage_genie_storage_path()
+        with open(storage_path, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving triage genie jobs: {e}")
         raise
 
 # Regression Dashboard Configuration storage file
-REGRESSION_CONFIG_STORAGE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "regression_config.json")
+# Team-specific storage path determined dynamically based on current user's team.
 
 def load_regression_config():
     """Load regression dashboard configuration from JSON file. Migrates legacy schema."""
     try:
-        if os.path.exists(REGRESSION_CONFIG_STORAGE):
-            with open(REGRESSION_CONFIG_STORAGE, 'r') as f:
+        storage_path = _get_regression_config_storage_path()
+        if os.path.exists(storage_path):
+            with open(storage_path, 'r') as f:
                 config = json.load(f)
             # Migration: add default_tag, added_tags if missing
             added = config.get("added_tags", [])
@@ -555,14 +723,14 @@ def load_regression_config():
 def save_regression_config(data):
     """Save regression dashboard configuration to JSON file"""
     try:
-        with open(REGRESSION_CONFIG_STORAGE, 'w') as f:
+        storage_path = _get_regression_config_storage_path()
+        with open(storage_path, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving regression config: {e}")
         raise
 
 # Triage Accuracy Analyzer data storage
-TRIAGE_ACCURACY_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 TRIAGE_ACCURACY_TASKIDS_FILE = "triage_accuracy_data_taskids.json"
 
 def _sanitize_tag_for_filename(tag):
@@ -575,13 +743,15 @@ def _sanitize_tag_for_filename(tag):
     s = re.sub(r"_+", "_", s).strip("_")
     return s if s else "unknown"
 
-def _triage_accuracy_path(tag=None):
-    """Get path for triage accuracy JSON. tag=None means task_ids mode."""
-    os.makedirs(TRIAGE_ACCURACY_DATA_DIR, exist_ok=True)
+def _triage_accuracy_filename(tag=None):
     if tag:
         sanitized = _sanitize_tag_for_filename(tag)
-        return os.path.join(TRIAGE_ACCURACY_DATA_DIR, f"triage_accuracy_data_{sanitized}.json")
-    return os.path.join(TRIAGE_ACCURACY_DATA_DIR, TRIAGE_ACCURACY_TASKIDS_FILE)
+        return f"triage_accuracy_data_{sanitized}.json"
+    return TRIAGE_ACCURACY_TASKIDS_FILE
+
+def _triage_accuracy_path(tag=None, for_write=False):
+    """Get path for triage accuracy JSON. tag=None means task_ids mode."""
+    return _resolve_team_or_legacy_file(_triage_accuracy_filename(tag), for_write=for_write)
 
 def load_triage_accuracy_data(tag=None):
     """Load triage accuracy data from JSON file. tag=None for task_ids mode."""
@@ -604,7 +774,7 @@ def load_triage_accuracy_data(tag=None):
                 return None
         # Migration: copy legacy triage_accuracy_data.json to per-tag file if tag matches
         if tag:
-            legacy_path = os.path.join(TRIAGE_ACCURACY_DATA_DIR, "triage_accuracy_data.json")
+            legacy_path = _resolve_team_or_legacy_file("triage_accuracy_data.json", for_write=False)
             if os.path.exists(legacy_path):
                 with open(legacy_path, 'r') as f:
                     data = json.load(f)
@@ -620,8 +790,8 @@ def load_triage_accuracy_data(tag=None):
 def save_triage_accuracy_data(data, tag=None):
     """Save triage accuracy data to JSON file. tag=None for task_ids mode."""
     try:
-        path = _triage_accuracy_path(tag)
-        os.makedirs(TRIAGE_ACCURACY_DATA_DIR, exist_ok=True)
+        path = _triage_accuracy_path(tag, for_write=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         # Atomic write: avoid corrupt JSON if two requests save at once
         tmp_path = f"{path}.tmp.{os.getpid()}"
         with open(tmp_path, 'w') as f:
@@ -638,72 +808,101 @@ def save_triage_accuracy_data(data, tag=None):
             pass
         raise
 
+def _unlink_if_exists(path):
+    """Remove a file if present. Returns True when a file was deleted."""
+    try:
+        if path and os.path.exists(path) and os.path.isfile(path):
+            os.remove(path)
+            logger.info("Deleted file: %s", path)
+            return True
+    except OSError as e:
+        logger.warning("Could not delete %s: %s", path, e)
+    return False
+
+
+def _remove_team_and_legacy_file(filename):
+    """Delete filename from the current team dir and the flat legacy data/ dir."""
+    if not filename:
+        return
+    team_path = os.path.join(_get_team_data_dir(create=False), filename)
+    _unlink_if_exists(team_path)
+    if (os.environ.get("REGX_TEAM_DATA_DIR") or "").strip():
+        return
+    legacy_path = os.path.join(_get_legacy_data_dir(), filename)
+    if os.path.abspath(legacy_path) != os.path.abspath(team_path):
+        _unlink_if_exists(legacy_path)
+
+
 def invalidate_triage_accuracy_cache(tag=None):
     """Delete triage accuracy cache. tag=None invalidates only task_ids file; pass tag for per-tag file."""
     try:
+        if tag:
+            _remove_team_and_legacy_file(_triage_accuracy_filename(tag))
+            # Shared legacy file: only remove if it belongs to this tag
+            legacy_shared = os.path.join(_get_legacy_data_dir(), "triage_accuracy_data.json")
+            if os.path.exists(legacy_shared):
+                try:
+                    with open(legacy_shared, "r") as f:
+                        data = json.load(f)
+                    if (data.get("tag") or "").strip() == tag.strip():
+                        _unlink_if_exists(legacy_shared)
+                except (OSError, json.JSONDecodeError, AttributeError):
+                    pass
+            return
         path = _triage_accuracy_path(tag)
-        if os.path.exists(path):
-            os.remove(path)
-            logger.info(f"Invalidated triage accuracy cache: {path}")
+        _unlink_if_exists(path)
     except Exception as e:
         logger.warning(f"Could not invalidate triage accuracy cache: {e}")
 
 # --------------- Failed Analysis Saved Tags storage ---------------
+# Phase 2: prefer intelligent_triage.persistence (data/<team>/failed_analysis/).
+# Keep AiTechConf team-or-legacy helpers for any remaining flat-file callers.
 FAILED_ANALYSIS_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 FAILED_ANALYSIS_TAGS_FILE = os.path.join(FAILED_ANALYSIS_DATA_DIR, "failed_analysis_saved_tags.json")
+FAILED_ANALYSIS_TAGS_FILENAME = "failed_analysis_saved_tags.json"
 
-def _failed_analysis_results_path(tag):
+def _failed_analysis_tags_path(for_write=False):
+    return _resolve_team_or_legacy_file(FAILED_ANALYSIS_TAGS_FILENAME, for_write=for_write)
+
+def _failed_analysis_results_path(tag, for_write=False):
+    """Team-or-legacy flat path; Phase 2 writes also go through _it_* persistence."""
     sanitized = _sanitize_tag_for_filename(tag)
-    return os.path.join(FAILED_ANALYSIS_DATA_DIR, f"failed_analysis_{sanitized}.json")
+    return _resolve_team_or_legacy_file(f"failed_analysis_{sanitized}.json", for_write=for_write)
 
 def load_failed_analysis_tags():
     try:
-        if os.path.exists(FAILED_ANALYSIS_TAGS_FILE):
-            with open(FAILED_ANALYSIS_TAGS_FILE, 'r') as f:
-                data = json.load(f)
-                if isinstance(data, dict) and "tags" in data:
-                    return data
-        return {"tags": []}
+        return _it_load_tags()
     except Exception as e:
         logger.error(f"Error loading failed analysis tags: {e}")
         return {"tags": []}
 
 def save_failed_analysis_tags(data):
     try:
-        os.makedirs(FAILED_ANALYSIS_DATA_DIR, exist_ok=True)
-        with open(FAILED_ANALYSIS_TAGS_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
+        _it_save_tags(data)
     except Exception as e:
         logger.error(f"Error saving failed analysis tags: {e}")
         raise
 
 def load_failed_analysis_results(tag):
     try:
-        path = _failed_analysis_results_path(tag)
-        if os.path.exists(path):
-            with open(path, 'r') as f:
-                return json.load(f)
-        return None
+        return _it_load_results(tag)
     except Exception as e:
         logger.error(f"Error loading failed analysis results for tag '{tag}': {e}")
         return None
 
 def save_failed_analysis_results(tag, data):
     try:
-        os.makedirs(FAILED_ANALYSIS_DATA_DIR, exist_ok=True)
-        path = _failed_analysis_results_path(tag)
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
+        _it_save_results(tag, data)
     except Exception as e:
         logger.error(f"Error saving failed analysis results for tag '{tag}': {e}")
         raise
 
 def delete_failed_analysis_results(tag):
     try:
-        path = _failed_analysis_results_path(tag)
-        if os.path.exists(path):
-            os.remove(path)
-            logger.info(f"Deleted failed analysis cache: {path}")
+        _it_delete_results(tag)
+        # Also clear AiTechConf team/legacy flat filenames if present.
+        sanitized = _sanitize_tag_for_filename(tag)
+        _remove_team_and_legacy_file(f"failed_analysis_{sanitized}.json")
     except Exception as e:
         logger.warning(f"Could not delete failed analysis cache for tag '{tag}': {e}")
 
@@ -933,13 +1132,45 @@ def fetch_regression_tasks(tag=None, task_ids=None, include_tag_extras=True):
 # ======================================================
 # API-2: Fetch Agave Task
 # ======================================================
-def fetch_agave_task(task_id):
-    resp = session.get(
-        f"{JITA_BASE}/agave_tasks/{task_id}",
-        timeout=30
-    )
+def fetch_agave_task(task_id, auth=None):
+    kwargs = {"timeout": 30}
+    resolved_auth = auth
+    if resolved_auth is None:
+        try:
+            resolved_auth = _current_user_jita_auth() or globals().get("JITA_SVC_AUTH")
+        except RuntimeError:
+            resolved_auth = globals().get("JITA_SVC_AUTH")
+    if resolved_auth:
+        kwargs["auth"] = resolved_auth
+    resp = session.get(f"{JITA_BASE}/agave_tasks/{task_id}", **kwargs)
     resp.raise_for_status()
-    return resp.json().get("data", {})
+    payload = resp.json() if resp is not None else {}
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        return payload.get("data") or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def nutest_branch_from_agave_task(task):
+    """Return JITA nutest-py3-tests_branch (or nested framework branch)."""
+    if not isinstance(task, dict):
+        return ""
+    for key in ("nutest-py3-tests_branch", "nutest_py3_tests_branch", "nutest_branch"):
+        val = str(task.get(key) or "").strip()
+        if val:
+            return val
+    framework = str(task.get("test_framework") or "nutest-py3-tests").strip() or "nutest-py3-tests"
+    keyed = str(task.get("%s_branch" % framework) or "").strip()
+    if keyed:
+        return keyed
+    tfm = task.get("test_framework_metadata")
+    if isinstance(tfm, dict):
+        for nested_key in ("framework", "test"):
+            nested = tfm.get(nested_key)
+            if isinstance(nested, dict):
+                val = str(nested.get("branch") or "").strip()
+                if val:
+                    return val
+    return ""
 
 # ======================================================
 # Flask Endpoint
@@ -2161,7 +2392,9 @@ def delete_config_tag():
         save_regression_config(config)
         
         invalidate_triage_accuracy_cache(tag)
-        logger.info(f"Deleted tag from config and triage JSON: {tag}")
+        # Phase 2: also delete intelligent-triage / failed_analysis cache JSON for this tag.
+        delete_failed_analysis_results(tag)
+        logger.info(f"Deleted tag from config, triage JSON, and failed_analysis cache: {tag}")
         return jsonify({"added_tags": added})
     except Exception as e:
         logger.error(f"Error deleting tag: {e}")
@@ -5039,6 +5272,25 @@ def create_run_plan():
         logger.error(f"Error creating run plan: {e}")
         return jsonify({"error": str(e)}), 500
 
+def _normalize_run_plan_jp_ids(raw_ids):
+    """Return cleaned job-profile id strings from a run-plan request or stored list."""
+    ids = []
+    seen = set()
+    for jp_id in raw_ids or []:
+        if isinstance(jp_id, dict):
+            jp_id = jp_id.get("$oid") or jp_id.get("_id") or ""
+            if isinstance(jp_id, dict):
+                jp_id = jp_id.get("$oid") or ""
+        if not jp_id or not isinstance(jp_id, str):
+            continue
+        jp_id = jp_id.strip()
+        if not jp_id or jp_id in seen:
+            continue
+        seen.add(jp_id)
+        ids.append(jp_id)
+    return ids
+
+
 @app.route("/mcp/regression/run-plan/<run_plan_id>", methods=["PUT"])
 @jwt_required
 def update_run_plan(run_plan_id):
@@ -5050,9 +5302,9 @@ def update_run_plan(run_plan_id):
         # Find and update run plan
         for i, rp in enumerate(data.get("run_plans", [])):
             if rp.get("id") == run_plan_id:
-                # Check if already triggered (restrict edits)
+                # Check if already triggered (restrict some edits)
                 if rp.get("last_triggered"):
-                    # Only allow editing schedule_date, name, branch, service_account, tag_name, is_dummy
+                    # Allow schedule_date, name, branch, service_account, tag_name, is_dummy
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data["schedule_date"]
                         rp["schedule_triggered"] = False
@@ -5083,17 +5335,19 @@ def update_run_plan(run_plan_id):
                     elif "name" in req_data:
                         rp["is_dummy"] = _is_dummy_run_plan(rp)
                     
-                    # Validate and filter job profiles if provided
-                    if "job_profiles" in req_data:
-                        new_job_profiles = req_data.get("job_profiles", [])
-                        new_job_profiles = [jp_id for jp_id in new_job_profiles if jp_id and isinstance(jp_id, str) and jp_id.strip()]
-                        if not new_job_profiles:
-                            return jsonify({"error": "At least one valid job profile is required"}), 400
-                        rp["job_profiles"] = new_job_profiles
-                    
                     if "schedule_date" in req_data:
                         rp["schedule_date"] = req_data.get("schedule_date")
                         rp["schedule_triggered"] = False
+
+                # Add/remove job profiles is always allowed (including after last_triggered).
+                removed_job_profiles = []
+                if "job_profiles" in req_data:
+                    old_job_profiles = _normalize_run_plan_jp_ids(rp.get("job_profiles"))
+                    new_job_profiles = _normalize_run_plan_jp_ids(req_data.get("job_profiles", []))
+                    if not new_job_profiles:
+                        return jsonify({"error": "At least one valid job profile is required"}), 400
+                    rp["job_profiles"] = new_job_profiles
+                    removed_job_profiles = [j for j in old_job_profiles if j not in set(new_job_profiles)]
                 
                 save_run_plans(data)
                 
@@ -5101,13 +5355,17 @@ def update_run_plan(run_plan_id):
                 # Tag name remains unchanged (auto-generated on create)
                 tag_name = rp.get("tag_name")
                 if "job_profiles" in req_data and tag_name:
-                    job_profiles = rp.get("job_profiles", [])
-                    job_profiles = [jp_id for jp_id in job_profiles if jp_id and isinstance(jp_id, str) and jp_id.strip()]
+                    job_profiles = _normalize_run_plan_jp_ids(rp.get("job_profiles"))
                     
                     if job_profiles:
                         logger.info(f"Ensuring tag '{tag_name}' exists in tester_tags for {len(job_profiles)} job profile(s)")
                         updated_count, failed = update_job_profiles_tester_tags(job_profiles, tag_name, action="add")
                         logger.info(f"Updated tester_tags: {updated_count} succeeded, {len(failed)} failed")
+                    if removed_job_profiles:
+                        logger.info(
+                            f"Removing tag '{tag_name}' from {len(removed_job_profiles)} dropped job profile(s)"
+                        )
+                        update_job_profiles_tester_tags(removed_job_profiles, tag_name, action="remove")
                 
                 return jsonify({"success": True, "run_plan": rp})
         
@@ -5362,6 +5620,77 @@ def trigger_run_plan(run_plan_id):
         logger.error(f"Error triggering run plan {run_plan_id}: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+# JITA PUT /job_profiles/:id only accepts these image_build_selection values.
+# GET often returns "None" / null; sending that back makes JITA reject the PUT.
+_JITA_IMAGE_BUILD_SELECTIONS = (
+    "By Commit",
+    "By Latest Smoke Passed",
+    "By Latest Build Passed",
+)
+_JITA_JP_PUT_READONLY_FIELDS = (
+    "_id",
+    "created_at",
+    "updated_at",
+    "created_by_user",
+    "last_triggered",
+    "scheduled_jobs",
+)
+
+
+def _apply_image_component_update(updated_profile, comp_data):
+    """Apply Image Branch fields to match JITA UI PUT shape (in place)."""
+    branch = (comp_data.get("branch") or "").strip()
+    update_type = comp_data.get("update_type") or ""
+    build_type = comp_data.get("build_type") or ""
+    tag = comp_data.get("tag") or ""
+    commit_id = (comp_data.get("commit_id") or "").strip()
+    gbn = comp_data.get("gbn")
+
+    if branch:
+        updated_profile["image_branch"] = branch
+    if build_type:
+        updated_profile["image_build_type"] = build_type
+
+    if update_type == "tag" and tag:
+        updated_profile["image_build_selection"] = tag
+        # JITA UI sends JSON null (not "") when selecting by tag.
+        updated_profile["image_commit"] = None
+        updated_profile.pop("image_gbn", None)
+    elif update_type == "commit":
+        updated_profile["image_build_selection"] = "By Commit"
+        updated_profile["image_commit"] = commit_id or None
+        if gbn not in (None, ""):
+            try:
+                updated_profile["image_gbn"] = int(gbn) if isinstance(gbn, str) else gbn
+            except (ValueError, TypeError):
+                updated_profile["image_gbn"] = gbn
+
+    return updated_profile
+
+
+def _prepare_jita_jp_put_payload(profile):
+    """Build a JITA job-profile PUT body: drop read-only GET fields and fix image enums."""
+    payload = {}
+    for key, value in (profile or {}).items():
+        if key in _JITA_JP_PUT_READONLY_FIELDS:
+            continue
+        if isinstance(value, (set, tuple)):
+            payload[key] = list(value)
+        elif value is Ellipsis:
+            payload[key] = None
+        else:
+            payload[key] = value
+
+    if payload.get("image_commit") == "":
+        payload["image_commit"] = None
+
+    selection = payload.get("image_build_selection")
+    if selection not in _JITA_IMAGE_BUILD_SELECTIONS:
+        payload.pop("image_build_selection", None)
+
+    return payload
+
+
 @app.route("/mcp/regression/run-plan/<run_plan_id>/batch-update", methods=["POST"])
 @jwt_required
 def batch_update_job_profiles(run_plan_id):
@@ -5522,6 +5851,18 @@ def batch_update_job_profiles(run_plan_id):
                         PRISM_CENTRAL["build"] = PC_BUILD
                         resource_manager_json["PRISM_CENTRAL"] = PRISM_CENTRAL
                         updated_profile["resource_manager_json"] = resource_manager_json
+
+                    elif component == "IMAGE":
+                        _apply_image_component_update(updated_profile, comp_data)
+                        logger.info(
+                            "Batch update IMAGE %s: branch=%s type=%s selection=%s commit=%s gbn=%s",
+                            job_id,
+                            updated_profile.get("image_branch"),
+                            updated_profile.get("image_build_type"),
+                            updated_profile.get("image_build_selection"),
+                            updated_profile.get("image_commit"),
+                            updated_profile.get("image_gbn"),
+                        )
                 
                 # Update test framework branch if provided
                 if req_data.get("nutest_branch"):
@@ -5627,15 +5968,8 @@ def batch_update_job_profiles(run_plan_id):
                     updated_profile["run_tests_with_additional_tags"] = new_additional_tags
                     logger.info(f"Overwriting run_tests_with_additional_tags for {job_id}: {new_additional_tags}")
 
-                # Ensure JSON serializable (following reference script pattern)
-                serializable_payload = {}
-                for k, v in updated_profile.items():
-                    if isinstance(v, (set, tuple)):
-                        serializable_payload[k] = list(v)
-                    elif v is Ellipsis:
-                        serializable_payload[k] = None
-                    else:
-                        serializable_payload[k] = v
+                # JITA PUT /api/v2/job_profiles/<id> — same writable shape as the JITA UI.
+                serializable_payload = _prepare_jita_jp_put_payload(updated_profile)
                 
                 # PUT update (use service account for batch updates)
                 put_resp = requests.put(
@@ -7795,15 +8129,43 @@ def _load_rdm_patterns():
 RDM_PATTERNS = _load_rdm_patterns()
 
 
+# Hostnames in installer-error lines: "pitpf06-4: The target node..." or
+# "Nodes: kylun01-1: Received \"fatal\"...". Require a digit so "Error:" / "Reason:"
+# are not treated as nodes.
+_INSTALLER_NODE_LINE_RE = re.compile(
+    r"(?:^|\n)\s*(?:Nodes?:\s*)?([A-Za-z][\w.-]*\d[\w.-]*):\s+\S"
+)
+
+
+def _extract_installer_error_nodes(message):
+    """Return every node listed under an RDM 'Installer errors:' block."""
+    if not message:
+        return []
+    installer = re.search(r"Installer errors\s*:", message, re.IGNORECASE)
+    if not installer:
+        return []
+    seen = dict()
+    for name in _INSTALLER_NODE_LINE_RE.findall(message[installer.end():]):
+        if name.lower() in ("nodes", "node"):
+            continue
+        seen.setdefault(name, None)
+    return list(seen)
+
+
 def _extract_node_names(message):
     """Extract node names from RDM failure messages.
 
-    Combines results from multiple extraction strategies so multi-node
-    failures (where different nodes appear in different formats) are
-    all captured.  Returns deduplicated list preserving first-seen order.
+    Prefer every hostname in an Installer errors block (multi-node failures
+    list one node per line after a single 'Nodes:' prefix). Otherwise combine
+    other extraction strategies. Returns a deduplicated list in first-seen order.
     """
+    if not message:
+        return []
+    installer_nodes = _extract_installer_error_nodes(message)
+    if installer_nodes:
+        return installer_nodes
     seen = dict()
-    for n in re.findall(r'([\w-]+):\s*Received\s+"fatal"\s+in\s+waiting\s+for\s+event', message):
+    for n in re.findall(r'([\w.-]+):\s*Received\s+"fatal"\s+in\s+waiting\s+for\s+event', message):
         seen.setdefault(n, None)
     for n in re.findall(r"(?:Nodes?:\s*)([a-zA-Z][\w\-]*\d+[\-\d]*)", message):
         seen.setdefault(n, None)
@@ -9802,6 +10164,7 @@ def delete_saved_tag(tag_name):
         return jsonify({"error": "Tag not found"}), 404
     save_failed_analysis_tags(data)
     delete_failed_analysis_results(tag_name)
+    invalidate_triage_accuracy_cache(tag_name)
     return jsonify({"success": True, "tags": data["tags"]})
 
 
@@ -9823,14 +10186,21 @@ def save_saved_tag_results(tag_name):
     results = body.get("results", [])
     current_branch = body.get("current_branch", "")
     cursor_ai = body.get("cursor_ai", {}) or {}
+    intelligent_triage = body.get("intelligent_triage") or {}
     payload = {
         "tag": tag_name,
         "results": results,
         "current_branch": current_branch,
         "cursor_ai": cursor_ai,
+        "intelligent_triage": intelligent_triage,
         "saved_at": datetime.utcnow().isoformat() + "Z",
         "count": len(results),
     }
+    # Preserve previously saved intelligent_triage entries when client omits the map.
+    if not intelligent_triage:
+        existing = load_failed_analysis_results(tag_name) or {}
+        if existing.get("intelligent_triage"):
+            payload["intelligent_triage"] = existing["intelligent_triage"]
     save_failed_analysis_results(tag_name, payload)
     return jsonify({"success": True, "count": len(results), "saved_at": payload["saved_at"]})
 
@@ -10128,7 +10498,7 @@ def _group_tests_for_rerun(tests, parent_task_id=None):
     return tests_by_task
 
 
-def _rerun_selected_tests(tests, overrides=None, parent_task_id=None):
+def _rerun_selected_tests(tests, overrides=None, parent_task_id=None, sync_to_tcms=False):
     """
     Re-run selected tests via JITA agave_tasks/{id}/rerun.
     Returns a dict (not a Flask response) so other workflows can reuse it.
@@ -10170,7 +10540,7 @@ def _rerun_selected_tests(tests, overrides=None, parent_task_id=None):
                 })
                 continue
 
-            payload = _build_rerun_payload(task_data, task_tests, overrides, current_username)
+            payload = _build_rerun_payload(task_data, task_tests, overrides, current_username, sync_to_tcms)
             rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
             logger.info(f"[retrigger] POST {rerun_url} with {len(task_tests)} test(s): {task_tests}")
             resp = requests.post(
@@ -10246,6 +10616,7 @@ def retrigger_failed_testcases():
             return jsonify({"error": "No tests provided"}), 400
 
         overrides = data.get("overrides", {})
+        sync_to_tcms = data.get("sync_to_tcms", False)
 
         current_username = g.current_user.get("sub", "")
         user_auth = _get_user_credentials(current_username)
@@ -10313,7 +10684,7 @@ def retrigger_failed_testcases():
 
                 # Pass UI overrides through as entered. Do not look up commits
                 # or branches from the Jita commits API.
-                payload = _build_rerun_payload(task_data, task_tests, task_overrides, trigger_username)
+                payload = _build_rerun_payload(task_data, task_tests, task_overrides, trigger_username, sync_to_tcms)
 
                 # POST to rerun endpoint (raw JSON body, matching Jita UI)
                 rerun_url = f"{JITA_BASE}/agave_tasks/{task_id}/rerun"
@@ -10552,13 +10923,16 @@ def _original_nested_params(task_data):
     return out
 
 
-def _build_rerun_payload(task_data, task_tests, overrides, username):
+def _build_rerun_payload(task_data, task_tests, overrides, username, sync_to_tcms=False):
     """
     Build a Jita /agave_tasks/{id}/rerun payload matching the official UI.
 
     Jita copies the original task and applies this body. Selected tests must
     include test_result_id (and name) so only those rows are rerun. Remaining
     fields are copied from the original task, then user overrides are applied.
+
+    sync_to_tcms: when True, add tester_tags "official" (JITA Mark Official).
+    When False, strip "official" so Reporting Config Validation does not sync.
     """
     import copy
 
@@ -10745,11 +11119,27 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
             tester_tags.append(fw_tag)
     if "jita3" not in tester_tags:
         tester_tags.append("jita3")
+    nested_resource_types = {
+        "nested", "nested_1", "nested_1.0", "nested_2", "nested_2.0",
+        "nestedahv 1.0", "nestedahv 2.0",
+    }
+    physical_resource_types = {"physical"}
+    resource_type = str(overrides.get("resource_type") or "").strip().lower()
     if overrides.get("override_pool") and resource_type in nested_resource_types:
         if "rdm__virtual" not in tester_tags:
             tester_tags.append("rdm__virtual")
     elif overrides.get("override_pool") and resource_type in physical_resource_types:
         tester_tags = [tag for tag in tester_tags if tag != "rdm__virtual"]
+
+    # JITA "Sync To TCMS" is driven by tester_tags including "official"
+    # (Mark Official), then Reporting Config Validation. Honor the checkbox
+    # after all other tag mutations so an original-task or override "official"
+    # cannot bypass an unchecked Sync results to TCMS.
+    if sync_to_tcms:
+        if "official" not in tester_tags:
+            tester_tags.append("official")
+    else:
+        tester_tags = [tag for tag in tester_tags if tag != "official"]
 
     if "match_resource_spec" in overrides and overrides.get("match_resource_spec") is not None:
         skip_match = not bool(overrides.get("match_resource_spec"))
@@ -10932,11 +11322,19 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         payload["imaging_options"] = imaging_options
     if overrides.get("override_resource_config"):
         nested_params = requested_hw.get("nested_params") if isinstance(requested_hw.get("nested_params"), dict) else {}
+    elif overrides.get("override_pool") and resource_type in physical_resource_types:
+        nested_params = {}
+        requested_hw.pop("nested_params", None)
+    elif overrides.get("override_pool") and resource_type in nested_resource_types:
+        version = "1.0" if resource_type in ("nested_1", "nested_1.0", "nestedahv 1.0") else "2.0"
+        nested_params = {"is_nested": True, "version": version}
     else:
         nested_params = _original_nested_params(task_data)
     if nested_params:
         payload["nested_params"] = nested_params
-    elif overrides.get("override_resource_config"):
+    elif overrides.get("override_resource_config") or (
+        overrides.get("override_pool") and resource_type in physical_resource_types
+    ):
         payload.pop("nested_params", None)
     if requested_hw or infra:
         if not requested_hw:
@@ -10968,6 +11366,10 @@ def _build_rerun_payload(task_data, task_tests, overrides, username):
         payload["retain_resources_config"] = retain
     if nested_params:
         payload["nested_params"] = nested_params
+    
+    # Add TCMS sync flag if enabled
+    if sync_to_tcms:
+        payload["sync_to_tcms"] = True
 
     return {k: v for k, v in payload.items() if v is not None and v != ""}
 
@@ -11151,6 +11553,9 @@ def _tcms_nutest_target_branch(branch):
     return b or "master"
 
 
+_TCMS_PACKAGE_TYPES = frozenset({"tar", "aws", "rpm", "iso", "ova", "qcow2"})
+
+
 def _extract_mongo_oid(value):
     if isinstance(value, dict):
         return str(value.get("$oid") or "").strip()
@@ -11159,46 +11564,124 @@ def _extract_mongo_oid(value):
     return str(value).strip()
 
 
-def _resolve_tcms_all_testcase_oid(tc_name, branch_key):
+def _parse_tcms_target(target, target_service=None):
     """
-    Resolve NutestPy3Tests all_test_cases document oid (+ current tags) by name.
+    Parse milestone `target` into (service, target_branch, package_type).
+
+    Examples:
+      AOS-ganges-7.5.2-stable-tar        → (AOS, ganges-7.5.2-stable, tar)
+      PC-ganges-7.5.2-stable-pc-tar      → (PC, ganges-7.5.2-stable-pc, tar)
+      Clusters-ganges-7.5.2-stable-aws   → (Clusters, ganges-7.5.2-stable, aws)
+      NCC-ncc-5.3.2-release-tar          → (NCC, ncc-5.3.2-release, tar)
+      PC-master-tar                      → (PC, master, tar)
+    """
+    raw = (target or "").strip()
+    svc = (target_service or "").strip()
+    rest = raw
+    if svc and raw.startswith(svc + "-"):
+        rest = raw[len(svc) + 1:]
+    elif not svc and raw:
+        # Best-effort: first token is the service
+        head, _, tail = raw.partition("-")
+        if tail:
+            svc, rest = head, tail
+    if not rest:
+        return svc, "", ""
+    branch, sep, pkg = rest.rpartition("-")
+    if sep and pkg in _TCMS_PACKAGE_TYPES:
+        return svc, branch, pkg
+    return svc, rest, ""
+
+
+def _tcms_all_testcase_lookup_specs(branch_key, tc=None):
+    """
+    Candidate (service, branch, package) filters for testdb all_test_cases.
+
+    Prefer NutestPy3Tests/tar (historical tag store on master / 7.6 / 7.5).
+    Patch milestones such as 7.5.2 often have no NutestPy3Tests docs — only
+    AOS/PC/Clusters/NCC rows whose target_branch is encoded in `target`
+    (e.g. ganges-7.5.2-stable-pc). Fall back to that parsed identity.
+    """
+    specs = []
+    seen = set()
+
+    def _add(service, tbranch, pkg):
+        service = (service or "").strip()
+        tbranch = (tbranch or "").strip()
+        pkg = (pkg or "").strip()
+        if not service or not tbranch:
+            return
+        key = (service, tbranch, pkg)
+        if key in seen:
+            return
+        seen.add(key)
+        spec = {
+            "target_service": service,
+            "target_branch": tbranch,
+            "deleted": False,
+        }
+        if pkg:
+            spec["target_package_type"] = pkg
+        specs.append(spec)
+
+    nutest_branch = _tcms_nutest_target_branch(branch_key)
+    _add("NutestPy3Tests", nutest_branch, "tar")
+
+    if isinstance(tc, dict):
+        svc, tbranch, pkg = _parse_tcms_target(tc.get("target"), tc.get("target_service"))
+        if svc:
+            _add(svc, tbranch or nutest_branch, pkg)
+            if tbranch and pkg:
+                _add(svc, tbranch, "")
+    return specs
+
+
+def _query_tcms_all_testcase(name, spec):
+    """Return (oid, tags) for one testdb all_test_cases filter, or (None, [])."""
+    raw_query = json.dumps({
+        "$and": [
+            spec,
+            {"test_case.name": name},
+            {"test_case.deprecated": False},
+        ]
+    })
+    url = (
+        f"{TCMS_TESTDB_BASE}/all_test_cases"
+        f"?raw_query={urllib.parse.quote(raw_query)}&sort=name&limit=1"
+    )
+    resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
+    if resp.status_code != 200:
+        return None, []
+    rows = resp.json().get("data") or []
+    if not rows:
+        return None, []
+    row = rows[0]
+    oid = _extract_mongo_oid(row.get("_id"))
+    tags = (row.get("additional_data") or {}).get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+    return (oid or None), tags
+
+
+def _resolve_tcms_all_testcase_oid(tc_name, branch_key, tc=None):
+    """
+    Resolve testdb all_test_cases document oid (+ current tags) by name.
 
     Tag write API is /all_test_cases/tags/{oid} and needs this oid — NOT the
     milestone aggregate _id stored as local 'oid'.
+
+    Tries NutestPy3Tests first, then the milestone row's target_service /
+    target (required for patch branches like 7.5.2 that have no Nutest docs).
     """
     name = (tc_name or "").strip()
     if not name:
         return None, []
-    target_branch = _tcms_nutest_target_branch(branch_key)
     try:
-        raw_query = json.dumps({
-            "$and": [
-                {
-                    "target_service": "NutestPy3Tests",
-                    "target_branch": target_branch,
-                    "target_package_type": "tar",
-                    "deleted": False,
-                },
-                {"test_case.name": name},
-                {"test_case.deprecated": False},
-            ]
-        })
-        url = (
-            f"{TCMS_TESTDB_BASE}/all_test_cases"
-            f"?raw_query={urllib.parse.quote(raw_query)}&sort=name&limit=1"
-        )
-        resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
-        if resp.status_code != 200:
-            return None, []
-        rows = resp.json().get("data") or []
-        if not rows:
-            return None, []
-        row = rows[0]
-        oid = _extract_mongo_oid(row.get("_id"))
-        tags = (row.get("additional_data") or {}).get("tags") or []
-        if not isinstance(tags, list):
-            tags = []
-        return (oid or None), tags
+        for spec in _tcms_all_testcase_lookup_specs(branch_key, tc):
+            oid, tags = _query_tcms_all_testcase(name, spec)
+            if oid:
+                return oid, tags
+        return None, []
     except Exception as exc:
         logger.warning("Failed to resolve TCMS all_test_cases oid for %s: %s", name, exc)
         return None, []
@@ -11331,7 +11814,7 @@ def _apply_testcase_tag_ops(testcase_oids, tags, branch, team, action="add"):
 
     def _refresh_tcms(name, tc, prefer_remote_tags):
         """Resolve oid (+ optional remote tags). Returns (tcms_oid, tags, resolved_ok)."""
-        resolved_oid, remote_tags = _resolve_tcms_all_testcase_oid(name, branch)
+        resolved_oid, remote_tags = _resolve_tcms_all_testcase_oid(name, branch, tc)
         tcms_oid = (tc.get("tcms_oid") or "").strip()
         current = list(tc.get("tags") or [])
         resolved_ok = bool(resolved_oid)
@@ -11676,46 +12159,23 @@ def _fetch_tags_for_testcases(testcases, branch_key):
     if not testcases:
         return testcases
 
-    name_map = {tc["name"]: tc for tc in testcases if tc.get("name")}
-    target_branch = _tcms_nutest_target_branch(branch_key)
-
+    named = [tc for tc in testcases if tc.get("name")]
     batch_size = 50
-    names = list(name_map.keys())
 
-    def _fetch_batch(batch_names):
-        for tc_name in batch_names:
+    def _fetch_batch(batch_tcs):
+        for tc in batch_tcs:
             try:
-                raw_query = json.dumps({
-                    "$and": [
-                        {
-                            "target_service": "NutestPy3Tests",
-                            "target_branch": target_branch,
-                            "target_package_type": "tar",
-                            "deleted": False,
-                        },
-                        {"test_case.name": tc_name},
-                        {"test_case.deprecated": False},
-                    ]
-                })
-                url = (
-                    f"{TCMS_TESTDB_BASE}/all_test_cases"
-                    f"?raw_query={urllib.parse.quote(raw_query)}&sort=name&limit=1"
-                )
-                resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
-                if resp.status_code == 200:
-                    data = resp.json().get("data", [])
-                    if data and tc_name in name_map:
-                        row = data[0]
-                        tags = (row.get("additional_data") or {}).get("tags", []) or []
-                        name_map[tc_name]["tags"] = tags if isinstance(tags, list) else []
-                        name_map[tc_name]["tcms_oid"] = _extract_mongo_oid(row.get("_id"))
+                oid, tags = _resolve_tcms_all_testcase_oid(tc.get("name"), branch_key, tc)
+                if oid:
+                    tc["tcms_oid"] = oid
+                    tc["tags"] = tags if isinstance(tags, list) else []
             except Exception as exc:
-                logger.warning(f"Failed to fetch tags for {tc_name}: {exc}")
+                logger.warning(f"Failed to fetch tags for {tc.get('name')}: {exc}")
 
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = []
-        for i in range(0, len(names), batch_size):
-            batch = names[i:i + batch_size]
+        for i in range(0, len(named), batch_size):
+            batch = named[i:i + batch_size]
             futures.append(pool.submit(_fetch_batch, batch))
         for fut in as_completed(futures):
             fut.result()
@@ -11723,11 +12183,21 @@ def _fetch_tags_for_testcases(testcases, branch_key):
     return testcases
 
 
+def _testcase_mgmt_data_dir():
+    """Team-scoped testcase cache dir; tests may set TESTCASE_MGMT_DATA_DIR."""
+    if TESTCASE_MGMT_DATA_DIR:
+        return TESTCASE_MGMT_DATA_DIR
+    env = (os.environ.get("REGX_TEAM_DATA_DIR") or "").strip()
+    if env:
+        return env
+    return _get_team_data_dir()
+
+
 def _tc_data_file(branch, team):
     """Return canonical path for a per-branch/team JSON file (short branch key)."""
     key = _normalize_tc_branch_key(branch)
     safe_name = f"testcase_management_{key}_{team}.json".replace("/", "_")
-    return os.path.join(TESTCASE_MGMT_DATA_DIR, safe_name)
+    return os.path.join(_testcase_mgmt_data_dir(), safe_name)
 
 
 def _tc_data_candidate_paths(branch, team):
@@ -11739,23 +12209,29 @@ def _tc_data_candidate_paths(branch, team):
     """
     key = _normalize_tc_branch_key(branch)
     team = (team or "CDP").strip() or "CDP"
-    paths = [_tc_data_file(key, team)]
+    data_dir = _testcase_mgmt_data_dir()
+    names = [f"testcase_management_{key}_{team}.json".replace("/", "_")]
     if key != "master" and re.match(r"^\d+(?:\.\d+)+$", key):
-        legacy = os.path.join(
-            TESTCASE_MGMT_DATA_DIR,
-            f"testcase_management_ganges-{key}-stable_{team}.json".replace("/", "_"),
-        )
-        if legacy not in paths:
-            paths.append(legacy)
-    # Also accept an accidental full-name canonical path if someone saved raw
+        names.append(f"testcase_management_ganges-{key}-stable_{team}.json".replace("/", "_"))
     raw = (branch or "").strip()
     if raw and raw != key:
-        alt = os.path.join(
-            TESTCASE_MGMT_DATA_DIR,
-            f"testcase_management_{raw}_{team}.json".replace("/", "_"),
-        )
-        if alt not in paths:
-            paths.append(alt)
+        names.append(f"testcase_management_{raw}_{team}.json".replace("/", "_"))
+    paths = []
+    for name in names:
+        path = os.path.join(data_dir, name)
+        if path not in paths:
+            paths.append(path)
+    # Also read leftover files from flat data/ when not in a test override.
+    if not TESTCASE_MGMT_DATA_DIR and not (os.environ.get("REGX_TEAM_DATA_DIR") or "").strip():
+        try:
+            legacy_root = _get_legacy_data_dir()
+        except NameError:
+            legacy_root = None
+        if legacy_root and os.path.abspath(legacy_root) != os.path.abspath(data_dir):
+            for name in names:
+                path = os.path.join(legacy_root, name)
+                if path not in paths:
+                    paths.append(path)
     return paths
 
 
@@ -11817,7 +12293,7 @@ def _save_tc_data(branch, team, data):
     Persist testcase cache to canonical short-key path AND any legacy candidate
     paths so load cannot prefer a stale ganges-* file after tag edits.
     """
-    os.makedirs(TESTCASE_MGMT_DATA_DIR, exist_ok=True)
+    os.makedirs(_testcase_mgmt_data_dir(), exist_ok=True)
     key = _normalize_tc_branch_key(branch)
     team = (team or "CDP").strip() or "CDP"
     if isinstance(data, dict):
@@ -11827,7 +12303,10 @@ def _save_tc_data(branch, team, data):
             data["last_updated"] = datetime.utcnow().isoformat() + "Z"
     payload = json.dumps(data, indent=2, default=str)
     written = []
+    write_dir = os.path.abspath(_testcase_mgmt_data_dir())
     for fpath in _tc_data_candidate_paths(key, team):
+        if os.path.abspath(os.path.dirname(fpath)) != write_dir:
+            continue
         try:
             with open(fpath, "w") as f:
                 f.write(payload)
@@ -11839,6 +12318,16 @@ def _save_tc_data(branch, team, data):
         fpath = _tc_data_file(key, team)
         with open(fpath, "w") as f:
             f.write(payload)
+
+
+def _delete_tc_data_files(branch):
+    """Remove per-branch testcase_management_*.json caches for all teams."""
+    deleted = []
+    for team in TESTCASE_MGMT_TEAMS:
+        for path in _tc_data_candidate_paths(branch, team):
+            if _unlink_if_exists(path):
+                deleted.append(path)
+    return deleted
 
 
 @app.route("/mcp/regression/testcase-mgmt/fetch-data", methods=["GET"])
@@ -12352,6 +12841,24 @@ def testcase_mgmt_branches():
         "teams": TESTCASE_MGMT_TEAMS,
         "custom_release_supported": True,
     })
+
+
+@app.route("/mcp/regression/testcase-mgmt/branches", methods=["DELETE"])
+@jwt_required
+def testcase_mgmt_delete_branch():
+    """Delete cached testcase_management_*.json files for a branch (all teams)."""
+    branch = (request.args.get("branch") or "").strip()
+    if not branch:
+        return jsonify({"error": "branch query param is required"}), 400
+    deleted = _delete_tc_data_files(branch)
+    logger.info("Deleted testcase management cache for branch %s: %s", branch, deleted)
+    return jsonify({
+        "success": True,
+        "branch": _normalize_tc_branch_key(branch),
+        "deleted": [os.path.basename(p) for p in deleted],
+    })
+
+
 # Dynamic Job Profile APIs
 # ======================================================
 
@@ -13489,15 +13996,16 @@ def _manage_ts_fetch_test_set(ts_id):
 
 
 def _jita_test_sets_search_params(raw_query, limit):
-    """Query params for JITA GET /test_sets name search used by Manage TS.
+    """Query params for JITA GET /test_sets name search used by Manage JP/TS.
 
     Name regex is unindexed. ``sort=-_id`` plus large field projections (args maps
     / ``only`` lists) routinely exceed JITA_SEARCH_TIMEOUT, so the UI gets zero
-    test sets. Skip sort and projection so JITA can stop after ``limit``.
+    test sets. Skip sort and projection so JITA can stop after ``limit``. Cap
+    aggressively — large limits make Manage JP hang and return an empty TS column.
     """
     return {
         "raw_query": raw_query,
-        "limit": min(int(limit), 200),
+        "limit": min(max(int(limit or 25), 1), 50),
     }
 
 
@@ -13957,6 +14465,29 @@ def dynamic_jp_search_node_pools():
         return jsonify({"error": str(e), "pools": []}), 500
 
 
+def _search_jita_branch_names(query, limit=20):
+    """Return JITA branch names matching ``query`` (case-insensitive regex)."""
+    query = (query or "").strip()
+    if len(query) < 2:
+        return []
+    pattern = re.escape(query)
+    raw_q = json.dumps({"name": {"$regex": pattern, "$options": "i"}})
+    resp = requests.get(
+        f"{JITA_BASE}/branches",
+        params={"raw_query": raw_q, "limit": limit},
+        auth=JITA_SVC_AUTH, verify=False, timeout=15,
+    )
+    branches = []
+    if resp.status_code == 200:
+        for item in resp.json().get("data", []) or []:
+            name = (item.get("name") or "") if isinstance(item, dict) else ""
+            if name and name not in branches:
+                branches.append(name)
+    q_lower = query.lower()
+    branches.sort(key=lambda b: (0 if b.lower().startswith(q_lower) else 1, b.lower()))
+    return branches
+
+
 @app.route("/mcp/regression/dynamic-jp/search-branches", methods=["POST"])
 def dynamic_jp_search_branches():
     """Search JITA branches by name."""
@@ -13965,26 +14496,11 @@ def dynamic_jp_search_branches():
         query = (req_data.get("query") or "").strip()
         if len(query) < 2:
             return jsonify({"branches": []})
-
-        pattern = re.escape(query)
-        raw_q = json.dumps({"name": {"$regex": pattern, "$options": "i"}})
-        resp = requests.get(
-            f"{JITA_BASE}/branches",
-            params={"raw_query": raw_q, "limit": 20},
-            auth=JITA_SVC_AUTH, verify=False, timeout=15
-        )
-        branches = []
-        if resp.status_code == 200:
-            for item in resp.json().get("data", []):
-                name = item.get("name") or ""
-                if name and name not in branches:
-                    branches.append(name)
-        # Sort so exact-prefix matches come first
-        q_lower = query.lower()
-        branches.sort(key=lambda b: (0 if b.lower().startswith(q_lower) else 1, b.lower()))
+        try:
+            branches = _search_jita_branch_names(query)
+        except requests.exceptions.Timeout:
+            return jsonify({"error": "Timed out", "branches": []}), 504
         return jsonify({"branches": branches})
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Timed out", "branches": []}), 504
     except Exception as e:
         logger.error(f"Error searching branches: {e}", exc_info=True)
         return jsonify({"error": str(e), "branches": []}), 500
@@ -14137,7 +14653,7 @@ def dynamic_jp_create():
                 f"(created_by will be the user)"
             )
         else:
-            logger.info(
+            logger.warning(
                 "[create] No cached user credentials — authenticating JITA calls as "
                 "service account (created_by = svc; owner recorded via emails/user)"
             )
@@ -14209,6 +14725,38 @@ def dynamic_jp_create():
         # its existing NOS/git branch). Explicit custom_* values still take precedence.
         version_from = (req_data.get("version_from") or "").strip()
         version_to = (req_data.get("version_to") or "").strip()
+        clone_to_branch = (req_data.get("clone_to_branch") or "").strip()
+        pc_branch_unresolved = None
+
+        # Clone-to: NOS/TCMS use the destination AOS branch. NuTest uses the
+        # release mainline (7.6.0.6 → ganges-7.6-stable; master → master).
+        # PC is looked up as `{clone_to}-pc` in JITA (master stays master).
+        # Never invent a PC name.
+        if clone_to_branch and not create_fresh:
+            nos_branch = clone_to_branch
+            nutest_branch = nutest_mainline_branch(clone_to_branch)
+            if not tcms_sync_branch:
+                tcms_sync_branch = clone_to_branch
+            override_source_branches = True
+            if is_master_branch(clone_to_branch):
+                pc_branch = "master"
+            else:
+                pc_query = pc_branch_search_query(clone_to_branch)
+                try:
+                    pc_hits = _search_jita_branch_names(pc_query) if pc_query else []
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"[create] PC branch search failed for {pc_query!r}: {e}")
+                    pc_hits = []
+                resolved_pc, missing_pc = resolve_clone_pc_branch(clone_to_branch, pc_hits)
+                if resolved_pc:
+                    pc_branch = resolved_pc
+                else:
+                    pc_branch = None
+                    pc_branch_unresolved = missing_pc
+                    logger.warning(
+                        f"[create] PC branch {missing_pc!r} not found in JITA; "
+                        "keeping source JP PC branch"
+                    )
         
         # Convert None to empty dict
         if not custom_test_args or not isinstance(custom_test_args, dict):
@@ -14439,49 +14987,6 @@ def dynamic_jp_create():
                 row["service"] = "nutest-py3test"
                 if not str(row.get("package_type") or "").strip():
                     row["package_type"] = "tar"
-
-        def _apply_retain_setup_on_failure(jp_payload):
-            """Retain deployment after each test failure, excluding DataCorruptionError."""
-            if not isinstance(jp_payload, dict):
-                return
-
-            existing = jp_payload.get("retain_resources_config")
-            existing_criteria = existing.get("criteria") if isinstance(existing, dict) else {}
-            existing_test_failure = (
-                existing_criteria.get("TEST_FAILURE") if isinstance(existing_criteria, dict) else {}
-            )
-            existing_params = (
-                existing_test_failure.get("params") if isinstance(existing_test_failure, dict) else {}
-            )
-            duration = RETAIN_DURATION_72H_MIN
-            states = existing_params.get("states_to_track") if isinstance(existing_params, dict) else None
-            if not isinstance(states, list) or not states:
-                states = ["Failed"]
-            required_states = ["Failed", "Aborted", "Timeout", "InfraError", "Warning"]
-            states = list(dict.fromkeys(states + [s for s in required_states if s not in states]))
-            exceptions = existing_params.get("exceptions") if isinstance(existing_params, dict) else []
-            if not isinstance(exceptions, list):
-                exceptions = []
-            exceptions = [e for e in exceptions if e != "DataCorruptionError"]
-
-            criteria = dict(existing_criteria) if isinstance(existing_criteria, dict) else {}
-            criteria["TEST_FAILURE"] = {
-                "entity": "DEPLOYMENT",
-                "type": "AFTER_EACH",
-                "params": {
-                    "duration": duration,
-                    "exceptions": exceptions,
-                    "states_to_track": states,
-                },
-            }
-            jp_payload["retain_resources_config"] = {"criteria": criteria}
-
-            for plugin in jp_payload.get("plugins") or []:
-                if not isinstance(plugin, dict):
-                    continue
-                args = plugin.get("args")
-                if isinstance(args, dict) and isinstance(args.get("exceptions"), list):
-                    args["exceptions"] = [e for e in args["exceptions"] if e != "DataCorruptionError"]
 
         source_testset_name = (req_data.get("source_testset_name") or "").strip()
 
@@ -14781,7 +15286,8 @@ def dynamic_jp_create():
             if _reuse_args_warn:
                 ts_create_warning = f"{ts_create_warning} {_reuse_args_warn}"
         else:
-            # Build test entries
+            # Build test entries the same way as before: copy the source row template
+            # and attach the typed names. Do not look tests up in the JITA catalog.
             if testcase_names:
                 row_tmpl = {}
                 if isinstance(source_ts, dict):
@@ -14826,6 +15332,7 @@ def dynamic_jp_create():
             )
             _ensure_test_args_on_test_set_payload(new_ts_payload, "{}", custom_test_args)
             _force_tcms_service_on_test_set(new_ts_payload)
+            _ensure_cdp_reg_jarvis_user_groups(new_ts_payload)
             logger.info(f"[create] TS POST payload: name={new_ts_name}, #tests={len(test_entries)}, "
                         f"test_args_keys={list(_test_args_value_to_dict(new_ts_payload.get('test_args')).keys())}, "
                         f"fw_args_keys={list(_framework_args_value_to_dict(new_ts_payload.get('framework_args')).keys())}")
@@ -14862,6 +15369,7 @@ def dynamic_jp_create():
                                         "{}",
                                         custom_test_args,
                                     )
+                                    _ensure_cdp_reg_jarvis_user_groups(created_ts_doc)
                                     ts_put_resp = requests.put(
                                         f"{JITA_BASE}/test_sets/{created_ts_id}",
                                         json=created_ts_doc,
@@ -15202,130 +15710,57 @@ def dynamic_jp_create():
                 new_jp_payload["patch_url"] = framework_patch_url
             else:
                 new_jp_payload.pop("patch_url", None)
-            logger.info(f"[create] Clone mode — set test framework branch={nutest_branch}, "
-                        f"patches(test={bool(test_patch_url)}, fw={bool(framework_patch_url)})")
+            logger.info(
+                f"[create] Clone mode — set test framework (nutest) branch={nutest_branch} "
+                f"(from clone_to={clone_to_branch or nos_branch}), "
+                f"patches(test={bool(test_patch_url)}, fw={bool(framework_patch_url)})"
+            )
 
-            # Use Latest Commit: override build selection to Latest Smoke Passed with optimal build type
-            if use_latest_commit:
-                logger.info(f"[create] Clone mode — applying use_latest_commit configuration")
-                
-                # Extract actual branches from source JP (not from request)
-                source_git = new_jp_payload.get("git") or {}
-                actual_nos_branch = source_git.get("branch", "master") if isinstance(source_git, dict) else "master"
-                
-                # For PC branch, check resource_manager_json
-                resource_manager_json = new_jp_payload.get("resource_manager_json") or {}
-                if isinstance(resource_manager_json, dict):
-                    pc_config = resource_manager_json.get("PRISM_CENTRAL") or {}
-                    if isinstance(pc_config, dict):
-                        pc_build = pc_config.get("build") or {}
-                        if isinstance(pc_build, dict):
-                            actual_pc_branch = pc_build.get("branch", actual_nos_branch)
-                        else:
-                            actual_pc_branch = actual_nos_branch
-                    else:
-                        actual_pc_branch = actual_nos_branch
-                else:
-                    actual_pc_branch = actual_nos_branch
-                    resource_manager_json = {}
-                
-                # Determine build types based on actual branches from source JP
-                nos_build_type = "opt" if actual_nos_branch.strip().lower() == "master" else "release"
-                pc_build_type = "opt" if actual_pc_branch.strip().lower() == "master" else "release"
-                
-                logger.info(f"[create] Extracted branches from source JP: nos={actual_nos_branch}, pc={actual_pc_branch}")
-                
-                # Update git config (keep source branch)
-                git = new_jp_payload.get("git") or {}
-                if not isinstance(git, dict):
-                    git = {}
-                git["branch"] = actual_nos_branch
-                git["repo"] = "main"
-                new_jp_payload["git"] = git
-                
-                # Update build selection for NOS
-                new_jp_payload["build_selection"] = {
-                    "by_latest_smoked": True,  # Always true for Latest Smoke Passed
-                    "commit_must_be_newer": False,
-                    "build_type": nos_build_type,
-                }
-                # Ensure conflicting fields are removed
-                new_jp_payload["build_selection"].pop("by_commit_id", None)
-                new_jp_payload["build_selection"].pop("commit_id", None)
-                new_jp_payload["build_selection"].pop("gbn", None)
-                
-                # Update resource_manager_json for PC
-                if "NOS_CLUSTER" not in resource_manager_json:
-                    resource_manager_json["NOS_CLUSTER"] = {}
-                resource_manager_json["PRISM_CENTRAL"] = {
-                    "build": {
-                        "branch": actual_pc_branch,
-                        "build_selection_build_type": pc_build_type,
-                        "build_selection_option": "Latest Smoke Passed",
-                    }
-                }
-                new_jp_payload["resource_manager_json"] = resource_manager_json
-                
-                logger.info(f"[create] Clone mode — set build_selection: nos_build_type={nos_build_type}, "
-                           f"pc_build_type={pc_build_type}, by_latest_smoked=True, nos_branch={actual_nos_branch}, pc_branch={actual_pc_branch}")
+        # Clone-to / Release Migration: overwrite NOS (and PC when resolved) before Latest.
+        if override_source_branches and not create_fresh:
+            apply_destination_nos(
+                new_jp_payload,
+                nos_branch,
+                nos_tag=nos_tag,
+                nos_update_type=nos_update_type,
+                nos_commit_id=nos_commit_id,
+                nos_gbn=nos_gbn,
+            )
+            apply_destination_pc(
+                new_jp_payload,
+                pc_branch,
+                pc_tag=pc_tag,
+                pc_update_type=pc_update_type,
+                pc_commit_id=pc_commit_id,
+            )
+            logger.info(
+                f"[create] Overrode destination branches: nos={nos_branch}, pc={pc_branch}"
+            )
 
-        # Release Migration: overwrite the source JP's NOS (git) and Prism Central
-        # branches with the requested ones. Fresh mode already applies branches above;
-        # this covers clone mode, which otherwise preserves the source branches.
-        if override_source_branches and not create_fresh and not use_latest_commit:
-            git = new_jp_payload.get("git") or {}
-            if not isinstance(git, dict):
-                git = {}
-            git["branch"] = nos_branch
-            git.setdefault("repo", "main")
-            new_jp_payload["git"] = git
+        if use_latest_commit and not create_fresh:
+            apply_latest_smoke_on_current_branches(new_jp_payload)
+            logger.info("[create] Clone mode — applied Latest Smoke Passed on current destination branches")
 
-            nos_build_type = "opt" if nos_branch.strip().lower() == "master" else "release"
-            pc_build_type = "opt" if pc_branch.strip().lower() == "master" else "release"
+        def _reapply_clone_retain(jp):
+            """Always set TEST_FAILURE retain; DCE unless Retain Setup is on.
 
-            if nos_update_type == "by_commit":
-                bs = {
-                    "by_commit_id": True,
-                    "commit_must_be_newer": False,
-                    "build_type": nos_build_type,
-                }
-                if nos_commit_id:
-                    bs["commit_id"] = nos_commit_id
-                if nos_gbn:
-                    try:
-                        bs["gbn"] = int(nos_gbn) if isinstance(nos_gbn, str) else nos_gbn
-                    except (ValueError, TypeError):
-                        bs["gbn"] = nos_gbn
-                new_jp_payload["build_selection"] = bs
-            else:
-                new_jp_payload["build_selection"] = {
-                    "by_latest_smoked": nos_tag == "Latest Smoke Passed",
-                    "commit_must_be_newer": False,
-                    "build_type": nos_build_type,
-                }
+            Release Migration (preserve_source_config) forces retain-on-failure with
+            DataCorruptionError. Dynamic JP clone honors the Retain Setup UI toggle.
+            """
+            if not isinstance(jp, dict):
+                return
+            apply_clone_retain_exceptions(
+                jp,
+                retain_setup_on_failure=(
+                    False if preserve_source_config else retain_setup_on_failure
+                ),
+                duration_min=RETAIN_DURATION_72H_MIN,
+            )
+            jp["retain_resources_config"] = _ensure_retain_duration(
+                jp.get("retain_resources_config"), RETAIN_DURATION_72H_MIN
+            )
 
-            rmj = new_jp_payload.get("resource_manager_json") or {}
-            if not isinstance(rmj, dict):
-                rmj = {}
-            rmj.setdefault("NOS_CLUSTER", {})
-            pc_build = {
-                "branch": pc_branch,
-                "build_selection_build_type": pc_build_type,
-            }
-            if pc_update_type == "by_commit":
-                if pc_commit_id:
-                    pc_build["build_selection_option"] = pc_commit_id
-            else:
-                pc_build["build_selection_option"] = pc_tag
-            rmj["PRISM_CENTRAL"] = {"build": pc_build}
-            new_jp_payload["resource_manager_json"] = rmj
-            logger.info(f"[create] Release Migration — overrode branches: nos={nos_branch}, pc={pc_branch}")
-
-        if retain_setup_on_failure:
-            _apply_retain_setup_on_failure(new_jp_payload)
-        new_jp_payload["retain_resources_config"] = _ensure_retain_duration(
-            new_jp_payload.get("retain_resources_config"), RETAIN_DURATION_72H_MIN
-        )
+        _reapply_clone_retain(new_jp_payload)
 
         # Release Migration: use the explicitly transformed description when provided
         # (e.g. old-version -> new-version replacement), overriding the generic default.
@@ -15333,10 +15768,16 @@ def dynamic_jp_create():
             new_jp_payload["description"] = custom_jp_description
 
         _set_tcms_sync_flags(new_jp_payload, sync_to_tcms, tcms_sync_branch)
+        apply_clone_test_defaults(new_jp_payload)
+        if not create_fresh:
+            restore_clone_service(new_jp_payload, source_jp)
+        if clone_to_branch and not create_fresh:
+            set_sut_branch(new_jp_payload, clone_to_branch)
 
         def _force_email_on_and_clear_tag_filters(jp):
             """Turn 'Send Email Reports' ON (logged-in user as recipient) and disable
-            'Run Tests With Tags' / clear any inherited TCMS tag filters. Mutates jp.
+            'Run Tests With Tags'. Additional/tester tags are filtered to the infra
+            allowlist (run-specific tags dropped). Mutates jp.
 
             JITA's "Send Email Reports" checkbox is NOT a boolean field — the UI derives
             its state from whether an ``EmailPlugin`` exists in ``plugins.post_run``
@@ -15383,27 +15824,26 @@ def dynamic_jp_create():
                 if current_user_name:
                     jp["user"] = current_user_name
                 jp["private"] = True
-                jp["user_groups"] = ["cdp_reg_jarvis"]
-            # Disable "Run Tests With Tags" and drop inherited TCMS tag(s) (e.g. "unstable").
-            adv = jp.get("advanced_options")
-            if not isinstance(adv, dict):
-                adv = {}
-            adv["run_tests_with_tags"] = False
-            adv["tags"] = []
-            jp["advanced_options"] = adv
-            jp["run_tests_with_additional_tags"] = []
+            _ensure_cdp_reg_jarvis_user_groups(jp)
+            clear_run_tests_with_tags(jp)
 
+        # Always turn off "Run Tests With Tags", including Release Migration
+        # (preserve_source_config). Keep only container__unlimited, infra__cdp,
+        # and max_deployments__0; drop run-specific tags. Email/visibility stay
+        # as-is in that mode.
+        clear_run_tests_with_tags(new_jp_payload)
         if not preserve_source_config:
             _force_email_on_and_clear_tag_filters(new_jp_payload)
             logger.info(
                 f"[create] Email ON (recipient={current_user_email}); "
-                f"run_tests_with_tags disabled and TCMS tag filters cleared"
+                f"run_tests_with_tags disabled"
             )
         else:
             logger.info(
-                "[create] preserve_source_config=True — kept source email/visibility/tag "
-                "config unchanged (Release Migration)"
+                "[create] preserve_source_config=True — kept source email/visibility; "
+                "run_tests_with_tags disabled; additional tags filtered to allowlist"
             )
+        _ensure_cdp_reg_jarvis_user_groups(new_jp_payload)
 
         # Tags will be applied via a separate PUT after creation (same
         # approach as Run Plan) because JITA's POST ignores tag fields.
@@ -15481,6 +15921,8 @@ def dynamic_jp_create():
                     jp_data = get_resp.json().get("data", {})
                     if isinstance(jp_data, dict):
                         _set_tcms_sync_flags(jp_data, False)
+                        if clone_to_branch:
+                            set_sut_branch(jp_data, clone_to_branch)
                         # Log infra from Jita's perspective after JP creation
                         infra_after = jp_data.get('infra', [])
                         coupon_allocated = None
@@ -15500,15 +15942,21 @@ def dynamic_jp_create():
                         jp_data["auto_schedule_cron"] = False
                         jp_data["allow_resource_sharing"] = False
                         jp_data["allow_resource_sharing_across_tasks"] = False
-                        jp_data["skip_bad_tests"] = True
+                        apply_clone_test_defaults(jp_data)
+                        if not create_fresh:
+                            restore_clone_service(jp_data, source_jp)
                         jp_data["run_tests_with_priorities"] = jp_data.get("run_tests_with_priorities") or []
                         jp_data["sdk_installation_options"] = jp_data.get("sdk_installation_options") or {}
                         jp_data["demo_mode"] = False
                         jp_data["image_build_type"] = jp_data.get("image_build_type") or "None"
                         if create_fresh:
                             jp_data["requested_hardware"] = _default_requested_hardware(resource_type)
-                        # Force email ON + clear inherited tag filters.
-                        _force_email_on_and_clear_tag_filters(jp_data)
+                        if preserve_source_config:
+                            clear_run_tests_with_tags(jp_data)
+                        else:
+                            _force_email_on_and_clear_tag_filters(jp_data)
+                        _ensure_cdp_reg_jarvis_user_groups(jp_data)
+                        _reapply_clone_retain(jp_data)
                         logger.info(
                             f"[create] Re-applied email + tag filters "
                             f"(send_emails={jp_data.get('send_emails')}, emails={jp_data.get('emails')})"
@@ -15596,10 +16044,20 @@ def dynamic_jp_create():
                         if not sync_to_tcms:
                             merged = [t for t in merged if t != "official"]
                         jp_data["tester_tags"] = merged
-                        _set_tcms_sync_flags(jp_data, sync_to_tcms)
-                        # Keep email ON and tag filters cleared on this PUT too
-                        # (covers the sync_to_tcms path where the block above is skipped).
-                        _force_email_on_and_clear_tag_filters(jp_data)
+                        _set_tcms_sync_flags(jp_data, sync_to_tcms, tcms_sync_branch)
+                        apply_clone_test_defaults(jp_data)
+                        if not create_fresh:
+                            restore_clone_service(jp_data, source_jp)
+                        if clone_to_branch:
+                            set_sut_branch(jp_data, clone_to_branch)
+                        # Re-clear tag filters on PUT (JITA may ignore them on POST).
+                        # Preserve source email/visibility for Release Migration.
+                        if preserve_source_config:
+                            clear_run_tests_with_tags(jp_data)
+                        else:
+                            _force_email_on_and_clear_tag_filters(jp_data)
+                        _ensure_cdp_reg_jarvis_user_groups(jp_data)
+                        _reapply_clone_retain(jp_data)
 
                         put_payload = {}
                         for k, v in jp_data.items():
@@ -15636,6 +16094,11 @@ def dynamic_jp_create():
             warnings.append(ts_fetch_warning)
         if ts_create_warning:
             warnings.append(ts_create_warning)
+        if pc_branch_unresolved:
+            warnings.append(
+                f"PC branch '{pc_branch_unresolved}' was not found in JITA; "
+                "kept the source job profile's Prism Central branch."
+            )
         if tag_warning:
             warnings.append(tag_warning)
         if tcms_cleanup_warning:
@@ -15957,8 +16420,13 @@ def dynamic_jp_search():
                 warnings.append(f"Job profile search failed: {e}")
                 logger.warning(f"[search] JP search failed: {e}")
 
-        ts_raw_q = _build_raw_query(ts_tool_cond) if include_test_sets else None
-        if ts_raw_q:
+        if include_test_sets:
+            # Test-set name regex is unindexed and slow. Prefer exact match for a
+            # single literal term, then a modest substring scan with a longer
+            # timeout (Manage JP used to time out at 25s with limit=200 → empty TS).
+            ts_limit = min(int(req_data.get("ts_limit", min(limit, 50))), 50)
+            ts_timeout = max(int(JITA_SEARCH_TIMEOUT), 45)
+
             def _run_ts_search(raw_q, lim, timeout_s):
                 return requests.get(
                     f"{JITA_BASE}/test_sets",
@@ -15966,47 +16434,90 @@ def dynamic_jp_search():
                     auth=JITA_SVC_AUTH, verify=False, timeout=timeout_s,
                 )
 
-            ts_resp = None
-            try:
-                ts_resp = _run_ts_search(ts_raw_q, limit, min(max(JITA_SEARCH_TIMEOUT, 20), 25))
-            except requests.exceptions.Timeout:
-                logger.warning("[search] TS search timed out; retrying with limit=10")
-                try:
-                    ts_resp = _run_ts_search(ts_raw_q, min(10, int(limit) or 10), 40)
-                except requests.exceptions.Timeout:
-                    ts_resp = None
-                    warnings.append(
-                        "Test set search timed out. Narrow the query or lower the result limit, then retry."
-                    )
-                    logger.warning("[search] TS search timed out on retry")
-            except Exception as e:
-                warnings.append(f"Test set search failed: {e}")
-                logger.warning(f"[search] TS search failed: {e}")
+            def _append_ts_hits(items):
+                for item in items or []:
+                    if not isinstance(item, dict):
+                        continue
+                    eid = _extract_id(item)
+                    if eid and any(r.get("_id") == eid for r in result["test_sets"]):
+                        continue
+                    result["test_sets"].append({
+                        "_id": eid,
+                        "name": item.get("name", ""),
+                        "description": item.get("description", ""),
+                        "created_at": item.get("created_at"),
+                        "test_args": item.get("test_args", "") or item.get("testArgs", "") or "",
+                        "framework_args": item.get("framework_args", "") or item.get("frameworkArgs", "") or "",
+                        "args_map": item.get("args_map", {}) or {},
+                        "agave_options": item.get("agave_options", {}) or {},
+                        "test_args_map": _manage_ts_extract_test_args(item),
+                        "framework_args_map": _manage_ts_extract_framework_args(item),
+                    })
 
-            if ts_resp is not None:
-                if ts_resp.status_code == 200:
-                    ts_body = ts_resp.json() or {}
-                    for item in (ts_body.get("data", []) or []):
-                        if not isinstance(item, dict):
-                            continue
-                        result["test_sets"].append({
-                            "_id": _extract_id(item),
-                            "name": item.get("name", ""),
-                            "description": item.get("description", ""),
-                            "created_at": item.get("created_at"),
-                            # Include both raw and normalized arg maps so Manage TS can
-                            # compute common keys from list/search payload directly.
-                            "test_args": item.get("test_args", "") or item.get("testArgs", "") or "",
-                            "framework_args": item.get("framework_args", "") or item.get("frameworkArgs", "") or "",
-                            "args_map": item.get("args_map", {}) or {},
-                            "agave_options": item.get("agave_options", {}) or {},
-                            "test_args_map": _manage_ts_extract_test_args(item),
-                            "framework_args_map": _manage_ts_extract_framework_args(item),
-                        })
-                    totals["test_sets"] = ts_body.get("total", len(result["test_sets"]))
-                else:
-                    warnings.append(f"Test set search returned HTTP {ts_resp.status_code}.")
-                    logger.warning(f"[search] TS search HTTP {ts_resp.status_code}: {ts_resp.text[:200]}")
+            def _ts_query_with_name(name_clause):
+                conds = [name_clause]
+                if date_cond:
+                    conds.append(date_cond)
+                    conds.append(ts_tool_cond)
+                return json.dumps({"$and": conds} if len(conds) > 1 else conds[0])
+
+            # Fast path: exact name (indexed) for a single literal term.
+            if (
+                not use_regex
+                and len(search_terms) == 1
+                and len(search_terms[0]) >= 2
+            ):
+                exact_q = _ts_query_with_name({"name": search_terms[0]})
+                try:
+                    exact_resp = _run_ts_search(exact_q, min(ts_limit, 20), 15)
+                    if exact_resp.status_code == 200:
+                        exact_body = exact_resp.json() or {}
+                        exact_data = exact_body.get("data", []) or []
+                        if exact_data:
+                            _append_ts_hits(exact_data)
+                            totals["test_sets"] = exact_body.get("total", len(result["test_sets"]))
+                            logger.info(
+                                f"[search] TS exact-name hit for {search_terms[0]!r}: "
+                                f"{len(result['test_sets'])} row(s)"
+                            )
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"[search] TS exact-name lookup failed: {e}")
+
+            ts_raw_q = _build_raw_query(ts_tool_cond)
+            if ts_raw_q and not result["test_sets"]:
+                ts_resp = None
+                try:
+                    ts_resp = _run_ts_search(ts_raw_q, ts_limit, ts_timeout)
+                except requests.exceptions.Timeout:
+                    logger.warning(
+                        f"[search] TS search timed out (limit={ts_limit}, timeout={ts_timeout}s); "
+                        "retrying with limit=15"
+                    )
+                    try:
+                        ts_resp = _run_ts_search(ts_raw_q, 15, max(ts_timeout, 60))
+                    except requests.exceptions.Timeout:
+                        ts_resp = None
+                        warnings.append(
+                            "Test set search timed out. Narrow the query (more of the name) "
+                            "or search by date, then retry."
+                        )
+                        logger.warning("[search] TS search timed out on retry")
+                except Exception as e:
+                    warnings.append(f"Test set search failed: {e}")
+                    logger.warning(f"[search] TS search failed: {e}")
+
+                if ts_resp is not None:
+                    if ts_resp.status_code == 200:
+                        ts_body = ts_resp.json() or {}
+                        _append_ts_hits(ts_body.get("data", []) or [])
+                        totals["test_sets"] = ts_body.get("total", len(result["test_sets"]))
+                    else:
+                        warnings.append(f"Test set search returned HTTP {ts_resp.status_code}.")
+                        logger.warning(
+                            f"[search] TS search HTTP {ts_resp.status_code}: {ts_resp.text[:200]}"
+                        )
+            elif result["test_sets"] and not totals["test_sets"]:
+                totals["test_sets"] = len(result["test_sets"])
 
         # Note when JITA reports more matches than we returned (shouldn't happen with
         # the high cap, but keeps the UI honest if a query exceeds SEARCH_MAX_LIMIT).
@@ -17045,6 +17556,94 @@ def validate_user_api_keys():
             "valid": True,
             "message": "Saved (live Confluence probe skipped)",
         }
+
+    sg_tok = (body.get("sourcegraph_token") or "").strip()
+    if not sg_tok or "****" in sg_tok:
+        sg_tok = get_user_key(username, "sourcegraph_token") or ""
+    if not sg_tok:
+        sg_tok = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    if not sg_tok:
+        results["sourcegraph_token"] = {
+            "valid": None,
+            "message": "Not saved yet — paste token and click Save (required for Suggest/Validate LST).",
+        }
+    else:
+        sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
+        api_urls = [sg_url + p for p in ["/.api/graphql", "/api/graphql", "/graphql"]]
+        auth_headers = [
+            {"Content-Type": "application/json", "Authorization": "token %s" % sg_tok},
+            {"Content-Type": "application/json", "Authorization": "Bearer %s" % sg_tok},
+        ]
+        probe_ok = False
+        probe_msg = "Could not reach Sourcegraph"
+        for api_url in api_urls:
+            for headers in auth_headers:
+                try:
+                    resp = requests.post(
+                        api_url,
+                        json={"query": "query { currentUser { username } }"},
+                        headers=headers,
+                        timeout=12,
+                        verify=False,
+                    )
+                    if resp.status_code in (401, 403):
+                        probe_msg = "Authentication failed (HTTP %s) — check the token" % resp.status_code
+                        continue
+                    if resp.status_code != 200:
+                        probe_msg = "HTTP %s from Sourcegraph" % resp.status_code
+                        continue
+                    data = resp.json() if resp.text else {}
+                    if data.get("errors"):
+                        # Some instances disallow currentUser; treat GraphQL auth success as OK.
+                        probe_ok = True
+                        probe_msg = "Reachable (GraphQL responded)"
+                        break
+                    user = ((data.get("data") or {}).get("currentUser") or {})
+                    uname = user.get("username") if isinstance(user, dict) else None
+                    probe_ok = True
+                    probe_msg = ("Authenticated as %s" % uname) if uname else "Authenticated"
+                    break
+                except Exception as exc:
+                    probe_msg = "Could not reach Sourcegraph (%s)" % exc
+                    continue
+            if probe_ok:
+                break
+        results["sourcegraph_token"] = {
+            "valid": True if probe_ok else False,
+            "message": probe_msg,
+        }
+
+    gerrit_pwd = (body.get("gerrit_http_password") or "").strip()
+    if not gerrit_pwd or "****" in gerrit_pwd:
+        gerrit_pwd = get_user_key(username, "gerrit_http_password") or ""
+    # Gerrit HTTP Credentials username is the LDAP id (e.g. swapnil.wankhede), not email.
+    gerrit_user = (username or "").strip()
+    if not gerrit_pwd:
+        results["gerrit_http_password"] = {
+            "valid": None,
+            "message": "Not saved yet — paste Gerrit HTTP password and Save (required for Take handover CR).",
+        }
+    elif not gerrit_user:
+        results["gerrit_http_password"] = {
+            "valid": None,
+            "message": "Could not resolve your Gerrit username (LDAP id). Log in again and retry Test Keys.",
+        }
+    else:
+        gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
+        ok_auth, auth_msg = _validate_gerrit_credentials(gerrit_url, gerrit_user, gerrit_pwd)
+        if ok_auth:
+            results["gerrit_http_password"] = {
+                "valid": True,
+                "message": "Authenticated as %s" % gerrit_user,
+            }
+        else:
+            results["gerrit_http_password"] = {
+                "valid": False,
+                "message": (
+                    "%s. Re-generate the HTTP password in Gerrit → Settings → HTTP Credentials "
+                    "and Save again (username is your Gerrit/LDAP id: %s)." % (auth_msg, gerrit_user)
+                ),
+            }
 
     return jsonify({"results": results})
 
@@ -18371,21 +18970,12 @@ def cursor_ai_list_mcp_servers():
 # ======================================================
 def parse_jita_url(url):
     """Extract task_ids from JITA results URL or direct API URL."""
-    if not url or not url.strip():
-        return []
-    from urllib.parse import urlparse, parse_qs
-    url = url.strip()
-    parsed = urlparse(url)
-    if "/agave_tasks/" in parsed.path:
-        task_id = parsed.path.rstrip("/").split("/")[-1]
-        if task_id and len(task_id) >= 20:
-            return [task_id]
-    qs = parse_qs(parsed.query)
-    task_ids_param = qs.get("task_ids", [])
-    if not task_ids_param:
-        return []
-    raw = task_ids_param[0] if isinstance(task_ids_param[0], str) else ",".join(task_ids_param)
-    return [tid.strip() for tid in raw.split(",") if tid.strip()]
+    return _parse_jita_url_helper(url)
+
+
+def _parse_task_id_inputs(text):
+    """Parse mixed JITA URLs / hex task IDs (comma, space, or newline separated)."""
+    return parse_task_id_inputs(text)
 
 
 # ======================================================
@@ -18434,20 +19024,7 @@ def _extract_jira_ticket_detail(jira_data):
 
 def _categorize_bug_type_from_issuetype(issuetype):
     """Categorize bug type from Jira issuetype name."""
-    if not issuetype:
-        return None
-    issuetype_lower = issuetype.lower()
-    if "environment" in issuetype_lower:
-        return "Environment"
-    elif "flaky" in issuetype_lower:
-        return "Flaky"
-    elif "test" in issuetype_lower or "testbed" in issuetype_lower:
-        # Any test-type issue (e.g. "Test", "Test Bug") counts as a test issue.
-        return "Test Bug"
-    elif "bug" in issuetype_lower:
-        # Any remaining bug (e.g. "Bug", "Product Bug") counts as a product bug.
-        return "Product Bug"
-    return None
+    return categorize_bug_type_from_issuetype(issuetype)
 
 
 def _fetch_ticket_issuetype(ticket):
@@ -18489,40 +19066,67 @@ def _fetch_ticket_issuetype(ticket):
 
 def _get_task_id_from_run(run):
     """Extract task_id string from a test run's agave_task_id."""
-    aid = run.get("agave_task_id")
-    if not aid:
-        return None
-    if isinstance(aid, dict) and "$oid" in aid:
-        return aid["$oid"]
-    return str(aid)
+    return get_task_id_from_run(run)
 
 
-def _aggregate_jita_test_cases(test_data, min_passes_for_success=1, auto_categorize_bug_types=False, latest_2_task_ids=None):
-    """Aggregate test results by test_name. Returns (test_cases_list, total_executions, total_passed, all_tests_passed, summary, tickets_set).
-    If latest_2_task_ids is provided, only consider runs from those 2 most recent tasks (consecutive latest runs).
-    A test passes only if it passed in BOTH of the 2 latest runs (consecutive passes)."""
+def _resolve_ticket_bug_type_map(jira_tickets, auto_categorize=True):
+    """Fetch and cache bug types for a list of Jira tickets. Returns {TICKET: bug_type}."""
+    ticket_bug_types = {}
+    if not auto_categorize or not jira_tickets or not resolve_jira_token():
+        return ticket_bug_types
+    for ticket in jira_tickets:
+        if not ticket or not ticket.strip():
+            continue
+        ticket_clean = ticket.strip().upper()
+        if "-" in ticket_clean:
+            parts = ticket_clean.split("-", 1)
+            if len(parts) == 2 and parts[0].isalpha() and parts[1]:
+                ticket_clean = "%s-%s" % (parts[0].upper(), parts[1])
+            else:
+                continue
+        else:
+            continue
+        if ticket_clean in ticket_bug_types:
+            continue
+        issuetype, _error = _fetch_ticket_issuetype(ticket_clean)
+        bug_type = _categorize_bug_type_from_issuetype(issuetype) if issuetype else None
+        ticket_bug_types[ticket_clean] = bug_type
+        if len(jira_tickets) > 1:
+            time.sleep(0.05)
+    return ticket_bug_types
+
+
+def _aggregate_jita_test_cases(
+    test_data,
+    min_passes_for_success=1,
+    auto_categorize_bug_types=False,
+    latest_2_task_ids=None,
+    sorted_task_ids=None,
+    use_sliding_eligibility=False,
+):
+    """Aggregate test results by test_name.
+
+    When ``use_sliding_eligibility`` is True (handover path), a test is Succeeded if
+    two Succeeded runs exist with only Product-Bug-only failures between them across
+    ``sorted_task_ids`` (newest-first). Otherwise falls back to min_passes / latest_2.
+    """
     by_name = defaultdict(list)
     tickets_set = set()
-    tickets_by_test = defaultdict(set)
     for test in test_data:
         test_name = test.get("test", {}).get("name", "")
         if not test_name:
             continue
-        # Filter to only 2 latest runs if specified
-        if latest_2_task_ids:
+        if latest_2_task_ids and not use_sliding_eligibility:
             tid = _get_task_id_from_run(test)
             if tid not in latest_2_task_ids:
                 continue
         by_name[test_name].append(test)
-        test_tickets = test.get("jira_tickets") or []
-        for t in test_tickets:
+        for t in (test.get("jira_tickets") or []):
             if t and t.strip():
                 tickets_set.add(t.strip())
-                tickets_by_test[test_name].add(t.strip())
 
-    # When using latest_2_task_ids, total_executions/total_passed reflect only those 2 runs
     filtered_data = test_data
-    if latest_2_task_ids:
+    if latest_2_task_ids and not use_sliding_eligibility:
         filtered_data = [t for t in test_data if _get_task_id_from_run(t) in latest_2_task_ids]
     total_executions = len(filtered_data)
     total_passed = sum(1 for t in filtered_data if t.get("status") == "Succeeded")
@@ -18530,48 +19134,55 @@ def _aggregate_jita_test_cases(test_data, min_passes_for_success=1, auto_categor
     summary = {"total": 0, "succeeded": 0, "failed": 0, "warning": 0, "pending": 0, "running": 0, "skipped": 0}
     all_succeeded = True
 
+    all_tickets = sorted(tickets_set)
+    ticket_bug_types = _resolve_ticket_bug_type_map(all_tickets, auto_categorize=auto_categorize_bug_types)
+    task_order = list(sorted_task_ids or [])
+
     for test_name, runs in by_name.items():
         total_count = len(runs)
-        passed_count = sum(1 for r in runs if r.get("status") == "Succeeded")
-        # When using latest_2_task_ids: require BOTH runs to pass (consecutive). Otherwise use min_passes_for_success.
-        required_passes = 2 if latest_2_task_ids else min_passes_for_success
-        derived_status = "Succeeded" if passed_count >= required_passes else "Failed"
-        if derived_status != "Succeeded":
-            all_succeeded = False
         jira_tickets = []
         seen = set()
         for r in runs:
-            raw_tickets = r.get("jira_tickets") or []
-            for t in raw_tickets:
-                if t and t.strip():
-                    ticket_clean = t.strip()
-                    if ticket_clean not in seen:
-                        seen.add(ticket_clean)
-                        jira_tickets.append(ticket_clean)
+            for t in (r.get("jira_tickets") or []):
+                if t and t.strip() and t.strip() not in seen:
+                    seen.add(t.strip())
+                    jira_tickets.append(t.strip())
+
+        eligibility_reason = None
+        if use_sliding_eligibility and task_order:
+            ordered = order_runs_for_test(runs, task_order)
+            run_payloads = []
+            for r in ordered:
+                r_tickets = [t.strip() for t in (r.get("jira_tickets") or []) if t and t.strip()]
+                r_types = []
+                for t in r_tickets:
+                    bt = ticket_bug_types.get(t.upper()) or ticket_bug_types.get(t)
+                    if bt:
+                        r_types.append(bt)
+                run_payloads.append({
+                    "status": r.get("status") or "",
+                    "jira_tickets": r_tickets,
+                    "bug_types": r_types,
+                })
+            eligible, eligibility_reason, passed_count = evaluate_sliding_eligibility(
+                run_payloads, ticket_bug_types=ticket_bug_types
+            )
+            derived_status = "Succeeded" if eligible else "Failed"
+        else:
+            passed_count = sum(1 for r in runs if r.get("status") == "Succeeded")
+            required_passes = 2 if latest_2_task_ids else min_passes_for_success
+            derived_status = "Succeeded" if passed_count >= required_passes else "Failed"
+            if derived_status == "Succeeded" and required_passes >= 2:
+                eligibility_reason = "consecutive_pass"
+
+        if derived_status != "Succeeded":
+            all_succeeded = False
 
         bug_types = set()
-        if auto_categorize_bug_types and jira_tickets and resolve_jira_token():
-            for ticket in jira_tickets:
-                if not ticket or not ticket.strip():
-                    continue
-                ticket_clean = ticket.strip().upper()
-                if "-" in ticket_clean:
-                    parts = ticket_clean.split("-", 1)
-                    if len(parts) == 2 and parts[0].isalpha() and parts[1]:
-                        ticket_clean = f"{parts[0].upper()}-{parts[1]}"
-                    else:
-                        continue
-                else:
-                    continue
-
-                issuetype, error = _fetch_ticket_issuetype(ticket_clean)
-                if issuetype:
-                    bug_type = _categorize_bug_type_from_issuetype(issuetype)
-                    if bug_type:
-                        bug_types.add(bug_type)
-                if len(jira_tickets) > 1:
-                    time.sleep(0.1)
-
+        for t in jira_tickets:
+            bt = ticket_bug_types.get(t.upper()) or ticket_bug_types.get(t)
+            if bt:
+                bug_types.add(bt)
         bug_type_str = ", ".join(sorted(bug_types)) if bug_types else None
 
         exception_summary = None
@@ -18597,6 +19208,7 @@ def _aggregate_jita_test_cases(test_data, min_passes_for_success=1, auto_categor
             "test_log_url": test_log_url,
             "failure_analysis": failure_analysis,
             "bug_type": bug_type_str,
+            "eligibility_reason": eligibility_reason,
         }
         test_cases.append(test_case_obj)
         summary["total"] += 1
@@ -18613,7 +19225,6 @@ def _aggregate_jita_test_cases(test_data, min_passes_for_success=1, auto_categor
 @jwt_required
 def jita_analysis():
     """Fetch by tag (same as Triage), or by JITA URL(s) / task_ids. Returns test cases with aggregated pass/fail."""
-    import re
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
@@ -18624,6 +19235,7 @@ def jita_analysis():
     tag_param = ""
     input_param = ""
     min_passes = 1
+    use_sliding = True
 
     if request.method == "POST" and request.is_json:
         data = request.get_json() or {}
@@ -18637,6 +19249,8 @@ def jita_analysis():
         tag_param = (data.get("tag") or "").strip()
         input_param = (data.get("input") or "").strip()
         min_passes = int(data.get("min_passes_for_success") or 1)
+        if "use_sliding_eligibility" in data:
+            use_sliding = bool(data.get("use_sliding_eligibility"))
     else:
         url = request.args.get("url", "").strip()
         urls_param = request.args.getlist("urls") or []
@@ -18648,6 +19262,8 @@ def jita_analysis():
             min_passes = int(request.args.get("min_passes_for_success") or 1)
         except Exception:
             min_passes = 1
+        if request.args.get("use_sliding_eligibility") is not None:
+            use_sliding = str(request.args.get("use_sliding_eligibility")).lower() in ("1", "true", "yes")
 
     task_ids = []
     if tag_param:
@@ -18661,33 +19277,23 @@ def jita_analysis():
             return jsonify({"error": str(e)}), 500
 
     if not task_ids and urls_param:
-        for u in urls_param:
-            if u.startswith("http://") or u.startswith("https://"):
-                task_ids.extend(parse_jita_url(u))
-            else:
-                potential_ids = re.split(r'[,\s\n]+', u)
-                task_ids.extend([tid.strip() for tid in potential_ids if tid.strip() and re.match(r'^[a-f0-9]{20,}$', tid.strip())])
-        task_ids = list(dict.fromkeys(task_ids))
+        task_ids = _parse_task_id_inputs(urls_param)
 
     if not task_ids and input_param:
-        if input_param.startswith("http://") or input_param.startswith("https://"):
-            task_ids = parse_jita_url(input_param)
-        else:
-            potential_ids = re.split(r'[,\s\n]+', input_param)
-            task_ids = [tid.strip() for tid in potential_ids if tid.strip() and re.match(r'^[a-f0-9]{20,}$', tid.strip())]
+        task_ids = _parse_task_id_inputs(input_param)
 
     if not task_ids and url:
-        task_ids = parse_jita_url(url)
+        task_ids = _parse_task_id_inputs(url)
 
     if not task_ids and task_ids_param:
-        task_ids = [tid.strip() for tid in task_ids_param.split(",") if tid.strip()]
+        task_ids = _parse_task_id_inputs(task_ids_param)
 
     if not task_ids:
         return jsonify({
-            "error": "Provide JITA URL(s) (e.g. https://jita.../results?task_ids=...) or task ID(s) (24-char hex, comma/space separated)"
+            "error": "Provide JITA URL(s) (e.g. https://jita.../results?task_ids=...) or task ID(s) (24-char hex, comma/space/newline separated)"
         }), 400
 
-    logger.info(f"[START] JITA Analysis | task_ids={len(task_ids)} | min_passes={min_passes}")
+    logger.info(f"[START] JITA Analysis | task_ids={len(task_ids)} | min_passes={min_passes} | sliding={use_sliding}")
     try:
         try:
             test_data = fetch_test_results_batch_with_pagination(task_ids, timeout=180, merge=False)
@@ -18711,7 +19317,6 @@ def jita_analysis():
                 test_branch = tfm.get("test", {}).get("branch") if tfm.get("test") else None
                 framework_branch = tfm.get("framework", {}).get("branch") if tfm.get("framework") else None
                 raw_ts = agave.get("updated_at") or agave.get("created_at") or ""
-                # Normalize to comparable string: API may return dict e.g. {"$date": "..."} or nested
                 if isinstance(raw_ts, dict):
                     val = raw_ts.get("$date") or raw_ts.get("$numberLong") or ""
                     while isinstance(val, dict):
@@ -18719,7 +19324,7 @@ def jita_analysis():
                     updated_at = str(val) if val and not isinstance(val, dict) else ""
                 else:
                     updated_at = str(raw_ts) if raw_ts else ""
-                task_id_to_ts[tid] = str(updated_at)  # ensure always string
+                task_id_to_ts[tid] = str(updated_at)
                 if len(task_metadata) < 20:
                     task_metadata.append({
                         "task_id": tid,
@@ -18736,21 +19341,28 @@ def jita_analysis():
                 logger.warning(f"Could not fetch agave_tasks for {tid}: {e}")
                 task_id_to_ts[tid] = ""
 
-        # Sort tasks by date (newest first), take 2 latest for "consecutive passes" logic
         def _ts_key(tid):
             v = task_id_to_ts.get(tid, "")
-            return str(v) if not isinstance(v, str) else v  # always comparable string
+            return str(v) if not isinstance(v, str) else v
         sorted_task_ids = sorted(task_ids, key=_ts_key, reverse=True)
-        latest_2_task_ids = set(sorted_task_ids[:2]) if len(sorted_task_ids) >= 2 else None
-        if latest_2_task_ids:
-            logger.info(f"JITA Analysis | Using 2 latest runs only (consecutive): {list(latest_2_task_ids)}")
+        logger.info(
+            "JITA Analysis | ordered tasks newest-first: %s%s",
+            sorted_task_ids[:5],
+            "..." if len(sorted_task_ids) > 5 else "",
+        )
 
         test_cases, total_executions, total_passed, all_tests_passed, summary, tickets_set = _aggregate_jita_test_cases(
-            test_data, min_passes_for_success=min_passes, auto_categorize_bug_types=True, latest_2_task_ids=latest_2_task_ids
+            test_data,
+            min_passes_for_success=min_passes,
+            auto_categorize_bug_types=True,
+            latest_2_task_ids=None,
+            sorted_task_ids=sorted_task_ids,
+            use_sliding_eligibility=use_sliding,
         )
         logger.info(f"[END] JITA Analysis | all_passed={all_tests_passed} | time={time.time() - start:.2f}s")
         return jsonify({
             "task_ids": task_ids,
+            "sorted_task_ids": sorted_task_ids,
             "tag": tag_param or None,
             "jita_url": url or None,
             "urls": urls_param if urls_param else None,
@@ -18762,6 +19374,7 @@ def jita_analysis():
             "total_executions": total_executions,
             "total_passed": total_passed,
             "min_passes_for_success": min_passes,
+            "use_sliding_eligibility": use_sliding,
             "generated_at": datetime.utcnow().isoformat(),
         })
     except Exception as e:
@@ -18777,16 +19390,23 @@ def jita_analysis():
 # Use abspath so the path is correct regardless of cwd when backend is started
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_BACKEND_DIR)
-HANDOVER_RECORDS_PATH = (os.getenv("HANDOVER_RECORDS_PATH") or "").strip() or os.path.join(_PROJECT_ROOT, "data", "handover_records.json")
+
+def _handover_records_path(for_write=False):
+    """Team-scoped handover file; HANDOVER_RECORDS_PATH env overrides for tests."""
+    env_path = (os.getenv("HANDOVER_RECORDS_PATH") or "").strip()
+    if env_path:
+        return env_path
+    return _resolve_team_or_legacy_file("handover_records.json", for_write=for_write)
 
 def _load_handover_records():
     """Load handover records from JSON file"""
     try:
-        parent = os.path.dirname(HANDOVER_RECORDS_PATH)
-        if not os.path.exists(parent):
+        path = _handover_records_path(for_write=False)
+        parent = os.path.dirname(path)
+        if parent and not os.path.exists(parent):
             os.makedirs(parent, exist_ok=True)
-        if os.path.exists(HANDOVER_RECORDS_PATH):
-            with open(HANDOVER_RECORDS_PATH, "r") as f:
+        if os.path.exists(path):
+            with open(path, "r") as f:
                 data = json.load(f)
                 return data.get("records", [])
     except Exception as e:
@@ -18797,9 +19417,11 @@ def _load_handover_records():
 def _save_handover_records(records):
     """Save handover records to JSON file"""
     try:
-        parent = os.path.dirname(HANDOVER_RECORDS_PATH)
-        os.makedirs(parent, exist_ok=True)
-        with open(HANDOVER_RECORDS_PATH, "w") as f:
+        path = _handover_records_path(for_write=True)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w") as f:
             json.dump({"records": records, "updated_at": datetime.utcnow().isoformat()}, f, indent=2)
     except Exception as e:
         logger.error(f"Could not save handover records: {e}")
@@ -18958,18 +19580,40 @@ def validate_jira_ticket():
 # ======================================================
 # Handover - validate-lst, create-lst-cr, check-lst-testcases, search-lst-file, deprecate-lst-cr, deprecation-search
 # ======================================================
-def validate_with_sourcegraph(repo_name, branch, file_path):
-    """Validate branch and file exist in repo via Sourcegraph."""
-    results = {"branch_valid": None, "file_valid": None, "branch_error": None, "file_error": None, "file_suggestions": [], "auth_required": False}
-    sg_token = (os.getenv("SOURCEGRAPH_TOKEN", "") or "").strip()
+def validate_with_sourcegraph(repo_name, branch, file_path, explicit_token=None):
+    """Validate branch and file exist in repo via Sourcegraph.
+
+    Uses the logged-in user's Sourcegraph token (Settings) with env fallback.
+    Tries branch aliases (e.g. 7.6.0.1 → ganges-7.6-stable) before failing.
+    """
+    results = {
+        "branch_valid": None,
+        "file_valid": None,
+        "branch_error": None,
+        "file_error": None,
+        "file_suggestions": [],
+        "branch_suggestions": [],
+        "resolved_branch": (branch or "master").strip() or "master",
+        "auth_required": False,
+        "message": "",
+    }
+    sg_token = resolve_sourcegraph_token(explicit_token)
     sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
     sg_graphql_path = (os.getenv("SOURCEGRAPH_GRAPHQL_PATH") or "/api/graphql").strip() or "/api/graphql"
+    auth_msg = (
+        "Sourcegraph token missing. Add Sourcegraph Token in Settings → API Key Configuration "
+        "(or set SOURCEGRAPH_TOKEN on the backend)."
+    )
     if not sg_token:
         results["auth_required"] = True
+        results["branch_error"] = auth_msg
+        results["file_error"] = auth_msg
+        results["message"] = auth_msg
         return results
     base_url = sg_url
     if not base_url:
         results["branch_error"] = "SOURCEGRAPH_URL not set"
+        results["file_error"] = "SOURCEGRAPH_URL not set"
         return results
     api_urls_to_try = []
     sg_graphql_url = (os.getenv("SOURCEGRAPH_GRAPHQL_URL") or "").strip().rstrip("/")
@@ -18992,6 +19636,7 @@ def validate_with_sourcegraph(repo_name, branch, file_path):
         {"Content-Type": "application/json", "Authorization": "token %s" % sg_token},
         {"Content-Type": "application/json", "Authorization": "Bearer %s" % sg_token},
     ]
+
     def run_search(search_query, url=None):
         urls = [url] if url else api_urls_to_try
         for u in urls:
@@ -18999,7 +19644,21 @@ def validate_with_sourcegraph(repo_name, branch, file_path):
                 continue
             for headers in auth_headers:
                 try:
-                    resp = requests.post(u, json={"query": "query Search($q: String!) { search(query: $q) { results { matchCount resultCount results { ... on FileMatch { file { path } } } } } }", "variables": {"q": search_query}}, headers=headers, timeout=20, verify=False)
+                    resp = requests.post(
+                        u,
+                        json={
+                            "query": (
+                                "query Search($q: String!) { search(query: $q) { results "
+                                "{ matchCount resultCount results { ... on FileMatch { file { path } } } } } }"
+                            ),
+                            "variables": {"q": search_query},
+                        },
+                        headers=headers,
+                        timeout=20,
+                        verify=False,
+                    )
+                    if resp.status_code in (401, 403):
+                        return None, "Sourcegraph authentication failed. Check your Sourcegraph Token in Settings."
                     if resp.status_code == 200:
                         data = resp.json()
                         if data.get("errors"):
@@ -19011,40 +19670,72 @@ def validate_with_sourcegraph(repo_name, branch, file_path):
                 except Exception:
                     continue
         return None, "Sourcegraph not configured or unreachable"
+
     try:
-        branch_query = "repo:%s rev:%s count:1" % (repo_name, branch)
-        match_count, err = run_search(branch_query)
-        if err:
+        branch_candidates = _branch_alias_candidates(branch)
+        resolved_branch = None
+        last_err = None
+        for b in branch_candidates:
+            branch_query = "repo:%s rev:%s count:1" % (repo_name, b)
+            match_count, err = run_search(branch_query)
+            if err:
+                last_err = err
+                if "authentication failed" in err.lower():
+                    results["auth_required"] = True
+                    results["branch_valid"] = None
+                    results["file_valid"] = None
+                    results["branch_error"] = err
+                    results["file_error"] = err
+                    results["message"] = err
+                    return results
+                continue
+            if match_count > 0:
+                resolved_branch = b
+                break
+        results["branch_suggestions"] = branch_candidates[:6]
+        if resolved_branch:
+            results["branch_valid"] = True
+            results["resolved_branch"] = resolved_branch
+        elif last_err:
             results["branch_valid"] = None
-            results["branch_error"] = err
+            results["branch_error"] = last_err
         else:
-            results["branch_valid"] = match_count > 0
-            if not results["branch_valid"]:
-                results["branch_error"] = "Branch '%s' not found" % branch
+            results["branch_valid"] = False
+            results["branch_error"] = "Branch '%s' not found (tried: %s)" % (
+                branch, ", ".join(branch_candidates[:6])
+            )
     except Exception as e:
         results["branch_valid"] = None
         results["branch_error"] = str(e)
+
     try:
-        file_query = "repo:%s rev:%s file:%s type:path count:10" % (repo_name, branch, file_path)
+        branch_for_file = results.get("resolved_branch") or branch
+        file_query = "repo:%s rev:%s file:%s type:path count:10" % (repo_name, branch_for_file, file_path)
         match_count, err = run_search(file_query)
         if err:
             results["file_valid"] = None
             results["file_error"] = err
+            if "authentication failed" in err.lower():
+                results["auth_required"] = True
+                results["message"] = err
         else:
             results["file_valid"] = match_count > 0
             if not results["file_valid"]:
-                results["file_error"] = "File '%s' not found" % file_path
+                results["file_error"] = "File '%s' not found on branch '%s'" % (file_path, branch_for_file)
     except Exception as e:
         results["file_valid"] = None
         results["file_error"] = str(e)
     return results
 
 
-def fetch_file_content_via_sourcegraph(repo_name, rev, file_path):
+def fetch_file_content_via_sourcegraph(repo_name, rev, file_path, explicit_token=None):
     """Fetch file content from Sourcegraph. Returns (content, None) or (None, error_message)."""
-    sg_token = (os.getenv("SOURCEGRAPH_TOKEN", "") or "").strip()
+    sg_token = resolve_sourcegraph_token(explicit_token)
     if not sg_token:
-        return None, "SOURCEGRAPH_TOKEN environment variable not set. Set it on the backend or paste LST file content below."
+        return None, (
+            "Sourcegraph token missing. Add Sourcegraph Token in Settings → API Key Configuration "
+            "or paste LST file content below."
+        )
     base_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
     if not base_url:
         return None, "SOURCEGRAPH_URL not set"
@@ -19073,7 +19764,7 @@ def fetch_file_content_via_sourcegraph(repo_name, rev, file_path):
                             return (blob_or_file.get("content") or ""), None
                 except Exception:
                     continue
-    return None, "Could not fetch file from Sourcegraph. Set the SOURCEGRAPH_TOKEN environment variable or paste LST content below."
+    return None, "Could not fetch file from Sourcegraph. Check your Sourcegraph Token or paste LST content below."
 
 
 def _check_testnames_in_lst_content(lst_content, test_names):
@@ -19097,6 +19788,45 @@ def _check_testnames_in_lst_content(lst_content, test_names):
     return already_present, not_present
 
 
+
+def resolve_sourcegraph_token(explicit_token=None):
+    """Resolve Sourcegraph token from request/user settings/env."""
+    tok = (explicit_token or "").strip()
+    if tok and "****" not in tok:
+        return tok
+    username = _current_username()
+    if username:
+        saved = (get_user_key(username, "sourcegraph_token") or "").strip()
+        if saved:
+            return saved
+    return (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+
+
+def _branch_alias_candidates(branch):
+    b = (branch or "").strip()
+    if not b:
+        return ["master"]
+    out = [b]
+    low = b.lower()
+    m = re.search(r"(\d+\.\d+)", low)
+    if m:
+        v = m.group(1)
+        out.extend([
+            "ganges-%s-stable" % v,
+            "%s-stable" % v,
+            v,
+        ])
+    if low != "master":
+        out.append("master")
+    seen = set()
+    uniq = []
+    for x in out:
+        if x and x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq
+
+
 @app.route("/mcp/regression/validate-lst", methods=["POST"])
 @jwt_required
 def validate_lst():
@@ -19109,16 +19839,27 @@ def validate_lst():
     repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
     if not lst_file:
         return jsonify({"error": "lst_file is required", "branch_valid": None, "file_valid": None}), 400
-    validation_results = validate_with_sourcegraph(repo_name, branch, lst_file)
+    validation_results = validate_with_sourcegraph(
+        repo_name, branch, lst_file, explicit_token=data.get("sourcegraph_token")
+    )
+    resolved_branch = validation_results.get("resolved_branch") or branch
     sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
-    sourcegraph_url = f"{sg_url}/{repo_name}@{branch}/-/blob/{lst_file.replace(' ', '+')}" if sg_url else None
+    sourcegraph_url = (
+        f"{sg_url}/{repo_name}@{resolved_branch}/-/blob/{lst_file.replace(' ', '+')}" if sg_url else None
+    )
     return jsonify({
-        "branch": branch, "lst_file": lst_file, "repo_name": repo_name,
+        "branch": resolved_branch,
+        "input_branch": branch,
+        "resolved_branch": resolved_branch,
+        "lst_file": lst_file,
+        "repo_name": repo_name,
         "branch_valid": validation_results.get("branch_valid"),
         "file_valid": validation_results.get("file_valid"),
         "branch_error": validation_results.get("branch_error"),
         "file_error": validation_results.get("file_error"),
         "file_suggestions": validation_results.get("file_suggestions", []),
+        "branch_suggestions": validation_results.get("branch_suggestions", []),
+        "auth_required": bool(validation_results.get("auth_required")),
         "sourcegraph_url": sourcegraph_url,
         "message": validation_results.get("message", ""),
         "generated_at": datetime.utcnow().isoformat()
@@ -19191,6 +19932,66 @@ def search_reviewers():
     except Exception as e:
         logger.warning("search_reviewers failed: %s", e)
         return jsonify({"results": [], "error": "Could not fetch reviewers: %s. Add reviewers manually by typing email and pressing Enter." % str(e)})
+
+
+
+@app.route("/mcp/regression/search-branches", methods=["GET"])
+@jwt_required
+def search_branches():
+    """Suggest branch names for handover branch input."""
+    q = (request.args.get("q") or "").strip()
+    repo_name = (request.args.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
+    raw_project = repo_name.split("/", 1)[-1] if "/" in repo_name else repo_name
+    project_candidates = [repo_name, raw_project]
+
+    suggestions = []
+    seen = set()
+    for c in _branch_alias_candidates(q)[:8]:
+        if c not in seen:
+            seen.add(c)
+            suggestions.append(c)
+
+    gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
+    auth = _get_gerrit_auth()
+    headers = {"Accept": "application/json"}
+    prefix = ""
+    if auth:
+        import base64
+        user, pw = auth
+        headers["Authorization"] = "Basic " + base64.b64encode(("%s:%s" % (user, pw)).encode()).decode()
+        prefix = "/a"
+
+    try:
+        for project in project_candidates:
+            encoded_project = urllib.parse.quote(project, safe="")
+            url = "%s%s/projects/%s/branches/?n=25" % (gerrit_url, prefix, encoded_project)
+            resp = requests.get(url, headers=headers, timeout=10, verify=False)
+            if resp.status_code != 200:
+                continue
+            resp_text = resp.text
+            if resp_text.startswith(")]}'"):
+                resp_text = resp_text[5:]
+            data = json.loads(resp_text) if resp_text else []
+            branches = data if isinstance(data, list) else []
+            for b in branches:
+                ref = (b.get("ref") or "").strip()
+                name = ref.replace("refs/heads/", "").strip()
+                if not name:
+                    continue
+                if q and q.lower() not in name.lower():
+                    if name not in suggestions and len(suggestions) < 4:
+                        pass
+                    else:
+                        continue
+                if name not in seen:
+                    seen.add(name)
+                    suggestions.append(name)
+            if suggestions:
+                break
+    except Exception as exc:
+        logger.warning("search_branches failed: %s", exc)
+
+    return jsonify({"results": suggestions[:10], "query": q, "repo_name": repo_name})
 
 
 @app.route("/mcp/regression/gerrit-connectivity", methods=["GET"])
@@ -19274,8 +20075,20 @@ def _build_gerrit_push_ref(branch, reviewers):
     return ref
 
 
-def _get_gerrit_auth():
-    """Get Gerrit auth as (username, password) or None if not configured."""
+
+def _get_gerrit_auth(prefer_ldap=False):
+    """Get Gerrit auth as (username, password).
+
+    When prefer_ldap=True (CR creation), use the logged-in LDAP username/password.
+    Otherwise prefer env service credentials (reviewer search / branch listing).
+    """
+    if prefer_ldap:
+        username = (_current_username() or "").strip()
+        creds = _get_user_credentials(username) if username else None
+        if creds and creds[1]:
+            return (creds[0], creds[1])
+        return None
+
     gerrit_token = (os.getenv("GERRIT_TOKEN") or "").strip()
     if gerrit_token and ":" in gerrit_token:
         parts = gerrit_token.split(":", 1)
@@ -19284,53 +20097,285 @@ def _get_gerrit_auth():
     password = (os.getenv("GERRIT_HTTP_PASSWORD") or "").strip()
     if username and password:
         return (username, password)
+    # Fall back to LDAP for authenticated Gerrit calls when env not set
+    ldap_user = (_current_username() or "").strip()
+    creds = _get_user_credentials(ldap_user) if ldap_user else None
+    if creds and creds[1]:
+        return (creds[0], creds[1])
     return None
+
+
+def _validate_gerrit_credentials(gerrit_url, username, password):
+    """Validate Gerrit basic auth against /a/accounts/self."""
+    if not gerrit_url or not username or not password:
+        return False, "Missing Gerrit URL/username/password"
+    url = "%s/a/accounts/self" % gerrit_url.rstrip("/")
+    headers = {"Accept": "application/json"}
+    import base64
+    headers["Authorization"] = "Basic " + base64.b64encode(("%s:%s" % (username, password)).encode()).decode()
+    try:
+        resp = requests.get(url, headers=headers, timeout=12, verify=False)
+        if resp.status_code == 200:
+            return True, "Authenticated"
+        if resp.status_code in (401, 403):
+            return False, "Authentication failed (401/403)"
+        return False, "Gerrit returned HTTP %s" % resp.status_code
+    except requests.exceptions.Timeout:
+        return False, "Gerrit request timed out"
+    except requests.exceptions.ConnectionError:
+        return False, "Cannot connect to Gerrit (VPN/network)"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _run_git(args, cwd, check=True):
+    """Run git command and return CompletedProcess."""
+    cmd = ["git"] + list(args)
+    return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=check)
+
+
+def _clone_and_sync_handover_branch(auth_url, repo_dir, branch, tmpdir):
+    """Shallow-clone selected branch, verify HEAD, pull latest; force-reset to origin on any sync issue."""
+    t0 = time.time()
+    logger.info("create_lst_cr: shallow clone branch=%s -> %s", branch, repo_dir)
+    clone = _run_git(
+        ["clone", "--depth", "1", "--single-branch", "--branch", branch, auth_url, repo_dir],
+        cwd=tmpdir,
+        check=False,
+    )
+    if clone.returncode != 0:
+        err = ((clone.stderr or clone.stdout or "")[:500]).strip()
+        logger.warning("create_lst_cr: branch-specific clone failed (%s); falling back", err)
+        if os.path.isdir(repo_dir):
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        _run_git(["clone", "--depth", "1", "--single-branch", auth_url, repo_dir], cwd=tmpdir, check=True)
+        fetch = _run_git(["fetch", "--depth", "1", "origin", branch], cwd=repo_dir, check=False)
+        if fetch.returncode != 0:
+            _run_git(["fetch", "origin", branch], cwd=repo_dir, check=True)
+        checkout = _run_git(["checkout", "-B", branch, "origin/%s" % branch], cwd=repo_dir, check=False)
+        if checkout.returncode != 0:
+            _run_git(["checkout", "-B", branch, "FETCH_HEAD"], cwd=repo_dir, check=True)
+
+    head = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir, check=True)
+    current = (head.stdout or "").strip()
+    if current != branch:
+        logger.warning("create_lst_cr: HEAD is %r, expected %r; forcing checkout", current, branch)
+        _run_git(["fetch", "origin", branch], cwd=repo_dir, check=False)
+        _run_git(["checkout", "-B", branch, "origin/%s" % branch], cwd=repo_dir, check=True)
+
+    pull = _run_git(["pull", "--ff-only", "origin", branch], cwd=repo_dir, check=False)
+    if pull.returncode != 0:
+        err = ((pull.stderr or pull.stdout or "")[:500]).strip()
+        logger.warning(
+            "create_lst_cr: pull --ff-only failed (%s); force reset to origin/%s",
+            err,
+            branch,
+        )
+        _run_git(["fetch", "origin", branch], cwd=repo_dir, check=True)
+        _run_git(["reset", "--hard", "origin/%s" % branch], cwd=repo_dir, check=True)
+        _run_git(["clean", "-fd"], cwd=repo_dir, check=False)
+
+    head = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir, check=True)
+    current = (head.stdout or "").strip()
+    if current != branch:
+        raise RuntimeError("After sync, HEAD is %r but expected branch %r" % (current, branch))
+
+    logger.info("create_lst_cr: clone+sync done in %.1fs branch=%s", time.time() - t0, branch)
+
+
+def _gerrit_identity_for_user():
+    """Return (gerrit_username, gerrit_http_password, email_for_git) for CR push.
+
+    Gerrit HTTP Credentials use the LDAP sAMAccountName (e.g. swapnil.wankhede)
+    plus the Gerrit HTTP password from User Settings — not the email address.
+    Email is kept only for git commit identity.
+    """
+    ldap_username = (_current_username() or "").strip()
+    email = (_current_user_email() or "").strip()
+    if not email and ldap_username:
+        email = "%s@%s" % (ldap_username, CORP_EMAIL_DOMAIN)
+    gerrit_user = ldap_username or (email.split("@")[0] if email else "")
+    http_pwd = (get_user_key(ldap_username, "gerrit_http_password") or "").strip() if ldap_username else ""
+    return gerrit_user, http_pwd, email or ""
 
 
 @app.route("/mcp/regression/create-lst-cr", methods=["POST"])
 @jwt_required
 def create_lst_cr():
-    """Return the manual git steps to add tests to an LST file and push for review.
-
-    Manual-only by design: the backend never pushes to Gerrit itself, so no Gerrit
-    credentials are needed on the server. The reviewers are baked into the push ref.
-    """
+    """Create Gerrit CR to add selected handover tests into an LST file using Gerrit HTTP password."""
     if request.method == "OPTIONS":
         return jsonify({}), 200
-    logger.info("[CREATE-LST-CR] POST received")
+
     data = request.get_json() or {}
     branch = (data.get("branch") or "master").strip()
     lst_file = (data.get("lst_file") or "").strip()
-    test_names = data.get("test_names", [])
-    logger.info("[CREATE-LST-CR] Received: branch=%r, lst_file=%r, test_names_count=%s, reviewers=%s",
-                branch, lst_file, len(test_names) if isinstance(test_names, list) else "?", data.get("reviewers"))
-    reviewers = data.get("reviewers") or []
+    lst_files = data.get("lst_files") or []
+    test_names = data.get("test_names") or []
+    reviewers = [str(r).strip() for r in (data.get("reviewers") or []) if str(r).strip()]
+    cr_subject = (data.get("cr_subject") or "Testcase Handover").strip() or "Testcase Handover"
+    cr_description = (data.get("cr_description") or "").strip()
+    handover_tickets = data.get("handover_tickets") or []
+    if isinstance(handover_tickets, str):
+        handover_tickets = [x.strip() for x in handover_tickets.split(",") if x.strip()]
+    else:
+        handover_tickets = [str(x).strip() for x in handover_tickets if str(x).strip()]
+    manual_only = bool(data.get("manual_only"))
+
+    if not isinstance(lst_files, list):
+        lst_files = []
+    lst_files = [str(x).strip() for x in lst_files if str(x).strip()]
+    if lst_file and lst_file not in lst_files:
+        lst_files.append(lst_file)
+    if not lst_files:
+        return jsonify({"error": "lst_file or lst_files is required"}), 400
+    test_names = [str(t).strip() for t in test_names if str(t or "").strip()]
     if not test_names:
         return jsonify({"error": "test_names is required"}), 400
-    if not lst_file:
-        return jsonify({"error": "lst_file is required"}), 400
-    test_names = [str(t).strip() for t in test_names if (t or "").strip()]
-    if not test_names:
-        return jsonify({"error": "test_names is required"}), 400
+
     push_ref = _build_gerrit_push_ref(branch, reviewers)
-    instructions = {
-        "message": "Add the following %s test(s) to the LST file, then push for review." % len(test_names),
-        "branch": branch, "lst_file": lst_file, "test_names": test_names,
-        "manual_steps": [
-            "1. Clone the repository and checkout branch '%s'" % branch,
-            "2. Open the LST file: %s" % lst_file,
-            "3. Add the following %s test name(s) to the file:" % len(test_names),
-            "   " + "\n   ".join(test_names[:10]) + ("..." if len(test_names) > 10 else ""),
-            "4. Commit with message: 'Add %s test(s) to LST'" % len(test_names),
-            "5. Push for review: git push origin HEAD:%s" % push_ref,
-        ],
-    }
-    return jsonify({
-        "manual": True,
-        "instructions": instructions,
-        "message": "Follow the manual steps below to push the change for review.",
-        "generated_at": datetime.utcnow().isoformat(),
-    })
+    if manual_only:
+        instructions = {
+            "message": "Add the following %s test(s) to the LST file, then push for review." % len(test_names),
+            "branch": branch, "lst_file": lst_files[0], "test_names": test_names,
+            "manual_steps": [
+                "1. Clone the repository and checkout branch '%s'" % branch,
+                "2. Open the LST file: %s" % lst_files[0],
+                "3. Add the following %s test name(s) to the file:" % len(test_names),
+                "   " + "\n   ".join(test_names[:10]) + ("..." if len(test_names) > 10 else ""),
+                "4. Commit with message: 'Add %s test(s) to LST'" % len(test_names),
+                "5. Push for review: git push origin HEAD:%s" % push_ref,
+            ],
+        }
+        return jsonify({
+            "manual": True,
+            "instructions": instructions,
+            "message": "Follow the manual steps below to push the change for review.",
+            "generated_at": datetime.utcnow().isoformat(),
+        })
+
+    gerrit_user, gerrit_pwd, git_email = _gerrit_identity_for_user()
+    if not gerrit_user:
+        return jsonify({
+            "error": "Logged-in username is required for Gerrit CR creation.",
+            "message": "Could not resolve your Gerrit username from the session. Log in again and retry.",
+        }), 400
+    if not gerrit_pwd:
+        return jsonify({
+            "error": "Gerrit HTTP password missing. Save it in Settings → API Keys → Gerrit HTTP Password.",
+            "require_key_setup": True,
+            "missing_key": "gerrit_http_password",
+            "message": "Generate an HTTP password in Gerrit → Settings → HTTP Credentials (username is your LDAP id, e.g. firstname.lastname), then paste it in RegX User Settings and Save.",
+        }), 403
+
+    gerrit_url = (os.getenv("GERRIT_URL") or "https://nugerrit.ntnxdpro.com").strip().rstrip("/")
+    ok_auth, auth_msg = _validate_gerrit_credentials(gerrit_url, gerrit_user, gerrit_pwd)
+    if not ok_auth:
+        return jsonify({
+            "error": "Gerrit authentication failed.",
+            "message": "Unable to validate Gerrit HTTP password for %s: %s. Re-generate the HTTP password in Gerrit and update Settings." % (gerrit_user, auth_msg),
+            "require_key_setup": True,
+            "missing_key": "gerrit_http_password",
+        }), 403
+
+    repo_path = (os.getenv("HANDOVER_REPO_PATH") or "nutest-py3-tests").strip("/")
+    clone_url = "%s/a/%s" % (gerrit_url, repo_path)
+
+    tmpdir = tempfile.mkdtemp(prefix="regx_handover_")
+    repo_dir = os.path.join(tmpdir, "repo")
+    try:
+        auth_url = clone_url.replace(
+            "https://",
+            "https://%s:%s@" % (urllib.parse.quote(gerrit_user), urllib.parse.quote(gerrit_pwd)),
+        )
+        _clone_and_sync_handover_branch(auth_url, repo_dir, branch, tmpdir)
+        if git_email:
+            _run_git(["config", "user.email", git_email], cwd=repo_dir, check=False)
+        display_name = (_current_username() or gerrit_user.split("@")[0] or gerrit_user).strip()
+        _run_git(["config", "user.name", display_name], cwd=repo_dir, check=False)
+        logger.info("create_lst_cr: applying LST edits on branch=%s files=%s", branch, lst_files)
+
+        per_file = []
+        total_to_add = 0
+        for lf in lst_files:
+            abs_lst = os.path.join(repo_dir, lf)
+            if not os.path.isfile(abs_lst):
+                return jsonify({
+                    "error": "LST file not found on branch.",
+                    "message": "File '%s' was not found on branch '%s'." % (lf, branch),
+                }), 400
+            with open(abs_lst, "r", encoding="utf-8", errors="ignore") as fh:
+                old_content = fh.read()
+            already_present, to_add = _check_testnames_in_lst_content(old_content, test_names)
+            if to_add:
+                append_block = "\n" + "\n".join(to_add) + "\n"
+                with open(abs_lst, "a", encoding="utf-8") as fh:
+                    fh.write(append_block)
+                _run_git(["add", lf], cwd=repo_dir, check=True)
+            per_file.append({"lst_file": lf, "already_present": already_present, "to_add": to_add})
+            total_to_add += len(to_add)
+
+        if total_to_add == 0:
+            return jsonify({
+                "success": False,
+                "message": "All selected tests are already present in selected LST file(s).",
+                "files": per_file,
+                "already_present": [x for p in per_file for x in p["already_present"]],
+                "to_add": [],
+            })
+
+        if not cr_description:
+            reviewers_line = ", ".join(reviewers) if reviewers else ""
+            tickets_line = ", ".join(handover_tickets) if handover_tickets else ""
+            all_to_add = [x for p in per_file for x in p["to_add"]]
+            tests_line = ", ".join(all_to_add[:15]) + (" ..." if len(all_to_add) > 15 else "")
+            cr_description = (
+                "Reviewers               : %s\n"
+                "Tickets resolved        : %s\n"
+                "Tests run               : %s\n"
+                "Target release          : %s\n"
+                "Code review URL         : "
+            ) % (reviewers_line, tickets_line, tests_line, branch)
+
+        commit_msg = cr_subject + "\n\n" + cr_description
+        logger.info("create_lst_cr: committing %s test(s) on branch=%s", total_to_add, branch)
+        _run_git(["commit", "-m", commit_msg], cwd=repo_dir, check=True)
+        push_t0 = time.time()
+        logger.info("create_lst_cr: pushing HEAD:%s", push_ref)
+        _run_git(["push", "origin", "HEAD:%s" % push_ref], cwd=repo_dir, check=True)
+        logger.info("create_lst_cr: push done in %.1fs", time.time() - push_t0)
+
+        return jsonify({
+            "success": True,
+            "message": "CR created and pushed for review.",
+            "cr_url": "%s/q/status:open+owner:%s+project:%s+branch:%s" % (
+                gerrit_url,
+                urllib.parse.quote(gerrit_user, safe=""),
+                urllib.parse.quote(repo_path, safe=""),
+                urllib.parse.quote(branch, safe=""),
+            ),
+            "files": per_file,
+            "already_present": [x for p in per_file for x in p["already_present"]],
+            "to_add": [x for p in per_file for x in p["to_add"]],
+            "push_ref": push_ref,
+            "generated_at": datetime.utcnow().isoformat(),
+        })
+    except subprocess.CalledProcessError as cpe:
+        stderr = (cpe.stderr or "").strip()
+        stdout = (cpe.stdout or "").strip()
+        msg = stderr or stdout or str(cpe)
+        return jsonify({
+            "error": "Failed to create CR via git/gerrit.",
+            "git_error": msg[:1000],
+            "message": "Create CR failed. Check Gerrit HTTP password, branch, VPN/network, and repository permissions.",
+        }), 502
+    except Exception as exc:
+        logger.exception("create_lst_cr failed")
+        return jsonify({"error": str(exc), "message": "Unexpected error during CR creation."}), 500
+    finally:
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 @app.route("/mcp/regression/check-lst-testcases", methods=["POST"])
@@ -19362,12 +20407,12 @@ def check_lst_testcases():
     return jsonify({"branch": branch, "lst_file": lst_file, "test_names": test_names, "present": already_present, "not_present": not_present, "generated_at": datetime.utcnow().isoformat()})
 
 
-def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=False):
+def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_only=False, sg_token=None, max_count=50):
     """Search Sourcegraph for files containing the test name."""
     test_name = str(test_name).strip() if test_name else ""
     if not test_name:
         return []
-    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    token = (sg_token or os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
     if not token:
         return []
     base_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
@@ -19389,7 +20434,7 @@ def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_on
         {"Content-Type": "application/json", "Authorization": "Bearer %s" % token},
     ]
     escaped = test_name.replace("\\", "\\\\").replace('"', '\\"')
-    search_query = f'repo:{repo_name} rev:{rev} "{escaped}" count:50'
+    search_query = f'repo:{repo_name} rev:{rev} "{escaped}" count:{int(max_count) if max_count else 50}'
     payload = {"query": "query Search($q: String!) { search(query: $q) { results { matchCount results { ... on FileMatch { file { path } } } } } }", "variables": {"q": search_query}}
     for api_url in api_urls:
         for headers in auth_headers:
@@ -19418,6 +20463,127 @@ def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_on
                 logger.warning("[SOURCEGRAPH] Search failed (%s): %s", api_url, e)
                 continue
     return []
+
+
+
+@app.route("/mcp/regression/suggest-lst-file", methods=["POST"])
+@jwt_required
+def suggest_lst_file():
+    """Suggest the best-fit LST file for selected handover testcases."""
+    data = request.get_json() or {}
+    test_names = data.get("test_names") or []
+    branch = (data.get("branch") or "master").strip() or "master"
+    repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
+
+    test_names = [str(t).strip() for t in test_names if (t or "").strip()]
+    if not test_names:
+        return jsonify({"error": "test_names is required (at least one testcase)"}), 400
+    sampled_total = len(test_names)
+    test_names = test_names[:20]
+
+    token = resolve_sourcegraph_token(data.get("sourcegraph_token"))
+    if not token:
+        return jsonify({
+            "suggested_lst_file": "",
+            "candidates": [],
+            "testcase_candidates": {},
+            "covered_tests": 0,
+            "total_tests": len(test_names),
+            "tie": False,
+            "error": "Sourcegraph token not configured. Add Sourcegraph Token in Settings → API Key Configuration.",
+            "generated_at": datetime.utcnow().isoformat(),
+        })
+
+    testcase_candidates = {}
+    freq = defaultdict(int)
+    seen_by_path = defaultdict(set)
+
+    def _search_one(test_name):
+        hits = search_sourcegraph_for_test(
+            repo_name,
+            test_name,
+            rev=branch,
+            lst_files_only=True,
+            sg_token=token,
+            max_count=20,
+        )
+        paths = []
+        seen = set()
+        for h in hits:
+            path = (h.get("path") or "").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
+        return test_name, paths
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(test_names)))) as executor:
+        future_map = {executor.submit(_search_one, tn): tn for tn in test_names}
+        for fut in as_completed(future_map):
+            test_name, paths = fut.result()
+            testcase_candidates[test_name] = paths
+            for path in paths:
+                if test_name not in seen_by_path[path]:
+                    seen_by_path[path].add(test_name)
+                    freq[path] += 1
+
+    low_branch = branch.lower()
+    branch_hints = []
+    if low_branch == "master":
+        branch_hints = ["/master/", "/milestones/master/"]
+    else:
+        m = re.search(r"(\d+\.\d+)", low_branch)
+        if m:
+            v = m.group(1)
+            branch_hints = ["/%s/" % v, "/%s-stable/" % v, "/ganges-%s/" % v]
+        branch_hints.append("/%s/" % low_branch)
+
+    def _score(path, count):
+        p = path.lower()
+        bonus = 0
+        for i, hint in enumerate(branch_hints):
+            if hint in p:
+                bonus = max(bonus, 50 - i * 5)
+        # Prefer stable/regression LST paths over intransit for auto-suggestion.
+        if "intransit" in p:
+            bonus -= 200
+        return count * 100 + bonus
+
+    ranked = sorted(freq.items(), key=lambda kv: (-_score(kv[0], kv[1]), -kv[1], kv[0]))
+    candidates = [{"lst_file": path, "count": count} for path, count in ranked]
+
+    # Never auto-suggest an intransit LST; keep those in candidates for manual pick only.
+    from handover_helpers import prefer_non_intransit_lst
+    suggested = prefer_non_intransit_lst([path for path, _count in ranked])
+    top_count = ranked[0][1] if ranked else 0
+    tie = len(ranked) > 1 and ranked[1][1] == top_count and top_count > 0
+    covered_tests = len({t for t, hits in testcase_candidates.items() if hits})
+
+    if suggested:
+        message = (
+            "Suggested LST selected by majority of matching selected testcases."
+            + (" Checked first 20 selected passed tests for faster suggestions." if sampled_total > 20 else "")
+        )
+    elif ranked:
+        message = (
+            "Only intransit LST matches found — pick one manually from candidates, "
+            "or enter a non-intransit LST path."
+        )
+    else:
+        message = "No matching LST files found for selected testcases on this branch."
+
+    return jsonify({
+        "branch": branch,
+        "repo_name": repo_name,
+        "suggested_lst_file": suggested,
+        "candidates": candidates,
+        "testcase_candidates": testcase_candidates,
+        "covered_tests": covered_tests,
+        "total_tests": sampled_total,
+        "tie": tie,
+        "message": message,
+        "generated_at": datetime.utcnow().isoformat(),
+    })
 
 
 @app.route("/mcp/regression/search-lst-file", methods=["POST"])
@@ -19562,7 +20728,12 @@ def deprecation_search():
 @app.route("/api/agents/triage/first-level-ai", methods=["POST"])
 @jwt_required
 def first_level_ai_analysis():
-    """First Level AI: failure analysis plus Triage Genie ticket validation."""
+    """First Level AI: failure analysis plus Triage Genie ticket validation.
+
+    Phase 2: returns formal intelligent_triage schema + decision engine outcome.
+    Never auto-starts Deep AI. Hybrid auto-triage write only when TG Correct/VALID
+    and ticket is open.
+    """
     try:
         request_data = request.get_json(force=True) or {}
         test_result = request_data.get("test_result") or request_data
@@ -19572,21 +20743,254 @@ def first_level_ai_analysis():
             return jsonify({"success": False, "error": "test_result is required"}), 400
 
         result = _run_first_level_ai_analysis(test_result, run_ai=True)
+        payload = build_intelligent_triage_payload(test_result, result)
+        analysis = payload["intelligent_triage"]
+        decision = payload["decision"]
+
+        # Independent confidences — never average into overall_confidence.
+        triage_confidence = payload.get("triage_confidence")
+        intermittent_confidence = payload.get("intermittent_confidence")
+
         result["user_requested"] = True
         result["analysis_result"] = {
             "analysis_type": "first_level_ai",
-            "confidence": 0.85 if result.get("tg_ticket_validation", {}).get("verdict") == "Correct" else 0.7,
+            # Back-compat field: same as triage_confidence only (not blended).
+            "confidence": triage_confidence,
+            "triage_confidence": triage_confidence,
+            "intermittent_confidence": intermittent_confidence,
         }
+        result["intelligent_triage"] = analysis
+        result["decision"] = decision
+        result["triage_confidence"] = triage_confidence
+        result["intermittent_confidence"] = intermittent_confidence
+        result["mcp_health"] = analysis.get("mcp_health")
+        result["thresholds"] = payload.get("thresholds")
+
+        # Persist into saved-tag cache when tag provided.
+        tag_name = (request_data.get("tag") or test_result.get("tag") or "").strip()
+        testcase_id = str(test_result.get("testcase_id") or "")
+        if tag_name and testcase_id:
+            try:
+                cached = load_failed_analysis_results(tag_name) or {
+                    "tag": tag_name,
+                    "results": [],
+                    "cursor_ai": {},
+                    "intelligent_triage": {},
+                }
+                cached = persist_analysis_into_tag_payload(cached, testcase_id, analysis)
+                save_failed_analysis_results(tag_name, cached)
+            except Exception as persist_err:
+                logger.warning("Could not persist intelligent_triage for %s: %s", tag_name, persist_err)
+
+        # Hybrid auto-triage write (eligible only).
+        auto_write = {
+            "attempted": False,
+            "applied": False,
+            "mode": decision.get("auto_triage_write"),
+            "detail": decision.get("auto_triage_write_detail"),
+            "error": None,
+        }
+        apply_auto = request_data.get("apply_auto_triage", True)
+        if (
+            apply_auto
+            and should_auto_write_triage(decision, analysis)
+            and testcase_id
+        ):
+            auto_write["attempted"] = True
+            try:
+                ticket = (
+                    ((analysis.get("triage_genie") or {}).get("original") or {}).get("ticket")
+                    or result.get("best_matching_ticket")
+                    or ""
+                )
+                comment = (
+                    "RegX Intelligent Triage AUTO_TRIAGE: TG validation Correct/VALID, "
+                    "ticket open. Linked %s. %s"
+                    % (ticket, (result.get("recommended_action") or "")[:400])
+                )
+                current_username = g.current_user.get("sub", "") if hasattr(g, "current_user") else ""
+                user_auth = _get_user_credentials(current_username) if current_username else None
+                if not user_auth:
+                    auto_write["error"] = "Session credentials unavailable for auto-triage write"
+                    decision["auto_triage_write"] = "recommend_only"
+                else:
+                    update_fields = {
+                        "comments": comment,
+                        "triaged_by": current_username,
+                    }
+                    if ticket:
+                        update_fields["jira_tickets"] = [ticket]
+                    put_payload = {
+                        "query": {"_id": {"$in": [{"$oid": testcase_id}]}},
+                        "data": {"$set": update_fields},
+                        "multi": True,
+                    }
+                    resp = requests.put(
+                        f"{JITA_BASE}/agave_test_results",
+                        headers={"Content-Type": "application/json"},
+                        json=put_payload,
+                        auth=user_auth,
+                        verify=False,
+                        timeout=30,
+                    )
+                    if resp.status_code == 200:
+                        auto_write["applied"] = True
+                        decision["auto_triage_write"] = "applied"
+                        analysis["auto_triage"] = {
+                            "applied": True,
+                            "jira_tickets": [ticket] if ticket else [],
+                            "comment": comment,
+                            "applied_at": datetime.utcnow().isoformat() + "Z",
+                            "applied_by": current_username,
+                            "mode": "hybrid_auto",
+                        }
+                        analysis["decision"] = decision
+                        result["intelligent_triage"] = analysis
+                        result["decision"] = decision
+                    else:
+                        auto_write["error"] = resp.text or ("HTTP %s" % resp.status_code)
+                        decision["auto_triage_write"] = "recommend_only"
+            except Exception as write_err:
+                auto_write["error"] = str(write_err)[:300]
+                decision["auto_triage_write"] = "recommend_only"
+                logger.warning("Hybrid auto-triage write failed: %s", write_err)
+
+        result["auto_triage_write"] = auto_write
+        # Explicit: Deep AI never auto-started from First Level.
+        result["deep_ai_recommended"] = bool(decision.get("deep_ai_recommended"))
+        result["deep_ai_started"] = False
         return jsonify(result)
     except Exception as e:
         logger.error("Error in first level AI analysis: %s", e, exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/mcp/regression/failed-analysis/glean-ai-validate", methods=["POST"])
+@jwt_required
+def glean_ai_validate_candidate():
+    """Human-triggered AI validation of a single Glean candidate (not auto for all)."""
+    try:
+        body = request.get_json(force=True) or {}
+        ticket = (body.get("ticket") or "").strip()
+        test_result = body.get("test_result") or {}
+        tag_name = (body.get("tag") or "").strip()
+        testcase_id = str(
+            body.get("testcase_id")
+            or test_result.get("testcase_id")
+            or ""
+        )
+        if not ticket:
+            return jsonify({"success": False, "error": "ticket is required"}), 400
+
+        exception_summary = test_result.get("exception_summary") or body.get("exception_summary") or ""
+        exception = test_result.get("exception") or body.get("exception") or ""
+        testcase_name = test_result.get("testcase_name") or body.get("testcase_name") or ""
+
+        # Reuse TG detailed validation heuristics against this candidate.
+        validation = validate_triage_genie_ticket_detailed(
+            ticket, exception_summary, exception, [{"ticket": ticket}]
+        )
+        validation["trigger"] = "human"
+        validation["match_verdict"] = validation.get("verdict")
+
+        # Optional short AI confirmation (best-effort; never fabricate tickets).
+        ai_note = ""
+        try:
+            system_prompt = (
+                "You validate whether a Jira ticket matches a test failure. "
+                "Respond with JSON only: "
+                '{"verdict":"Correct|Partial|Incorrect","reason":"...","confidence":0.0}. '
+                "Do not invent ticket IDs."
+            )
+            user_content = "\n".join([
+                "Testcase: %s" % testcase_name,
+                "Exception: %s" % (exception_summary or "")[:1500],
+                "Candidate ticket: %s" % ticket,
+                "Jira summary: %s" % (validation.get("jira_summary") or ""),
+                "Heuristic verdict: %s — %s" % (validation.get("verdict"), validation.get("reason")),
+            ])
+            ai_raw = _call_ai_chat(system_prompt, user_content, max_tokens=400)
+            parsed = _parse_first_level_ai_json(ai_raw)
+            if parsed.get("verdict") in ("Correct", "Partial", "Incorrect"):
+                validation["verdict"] = parsed["verdict"]
+                validation["match_verdict"] = parsed["verdict"]
+                if parsed.get("reason"):
+                    validation["reason"] = parsed["reason"]
+                if parsed.get("confidence") is not None:
+                    validation["ai_confidence"] = parsed["confidence"]
+            ai_note = (ai_raw or "")[:500]
+        except Exception as ai_err:
+            validation["ai_error"] = str(ai_err)[:200]
+            # Do not fabricate a stronger verdict on AI failure.
+            logger.warning("Glean AI validate chat failed: %s", ai_err)
+
+        validation["ai_note"] = ai_note
+
+        # Persist into intelligent_triage map when tag+testcase known.
+        analysis = None
+        if tag_name and testcase_id:
+            cached = load_failed_analysis_results(tag_name) or {
+                "tag": tag_name,
+                "results": [],
+                "cursor_ai": {},
+                "intelligent_triage": {},
+            }
+            existing = (cached.get("intelligent_triage") or {}).get(testcase_id) or {}
+            if not existing:
+                # Seed from a lightweight first-level search so candidates exist.
+                fl = _run_first_level_ai_analysis(test_result or body, run_ai=False)
+                seeded = build_intelligent_triage_payload(test_result or body, fl)
+                existing = seeded["intelligent_triage"]
+            analysis = merge_glean_ai_validation(existing, validation, ticket=ticket)
+            cached = persist_analysis_into_tag_payload(cached, testcase_id, analysis)
+            save_failed_analysis_results(tag_name, cached)
+
+        return jsonify({
+            "success": True,
+            "ticket": ticket,
+            "ai_validation": validation,
+            "intelligent_triage": analysis,
+            "persisted": bool(analysis),
+        })
+    except Exception as e:
+        logger.error("Error in glean-ai-validate: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/thresholds", methods=["GET"])
+@jwt_required
+def get_intelligent_triage_thresholds():
+    """Return team-specific Intelligent Triage thresholds (defaults from architecture)."""
+    try:
+        return jsonify({
+            "success": True,
+            "thresholds": load_team_thresholds(),
+            "defaults": DEFAULT_THRESHOLDS,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/thresholds", methods=["PUT"])
+@jwt_required
+def put_intelligent_triage_thresholds():
+    """Update team-specific Intelligent Triage thresholds."""
+    try:
+        body = request.get_json(force=True) or {}
+        data = body.get("thresholds") if "thresholds" in body else body
+        saved = save_team_thresholds(data if isinstance(data, dict) else {})
+        return jsonify({"success": True, "thresholds": saved})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/mcp/regression/failed-analysis/deep-ai", methods=["POST"])
 @jwt_required
 def failed_analysis_deep_ai():
-    """Deep AI: skill-based triage via Cursor bridge, plus Glean/Jira ticket hunt."""
+    """Deep AI: skill-based triage via Cursor bridge, plus Glean/Jira ticket hunt.
+
+    Phase 2: marks deep_ai_started only on this user-triggered path; never from First Level.
+    """
     try:
         body = request.get_json(force=True) or {}
         test_result = body.get("test_result") or body
@@ -19647,6 +21051,11 @@ def failed_analysis_deep_ai():
             or ""
         )
         skill_url = rdm_link if analysis_type == "skipped" else test_log_url
+        skill_used = (
+            "triage-rdm-deployment-failure"
+            if analysis_type == "skipped"
+            else "triage-cdp-test-failure"
+        )
 
         payload = {
             "testcase_name": testcase_name,
@@ -19666,6 +21075,10 @@ def failed_analysis_deep_ai():
             "analysis_type": analysis_type,
             "cursor_api_key": cursor_api_key,
             "atlassian_tokens": atlassian_tokens,
+            # Skill source of truth: prefer Sourcegraph nutest on master (bridge default);
+            # local .cursor/skills fallback is handled inside cursor-bridge.
+            "prefer_sourcegraph_skill": True,
+            "skill_fallback_local": True,
         }
 
         resp = requests.post(
@@ -19683,9 +21096,28 @@ def failed_analysis_deep_ai():
 
         data = resp.json()
         analysis = data.get("analysis") or {}
-        return jsonify({
+        session_id = data.get("session_id", "")
+        mcp_health = data.get("mcp_health") or analysis.get("mcp_health") or {
+            "sourcegraph": {
+                "service": "sourcegraph",
+                "available": True,
+                "ok": True,
+                "error": None,
+                "claimed_success": True,
+            },
+            "glean": {
+                "service": "glean",
+                "available": first_level.get("glean_available"),
+                "ok": first_level.get("glean_ok"),
+                "error": None if first_level.get("glean_ok") else "not_ok_at_first_level",
+                "claimed_success": bool(first_level.get("glean_ok")),
+            },
+        }
+
+        # Shared session model: Deep AI + Cursor AI use the same session_id.
+        response_body = {
             "success": True,
-            "session_id": data.get("session_id", ""),
+            "session_id": session_id,
             "analysis": analysis,
             "root_cause": analysis.get("root_cause"),
             "classification": analysis.get("classification"),
@@ -19699,13 +21131,53 @@ def failed_analysis_deep_ai():
             "enriched_tickets": first_level.get("enriched_tickets") or [],
             "glean_snippets": first_level.get("glean_snippets") or [],
             "glean_available": first_level.get("glean_available"),
+            "glean_ok": first_level.get("glean_ok"),
             "search_source": first_level.get("search_source"),
-            "skill_used": (
-                "triage-rdm-deployment-failure"
-                if analysis_type == "skipped"
-                else "triage-cdp-test-failure"
-            ),
-        })
+            "skill_used": skill_used,
+            "mcp_health": mcp_health,
+            "deep_ai_started": True,
+            "deep_ai_recommended": True,
+            "ux_entry": "deep_ai",  # merged UX with Cursor AI column via shared session
+        }
+
+        tag_name = (body.get("tag") or test_result.get("tag") or "").strip()
+        testcase_id = str(test_result.get("testcase_id") or "")
+        if tag_name and testcase_id:
+            try:
+                cached = load_failed_analysis_results(tag_name) or {
+                    "tag": tag_name,
+                    "results": [],
+                    "cursor_ai": {},
+                    "intelligent_triage": {},
+                }
+                existing = (cached.get("intelligent_triage") or {}).get(testcase_id)
+                if not existing:
+                    seeded = build_intelligent_triage_payload(test_result, first_level)
+                    existing = seeded["intelligent_triage"]
+                updated = set_deep_ai_started(
+                    existing,
+                    session_id=session_id,
+                    skill_used=skill_used,
+                    mcp_health=mcp_health,
+                )
+                updated["deep_ai"]["status"] = "complete"
+                updated["deep_ai"]["root_cause"] = analysis.get("root_cause")
+                updated["deep_ai"]["classification"] = analysis.get("classification")
+                updated["deep_ai"]["confidence"] = analysis.get("confidence")
+                cached = persist_analysis_into_tag_payload(cached, testcase_id, updated)
+                # Also mirror session into cursor_ai for UX merge.
+                cursor_ai = dict(cached.get("cursor_ai") or {})
+                sessions = dict(cursor_ai.get("sessions") or {})
+                if session_id:
+                    sessions[testcase_id] = session_id
+                cursor_ai["sessions"] = sessions
+                cached["cursor_ai"] = cursor_ai
+                save_failed_analysis_results(tag_name, cached)
+                response_body["intelligent_triage"] = updated
+            except Exception as persist_err:
+                logger.warning("Could not persist deep_ai session: %s", persist_err)
+
+        return jsonify(response_body)
     except requests.exceptions.ConnectionError:
         logger.error("Cursor bridge is not reachable at %s", CURSOR_BRIDGE_URL)
         return jsonify({
@@ -19720,6 +21192,133 @@ def failed_analysis_deep_ai():
     except Exception as e:
         logger.error("Error in failed-analysis deep-ai: %s", e, exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ======================================================
+# Flux Quick Fix proxy (Failed Testcase Analysis)
+# ======================================================
+def _flux_error_response(exc):
+    if isinstance(exc, FluxError):
+        return jsonify(exc.to_dict()), exc.status_code
+    logger.exception("Unexpected Flux error: %s", exc)
+    return jsonify({"error": str(exc)}), 500
+
+
+def _flux_client_or_error():
+    username = _current_username()
+    if not username:
+        return None, (jsonify({"error": "Not authenticated"}), 401)
+    
+    # Get stored Flux credentials from user_keys
+    flux_username = get_user_key(username, "flux_username")
+    flux_password = get_user_key(username, "flux_password")
+    
+    if not flux_username or not flux_password:
+        return None, (jsonify({
+            "error": "Flux username and password required. Configure them in Settings → API Keys.",
+            "require_key_setup": True,
+            "missing_key": "flux_username" if not flux_username else "flux_password",
+        }), 403)
+    
+    return get_flux_client(flux_username, flux_password), None
+
+
+@app.route("/mcp/regression/flux/quick-fix", methods=["POST"])
+@app.route("/api/mcp/regression/flux/quick-fix", methods=["POST"])
+@jwt_required
+def flux_quick_fix():
+    """Queue a Flux quick-fix for a failed test's Jira ticket."""
+    client, err = _flux_client_or_error()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    jira_key = (body.get("jira_key") or "").strip()
+    raw_branch = (body.get("target_branch") or "").strip()
+    target_branch = _tcms_nutest_target_branch(raw_branch) if raw_branch else ""
+    log_url = (body.get("log_url") or "").strip() or None
+    if not jira_key:
+        return jsonify({"error": "jira_key is required"}), 400
+    if not target_branch:
+        return jsonify({"error": "target_branch is required"}), 400
+
+    username = _current_username()
+    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+    gerrit_http_password = get_user_key(username, "gerrit_http_password") if username else None
+    missing = None
+    if not cursor_api_key:
+        missing = "cursor_api_key"
+    elif not gerrit_http_password:
+        missing = "gerrit_http_password"
+    if missing:
+        return jsonify(FluxKeySetupError(missing).to_dict()), 403
+
+    try:
+        result = client.start_quick_fix(
+            jira_key=jira_key,
+            target_branch=target_branch,
+            log_url=log_url,
+            cursor_api_key=cursor_api_key,
+            gerrit_http_password=gerrit_http_password,
+            send_test_fix=body.get("send_test_fix", True),
+            update_jira=body.get("update_jira", True),
+            pause_for_review=body.get("pause_for_review", True),
+        )
+        return jsonify(result)
+    except FluxError as exc:
+        return _flux_error_response(exc)
+
+
+@app.route("/mcp/regression/flux/tickets/<int:record_id>", methods=["GET"])
+@app.route("/api/mcp/regression/flux/tickets/<int:record_id>", methods=["GET"])
+@jwt_required
+def flux_get_ticket(record_id):
+    """Poll a Flux ticket/record by id."""
+    client, err = _flux_client_or_error()
+    if err:
+        return err
+    try:
+        return jsonify(client.get_ticket(record_id))
+    except FluxError as exc:
+        return _flux_error_response(exc)
+
+
+@app.route("/mcp/regression/flux/tickets/<int:record_id>/resume", methods=["POST"])
+@app.route("/api/mcp/regression/flux/tickets/<int:record_id>/resume", methods=["POST"])
+@jwt_required
+def flux_resume_ticket(record_id):
+    """Resume a paused Flux pipeline (Create Gerrit CR)."""
+    client, err = _flux_client_or_error()
+    if err:
+        return err
+    try:
+        return jsonify(client.resume_ticket(record_id))
+    except FluxError as exc:
+        return _flux_error_response(exc)
+
+
+@app.route("/mcp/regression/flux/nutest-branch", methods=["GET"])
+@app.route("/api/mcp/regression/flux/nutest-branch", methods=["GET"])
+@jwt_required
+def flux_nutest_branch():
+    """Look up nutest-py3-tests_branch from JITA agave_tasks/{id}."""
+    task_id = (request.args.get("task_id") or "").strip()
+    if not task_id:
+        return jsonify({"error": "task_id is required"}), 400
+    try:
+        task = fetch_agave_task(task_id) or {}
+        branch = nutest_branch_from_agave_task(task)
+        return jsonify({
+            "task_id": task_id,
+            "nutest_branch": branch,
+            "nutest-py3-tests_branch": branch,
+        })
+    except requests.exceptions.HTTPError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", 502) or 502
+        logger.warning("JITA agave_tasks lookup failed for %s: %s", task_id, exc)
+        return jsonify({"error": "Failed to fetch JITA task %s" % task_id}), status if 400 <= status < 500 else 502
+    except Exception as exc:
+        logger.warning("JITA agave_tasks lookup failed for %s: %s", task_id, exc)
+        return jsonify({"error": "Failed to fetch JITA task %s" % task_id}), 502
 
 
 # ======================================================

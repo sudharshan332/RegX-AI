@@ -169,8 +169,11 @@ export default function DynamicJobProfile() {
   };
   /** Clone mode only: link new JP to source TS instead of creating a TS with only the typed testcases. */
   const [reuseSourceTS, setReuseSourceTS] = useState(false);
-  /** Clone mode only: retain deployment after each test failure, without DataCorruptionError exception. */
+  /** Clone mode: retain deployment after each test failure. Defaults on when Show existing is enabled. */
   const [retainSetupOnFailure, setRetainSetupOnFailure] = useState(false);
+  /** Destination branch for clone (NOS / NuTest / TCMS). Follows search branch until edited. */
+  const [cloneToBranch, setCloneToBranch] = useState('master');
+  const cloneToTouched = useRef(false);
   /** Clone mode only: use latest commit configuration (Latest Smoke Passed + auto build type). Default OFF to preserve source JP config. */
   const [useLatestCommit, setUseLatestCommit] = useState(false);
   /** Keeps the last "New test set" name if user toggles to use existing (field hidden) and back. */
@@ -220,6 +223,11 @@ export default function DynamicJobProfile() {
   const [branchLoading, setBranchLoading] = useState(false);
   const branchReqId = useRef(0);
   const branchDebounce = useRef(null);
+
+  const [cloneToResults, setCloneToResults] = useState([]);
+  const [cloneToLoading, setCloneToLoading] = useState(false);
+  const cloneToReqId = useRef(0);
+  const cloneToDebounce = useRef(null);
 
   const [djpSubView, setDjpSubView] = useState('create');
   const [showDjpManageMenu, setShowDjpManageMenu] = useState(false);
@@ -658,27 +666,49 @@ export default function DynamicJobProfile() {
     }, 300);
   }, []);
 
-  const handleSearchBranches = useCallback((query) => {
-    if (branchDebounce.current) clearTimeout(branchDebounce.current);
+  const runBranchSearch = useCallback((query, reqIdRef, debounceRef, setResults, setLoading) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!query || query.length < 2) {
-      setBranchResults([]);
-      setBranchLoading(false);
+      setResults([]);
+      setLoading(false);
       return;
     }
-    setBranchLoading(true);
-    branchDebounce.current = setTimeout(async () => {
-      const reqId = ++branchReqId.current;
+    setLoading(true);
+    debounceRef.current = setTimeout(async () => {
+      const reqId = ++reqIdRef.current;
       try {
         const response = await api.post(`${API_BASE}/search-branches`, { query });
-        if (reqId === branchReqId.current) {
-          setBranchResults(Array.isArray(response.data?.branches) ? response.data.branches : []);
+        if (reqId === reqIdRef.current) {
+          setResults(Array.isArray(response.data?.branches) ? response.data.branches : []);
         }
       } catch (_) {
-        if (reqId === branchReqId.current) setBranchResults([]);
+        if (reqId === reqIdRef.current) setResults([]);
       } finally {
-        if (reqId === branchReqId.current) setBranchLoading(false);
+        if (reqId === reqIdRef.current) setLoading(false);
       }
     }, 300);
+  }, []);
+
+  const handleSearchBranches = useCallback((query) => {
+    runBranchSearch(query, branchReqId, branchDebounce, setBranchResults, setBranchLoading);
+  }, [runBranchSearch]);
+
+  const handleSearchCloneToBranches = useCallback((query) => {
+    runBranchSearch(query, cloneToReqId, cloneToDebounce, setCloneToResults, setCloneToLoading);
+  }, [runBranchSearch]);
+
+  const applySearchBranch = useCallback((val) => {
+    setBranch(val);
+    setConfig((prev) => ({
+      ...prev,
+      nosBranch: val,
+      pcBranch: derivePcBranch(val),
+      nutestBranch: val,
+    }));
+    if (!cloneToTouched.current) {
+      setCloneToBranch(val);
+      setCloneToResults([]);
+    }
   }, []);
 
   const handleCreate = async () => {
@@ -737,20 +767,24 @@ export default function DynamicJobProfile() {
           }, {})
         : {};
 
+      const destBranch = showExisting
+        ? (cloneToBranch.trim() || branch || 'master')
+        : (effectiveConfig.nosBranch || 'master');
+
       const response = await api.post(`${API_BASE}/create`, {
         source_jp_id: showExisting ? selectedJP : null,
         source_testset_id: showExisting ? (resolvedTSId || testSetDetails?._id || null) : null,
         source_testset_name: showExisting ? (selectedTestSetName || null) : null,
-        nos_branch: effectiveConfig.nosBranch || 'master',
+        nos_branch: destBranch,
         nos_tag: effectiveConfig.nosTag || 'Latest Smoke Passed',
         nos_update_type: effectiveConfig.nosUpdateType || 'by_tag',
         nos_commit_id: effectiveConfig.nosCommitId || '',
         nos_gbn: effectiveConfig.nosGbn || '',
-        pc_branch: effectiveConfig.pcBranch || 'master',
+        ...(showExisting ? {} : { pc_branch: effectiveConfig.pcBranch || 'master' }),
         pc_tag: effectiveConfig.pcTag || 'Latest Smoke Passed',
         pc_update_type: effectiveConfig.pcUpdateType || 'by_tag',
         pc_commit_id: effectiveConfig.pcCommitId || '',
-        nutest_branch: effectiveConfig.nutestBranch || 'master',
+        nutest_branch: showExisting ? destBranch : (effectiveConfig.nutestBranch || destBranch),
         provider: effectiveConfig.provider || 'global_pool',
         resource_type: effectiveConfig.resourceType || 'nested_2.0',
         coupon: (!showExisting && effectiveConfig.provider === 'global_pool'
@@ -771,6 +805,11 @@ export default function DynamicJobProfile() {
         custom_test_args: Object.keys(customTestArgs).length > 0 ? customTestArgs : null,
         custom_framework_options: Object.keys(customFrameworkOptions).length > 0 ? customFrameworkOptions : null,
         include_optional_defaults: includeOptionalDefaults,
+        ...(showExisting ? {
+          clone_to_branch: destBranch,
+          override_source_branches: true,
+          tcms_sync_branch: destBranch,
+        } : {}),
       });
       if (response.data?.success) {
         setCreateResult(response.data);
@@ -900,7 +939,7 @@ export default function DynamicJobProfile() {
             onClick={() => setRetainSetupOnFailure(!retainSetupOnFailure)}
             role="switch"
             aria-checked={retainSetupOnFailure}
-            title="Retain live deployments on failure"
+            title="Retain test environment on failure (DataCorruptionError exception)"
           >
             <div className="djp-toggle-knob" />
           </div>
@@ -1292,19 +1331,13 @@ export default function DynamicJobProfile() {
 
         <div className="djp-search-row">
           <div className="djp-form-group djp-branch-field">
-            <label>Branch</label>
+            <label>{showExisting ? 'Search branch' : 'Branch'}</label>
             <input
               type="text"
               value={branch}
               onChange={(e) => {
                 const val = e.target.value;
-                setBranch(val);
-                setConfig(prev => ({
-                  ...prev,
-                  nosBranch: val,
-                  pcBranch: derivePcBranch(val),
-                  nutestBranch: val,
-                }));
+                applySearchBranch(val);
                 handleSearchBranches(val);
               }}
               onBlur={() => setTimeout(() => setBranchResults([]), 150)}
@@ -1319,13 +1352,7 @@ export default function DynamicJobProfile() {
                     className={`djp-pool-item ${branch === b ? 'selected' : ''}`}
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
-                      setBranch(b);
-                      setConfig(prev => ({
-                        ...prev,
-                        nosBranch: b,
-                        pcBranch: derivePcBranch(b),
-                        nutestBranch: b,
-                      }));
+                      applySearchBranch(b);
                       setBranchResults([]);
                     }}
                   >
@@ -1336,6 +1363,46 @@ export default function DynamicJobProfile() {
             )}
           </div>
 
+          {showExisting && (
+            <>
+              <span className="djp-clone-arrow" aria-hidden="true">→</span>
+              <div className="djp-form-group djp-branch-field">
+                <label>Clone to</label>
+                <input
+                  type="text"
+                  value={cloneToBranch}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    cloneToTouched.current = true;
+                    setCloneToBranch(val);
+                    handleSearchCloneToBranches(val);
+                  }}
+                  onBlur={() => setTimeout(() => setCloneToResults([]), 150)}
+                  placeholder="Destination (e.g. master, ganges-7.5-stable)"
+                />
+                {cloneToLoading && <small className="djp-field-status">Searching...</small>}
+                {cloneToResults.length > 0 && (
+                  <div className="djp-pool-results djp-branch-results">
+                    {cloneToResults.map((b) => (
+                      <div
+                        key={b}
+                        className={`djp-pool-item ${cloneToBranch === b ? 'selected' : ''}`}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          cloneToTouched.current = true;
+                          setCloneToBranch(b);
+                          setCloneToResults([]);
+                        }}
+                      >
+                        {b}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
           <div className="djp-toggle-group">
             <label className="djp-toggle-label">Show existing</label>
             <div
@@ -1343,12 +1410,16 @@ export default function DynamicJobProfile() {
               onClick={() => {
                 historySearchReqId.current += 1;
                 setLoading(false);
-                setShowExisting(!showExisting);
+                const next = !showExisting;
+                setShowExisting(next);
                 setReadyToConfigure(false);
                 setExecHistoryFetched(false);
                 setUniquePairs([]);
                 resetSelections();
                 setCreateResult(null);
+                cloneToTouched.current = false;
+                setCloneToBranch(branch);
+                setCloneToResults([]);
               }}
             >
               <div className="djp-toggle-knob" />

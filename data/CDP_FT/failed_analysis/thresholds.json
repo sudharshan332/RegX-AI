@@ -1,0 +1,11 @@
+{
+  "version": "v1",
+  "T_high": 0.75,
+  "T_auto": 0.85,
+  "T_mid": 0.55,
+  "T_intermittent": 0.80,
+  "T_insufficient_cap": 0.40,
+  "require_open_ticket_for_auto": true,
+  "require_tg_correct_for_auto_write": true,
+  "notes": "Team-specific Intelligent Triage thresholds (architecture doc defaults)."
+}

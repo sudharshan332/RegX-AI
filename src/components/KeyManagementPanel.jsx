@@ -8,6 +8,8 @@ const EMPTY_KEYS = {
   atlassian_confluence_token: '',
   gerrit_http_password: '',
   sourcegraph_token: '',
+  flux_username: '',
+  flux_password: '',
 };
 
 export default function KeyManagementPanel({ onClose }) {
@@ -24,6 +26,8 @@ export default function KeyManagementPanel({ onClose }) {
     atlassian_confluence_token: false,
     gerrit_http_password: false,
     sourcegraph_token: false,
+    flux_username: false,
+    flux_password: false,
   });
 
   useEffect(() => {
@@ -226,8 +230,55 @@ export default function KeyManagementPanel({ onClose }) {
           </button>
         </div>
         <p className="help-text">
-          Used for automatic Gerrit CR creation in Handover. Username is your logged-in email.
+          Required for automatic Gerrit CR creation in Handover. Generate it in Gerrit → Settings → HTTP Credentials.
+          Username is your Gerrit/LDAP id shown on that page (e.g. firstname.lastname), not your email.
         </p>
+      </div>
+
+      <div className="key-section">
+        <label htmlFor="flux-username">Flux Username</label>
+        <div className="input-with-toggle">
+          <input
+            id="flux-username"
+            type={showKeys.flux_username ? 'text' : 'password'}
+            value={keys.flux_username}
+            onChange={(e) => handleChange('flux_username', e.target.value)}
+            placeholder="Required for Flux Quick Fix"
+            disabled={saving || validating}
+          />
+          <button
+            type="button"
+            className="toggle-visibility-btn"
+            onClick={() => toggleShowKey('flux_username')}
+            title={showKeys.flux_username ? 'Hide username' : 'Show username'}
+          >
+            {showKeys.flux_username ? '👁️' : '👁️‍🗨️'}
+          </button>
+        </div>
+        <p className="help-text">Your Flux login username (may differ from RegX username).</p>
+      </div>
+
+      <div className="key-section">
+        <label htmlFor="flux-password">Flux Password</label>
+        <div className="input-with-toggle">
+          <input
+            id="flux-password"
+            type={showKeys.flux_password ? 'text' : 'password'}
+            value={keys.flux_password}
+            onChange={(e) => handleChange('flux_password', e.target.value)}
+            placeholder="Required for Flux Quick Fix"
+            disabled={saving || validating}
+          />
+          <button
+            type="button"
+            className="toggle-visibility-btn"
+            onClick={() => toggleShowKey('flux_password')}
+            title={showKeys.flux_password ? 'Hide password' : 'Show password'}
+          >
+            {showKeys.flux_password ? '👁️' : '👁️‍🗨️'}
+          </button>
+        </div>
+        <p className="help-text">Your Flux login password.</p>
       </div>
 
       <div className="key-section">

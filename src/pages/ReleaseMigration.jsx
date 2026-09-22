@@ -86,7 +86,12 @@ export const buildMigrationPayload = (jp, form) => {
     nutest_branch: form.testOptionBranch,
     override_source_branches: true,
     preserve_source_config: true,
+    // Retain Test Environment on Test Failure is on, with DataCorruptionError.
+    // Do not send retain_setup_on_failure true (that blank-exceptions path).
+    retain_setup_on_failure: false,
     // Sync to TCMS is always enabled for release migration.
+    // "Run Tests With Tags" is turned off server-side. Additional tags keep
+    // container__unlimited, infra__cdp, and max_deployments__0 only.
     sync_to_tcms: true,
     tcms_sync_branch: form.tcmsSyncBranch,
     // Reuse the source JP's existing test set unchanged (no new test set created).

@@ -25,6 +25,8 @@ ALLOWED_KEY_NAMES = (
     "atlassian_confluence_token",
     "gerrit_http_password",
     "sourcegraph_token",
+    "flux_username",
+    "flux_password",
 )
 
 _LOCK = threading.Lock()
