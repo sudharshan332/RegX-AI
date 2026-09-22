@@ -23,6 +23,8 @@ for _name in (
 class TestDeepAiPhase3Intents(unittest.TestCase):
     def test_create_eng_intent(self):
         self.assertTrue(_NS["is_create_eng_ticket_intent"]("create eng ticket"))
+        self.assertTrue(_NS["is_create_eng_ticket_intent"]("Creat Eng"))
+        self.assertTrue(_NS["is_create_eng_ticket_intent"]("creat eng"))
         self.assertFalse(_NS["is_create_eng_ticket_intent"]("open ticket ENG-1"))
 
     def test_flux_intent(self):

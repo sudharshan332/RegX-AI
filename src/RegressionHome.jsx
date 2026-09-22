@@ -1584,7 +1584,28 @@ export default function RegressionHome() {
       };
 
       let resp;
-      if (sessionId) {
+      const createIntent = /\b(create|file|raise|submit|creat|creaet|crate)\b.{0,40}\b(ticket|eng|jira)\b/i.test(question)
+        || /\b(create|file|creat)\s+eng\b/i.test(question)
+        || /\bnew\s+(eng\s+)?(jira\s+)?ticket\b/i.test(question);
+      // Prefer dedicated User Settings Jira create path over agent MCP / jira_helper.
+      if (createIntent) {
+        resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/create-eng-ticket`, {
+          ticket_context: ticketContext,
+        });
+        if (resp.data?.success) {
+          resp = {
+            data: {
+              success: true,
+              session_id: sessionId,
+              analysis: resp.data.analysis || {
+                follow_up_answer: `Created ${resp.data.key}: ${resp.data.url}`,
+                created_ticket: resp.data.key,
+                created_ticket_url: resp.data.url,
+              },
+            },
+          };
+        }
+      } else if (sessionId) {
         resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/follow-up`, {
           session_id: sessionId,
           question,
@@ -1600,45 +1621,23 @@ export default function RegressionHome() {
           },
         });
       } else {
-        // No live session — still support create-ticket via dedicated endpoint /
-        // follow-up intercept by synthesizing a short-lived session path.
-        const createIntent = /\b(create|file|open|raise|make|creaet)\b.*\b(ticket|eng|jira)\b/i.test(question)
-          || /\b(create|file)\s+eng\b/i.test(question);
-        if (createIntent) {
-          resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/create-eng-ticket`, {
-            ticket_context: ticketContext,
-          });
-          if (resp.data?.success) {
-            resp = {
-              data: {
-                success: true,
-                analysis: resp.data.analysis || {
-                  follow_up_answer: `Created ${resp.data.key}: ${resp.data.url}`,
-                  created_ticket: resp.data.key,
-                  created_ticket_url: resp.data.url,
-                },
-              },
-            };
+        resp = await api.post(
+          `${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase`,
+          {
+            testcase_name: tab?.testName || "",
+            exception_summary: `Follow-up question on ${ticket}: ${question}\n\nPrevious analysis: ${prevResult.root_cause || "N/A"}`,
+            exception: "",
+            test_log_url: "",
+            jira_tickets: [ticket],
+            failure_stage: "follow_up",
+          },
+          { timeout: 600000 }
+        );
+        if (resp.data?.success) {
+          if (resp.data.session_id) {
+            setDeepAnalysisSessions(prev => ({ ...prev, [ticket]: resp.data.session_id }));
           }
-        } else {
-          resp = await api.post(
-            `${API_BASE_URL}/mcp/regression/cursor-ai/analyze-testcase`,
-            {
-              testcase_name: tab?.testName || "",
-              exception_summary: `Follow-up question on ${ticket}: ${question}\n\nPrevious analysis: ${prevResult.root_cause || "N/A"}`,
-              exception: "",
-              test_log_url: "",
-              jira_tickets: [ticket],
-              failure_stage: "follow_up",
-            },
-            { timeout: 600000 }
-          );
-          if (resp.data?.success) {
-            if (resp.data.session_id) {
-              setDeepAnalysisSessions(prev => ({ ...prev, [ticket]: resp.data.session_id }));
-            }
-            resp = { data: { success: true, analysis: resp.data.analysis } };
-          }
+          resp = { data: { success: true, analysis: resp.data.analysis } };
         }
       }
       if (resp.data?.success) {

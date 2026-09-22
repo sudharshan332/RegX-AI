@@ -14,6 +14,8 @@ class TestCreateEngTicketIntent(unittest.TestCase):
         phrases = [
             "create a eng ticket",
             "creaet a eng ticket",
+            "Creat Eng",
+            "creat eng",
             "Create ENG ticket",
             "file a jira ticket",
             "create ticket for this",
@@ -72,6 +74,47 @@ class TestCreateEngJiraTicket(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertIn("Jira token", result["error"])
+
+    def test_rewrite_agent_mcp_credential_errors(self):
+        blocked = (
+            "Ticket creation attempted but blocked: JIRA credentials are not configured. "
+            "~/.cursor/mcp.json has no MCP servers, the atlassian MCP server is in error state, "
+            "and JIRA_URL / JIRA_PERSONAL_TOKEN environment variables are unset."
+        )
+        with patch.object(tf, "mcp_token_status_for_user", return_value={
+            "atlassian": {"ok": True, "error": None},
+            "sourcegraph": {"ok": True, "error": None},
+            "cursor": {"ok": True, "error": None},
+        }):
+            rewritten = tf.rewrite_agent_jira_credential_errors(blocked, "alice")
+        self.assertIn("User Settings", rewritten)
+        self.assertIn("create ENG ticket", rewritten)
+        self.assertNotIn("JIRA_PERSONAL_TOKEN environment variables are unset", rewritten)
+
+        with patch.object(tf, "mcp_token_status_for_user", return_value={
+            "atlassian": {
+                "ok": False,
+                "error": "Atlassian Jira Personal Token missing in User Settings → API Keys.",
+            },
+            "sourcegraph": {"ok": False, "error": None},
+            "cursor": {"ok": False, "error": None},
+        }):
+            missing = tf.rewrite_agent_jira_credential_errors(blocked, "bob")
+        self.assertIn("User Settings", missing)
+        self.assertIn("MCP", missing)
+
+    def test_format_mcp_token_connection_error(self):
+        with patch.object(tf, "mcp_token_status_for_user", return_value={
+            "atlassian": {
+                "ok": False,
+                "error": "Atlassian Jira Personal Token missing in User Settings → API Keys.",
+            },
+            "sourcegraph": {"ok": True, "error": None},
+            "cursor": {"ok": True, "error": None},
+        }):
+            msg = tf.format_mcp_token_connection_error("jira", "alice")
+        self.assertIn("MCP connection issue", msg)
+        self.assertIn("User Settings", msg)
 
     def test_infers_fields_for_simple_create(self):
         draft = tf.build_eng_ticket_draft({

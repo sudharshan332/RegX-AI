@@ -1947,6 +1947,28 @@ export default function FailedTestcaseAnalysis() {
     handleFluxQuickFix(result);
   };
 
+  const isCreateEngChatIntent = (text) => {
+    const t = String(text || '')
+      .toLowerCase()
+      .replace(/\bcreat\b/g, 'create')
+      .replace(/\bcreaet\b/g, 'create')
+      .replace(/\bcrate\b/g, 'create')
+      .replace(/ticet|tiket|ticekt/g, 'ticket')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!t) return false;
+    if (/\b(open|show|view|get)\b.{0,24}\b[a-z][a-z0-9]+-\d+\b/.test(t)
+      && !/\b(create|file|raise|submit)\b/.test(t)) {
+      return false;
+    }
+    return (
+      /\b(create|file|raise|submit)\b.{0,40}\b(eng\s+)?(jira\s+)?ticket\b/.test(t)
+      || /\b(create|file|raise|submit)\b.{0,24}\beng\b/.test(t)
+      || /\bnew\s+(eng\s+)?(jira\s+)?ticket\b/.test(t)
+      || /\b(create|file)\s+eng\b/.test(t)
+    );
+  };
+
   const handleFollowUp = async () => {
     if (!followUpInput.trim()) return;
     const ctx = getDeepChatContext();
@@ -1959,23 +1981,59 @@ export default function FailedTestcaseAnalysis() {
     appendFollowUpMessage(ctx.testcaseId, { role: 'user', text: question, mode: selectedMode });
     setFollowUpInput('');
 
+    const ticketContext = {
+      testcase_name: ctx.testcaseName,
+      ...ctx.latestAnalysis,
+    };
+    const recoveryContext = {
+      testcase_name: ctx.testcaseName,
+      latest_analysis: ctx.latestAnalysis,
+      prior_history: followUpHistory.slice(-20),
+      agave_task_id: ctx.latestAnalysis.agave_task_id || '',
+      testcase_id: ctx.testcaseId || '',
+    };
+
     try {
-      const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/follow-up`, {
-        session_id: sessionId || `deep-ai-${ctx.testcaseId || 'anon'}`,
-        question,
-        mode: followUpMode,
-        ticket_context: {
-          testcase_name: ctx.testcaseName,
-          ...ctx.latestAnalysis,
-        },
-        recovery_context: {
-          testcase_name: ctx.testcaseName,
-          latest_analysis: ctx.latestAnalysis,
-          prior_history: followUpHistory.slice(-20),
-          agave_task_id: ctx.latestAnalysis.agave_task_id || '',
-          testcase_id: ctx.testcaseId || '',
-        },
-      });
+      let resp;
+      const pendingDraft = ctx.latestAnalysis?.pending_ticket_draft;
+      const confirmDraft = Boolean(pendingDraft) && /^(yes|y|confirm|ok|okay|proceed)\b/i.test(question.trim());
+      // Create ENG via dedicated User Settings Jira REST path — never agent MCP / jira_helper.
+      if (isCreateEngChatIntent(question) || confirmDraft) {
+        resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/create-eng-ticket`, {
+          ticket_context: {
+            ...ticketContext,
+            ...(confirmDraft && pendingDraft ? { ...pendingDraft, confirm: true } : {}),
+          },
+          require_confirm: false,
+          confirm: confirmDraft || undefined,
+        });
+        if (resp.data?.success) {
+          resp = {
+            data: {
+              success: true,
+              session_id: sessionId,
+              analysis: resp.data.analysis || {
+                follow_up_answer: resp.data.key
+                  ? `Created ${resp.data.key}: ${resp.data.url || ''}`
+                  : resp.data.draft
+                    ? 'ENG draft ready — confirm to create.'
+                    : 'ENG ticket request processed.',
+                created_ticket: resp.data.key,
+                created_ticket_url: resp.data.url,
+                pending_ticket_draft: resp.data.draft || resp.data.analysis?.pending_ticket_draft,
+              },
+            },
+          };
+        }
+      } else {
+        resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/follow-up`, {
+          session_id: sessionId || `deep-ai-${ctx.testcaseId || 'anon'}`,
+          question,
+          mode: followUpMode,
+          ticket_context: ticketContext,
+          recovery_context: recoveryContext,
+        });
+      }
       if (resp.data?.success) {
         const analysis = resp.data.analysis || {};
         appendFollowUpMessage(ctx.testcaseId, {
