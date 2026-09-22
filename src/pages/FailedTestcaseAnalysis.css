@@ -3028,6 +3028,27 @@ a.glean-snippet-title:hover {
   color: #4c1d95;
 }
 
+.rdm-mcp-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  color: #92400e;
+}
+
+.rdm-mcp-banner strong {
+  color: #b45309;
+}
+
+.triage-analysis-modal .rdm-mcp-banner {
+  margin-top: 8px;
+}
+
 .rdm-skill-actions {
   display: flex;
   flex-wrap: wrap;

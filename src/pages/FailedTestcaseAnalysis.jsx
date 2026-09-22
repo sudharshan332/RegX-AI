@@ -59,6 +59,78 @@ export function fluxCategoryLabel(category) {
 export const FLUX_MAX_WAIT_MS = 15 * 60 * 1000;
 export const FLUX_POLL_INTERVAL_MS = 10000;
 
+/** Safe React text: primitives only; objects/arrays must not be rendered as children. */
+export function textOrEmpty(value) {
+  if (value == null || value === false) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return '';
+}
+
+export function triageModalAnalysisText(modal) {
+  if (!modal) return '';
+  return (
+    textOrEmpty(modal.root_cause)
+    || textOrEmpty(modal.ai_summary)
+    || textOrEmpty(modal.analysis)
+  );
+}
+
+function mcpEntryIsDown(entry) {
+  if (entry == null) return false;
+  if (typeof entry === 'boolean') return entry === false;
+  if (typeof entry === 'string') {
+    const s = entry.trim().toLowerCase();
+    return s === 'unavailable' || s === 'down' || s === 'error' || s === 'failed' || s === 'false';
+  }
+  if (typeof entry === 'object') {
+    if (entry.ok === false) return true;
+    const status = String(entry.status || entry.state || '').toLowerCase();
+    return status === 'unavailable' || status === 'down' || status === 'error' || status === 'failed';
+  }
+  return false;
+}
+
+export function rdmMcpHealthBanners(mcpHealth) {
+  const health = mcpHealth || {};
+  const banners = [];
+  if (mcpEntryIsDown(health.glean)) {
+    banners.push({
+      key: 'glean',
+      title: 'Glean MCP unavailable',
+      detail: 'Ticket matching may be incomplete. Using pre-fetched search results if any.',
+    });
+  }
+  if (mcpEntryIsDown(health.sourcegraph)) {
+    banners.push({
+      key: 'sourcegraph',
+      title: 'Sourcegraph MCP unavailable',
+      detail: 'Skill files may not have loaded. Analysis used the RDM failure message and logs only.',
+    });
+  }
+  return banners;
+}
+
+export function rdmRecommendedActionLabel(skill) {
+  const action = textOrEmpty(skill?.recommended_action);
+  const ticket = textOrEmpty(skill?.jira_ticket) || textOrEmpty(skill?.jira_refs?.[0]);
+  const project = textOrEmpty(skill?.suggested_jira_project) || textOrEmpty(skill?.jira_create?.project) || 'DIAL';
+  if (action === 'link_existing') {
+    return ticket ? `Link ${ticket}` : 'Link existing ticket';
+  }
+  if (action === 'create_jira') {
+    return `Create ${project} ticket`;
+  }
+  if (action === 'disable_node_and_rerun') {
+    return 'Disable node and rerun';
+  }
+  if (action === 'rerun') {
+    return 'Rerun';
+  }
+  return action;
+}
+
 export function fluxHasRootCause(ticket) {
   return Boolean(String(ticket?.root_cause || '').trim());
 }
@@ -2198,14 +2270,14 @@ export default function FailedTestcaseAnalysis() {
         setRdmSkillResults(prev => ({ ...prev, [testId]: resp.data }));
         applyRdmAnalysisSideEffects(testId, resp.data);
       } else {
-        alert(resp.data?.error || 'AI Skill Analysis failed');
+        alert(resp.data?.error || 'AI RDM Failure Analysis failed');
       }
     } catch (err) {
       const data = err.response?.data || {};
       if (data.require_key_setup) {
         alert('Cursor API key required. Configure it in Settings.');
       } else {
-        alert('AI Skill Analysis failed: ' + (data.error || err.message));
+        alert('AI RDM Failure Analysis failed: ' + (data.error || err.message));
       }
     } finally {
       setRdmSkillLoading(prev => ({ ...prev, [testId]: false }));
@@ -3410,9 +3482,9 @@ export default function FailedTestcaseAnalysis() {
                     className="btn-rdm-skill-analyze"
                     disabled={rdmAiLoad || rdmSkillLoad}
                     onClick={() => handleRdmSkillAnalyze(result)}
-                    title="Triage via triage-rdm-deployment-failure skill (RDM logs, ENG/DIAL tickets)"
+                    title={`AI RDM Failure Analysis via triage-rdm-deployment-failure${rdm.rdm_link ? ` — ${rdm.rdm_link}` : ''}`}
                   >
-                    {rdmSkillLoad ? 'Skill analyzing…' : rdmSkill ? 'Re-run Skill Analysis' : 'AI Skill Analysis'}
+                    {rdmSkillLoad ? 'RDM analyzing…' : rdmSkill ? 'Re-run AI RDM Failure Analysis' : 'AI RDM Failure Analysis'}
                   </button>
                 </div>
                 {rdmAi && (
@@ -3455,25 +3527,40 @@ export default function FailedTestcaseAnalysis() {
                 {rdmSkill && (
                   <div className="rdm-skill-result">
                     <div className="rdm-skill-header">
-                      <span className="rdm-badge rdm-badge-skill">Skill</span>
+                      <span className="rdm-badge rdm-badge-skill">RDM skill</span>
                       <span className="rdm-skill-name">{rdmSkill.skill_used || 'triage-rdm-deployment-failure'}</span>
-                      {(rdmSkill.issue_category || rdmSkill.classification) && (
-                        <span className="rdm-skill-category">{rdmSkill.issue_category || rdmSkill.classification}</span>
+                      {(textOrEmpty(rdmSkill.issue_category) || textOrEmpty(rdmSkill.classification)) && (
+                        <span className="rdm-skill-category">{textOrEmpty(rdmSkill.issue_category) || textOrEmpty(rdmSkill.classification)}</span>
                       )}
                     </div>
-                    <div className="rdm-ai-summary">{rdmSkill.root_cause || rdmSkill.ai_summary}</div>
-                    {rdmSkill.recommended_action && (
+                    {rdmMcpHealthBanners(rdmSkill.mcp_health).map(banner => (
+                      <div key={banner.key} className="rdm-mcp-banner" role="status">
+                        <strong>{banner.title}</strong>
+                        <span>{banner.detail}</span>
+                      </div>
+                    ))}
+                    <div className="rdm-ai-summary">{textOrEmpty(rdmSkill.root_cause) || textOrEmpty(rdmSkill.ai_summary)}</div>
+                    {textOrEmpty(rdmSkill.recommended_action) && (
                       <div className="rdm-skill-action">
-                        Action: <code>{rdmSkill.recommended_action}</code>
+                        Decision: <strong>{rdmRecommendedActionLabel(rdmSkill)}</strong>
+                        {' '}
+                        <code>{textOrEmpty(rdmSkill.recommended_action)}</code>
                       </div>
                     )}
-                    {rdmSkill.jira_refs && rdmSkill.jira_refs.length > 0 && (
-                      <div className="rdm-ai-jiras">
-                        {rdmSkill.jira_refs.map(j => (
-                          <a key={j} href={`${JIRA_URL}${j}`} target="_blank" rel="noopener noreferrer" className="jira-link">{j}</a>
-                        ))}
-                      </div>
-                    )}
+                    {(() => {
+                      const skillTickets = [...new Set([
+                        ...(rdmSkill.jira_refs || []),
+                        ...(rdmSkill.enriched_tickets || []).map(t => t.ticket || t.key).filter(Boolean),
+                      ])];
+                      if (!skillTickets.length) return null;
+                      return (
+                        <div className="rdm-ai-jiras">
+                          {skillTickets.map(j => (
+                            <a key={j} href={`${JIRA_URL}${j}`} target="_blank" rel="noopener noreferrer" className="jira-link">{j}</a>
+                          ))}
+                        </div>
+                      );
+                    })()}
                     {rdmSkill.suggested_comment && (
                       <div className="rdm-ai-suggest">
                         <strong>Suggested:</strong> <code>{rdmSkill.suggested_comment}</code>
@@ -3505,14 +3592,25 @@ export default function FailedTestcaseAnalysis() {
                       <button
                         type="button"
                         className="btn-view-analysis"
-                        onClick={() => setTriageAnalysisModal({
-                          kind: 'rdm_skill',
-                          testcase_name: result.testcase_name,
-                          testcase_id: result.testcase_id,
-                          ...rdmSkill,
-                          jira_duplicates: rdmSkill.jira_duplicates || rdmSkill.jira_refs || [],
-                          best_matching_ticket: rdmSkill.jira_ticket,
-                        })}
+                        onClick={() => {
+                          const { analysis: nestedAnalysis, ...rdmSkillRest } = rdmSkill;
+                          setTriageAnalysisModal({
+                            kind: 'rdm_skill',
+                            testcase_name: result.testcase_name,
+                            testcase_id: result.testcase_id,
+                            ...rdmSkillRest,
+                            root_cause: textOrEmpty(rdmSkill.root_cause) || textOrEmpty(nestedAnalysis?.root_cause),
+                            ai_summary: textOrEmpty(rdmSkill.ai_summary),
+                            classification: textOrEmpty(rdmSkill.classification) || textOrEmpty(nestedAnalysis?.classification),
+                            suggested_fix: textOrEmpty(rdmSkill.suggested_fix) || textOrEmpty(nestedAnalysis?.suggested_fix),
+                            triage_report: textOrEmpty(rdmSkill.triage_report) || textOrEmpty(nestedAnalysis?.triage_report),
+                            jira_duplicates: rdmSkill.jira_duplicates || rdmSkill.jira_refs || [],
+                            best_matching_ticket: rdmSkill.jira_ticket,
+                            mcp_health: rdmSkill.mcp_health,
+                            glean_ok: rdmSkill.glean_ok,
+                            search_source: rdmSkill.search_source,
+                          });
+                        }}
                       >
                         View report
                       </button>
@@ -4739,7 +4837,7 @@ export default function FailedTestcaseAnalysis() {
             <div className="modal-header">
               <h3>
                 {triageAnalysisModal.kind === 'rdm_skill'
-                  ? 'AI Skill Analysis (RDM)'
+                  ? 'AI RDM Failure Analysis'
                   : triageAnalysisModal.kind === 'deep'
                   ? 'Deep AI Analysis'
                   : 'First Level AI Analysis'}
@@ -4767,8 +4865,8 @@ export default function FailedTestcaseAnalysis() {
 
               <div className="glean-section">
                 <h4>Failure Classification</h4>
-                <span className={`badge glean-issue-badge glean-issue-${((triageAnalysisModal.issue_type || triageAnalysisModal.classification) || '').replace(/\s+/g, '-').toLowerCase()}`}>
-                  {triageAnalysisModal.issue_type || triageAnalysisModal.classification || 'Unknown'}
+                <span className={`badge glean-issue-badge glean-issue-${(textOrEmpty(triageAnalysisModal.issue_type) || textOrEmpty(triageAnalysisModal.classification) || 'unknown').replace(/\s+/g, '-').toLowerCase()}`}>
+                  {textOrEmpty(triageAnalysisModal.issue_type) || textOrEmpty(triageAnalysisModal.classification) || 'Unknown'}
                 </span>
                 {triageAnalysisModal.triage_confidence != null && (
                   <span className="badge triage-conf-badge" title="Independent triage_confidence">
@@ -4780,8 +4878,8 @@ export default function FailedTestcaseAnalysis() {
                     intermittent_confidence {Number(triageAnalysisModal.intermittent_confidence).toFixed(2)}
                   </span>
                 )}
-                {triageAnalysisModal.skill_used && (
-                  <span className="deep-ai-skill">Skill: {triageAnalysisModal.skill_used}</span>
+                {textOrEmpty(triageAnalysisModal.skill_used) && (
+                  <span className="deep-ai-skill">Skill: {textOrEmpty(triageAnalysisModal.skill_used)}</span>
                 )}
                 {triageAnalysisModal.search_source && (
                   <span className="search-source-hint">
@@ -4789,6 +4887,12 @@ export default function FailedTestcaseAnalysis() {
                     {triageAnalysisModal.glean_ok === false ? ' (Glean unavailable, Jira fallback used)' : ''}
                   </span>
                 )}
+                {rdmMcpHealthBanners(triageAnalysisModal.mcp_health).map(banner => (
+                  <div key={banner.key} className="rdm-mcp-banner" role="status">
+                    <strong>{banner.title}</strong>
+                    <span>{banner.detail}</span>
+                  </div>
+                ))}
               </div>
 
               <div className="glean-section">
@@ -4802,31 +4906,30 @@ export default function FailedTestcaseAnalysis() {
                 <TgValidationBlock validation={triageAnalysisModal.tg_ticket_validation} />
               </div>
 
-              {(triageAnalysisModal.analysis || triageAnalysisModal.root_cause) && (
+              {triageModalAnalysisText(triageAnalysisModal) && (
                 <div className="glean-section">
                   <h4>{triageAnalysisModal.kind === 'deep' ? 'Root Cause' : 'Analysis'}</h4>
                   <div className="glean-ai-analysis">
-                    {triageAnalysisModal.analysis || triageAnalysisModal.root_cause}
+                    {triageModalAnalysisText(triageAnalysisModal)}
                   </div>
                 </div>
               )}
 
-              {triageAnalysisModal.recommended_action && (
+              {textOrEmpty(triageAnalysisModal.recommended_action) && (
                 <div className="glean-section">
                   <h4>Recommended Action</h4>
                   <div className="glean-ai-analysis">
-                    {typeof triageAnalysisModal.recommended_action === 'string' &&
-                    ['link_existing', 'create_jira', 'rerun', 'disable_node_and_rerun'].includes(triageAnalysisModal.recommended_action)
-                      ? `${triageAnalysisModal.recommended_action}${triageAnalysisModal.suggested_comment ? ` — ${triageAnalysisModal.suggested_comment}` : ''}`
-                      : triageAnalysisModal.recommended_action}
+                    {['link_existing', 'create_jira', 'rerun', 'disable_node_and_rerun'].includes(textOrEmpty(triageAnalysisModal.recommended_action))
+                      ? `${rdmRecommendedActionLabel(triageAnalysisModal)}${textOrEmpty(triageAnalysisModal.suggested_comment) ? ` — ${textOrEmpty(triageAnalysisModal.suggested_comment)}` : ''}`
+                      : textOrEmpty(triageAnalysisModal.recommended_action)}
                   </div>
                 </div>
               )}
 
-              {triageAnalysisModal.suggested_fix && (
+              {textOrEmpty(triageAnalysisModal.suggested_fix) && (
                 <div className="glean-section">
                   <h4>Suggested Fix</h4>
-                  <div className="glean-ai-analysis">{triageAnalysisModal.suggested_fix}</div>
+                  <div className="glean-ai-analysis">{textOrEmpty(triageAnalysisModal.suggested_fix)}</div>
                 </div>
               )}
 
@@ -4865,9 +4968,13 @@ export default function FailedTestcaseAnalysis() {
                 <div className="glean-section">
                   <h4>Jira Duplicates</h4>
                   <div className="glean-jira-list">
-                    {triageAnalysisModal.jira_duplicates.map((ticket) => (
-                      <a key={ticket} href={`${JIRA_URL}${ticket}`} target="_blank" rel="noopener noreferrer" className="jira-link">{ticket}</a>
-                    ))}
+                    {triageAnalysisModal.jira_duplicates.map((ticket, idx) => {
+                      const key = textOrEmpty(ticket?.ticket || ticket);
+                      if (!key) return null;
+                      return (
+                        <a key={`${key}-${idx}`} href={`${JIRA_URL}${key}`} target="_blank" rel="noopener noreferrer" className="jira-link">{key}</a>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -4919,10 +5026,10 @@ export default function FailedTestcaseAnalysis() {
                 </div>
               )}
 
-              {triageAnalysisModal.triage_report && (
+              {textOrEmpty(triageAnalysisModal.triage_report) && (
                 <div className="glean-section">
                   <h4>Skill Triage Report</h4>
-                  <div className="glean-ai-analysis triage-report-block">{triageAnalysisModal.triage_report}</div>
+                  <div className="glean-ai-analysis triage-report-block">{textOrEmpty(triageAnalysisModal.triage_report)}</div>
                 </div>
               )}
             </div>
