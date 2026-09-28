@@ -45,8 +45,10 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Deprecation CR requested via RegX.",
-      "cr_status": "pending_manual",
-      "commit_message": "Deprecated 1 test(s) from test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_robo_encryption.lst\n\nJira: ENT-124312\n\nRemove"
+      "cr_status": "created",
+      "commit_message": "Deprecated 1 test(s) from test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_robo_encryption.lst\n\nJira: ENT-124312\n\nRemove",
+      "gerrit_change_id": "603437",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603437"
     },
     {
       "test_name": "cdp.zookeeper.zk_preupgrade_checks.test_preupgradechecks.TestPreUpgradeChecks.test_preupgrade_checks",
@@ -68,7 +70,332 @@
         "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_upgrade_all.lst"
       ],
       "commit_message": "Deprecated 1 test(s) from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_upgrade_all.lst, test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_upgrade_all.lst, test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_upgrade_all.lst\n\nJira: ENG-123123"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___all_metadata_disk_replacement",
+      "deprecation_date": "2026-09-25T04:08:05.158126",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com",
+        "pranav.pathak@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+      ],
+      "commit_message": "Deprecated 5 test(s) from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst\n\nJira: ENG-987072\n\nDeprecate cassandra testcases",
+      "gerrit_change_id": "606185",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/606185"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___two_metadata_disk_replacement",
+      "deprecation_date": "2026-09-25T04:08:05.158126",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com",
+        "pranav.pathak@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+      ],
+      "commit_message": "Deprecated 5 test(s) from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst\n\nJira: ENG-987072\n\nDeprecate cassandra testcases",
+      "gerrit_change_id": "606185",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/606185"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___planned_metadata_disk_replacement_with_replica_ei",
+      "deprecation_date": "2026-09-25T04:08:05.158126",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com",
+        "pranav.pathak@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+      ],
+      "commit_message": "Deprecated 5 test(s) from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst\n\nJira: ENG-987072\n\nDeprecate cassandra testcases",
+      "gerrit_change_id": "606185",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/606185"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___all_ssd_removal_test",
+      "deprecation_date": "2026-09-25T04:08:05.158126",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com",
+        "pranav.pathak@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+      ],
+      "commit_message": "Deprecated 5 test(s) from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst\n\nJira: ENG-987072\n\nDeprecate cassandra testcases",
+      "gerrit_change_id": "606185",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/606185"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___all_ssd_serial_removal_test",
+      "deprecation_date": "2026-09-25T04:08:05.158126",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com",
+        "pranav.pathak@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+      ],
+      "commit_message": "Deprecated 5 test(s) from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst\n\nJira: ENG-987072\n\nDeprecate cassandra testcases",
+      "gerrit_change_id": "606185",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/606185"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___all_metadata_disk_replacement",
+      "deprecation_date": "2026-09-28T05:11:22.619800",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "pranav.pathak@nutanix.com",
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/kronos_master/CDP/FunctionalTest/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : pranav.pathak@nutanix.com, shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nDeprecated 5 test(s) and replace 2 testcases from cassandra from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___two_metadata_disk_replacement",
+      "deprecation_date": "2026-09-28T05:11:22.619800",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "pranav.pathak@nutanix.com",
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/kronos_master/CDP/FunctionalTest/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : pranav.pathak@nutanix.com, shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nDeprecated 5 test(s) and replace 2 testcases from cassandra from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___planned_metadata_disk_replacement_with_replica_ei",
+      "deprecation_date": "2026-09-28T05:11:22.619800",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "pranav.pathak@nutanix.com",
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/kronos_master/CDP/FunctionalTest/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : pranav.pathak@nutanix.com, shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nDeprecated 5 test(s) and replace 2 testcases from cassandra from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___all_ssd_removal_test",
+      "deprecation_date": "2026-09-28T05:11:22.619800",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "pranav.pathak@nutanix.com",
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/kronos_master/CDP/FunctionalTest/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : pranav.pathak@nutanix.com, shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nDeprecated 5 test(s) and replace 2 testcases from cassandra from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___all_ssd_serial_removal_test",
+      "deprecation_date": "2026-09-28T05:11:22.619800",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "pranav.pathak@nutanix.com",
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/milestones/7.5/cdp/onprem/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/7.3.99/CDP/Regression_team_owned_lst/Regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/janus_master/CDP/REGRESSION/regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/7.6/CDP/REGRESSION/regression_cdp_nutest_official_cassandra.lst",
+        "test_sets/milestones/kronos_master/CDP/FunctionalTest/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : pranav.pathak@nutanix.com, shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nDeprecated 5 test(s) and replace 2 testcases from cassandra from test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_cassandra.lst"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___all_metadata_disk_replacement",
+      "deprecation_date": "2026-09-28T05:53:44.963806",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/cdp/regression_cdp_intransit_tests.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "swapnil.wankhede@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/cdp/regression_cdp_intransit_tests.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nRemove the testcase from the intransit files"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___two_metadata_disk_replacement",
+      "deprecation_date": "2026-09-28T05:53:44.963806",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/cdp/regression_cdp_intransit_tests.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "swapnil.wankhede@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/cdp/regression_cdp_intransit_tests.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nRemove the testcase from the intransit files"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___planned_metadata_disk_replacement_with_replica_ei",
+      "deprecation_date": "2026-09-28T05:53:44.963806",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/cdp/regression_cdp_intransit_tests.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "swapnil.wankhede@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/cdp/regression_cdp_intransit_tests.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nRemove the testcase from the intransit files"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___all_ssd_removal_test",
+      "deprecation_date": "2026-09-28T05:53:44.963806",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/cdp/regression_cdp_intransit_tests.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "swapnil.wankhede@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/cdp/regression_cdp_intransit_tests.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nRemove the testcase from the intransit files"
+    },
+    {
+      "test_name": "cassandra_medusa.config_change_tests.io_integrity.test_metadatadisk_replacement_with_io_integrity.MetadataDiskreplacementWithIOIntegrityTest.test_metadata_disk_replacement_with_io_integrity___all_ssd_serial_removal_test",
+      "deprecation_date": "2026-09-28T05:53:44.963806",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/cdp/regression_cdp_intransit_tests.lst",
+      "jira_tickets": [
+        "ENG-987072"
+      ],
+      "reviewers": [
+        "swapnil.wankhede@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "pending_manual",
+      "lst_files": [
+        "test_sets/cdp/regression_cdp_intransit_tests.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nRemove the testcase from the intransit files"
     }
   ],
-  "updated_at": "2026-09-22T07:23:27.866868"
+  "updated_at": "2026-09-28T05:53:44.964857"
 }

@@ -542,17 +542,27 @@ def evaluate_sliding_eligibility(
     ordered_runs: Sequence[Dict[str, Any]],
     ticket_bug_types: Optional[Dict[str, Optional[str]]] = None,
     resolve_issuetype: Optional[Callable[[str], Optional[str]]] = None,
+    min_passes: int = 1,
 ) -> Tuple[bool, Optional[str], int]:
     """Evaluate handover eligibility for one testcase across ordered runs.
 
     ``ordered_runs`` must be newest-first. Each item:
       {"status": "Succeeded"|..., "jira_tickets": [...], "bug_types": [...]?}
 
-    Eligible if two Succeeded anchors exist with only Product-Bug-only failures between them.
+    Eligible if at least ``min_passes`` Succeeded runs exist (default 1).
+    When ``min_passes`` is 2 or more, two Succeeded anchors must exist with
+    only Product-Bug-only failures between them.
 
     Returns (eligible, reason, passed_count) where reason is
-    ``consecutive_pass``, ``product_bug_gap``, or None.
+    ``single_pass``, ``consecutive_pass``, ``product_bug_gap``, or None.
     """
+    try:
+        min_passes = int(min_passes)
+    except (TypeError, ValueError):
+        min_passes = 1
+    if min_passes < 1:
+        min_passes = 1
+
     seq: List[Dict[str, Any]] = []
     for run in ordered_runs or []:
         if not isinstance(run, dict):
@@ -571,6 +581,12 @@ def evaluate_sliding_eligibility(
 
     passed_count = sum(1 for r in seq if r["status"] == "Succeeded")
     n = len(seq)
+    if min_passes <= 1:
+        if passed_count >= 1:
+            reason = "consecutive_pass" if passed_count >= 2 else "single_pass"
+            return True, reason, passed_count
+        return False, None, passed_count
+
     if n < 2:
         return False, None, passed_count
 

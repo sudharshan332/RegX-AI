@@ -28,7 +28,7 @@ function isPassedTest(tc) {
   if (!tc) return false;
   const passCount = tc.passed_count || 0;
   const status = (tc.status || "").toLowerCase();
-  return status === "succeeded" || passCount >= 2;
+  return status === "succeeded" || passCount >= 1;
 }
 
 const btnBase = { fontSize: "13px", fontWeight: "500", border: "none", borderRadius: "8px", cursor: "pointer", transition: "all 0.15s ease", boxSizing: "border-box" };
@@ -129,13 +129,6 @@ function recordLstFiles(r) {
   return files;
 }
 
-function lstFileBasename(path) {
-  const s = String(path || "").trim();
-  if (!s) return "";
-  const parts = s.split(/[/\\]/).filter(Boolean);
-  return parts[parts.length - 1] || s;
-}
-
 function uniqueTickets(...lists) {
   const out = [];
   const seen = new Set();
@@ -160,20 +153,6 @@ function TicketLinks({ tickets }) {
       ))}
     </div>
   );
-}
-
-function SavedRecordTickets({ record }) {
-  const tickets = uniqueTickets(record.handover_tickets, record.jira_tickets, record.tickets);
-  return <TicketLinks tickets={tickets} />;
-}
-
-function recordExtraSections(r) {
-  return [
-    ["Notes", r?.notes],
-    ["Commit message", r?.commit_message],
-    ["CR subject", r?.cr_subject],
-    ["CR description", r?.cr_description],
-  ].filter(([, value]) => String(value || "").trim());
 }
 
 function formatLstAddSummary(toAdd, alreadyPresent) {
@@ -309,33 +288,100 @@ function ReviewerAutocomplete({ value, onChange, placeholder, disabled, style })
   );
 }
 
-function formatDateIST(isoDateStr) {
-  if (!isoDateStr) return "-";
+function formatRecordWhen(isoDateStr) {
+  if (!isoDateStr) return { date: "-", time: "-" };
   try {
-    // Backend stores dates in UTC without timezone indicator (e.g., "2026-01-30T06:14:00.000000")
-    // We need to explicitly treat it as UTC by appending 'Z' if it doesn't have a timezone
-    let dateStr = isoDateStr.trim();
-    // Check if it already has timezone info (Z, +, or - after the time part)
-    const hasTimezone = dateStr.endsWith('Z') || dateStr.match(/[+-]\d{2}:\d{2}$/);
-    if (!hasTimezone && dateStr.includes('T')) {
-      // ISO format without timezone - treat as UTC
-      dateStr = dateStr + 'Z';
-    }
+    let dateStr = String(isoDateStr).trim();
+    const hasTimezone = dateStr.endsWith("Z") || dateStr.match(/[+-]\d{2}:\d{2}$/);
+    if (!hasTimezone && dateStr.includes("T")) dateStr += "Z";
     const d = new Date(dateStr);
-    if (Number.isNaN(d.getTime())) return "-";
-    // Format as "30 Jan, 11:44 AM" in IST (UTC+5:30)
-    const options = {
-      timeZone: "Asia/Kolkata",
-      day: "numeric",
-      month: "short",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: true
+    if (Number.isNaN(d.getTime())) return { date: "-", time: "-" };
+    return {
+      date: d.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", year: "numeric" }),
+      time: d.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: true }),
     };
-    return d.toLocaleString("en-IN", options);
   } catch {
-    return "-";
+    return { date: "-", time: "-" };
   }
+}
+
+function recordComponent(r) {
+  const files = recordLstFiles(r);
+  for (let i = 0; i < files.length; i += 1) {
+    const match = String(files[i]).match(/milestones\/[^/]+\/([^/]+)/i);
+    if (match && match[1]) return match[1];
+  }
+  const seg = String(r?.test_name || "").trim().split(".")[0];
+  return seg || "";
+}
+
+function groupSavedRecords(rows) {
+  const groups = new Map();
+  (rows || []).forEach((r) => {
+    const cr = String(r.gerrit_change_id || "").trim();
+    const lst = recordLstFiles(r).slice().sort().join("|");
+    const key = cr
+      ? `${r._kind}\0cr\0${cr}`
+      : `${r._kind}\0batch\0${r._date || ""}\0${r.branch || ""}\0${lst}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        kind: r._kind,
+        cr,
+        crUrl: r.cr_url || "",
+        date: r._date || "",
+        branch: r.branch || "",
+        rows: [],
+      });
+    }
+    const group = groups.get(key);
+    group.rows.push(r);
+    if ((r._date || "") > (group.date || "")) group.date = r._date;
+    if (!group.crUrl && r.cr_url) group.crUrl = r.cr_url;
+    if (!group.branch && r.branch) group.branch = r.branch;
+  });
+  return Array.from(groups.values()).map((group) => {
+    const components = [];
+    const seenComponents = new Set();
+    const byWhom = [];
+    const seenWhom = new Set();
+    const lstFiles = [];
+    const tickets = [];
+    const reviewers = [];
+    group.rows.forEach((r) => {
+      const component = recordComponent(r);
+      if (component && !seenComponents.has(component)) {
+        seenComponents.add(component);
+        components.push(component);
+      }
+      const who = String(r.by_whom || "").trim();
+      if (who && !seenWhom.has(who)) {
+        seenWhom.add(who);
+        byWhom.push(who);
+      }
+      recordLstFiles(r).forEach((f) => {
+        if (!lstFiles.includes(f)) lstFiles.push(f);
+      });
+      uniqueTickets(r.handover_tickets, r.jira_tickets, r.tickets, r.bug_tickets).forEach((t) => {
+        if (!tickets.includes(t)) tickets.push(t);
+      });
+      (Array.isArray(r.reviewers) ? r.reviewers : []).forEach((rev) => {
+        const value = String(rev || "").trim();
+        if (value && !reviewers.includes(value)) reviewers.push(value);
+      });
+    });
+    return {
+      ...group,
+      components,
+      byWhom,
+      lstFiles,
+      tickets,
+      reviewers,
+      tests: group.rows.map((r) => r.test_name).filter(Boolean),
+      status: group.rows.map((r) => r.cr_status).find(Boolean) || "",
+      canDelete: group.rows.some((r) => r.can_delete),
+    };
+  }).sort((a, b) => String(b.date).localeCompare(String(a.date)));
 }
 
 export default function Handover() {
@@ -384,7 +430,7 @@ export default function Handover() {
 
   // Deprecation tab
   const [activeTab, setActiveTab] = useState("handover");
-  const [deprecationSearchQueries, setDeprecationSearchQueries] = useState([""]);
+  const [deprecationInput, setDeprecationInput] = useState("");
   const [deprecationResults, setDeprecationResults] = useState(null);
   const [loadingDeprecationSearch, setLoadingDeprecationSearch] = useState(false);
   const [deprecationLstFile, setDeprecationLstFile] = useState("");
@@ -398,8 +444,12 @@ export default function Handover() {
   const [deprecationShowBranchDropdown, setDeprecationShowBranchDropdown] = useState(false);
   const deprecationBranchSuggestTimerRef = useRef(null);
   const deprecationBranchContainerRef = useRef(null);
-  const [deprecationCommitMessage, setDeprecationCommitMessage] = useState("");
+  const deprecationCrBranchContainerRef = useRef(null);
   const [deprecationTicketsExtra, setDeprecationTicketsExtra] = useState("");
+  const [deprecationCommitNote, setDeprecationCommitNote] = useState("");
+  const [deprecationCrPreviewOpen, setDeprecationCrPreviewOpen] = useState(false);
+  const [deprecationCrSubject, setDeprecationCrSubject] = useState("Testcase Deprecation");
+  const [deprecationCrDescription, setDeprecationCrDescription] = useState("");
   const [deprecationReviewers, setDeprecationReviewers] = useState("");
   const [deprecationValidation, setDeprecationValidation] = useState(null);
   const [deprecationCrResult, setDeprecationCrResult] = useState(null);
@@ -466,6 +516,29 @@ export default function Handover() {
       `Target release          : ${targetRelease}\n` +
       `Code review URL         : `
     );
+  };
+
+  const buildDefaultDeprecationCrDescription = () => {
+    const reviewersLine = (deprecationReviewers || "").split(",").map((r) => r.trim()).filter(Boolean).join(", ");
+    const ticketsLine = (deprecationTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean).join(", ");
+    const targetRelease = (deprecationLstBranch || "master").trim() || "master";
+    return (
+      `Reviewers               : ${reviewersLine}\n` +
+      `Tickets resolved        : ${ticketsLine}\n` +
+      "Tests run               : \n" +
+      `Target release          : ${targetRelease}\n` +
+      `Code review URL         : `
+    );
+  };
+
+  const composedDeprecationCommit = () => {
+    const subject = (deprecationCrSubject || "Testcase Deprecation").trim() || "Testcase Deprecation";
+    const note = (deprecationCommitNote || "").trim();
+    let description = (deprecationCrDescription || "").trim() || buildDefaultDeprecationCrDescription();
+    if (note && !description.includes(note)) {
+      description = `${description}\n\n${note}`;
+    }
+    return { subject, description, commitMsg: `${subject}\n\n${description}` };
   };
 
   const handleSuggestLstFile = async ({ silent = false } = {}) => {
@@ -553,7 +626,9 @@ export default function Handover() {
       if (!inHandoverBranch && !inFetchBranch) {
         setHandoverShowBranchDropdown(false);
       }
-      if (deprecationBranchContainerRef.current && !deprecationBranchContainerRef.current.contains(e.target)) {
+      const inDepFetchBranch = deprecationBranchContainerRef.current?.contains(e.target);
+      const inDepCrBranch = deprecationCrBranchContainerRef.current?.contains(e.target);
+      if (!inDepFetchBranch && !inDepCrBranch) {
         setDeprecationShowBranchDropdown(false);
       }
     };
@@ -591,15 +666,13 @@ export default function Handover() {
 
   const getDeprecationSearchTestNames = () => {
     const names = [];
-    (deprecationSearchQueries || []).forEach((q) => {
-      String(q || "")
-        .split(/[,\n]+/)
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .forEach((n) => {
-          if (!names.includes(n)) names.push(n);
-        });
-    });
+    String(deprecationInput || "")
+      .split(/[,\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((n) => {
+        if (!names.includes(n)) names.push(n);
+      });
     return names;
   };
 
@@ -662,7 +735,7 @@ export default function Handover() {
     }, 250);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deprecationLstBranch, deprecationSearchQueries, deprecationResults]);
+  }, [deprecationLstBranch, deprecationInput, deprecationResults]);
 
   const openCrPreview = () => {
     const selectedTests = getSelectedHandoverTests();
@@ -687,6 +760,30 @@ export default function Handover() {
       setHandoverCrDescription(buildDefaultCrDescription());
     }
     setHandoverCrPreviewOpen(true);
+  };
+
+  const openDeprecationCrPreview = () => {
+    if (!getDeprecationTargetTests().length) {
+      alert("Search by test name first.");
+      return;
+    }
+    if (!(deprecationLstBranch || "").trim()) {
+      alert("Please enter Branch before previewing CR.");
+      return;
+    }
+    if (!(deprecationTicketsExtra || "").trim()) {
+      alert("Please enter Jira ticket(s) before previewing CR.");
+      return;
+    }
+    if (!(deprecationReviewers || "").trim()) {
+      alert("Please add at least one reviewer before previewing CR.");
+      return;
+    }
+    setDeprecationCrSubject((prev) => prev || "Testcase Deprecation");
+    if (!(deprecationCrDescription || "").trim()) {
+      setDeprecationCrDescription(buildDefaultDeprecationCrDescription());
+    }
+    setDeprecationCrPreviewOpen(true);
   };
 
 
@@ -735,7 +832,7 @@ export default function Handover() {
     try {
       const res = await api.post(
         JITA_ANALYSIS_API,
-        { input, branch, min_passes_for_success: 2, use_sliding_eligibility: true },
+        { input, branch, min_passes_for_success: 1, use_sliding_eligibility: true },
         { timeout: 120000, headers: { "Content-Type": "application/json" } }
       );
       if (res.data?.error) {
@@ -775,7 +872,7 @@ export default function Handover() {
         setHandoverTestTickets(ticketsMap);
         setHandoverBugTypeMap(bugTypeMap);
         
-        // Auto-select eligible tests (2 consecutive passes, or Product Bug gaps between passes)
+        // Auto-select eligible tests (at least 1 pass, or Product Bug gaps between passes)
         const autoSelected = new Set();
         res.data.test_cases.forEach((tc) => {
           const status = (tc.status || "").toLowerCase();
@@ -1097,11 +1194,14 @@ export default function Handover() {
   };
 
   const handleDeprecationSearch = async () => {
-    const parts = (deprecationSearchQueries || [""])
-      .map((s) => (s || "").trim())
-      .filter(Boolean);
+    const parts = getDeprecationSearchTestNames();
     if (!parts.length) {
-      alert("Enter one or more test names to search.");
+      alert("Enter testcase name(s), separated by comma or new line.");
+      return;
+    }
+    const branch = (deprecationLstBranch || "").trim();
+    if (!branch) {
+      alert("Enter Branch so Sourcegraph can list LST files on that revision.");
       return;
     }
     setLoadingDeprecationSearch(true);
@@ -1113,9 +1213,12 @@ export default function Handover() {
     setDeprecationValidation(null);
     setDeprecationCrResult(null);
     setDeprecationManualLstInstructions(null);
+    setDeprecationCrPreviewOpen(false);
+    setDeprecationCrSubject("Testcase Deprecation");
+    setDeprecationCrDescription("");
+    setDeprecationCommitNote("");
     try {
-      const branch = (deprecationLstBranch || "").trim();
-      const res = await api.post(DEPRECATION_SEARCH_API, { q: parts, branch: branch || undefined });
+      const res = await api.post(DEPRECATION_SEARCH_API, { q: parts, branch });
       setDeprecationResults(res.data);
     } catch (err) {
       setDeprecationResults({ error: err.response?.data?.error || "Search failed.", results: [], count: 0 });
@@ -1143,41 +1246,44 @@ export default function Handover() {
     }
   };
 
-  const handleRecordsDelete = async (kind, r) => {
-    const testName = (r.test_name || "").trim();
-    const date = kind === "deprecation" ? (r.deprecation_date || "") : (r.handover_date || "");
-    if (!testName || !date) return;
-    if (!window.confirm(`Delete this ${kind} record for "${testName}"?`)) return;
-    try {
-      const res = await api.post(
-        kind === "deprecation" ? DEPRECATION_RECORD_DELETE_API : HANDOVER_RECORD_DELETE_API,
-        kind === "deprecation"
-          ? { test_name: testName, deprecation_date: date, lst_file: r.lst_file || "" }
-          : { test_name: testName, handover_date: date, lst_file: r.lst_file || "" },
-        { headers: getAuthHeaders() }
-      );
-      if (!res.data?.success) {
-        alert(res.data?.message || "No matching record found.");
-        return;
+  const handleRecordsDeleteGroup = async (group) => {
+    const label = group.cr ? `CR ${group.cr}` : "this saved batch";
+    if (!window.confirm(`Delete ${label} (${group.rows.length} test(s))?`)) return;
+    const removedKeys = new Set();
+    let blocked = false;
+    for (const r of group.rows) {
+      if (!r.can_delete) {
+        blocked = true;
+        continue;
       }
-      const key = getSavedRecordKey(kind, r);
-      if (kind === "deprecation") {
-        setRecordsDeprecation((prev) => prev.filter((x) => getSavedRecordKey("deprecation", x) !== key));
-      } else {
-        setRecordsHandover((prev) => prev.filter((x) => getSavedRecordKey("handover", x) !== key));
+      const testName = (r.test_name || "").trim();
+      const date = group.kind === "deprecation" ? (r.deprecation_date || "") : (r.handover_date || "");
+      if (!testName || !date) continue;
+      try {
+        const res = await api.post(
+          group.kind === "deprecation" ? DEPRECATION_RECORD_DELETE_API : HANDOVER_RECORD_DELETE_API,
+          group.kind === "deprecation"
+            ? { test_name: testName, deprecation_date: date, lst_file: r.lst_file || "" }
+            : { test_name: testName, handover_date: date, lst_file: r.lst_file || "" },
+          { headers: getAuthHeaders() }
+        );
+        if (res.data?.success) removedKeys.add(getSavedRecordKey(group.kind, r));
+      } catch (err) {
+        if (err.response?.status === 403) blocked = true;
       }
+    }
+    if (removedKeys.size) {
+      const drop = (prev) => prev.filter((x) => !removedKeys.has(getSavedRecordKey(group.kind, x)));
+      if (group.kind === "deprecation") setRecordsDeprecation(drop);
+      else setRecordsHandover(drop);
       setRecordsExpanded((prev) => {
         const next = new Set(prev);
-        next.delete(key);
+        next.delete(group.key);
         return next;
       });
-    } catch (err) {
-      if (err.response?.status === 403) {
-        alert(err.response?.data?.error || "You can only delete records you created.");
-        return;
-      }
-      alert(err.response?.data?.error || "Failed to delete record.");
     }
+    if (blocked) alert("Some tests were kept because you can only delete records you created.");
+    else if (!removedKeys.size) alert("No matching records were deleted.");
   };
 
   const toggleRecordsExpanded = (key) => {
@@ -1213,6 +1319,11 @@ export default function Handover() {
     rows.sort((a, b) => String(b._date).localeCompare(String(a._date)));
     return rows;
   }, [recordsHandover, recordsDeprecation]);
+
+  const groupedSavedRecords = useMemo(
+    () => groupSavedRecords(visibleSavedRecords),
+    [visibleSavedRecords]
+  );
 
   const canEditAnyVisible = visibleSavedRecords.some((r) => r.can_delete);
 
@@ -1287,12 +1398,20 @@ export default function Handover() {
       alert("Select at least one LST file.");
       return;
     }
+    const ticketsList = (deprecationTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean);
+    const reviewersList = (deprecationReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
+    if (!ticketsList.length) {
+      alert("Please enter Jira ticket(s) before saving.");
+      return;
+    }
+    if (!reviewersList.length) {
+      alert("Please add reviewer(s) before saving.");
+      return;
+    }
     setDeprecationCreateLstLoading(true);
     setDeprecationManualLstInstructions(null);
     setDeprecationCrResult(null);
-    const ticketsList = (deprecationTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean);
-    const reviewersList = (deprecationReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
-    const commitMsg = "Deprecated " + test_names.length + " test(s) from " + lst_files.join(", ") + (ticketsList.length ? "\n\nJira: " + ticketsList.join(", ") : "") + (deprecationCommitMessage.trim() ? "\n\n" + deprecationCommitMessage.trim() : "");
+    const { subject, description, commitMsg } = composedDeprecationCommit();
     const notes =
       "Deprecation saved (no Gerrit push). " +
       "Branch: " + branch + "; LST: " + lst_files.join(", ") +
@@ -1307,6 +1426,8 @@ export default function Handover() {
           lst_files,
           test_names,
           commit_message: commitMsg,
+          cr_subject: subject,
+          cr_description: description,
           jira_tickets: ticketsList.length ? ticketsList : undefined,
           reviewers: reviewersList.length ? reviewersList : undefined,
           notes,
@@ -1348,12 +1469,20 @@ export default function Handover() {
       alert("Select at least one LST file.");
       return;
     }
+    const ticketsList = (deprecationTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean);
+    const reviewersList = (deprecationReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
+    if (!ticketsList.length) {
+      alert("Please enter Jira ticket(s) before creating CR.");
+      return;
+    }
+    if (!reviewersList.length) {
+      alert("Please add reviewer(s) before creating CR.");
+      return;
+    }
     setDeprecationCreateLstLoading(true);
     setDeprecationManualLstInstructions(null);
     setDeprecationCrResult(null);
-    const ticketsList = (deprecationTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean);
-    const reviewersList = (deprecationReviewers || "").split(",").map((r) => r.trim()).filter(Boolean);
-    const commitMsg = "Deprecated " + test_names.length + " test(s) from " + lst_files.join(", ") + (ticketsList.length ? "\n\nJira: " + ticketsList.join(", ") : "") + (deprecationCommitMessage.trim() ? "\n\n" + deprecationCommitMessage.trim() : "");
+    const { subject, description, commitMsg } = composedDeprecationCommit();
     try {
       // Persist a record first, then create CR
       try {
@@ -1365,6 +1494,8 @@ export default function Handover() {
             lst_files,
             test_names,
             commit_message: commitMsg,
+            cr_subject: subject,
+            cr_description: description,
             jira_tickets: ticketsList.length ? ticketsList : undefined,
             reviewers: reviewersList.length ? reviewersList : undefined,
             notes: "Deprecation CR requested via RegX.",
@@ -1384,6 +1515,8 @@ export default function Handover() {
           lst_files,
           test_names,
           commit_message: commitMsg,
+          cr_subject: subject,
+          cr_description: description,
           jira_tickets: ticketsList.length ? ticketsList : undefined,
           reviewers: reviewersList.length ? reviewersList : undefined,
           manual_only: false,
@@ -2608,38 +2741,67 @@ export default function Handover() {
       {activeTab === "deprecation" && (
         <div>
           <p className="ho-subtitle ho-intro">
-            Search by test name(s), then enter Branch so Sourcegraph can list LST files on that revision. Select one or more files to remove the test from. Saved rows live under the Records tab.
+            Paste testcase name(s) (comma or newline separated). Enter Branch so LST files on that branch are used.
           </p>
+
           <div className="ho-card">
-            <div className="ho-card__title">Find test cases</div>
-            {(deprecationSearchQueries || [""]).map((query, idx) => (
-              <div key={idx} style={{ display: "flex", gap: "8px", alignItems: "center", marginBottom: "8px", flexWrap: "wrap" }}>
+            <div className="ho-card__title">Test cases</div>
+            <textarea
+              value={deprecationInput}
+              onChange={(e) => setDeprecationInput(e.target.value)}
+              rows={4}
+              placeholder="Testcase name(s)"
+              style={{ width: "100%", padding: "10px 12px", fontSize: "14px", border: "1px solid #ddd", borderRadius: "4px", boxSizing: "border-box", fontFamily: "inherit", resize: "vertical" }}
+            />
+            <div style={{ display: "flex", gap: "12px", marginTop: "12px", flexWrap: "wrap", alignItems: "flex-end", justifyContent: "space-between" }}>
+              <div ref={deprecationBranchContainerRef} style={{ flex: "1 1 260px", maxWidth: "360px", position: "relative" }}>
+                <label style={{ display: "block", marginBottom: "4px", fontSize: "13px", fontWeight: "500" }}>
+                  Branch <span style={{ color: "#dc2626" }}>*</span>
+                  <span style={{ fontWeight: "400", color: "#64748b" }}> (required for test names)</span>
+                </label>
                 <input
                   type="text"
-                  value={query}
+                  value={deprecationLstBranch}
                   onChange={(e) => {
-                    const next = [...(deprecationSearchQueries || [""])];
-                    next[idx] = e.target.value;
-                    setDeprecationSearchQueries(next);
+                    setDeprecationLstBranch(e.target.value);
+                    setDeprecationLstFiles([]);
+                    setDeprecationValidation(null);
+                    setDeprecationCrResult(null);
                   }}
-                  placeholder={idx === 0 ? "Test name(s), e.g. test_a, test_b" : "Another test name(s)"}
-                  style={{ flex: 1, minWidth: "280px", padding: "8px 12px", fontSize: "14px", border: "1px solid #ddd", borderRadius: "4px", boxSizing: "border-box" }}
-                  onKeyPress={(e) => e.key === "Enter" && handleDeprecationSearch()}
+                  onFocus={() => { if (deprecationBranchSuggestions.length > 0) setDeprecationShowBranchDropdown(true); }}
+                  placeholder="master"
+                  disabled={loadingDeprecationSearch}
+                  style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box", backgroundColor: loadingDeprecationSearch ? "#f3f4f6" : "white" }}
                 />
-                {idx === (deprecationSearchQueries || [""]).length - 1 ? (
-                  <button type="button" onClick={() => setDeprecationSearchQueries((prev) => [...(prev || [""]), ""])} style={{ padding: "8px 14px", background: "#0d9488", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}>+</button>
-                ) : (deprecationSearchQueries || [""]).length > 1 ? (
-                  <button type="button" onClick={() => setDeprecationSearchQueries((prev) => prev.filter((_, i) => i !== idx))} style={{ padding: "6px 10px", background: "#f87171", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}>×</button>
-                ) : null}
+                {deprecationShowBranchDropdown && !loadingDeprecationSearch && (
+                  <div style={{ position: "absolute", top: "100%", left: 0, right: 0, maxHeight: "220px", overflowY: "auto", background: "white", border: "1px solid #d1d5db", borderRadius: "4px", boxShadow: "0 4px 6px rgba(0,0,0,0.1)", zIndex: 1000, marginTop: "2px" }}>
+                    {deprecationBranchLoading ? (
+                      <div style={{ padding: "8px 12px", fontSize: "13px", color: "#64748b" }}>Searching branches...</div>
+                    ) : deprecationBranchSuggestions.length === 0 ? (
+                      <div style={{ padding: "8px 12px", fontSize: "13px", color: "#64748b" }}>No branch suggestions</div>
+                    ) : (
+                      deprecationBranchSuggestions.map((b) => (
+                        <button
+                          key={`dep-fetch-${b}`}
+                          type="button"
+                          onClick={() => {
+                            setDeprecationLstBranch(b);
+                            setDeprecationShowBranchDropdown(false);
+                            setDeprecationLstFiles([]);
+                            setDeprecationValidation(null);
+                            setDeprecationCrResult(null);
+                          }}
+                          style={{ width: "100%", textAlign: "left", padding: "8px 12px", fontSize: "13px", cursor: "pointer", border: "none", borderBottom: "1px solid #f1f5f9", background: b === deprecationLstBranch ? "#e0f2fe" : "white" }}
+                        >
+                          {b}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
-            ))}
-            <div style={{ display: "flex", gap: "12px", marginTop: "12px", flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <button
-                onClick={handleDeprecationSearch}
-                disabled={loadingDeprecationSearch}
-                style={{ padding: "8px 16px", background: loadingDeprecationSearch ? "#94a3b8" : "#0d9488", color: "white", border: "none", borderRadius: "4px", cursor: loadingDeprecationSearch ? "not-allowed" : "pointer", fontWeight: "500" }}
-              >
-                {loadingDeprecationSearch ? "Searching..." : "Search"}
+              <button onClick={() => handleDeprecationSearch()} disabled={loadingDeprecationSearch} style={loadingDeprecationSearch ? { ...btnValidateDisabled } : { ...btnSecondary }}>
+                {loadingDeprecationSearch ? "Loading..." : "Fetch"}
               </button>
             </div>
           </div>
@@ -2647,7 +2809,7 @@ export default function Handover() {
           {deprecationResults && (
             <div>
               {deprecationResults.error ? (
-                <div style={{ color: "#dc3545", padding: "8px", fontSize: "14px" }}>{deprecationResults.error}</div>
+                <div style={{ color: "#dc3545", padding: "12px", background: "#fef2f2", borderRadius: "8px", marginTop: "20px" }}>{deprecationResults.error}</div>
               ) : (
                 <>
                   {deprecationResults && !deprecationResults.error && (() => {
@@ -2656,27 +2818,33 @@ export default function Handover() {
                     const resolvedDeprecationLstFiles = getResolvedDeprecationLstFiles();
                     const hasDeprecationLst = resolvedDeprecationLstFiles.length > 0;
                     const hasDeprecationBranch = (deprecationLstBranch || "").trim() !== "";
-                    const depActionsDisabled = deprecationCreateLstLoading || selectedCount === 0 || !hasDeprecationLst || !hasDeprecationBranch;
-                    const depValidateDisabled = deprecationValidating || selectedCount === 0 || !hasDeprecationLst || !hasDeprecationBranch;
+                    const hasDeprecationTickets = (deprecationTicketsExtra || "").trim() !== "";
+                    const hasLstValidation = deprecationValidation
+                      && !deprecationValidation.error
+                      && Array.isArray(deprecationValidation.files)
+                      && deprecationValidation.files.length > 0
+                      && deprecationValidation.files.every((f) => !f.error);
+                    const depActionsDisabled = deprecationCreateLstLoading || selectedCount === 0 || !hasDeprecationLst || !hasDeprecationBranch || !hasLstValidation;
+                    const depValidateDisabled = deprecationValidating || selectedCount === 0 || !hasDeprecationLst || !hasDeprecationBranch || !hasDeprecationTickets;
                     return (
-                      <div style={{ marginTop: "20px", padding: "16px", background: "#ecfdf5", borderRadius: "8px", border: "2px solid #10b981" }}>
-                        <h4 style={{ marginTop: 0, marginBottom: "8px", color: "#065f46" }}>
-                          Deprecate — Remove {selectedCount} test(s) from LST file(s)
-                        </h4>
-                        <p style={{ marginBottom: "12px", fontSize: "14px", color: "#047857" }}>
-                          Enter Branch so Sourcegraph can list LST files on that revision. Select one or more files to remove the test from.
-                        </p>
+                      <>
                         {selectedCount > 0 && (
-                          <div style={{ marginBottom: "12px", padding: "10px", background: "#fff", borderRadius: "6px", border: "1px solid #a7f3d0", fontSize: "13px", color: "#065f46" }}>
-                            <strong>Tests to remove:</strong>
-                            <ul style={{ margin: "6px 0 0 18px", padding: 0 }}>
-                              {selectedTestNames.map((n) => (
-                                <li key={n} style={{ wordBreak: "break-word" }}>{n}</li>
+                          <div style={{ marginTop: "16px", padding: "10px", background: "#ffffff", borderRadius: "6px", border: "1px solid #cbd5e1" }}>
+                            <div style={{ fontSize: "13px", fontWeight: "600", marginBottom: "8px", color: "#475569" }}>
+                              Selected Test Cases for Deprecation ({selectedCount}):
+                            </div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "12px", color: "#334155" }}>
+                              {selectedTestNames.map((testName) => (
+                                <div key={testName} style={{ padding: "4px 8px", background: "#f1f5f9", borderRadius: "4px", wordBreak: "break-word" }}>
+                                  {testName}
+                                </div>
                               ))}
-                            </ul>
+                            </div>
                           </div>
                         )}
-                        <div ref={deprecationBranchContainerRef} style={{ marginBottom: "10px", maxWidth: "360px", position: "relative" }}>
+                      <div style={{ marginTop: "20px", padding: "16px", background: "#ecfdf5", borderRadius: "8px", border: "2px solid #10b981" }}>
+                        <h4 style={{ marginTop: 0, marginBottom: "12px" }}>✓ Ready for CR</h4>
+                        <div ref={deprecationCrBranchContainerRef} style={{ marginBottom: "10px", maxWidth: "360px", position: "relative" }}>
                           <label style={{ display: "block", marginBottom: "4px", fontSize: "13px", fontWeight: "500" }}>Branch <span style={{ color: "#dc2626" }}>*</span></label>
                           <input
                             type="text"
@@ -2700,7 +2868,7 @@ export default function Handover() {
                               ) : (
                                 deprecationBranchSuggestions.map((b) => (
                                   <button
-                                    key={b}
+                                    key={`dep-cr-${b}`}
                                     type="button"
                                     onClick={() => {
                                       setDeprecationLstBranch(b);
@@ -2719,14 +2887,14 @@ export default function Handover() {
                           )}
                         </div>
                         <div style={{ marginBottom: "10px" }}>
-                          <label style={{ display: "block", marginBottom: "4px", fontSize: "13px", fontWeight: "500" }}>LST File Path <span style={{ color: "#dc2626" }}>*</span></label>
+                          <label style={{ display: "block", marginBottom: "4px", fontSize: "13px", fontWeight: "500" }}>LST File Path *</label>
                           <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", width: "100%" }}>
                             <input
                               type="text"
                               value={deprecationLstFile}
                               onChange={(e) => { setDeprecationLstFile(e.target.value); setDeprecationValidation(null); setDeprecationCrResult(null); }}
-                              placeholder="Optional typed path, e.g. test_sets/milestones/.../foo.lst"
-                              style={{ padding: "8px 12px", fontSize: "13px", width: "100%", flex: 1, minWidth: "280px", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }}
+                              placeholder="e.g. test_sets/milestones/7.3.0.98/zookeeper.lst"
+                              style={{ padding: "8px 12px", fontSize: "13px", width: "100%", flex: 1, minWidth: "420px", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }}
                             />
                             <button
                               type="button"
@@ -2791,7 +2959,7 @@ export default function Handover() {
                               <div style={{ fontSize: "12px", color: "#1e3a8a", fontWeight: 600, marginBottom: "6px" }}>
                                 Click to select suggested LST files (you can select multiple)
                               </div>
-                              {deprecationLstSuggestion.candidates.map((c) => {
+                              {deprecationLstSuggestion.candidates.slice(0, 4).map((c) => {
                                 const file = c.lst_file || "";
                                 const selected = resolvedDeprecationLstFiles.includes(file);
                                 return (
@@ -2829,18 +2997,34 @@ export default function Handover() {
                             </div>
                           )}
                         </div>
-                        <div style={{ marginBottom: "10px", display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "flex-end" }}>
+                        <div style={{ marginBottom: "10px", display: "flex", gap: "12px", flexWrap: "wrap" }}>
                           <div style={{ flex: 1, minWidth: "200px" }}>
-                            <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Commit Message</label>
-                            <input type="text" value={deprecationCommitMessage} onChange={(e) => setDeprecationCommitMessage(e.target.value)} placeholder="Optional" style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }} />
+                            <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Commit Note (optional)</label>
+                            <input
+                              type="text"
+                              value={deprecationCommitNote}
+                              onChange={(e) => setDeprecationCommitNote(e.target.value)}
+                              placeholder="Optional note appended after preview template"
+                              style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }}
+                            />
                           </div>
+                        </div>
+                        <div style={{ marginBottom: "10px" }}>
+                          <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Deprecation ticket(s), comma-separated <span style={{ color: "#dc2626" }}>*</span></label>
+                          <input type="text" value={deprecationTicketsExtra} onChange={(e) => setDeprecationTicketsExtra(e.target.value)} placeholder="ENG-123, ENG-456" style={{ padding: "8px 12px", fontSize: "13px", width: "100%", maxWidth: "400px", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }} />
+                        </div>
+                        <div style={{ marginBottom: "10px" }}>
+                          <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Reviewers (type name to search)</label>
+                          <ReviewerAutocomplete value={deprecationReviewers} onChange={setDeprecationReviewers} placeholder="Type name (e.g. john) to search..." />
+                        </div>
+                        <div style={{ display: "flex", gap: "10px", marginBottom: "12px", flexWrap: "wrap" }}>
                           <button
                             onClick={handleDeprecationValidateLst}
                             disabled={depValidateDisabled}
                             style={depValidateDisabled ? { ...btnTertiaryDisabled } : { ...btnTertiary }}
-                            title={!hasDeprecationBranch ? "Please enter Branch" : (!hasDeprecationLst ? "Select at least one LST file" : (selectedCount === 0 ? "Search or select testcases first" : ""))}
+                            title={!hasDeprecationLst ? "Please enter LST File Path" : (!hasDeprecationBranch ? "Please enter Branch" : (!hasDeprecationTickets ? "Please enter Deprecation ticket(s)" : (selectedCount === 0 ? "Enter testcase name(s) first" : "")))}
                           >
-                            {deprecationValidating ? "Checking..." : "Validate LST"}
+                            {deprecationValidating ? "Validating..." : "Validate LST"}
                           </button>
                         </div>
                         {deprecationValidation && (
@@ -2921,22 +3105,71 @@ export default function Handover() {
                             )}
                           </div>
                         )}
-                        <div style={{ marginBottom: "10px" }}>
-                          <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Jira ticket no.</label>
-                          <input type="text" value={deprecationTicketsExtra} onChange={(e) => setDeprecationTicketsExtra(e.target.value)} placeholder="e.g. ENG-123, ENG-456" style={{ padding: "8px 12px", fontSize: "13px", width: "100%", maxWidth: "400px", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }} />
-                        </div>
-                        <div style={{ marginBottom: "10px" }}>
-                          <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Reviewers (type name to search)</label>
-                          <ReviewerAutocomplete value={deprecationReviewers} onChange={setDeprecationReviewers} placeholder="Type name (e.g. john) to search..." />
-                        </div>
-                        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "10px", alignItems: "center" }}>
-                          <button onClick={handleDeprecationSave} disabled={depActionsDisabled} style={depActionsDisabled ? { ...btnTertiaryDisabled } : { ...btnTertiary }}>
+                        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px", alignItems: "center" }}>
+                          <button
+                            type="button"
+                            onClick={openDeprecationCrPreview}
+                            disabled={deprecationCreateLstLoading}
+                            style={deprecationCreateLstLoading ? { ...btnValidateDisabled } : { ...btnValidate }}
+                          >
+                            Preview CR
+                          </button>
+                          <button onClick={handleDeprecationSave} disabled={depActionsDisabled} style={depActionsDisabled ? { ...btnTertiaryDisabled } : { ...btnTertiary }} title="Save deprecation data without creating a Gerrit CR">
                             {deprecationCreateLstLoading ? "Saving..." : "Save"}
                           </button>
-                          <button onClick={handleDeprecationCreateLstCr} disabled={depActionsDisabled} style={depActionsDisabled ? { ...btnPrimaryDisabled } : { ...btnPrimary }}>
-                            {deprecationCreateLstLoading ? "Creating..." : "Create Gerrit CR"}
+                          <button onClick={handleDeprecationCreateLstCr} disabled={depActionsDisabled} style={depActionsDisabled ? { ...btnPrimaryDisabled } : { ...btnPrimary }} title={depActionsDisabled ? (!hasLstValidation ? "Please validate LST file" : "") : "Save deprecation and create Gerrit CR"}>
+                            {deprecationCreateLstLoading ? "Processing..." : "Deprecate"}
                           </button>
+                          {!hasLstValidation && (
+                            <span style={{ fontSize: "11px", color: "#64748b", fontStyle: "italic" }}>
+                              Validate LST file to proceed
+                            </span>
+                          )}
+                          {hasLstValidation && (
+                            <span style={{ fontSize: "11px", color: "#16a34a", fontStyle: "italic", fontWeight: "500" }}>
+                              ✓ Ready for deprecation
+                            </span>
+                          )}
                         </div>
+                        {deprecationCrPreviewOpen && (
+                          <div style={{ marginTop: "12px", padding: "12px", border: "1px solid #cbd5e1", borderRadius: "8px", background: "#f8fafc" }}>
+                            <h5 style={{ margin: "0 0 10px 0", fontSize: "14px", color: "#0f172a" }}>CR Preview (editable)</h5>
+                            <div style={{ marginBottom: "8px" }}>
+                              <label style={{ display: "block", fontSize: "12px", marginBottom: "4px", color: "#334155" }}>Subject</label>
+                              <input
+                                type="text"
+                                value={deprecationCrSubject}
+                                onChange={(e) => setDeprecationCrSubject(e.target.value)}
+                                style={{ width: "100%", maxWidth: "560px", padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: "4px", fontSize: "13px" }}
+                              />
+                            </div>
+                            <div style={{ marginBottom: "8px" }}>
+                              <label style={{ display: "block", fontSize: "12px", marginBottom: "4px", color: "#334155" }}>Description</label>
+                              <textarea
+                                value={deprecationCrDescription}
+                                onChange={(e) => setDeprecationCrDescription(e.target.value)}
+                                rows={8}
+                                style={{ width: "100%", maxWidth: "760px", padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: "4px", fontSize: "13px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}
+                              />
+                            </div>
+                            <div style={{ display: "flex", gap: "8px" }}>
+                              <button
+                                type="button"
+                                onClick={() => setDeprecationCrDescription(buildDefaultDeprecationCrDescription())}
+                                style={{ ...btnTertiary }}
+                              >
+                                Reset Template
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeprecationCrPreviewOpen(false)}
+                                style={{ ...btnSecondary, padding: "9px 16px" }}
+                              >
+                                Save & Close
+                              </button>
+                            </div>
+                          </div>
+                        )}
                         {deprecationCrResult && (
                           <div style={{ marginTop: "12px", padding: "10px", background: deprecationCrResult.success ? "#ecfdf5" : "#fef2f2", borderRadius: "4px", border: "1px solid " + (deprecationCrResult.success ? "#10b981" : "#f87171"), fontSize: "13px" }}>
                             {deprecationCrResult.success && (deprecationCrResult.cr_url || deprecationCrResult.gerrit_url) && (
@@ -2958,6 +3191,7 @@ export default function Handover() {
                           </div>
                         )}
                       </div>
+                      </>
                     );
                   })()}
                 </>
@@ -3008,7 +3242,8 @@ export default function Handover() {
             )}
             {!recordsLoading && !recordsError && (
               <p style={{ margin: "8px 0 0", fontSize: "13px", color: "#64748b" }}>
-                {visibleSavedRecords.length} record{visibleSavedRecords.length === 1 ? "" : "s"}
+                {groupedSavedRecords.length} CR{groupedSavedRecords.length === 1 ? "" : "s"}
+                {" "}({visibleSavedRecords.length} test{visibleSavedRecords.length === 1 ? "" : "s"})
               </p>
             )}
           </div>
@@ -3029,104 +3264,69 @@ export default function Handover() {
                 <table className="ho-table ho-records-table">
                   <thead>
                     <tr>
+                      <th className="col-status">CR</th>
                       <th className="col-type">Type</th>
-                      <th className="col-name">Test name</th>
                       <th className="col-date">Date</th>
-                      <th className="col-lst">LST file(s)</th>
-                      <th className="col-branch">Branch</th>
-                      <th className="col-tickets">Tickets</th>
-                      <th className="col-tickets">Bug tickets</th>
-                      <th className="col-reviewers">Reviewers</th>
+                      <th className="col-date">Time</th>
                       <th className="col-whom">By whom</th>
-                      <th className="col-status">CR status</th>
+                      <th className="col-branch">Component</th>
+                      <th className="col-branch">Branch</th>
+                      <th className="col-name">Tests</th>
                       <th className="col-actions">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleSavedRecords.map((r) => {
-                      const extra = recordExtraSections(r);
-                      const lstFiles = recordLstFiles(r);
-                      const expanded = recordsExpanded.has(r._key);
-                      const reviewers = Array.isArray(r.reviewers) ? r.reviewers.filter(Boolean) : [];
-                      const bugTickets = uniqueTickets(r.bug_tickets);
-                      const statusKey = String(r.cr_status || "").replace(/\s+/g, "_");
-                      const canExpand = extra.length > 0 || lstFiles.length > 0;
+                    {groupedSavedRecords.map((group) => {
+                      const expanded = recordsExpanded.has(group.key);
+                      const when = formatRecordWhen(group.date);
+                      const statusKey = String(group.status || "").replace(/\s+/g, "_");
+                      const componentLabel = group.components.join(", ");
                       return (
-                        <React.Fragment key={r._key}>
+                        <React.Fragment key={group.key}>
                           <tr className="ho-records-row">
-                            <td className="col-type">
-                              <span className={`ho-records-kind ho-records-kind--${r._kind}`}>
-                                {r._kind === "deprecation" ? "Deprecation" : "Handover"}
-                              </span>
-                            </td>
-                            <td className="col-name">
-                              <span className="ho-records-ellipsis ho-records-name" title={r.test_name || ""}>
-                                {r.test_name || "-"}
-                              </span>
-                            </td>
-                            <td className="col-date">{formatDateIST(r._date)}</td>
-                            <td className="col-lst">
-                              {lstFiles.length ? (
-                                <span className="ho-records-lst-row" title={lstFiles.join("\n")}>
-                                  <code>{lstFileBasename(lstFiles[0])}</code>
-                                  {lstFiles.length > 1 ? (
-                                    <span className="ho-records-more">+{lstFiles.length - 1}</span>
-                                  ) : null}
-                                </span>
+                            <td className="col-status">
+                              {group.cr ? (
+                                group.crUrl ? (
+                                  <a href={group.crUrl} target="_blank" rel="noreferrer">{group.cr}</a>
+                                ) : (
+                                  group.cr
+                                )
                               ) : (
-                                <span className="ho-records-empty">-</span>
+                                <span className="ho-records-empty">No CR</span>
                               )}
+                            </td>
+                            <td className="col-type">
+                              <span className={`ho-records-kind ho-records-kind--${group.kind}`}>
+                                {group.kind === "deprecation" ? "Deprecation" : "Handover"}
+                              </span>
+                            </td>
+                            <td className="col-date">{when.date}</td>
+                            <td className="col-date">{when.time}</td>
+                            <td className="col-whom">
+                              <span className="ho-records-ellipsis" title={group.byWhom.join(", ")}>
+                                {group.byWhom.length ? group.byWhom.map(formatByWhom).join(", ") : "-"}
+                              </span>
                             </td>
                             <td className="col-branch">
-                              <span className="ho-records-ellipsis" title={r.branch || ""}>{r.branch || "-"}</span>
+                              <span className="ho-records-ellipsis" title={componentLabel}>{componentLabel || "-"}</span>
                             </td>
-                            <td className="col-tickets">
-                              <SavedRecordTickets record={r} />
+                            <td className="col-branch">
+                              <span className="ho-records-ellipsis" title={group.branch || ""}>{group.branch || "-"}</span>
                             </td>
-                            <td className="col-tickets">
-                              {bugTickets.length || r.bug_type ? (
-                                <div>
-                                  <TicketLinks tickets={bugTickets} />
-                                  {r.bug_type ? <div className="ho-records-meta">{r.bug_type}</div> : null}
-                                </div>
-                              ) : (
-                                <span className="ho-records-empty">-</span>
-                              )}
-                            </td>
-                            <td className="col-reviewers">
-                              {reviewers.length ? (
-                                <span className="ho-records-ellipsis" title={reviewers.join(", ")}>
-                                  {reviewers.map(formatByWhom).join(", ")}
-                                </span>
-                              ) : (
-                                <span className="ho-records-empty">-</span>
-                              )}
-                            </td>
-                            <td className="col-whom">
-                              <span className="ho-records-ellipsis" title={r.by_whom || ""}>{formatByWhom(r.by_whom)}</span>
-                            </td>
-                            <td className="col-status">
-                              {r.cr_status ? (
-                                <span className={`ho-records-status ho-records-status--${statusKey}`}>{r.cr_status}</span>
-                              ) : (
-                                <span className="ho-records-empty">-</span>
-                              )}
-                            </td>
+                            <td className="col-name">{group.tests.length}</td>
                             <td className="col-actions">
                               <div className="ho-records-actions">
-                                {canExpand && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleRecordsExpanded(group.key)}
+                                  className="ho-records-btn"
+                                >
+                                  {expanded ? "Hide" : "Details"}
+                                </button>
+                                {recordsEditMode && group.canDelete && (
                                   <button
                                     type="button"
-                                    onClick={() => toggleRecordsExpanded(r._key)}
-                                    className="ho-records-btn"
-                                  >
-                                    {expanded ? "Hide" : "Details"}
-                                  </button>
-                                )}
-                                {recordsEditMode && r.can_delete && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleRecordsDelete(r._kind, r)}
+                                    onClick={() => handleRecordsDeleteGroup(group)}
                                     className="ho-records-btn ho-records-btn--danger"
                                   >
                                     Delete
@@ -3135,23 +3335,42 @@ export default function Handover() {
                               </div>
                             </td>
                           </tr>
-                          {expanded && canExpand && (
+                          {expanded && (
                             <tr className="ho-records-detail-row">
-                              <td colSpan={11}>
-                                {lstFiles.length > 0 && (
+                              <td colSpan={9}>
+                                <div className="ho-records-detail-block">
+                                  <div className="ho-records-detail-label">
+                                    {group.kind === "deprecation" ? "Deprecated test cases" : "Handover test cases"}
+                                    {" "}({group.tests.length})
+                                  </div>
+                                  {group.tests.map((name, idx) => (
+                                    <div key={`${name}-${idx}`} className="ho-records-detail-path">{name}</div>
+                                  ))}
+                                </div>
+                                {group.lstFiles.length > 0 && (
                                   <div className="ho-records-detail-block">
                                     <div className="ho-records-detail-label">LST file(s)</div>
-                                    {lstFiles.map((f) => (
+                                    {group.lstFiles.map((f) => (
                                       <div key={f} className="ho-records-detail-path"><code>{f}</code></div>
                                     ))}
                                   </div>
                                 )}
-                                {extra.map(([label, value]) => (
-                                  <div key={label} className="ho-records-detail-block">
-                                    <div className="ho-records-detail-label">{label}</div>
-                                    <pre className="ho-records-extra">{String(value).trim()}</pre>
-                                  </div>
-                                ))}
+                                <div className="ho-records-detail-block">
+                                  <div className="ho-records-detail-label">Tickets</div>
+                                  <TicketLinks tickets={group.tickets} />
+                                </div>
+                                <div className="ho-records-detail-block">
+                                  <div className="ho-records-detail-label">Reviewers</div>
+                                  <div>{group.reviewers.length ? group.reviewers.map(formatByWhom).join(", ") : "-"}</div>
+                                </div>
+                                <div className="ho-records-detail-block">
+                                  <div className="ho-records-detail-label">CR status</div>
+                                  {group.status ? (
+                                    <span className={`ho-records-status ho-records-status--${statusKey}`}>{group.status}</span>
+                                  ) : (
+                                    <span className="ho-records-empty">-</span>
+                                  )}
+                                </div>
                               </td>
                             </tr>
                           )}

@@ -180,8 +180,8 @@ class TestNameMatchAndWindowTests(unittest.TestCase):
         self.assertNotIn("system_under_test", filtered[0])
 
     def test_last_5_window_ignores_older_sixth_run(self):
-        # Newest 5: one Succeeded + four Product-Bug failures (not eligible).
-        # 6th (oldest) Succeeded would make product_bug_gap if included.
+        # Newest 5: one Succeeded + four Product-Bug failures (eligible at min_passes=1).
+        # 6th (oldest) Succeeded would make product_bug_gap if included with min_passes=2.
         runs = [
             self._run("t.a", "master", "2026-09-10", "Succeeded", "t1"),
             self._run("t.a", "master", "2026-09-09", "Failed", "t2"),
@@ -196,10 +196,15 @@ class TestNameMatchAndWindowTests(unittest.TestCase):
         self.assertEqual(len(selected), 5)
         self.assertEqual([r["agave_task_id"]["$oid"] for r in selected], ["t1", "t2", "t3", "t4", "t5"])
         ok, reason, passed = evaluate_sliding_eligibility(selected)
-        self.assertFalse(ok)
-        self.assertIsNone(reason)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "single_pass")
         self.assertEqual(passed, 1)
-        all_ok, all_reason, all_passed = evaluate_sliding_eligibility(select_newest_runs(runs, 6))
+        two_pass_ok, two_pass_reason, _ = evaluate_sliding_eligibility(selected, min_passes=2)
+        self.assertFalse(two_pass_ok)
+        self.assertIsNone(two_pass_reason)
+        all_ok, all_reason, all_passed = evaluate_sliding_eligibility(
+            select_newest_runs(runs, 6), min_passes=2
+        )
         self.assertTrue(all_ok)
         self.assertEqual(all_reason, "product_bug_gap")
         self.assertEqual(all_passed, 2)
@@ -217,6 +222,22 @@ class TestNameMatchAndWindowTests(unittest.TestCase):
 
 
 class EligibilityTests(unittest.TestCase):
+    def test_single_pass_eligible(self):
+        ok, reason, passed = evaluate_sliding_eligibility([
+            {"status": "Succeeded", "bug_types": []},
+        ])
+        self.assertTrue(ok)
+        self.assertEqual(reason, "single_pass")
+        self.assertEqual(passed, 1)
+
+    def test_zero_passes_not_eligible(self):
+        ok, reason, passed = evaluate_sliding_eligibility([
+            {"status": "Failed", "bug_types": ["Product Bug"]},
+        ])
+        self.assertFalse(ok)
+        self.assertIsNone(reason)
+        self.assertEqual(passed, 0)
+
     def test_consecutive_pass(self):
         ok, reason, passed = evaluate_sliding_eligibility([
             {"status": "Succeeded", "bug_types": []},
@@ -231,7 +252,7 @@ class EligibilityTests(unittest.TestCase):
             {"status": "Succeeded", "bug_types": []},
             {"status": "Failed", "bug_types": ["Product Bug"]},
             {"status": "Succeeded", "bug_types": []},
-        ])
+        ], min_passes=2)
         self.assertTrue(ok)
         self.assertEqual(reason, "product_bug_gap")
         self.assertEqual(passed, 2)
@@ -241,7 +262,7 @@ class EligibilityTests(unittest.TestCase):
             {"status": "Succeeded", "bug_types": []},
             {"status": "Failed", "bug_types": ["Test Bug"]},
             {"status": "Succeeded", "bug_types": []},
-        ])
+        ], min_passes=2)
         self.assertFalse(ok)
         self.assertIsNone(reason)
         self.assertEqual(passed, 2)
@@ -251,7 +272,7 @@ class EligibilityTests(unittest.TestCase):
             {"status": "Succeeded", "bug_types": []},
             {"status": "Failed", "bug_types": []},
             {"status": "Succeeded", "bug_types": []},
-        ])
+        ], min_passes=2)
         self.assertFalse(ok)
         self.assertIsNone(reason)
 

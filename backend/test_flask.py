@@ -21699,8 +21699,9 @@ def _aggregate_jita_test_cases(
     """Aggregate test results by test_name.
 
     When ``use_sliding_eligibility`` is True (handover path), a test is Succeeded if
-    two Succeeded runs exist with only Product-Bug-only failures between them across
-    ``sorted_task_ids`` (newest-first). Otherwise falls back to min_passes / latest_2.
+    it has at least ``min_passes_for_success`` Succeeded runs (default 1). For two or
+    more required passes, Product-Bug-only failures may sit between Succeeded anchors
+    across ``sorted_task_ids`` (newest-first). Otherwise falls back to min_passes / latest_2.
     """
     by_name = defaultdict(list)
     tickets_set = set()
@@ -21757,7 +21758,9 @@ def _aggregate_jita_test_cases(
                     "bug_types": r_types,
                 })
             eligible, eligibility_reason, passed_count = evaluate_sliding_eligibility(
-                run_payloads, ticket_bug_types=ticket_bug_types
+                run_payloads,
+                ticket_bug_types=ticket_bug_types,
+                min_passes=min_passes_for_success,
             )
             derived_status = "Succeeded" if eligible else "Failed"
         else:
@@ -22458,6 +22461,92 @@ def _add_deprecation_records(
         records.append(rec)
     _save_deprecation_records(records)
     logger.info("[DEPRECATION-RECORD] Saved %s record(s), by %s", len(test_names), by_whom)
+
+
+def _stamp_records_with_cr(kind, test_names, branches, lst_files, gerrit_change_id, cr_url):
+    """Attach a Gerrit change to the newest unstamped rows for these tests.
+
+    Matches test name, branch (typed or NuTest mainline), and LST. Rows that
+    already have a change id are left alone. Save-only rows stay unstamped
+    until a CR succeeds.
+    """
+    change_id = (gerrit_change_id or "").strip()
+    url = (cr_url or "").strip()
+    if not change_id and not url:
+        return 0
+    names = {str(n).strip() for n in (test_names or []) if str(n).strip()}
+    if not names:
+        return 0
+    branch_set = {str(b).strip() for b in (branches or []) if str(b).strip()}
+    lst_set = {str(x).strip() for x in (lst_files or []) if str(x).strip()}
+    if kind == "deprecation":
+        date_key = "deprecation_date"
+        records = _load_deprecation_records()
+        save = _save_deprecation_records
+    else:
+        date_key = "handover_date"
+        records = _load_handover_records()
+        save = _save_handover_records
+
+    candidates = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        if (rec.get("test_name") or "").strip() not in names:
+            continue
+        if (rec.get("gerrit_change_id") or "").strip():
+            continue
+        rec_branch = (rec.get("branch") or "").strip()
+        if branch_set and rec_branch and rec_branch not in branch_set:
+            continue
+        rec_lsts = set()
+        if (rec.get("lst_file") or "").strip():
+            rec_lsts.add((rec.get("lst_file") or "").strip())
+        for raw in rec.get("lst_files") or []:
+            path = str(raw or "").strip()
+            if path:
+                rec_lsts.add(path)
+        if lst_set and rec_lsts and not (rec_lsts & lst_set):
+            continue
+        candidates.append(rec)
+    if not candidates:
+        return 0
+    newest = max((rec.get(date_key) or "") for rec in candidates)
+    stamped = 0
+    for rec in candidates:
+        if (rec.get(date_key) or "") != newest:
+            continue
+        rec["gerrit_change_id"] = change_id
+        if url:
+            rec["cr_url"] = url
+        rec["cr_status"] = "created"
+        stamped += 1
+    if stamped:
+        save(records)
+        logger.info(
+            "[%s-RECORD] Stamped %s row(s) with CR %s",
+            kind.upper(),
+            stamped,
+            change_id or url,
+        )
+    return stamped
+
+
+def _stamp_cr_result(kind, test_names, branches, lst_files, result):
+    """Best-effort stamp after a successful LST CR. Never fails the CR response."""
+    if not isinstance(result, dict) or not result.get("success"):
+        return
+    try:
+        _stamp_records_with_cr(
+            kind,
+            test_names,
+            branches,
+            lst_files,
+            result.get("gerrit_change_id") or "",
+            result.get("cr_url") or result.get("gerrit_url") or "",
+        )
+    except Exception:
+        logger.exception("Could not stamp %s records with CR", kind)
 
 
 @app.route("/mcp/regression/deprecation-record", methods=["POST"])
@@ -23588,7 +23677,9 @@ def create_lst_cr():
         return jsonify({}), 200
 
     data = request.get_json() or {}
-    branch = _handover_nutest_branch(data.get("branch") or "master")
+    requested_branch = (data.get("branch") or "master").strip() or "master"
+    branch = _handover_nutest_branch(requested_branch)
+    record_branches = [requested_branch, branch]
     lst_files = _collect_lst_files_from_payload(data)
     test_names = data.get("test_names") or []
     reviewers = [str(r).strip() for r in (data.get("reviewers") or []) if str(r).strip()]
@@ -23678,6 +23769,7 @@ def create_lst_cr():
                 handover_tickets=handover_tickets,
                 owner=gerrit_user,
             )
+            _stamp_cr_result("handover", test_names, record_branches, lst_files, result)
             return jsonify(result)
         except GerritRestError as exc:
             if not git_fallback_enabled():
@@ -23776,7 +23868,7 @@ def create_lst_cr():
             urllib.parse.quote(branch, safe=""),
         )
 
-        return jsonify({
+        payload = {
             "success": True,
             "message": "CR created and pushed for review.",
             "cr_url": cr_url,
@@ -23787,7 +23879,9 @@ def create_lst_cr():
             "to_add": [x for p in per_file for x in p["to_add"]],
             "push_ref": push_ref,
             "generated_at": datetime.utcnow().isoformat(),
-        })
+        }
+        _stamp_cr_result("handover", test_names, record_branches, lst_files, payload)
+        return jsonify(payload)
     except subprocess.CalledProcessError as cpe:
         stderr = (cpe.stderr or "").strip()
         stdout = (cpe.stdout or "").strip()
@@ -24071,11 +24165,15 @@ def deprecate_lst_cr():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json() or {}
-    branch = _handover_nutest_branch(data.get("branch") or "master")
+    requested_branch = (data.get("branch") or "master").strip() or "master"
+    branch = _handover_nutest_branch(requested_branch)
+    record_branches = [requested_branch, branch]
     lst_files = _collect_lst_files_from_payload(data)
     test_names = data.get("test_names") or []
     reviewers = [str(r).strip() for r in (data.get("reviewers") or []) if str(r).strip()]
-    commit_message = (data.get("commit_message") or "").strip()
+    cr_subject = (data.get("cr_subject") or "").strip()
+    cr_description = (data.get("cr_description") or "").strip()
+    legacy_commit = (data.get("commit_message") or "").strip()
     jira_tickets = data.get("jira_tickets") or data.get("tickets") or []
     if isinstance(jira_tickets, str):
         jira_tickets = [x.strip() for x in jira_tickets.split(",") if x.strip()]
@@ -24092,6 +24190,29 @@ def deprecate_lst_cr():
         return jsonify({"error": "test_names is required"}), 400
     lst_file = lst_files[0]
 
+    def _default_deprecation_description():
+        reviewers_line = ", ".join(reviewers) if reviewers else ""
+        tickets_line = ", ".join(jira_tickets) if jira_tickets else ""
+        return (
+            "Reviewers               : %s\n"
+            "Tickets resolved        : %s\n"
+            "Tests run               : \n"
+            "Target release          : %s\n"
+            "Code review URL         : "
+        ) % (reviewers_line, tickets_line, branch)
+
+    if cr_subject or cr_description:
+        cr_subject = cr_subject or "Testcase Deprecation"
+        if not cr_description:
+            cr_description = _default_deprecation_description()
+        commit_message = cr_subject + "\n\n" + cr_description
+    elif legacy_commit:
+        commit_message = legacy_commit
+    else:
+        cr_subject = "Testcase Deprecation"
+        cr_description = _default_deprecation_description()
+        commit_message = cr_subject + "\n\n" + cr_description
+
     push_ref = _build_gerrit_push_ref(branch, reviewers)
     instructions = {
         "message": "Remove the following %s test(s) from the LST file(s), then push for review." % len(test_names),
@@ -24101,7 +24222,7 @@ def deprecate_lst_cr():
             "2. Open the LST file(s): %s" % ", ".join(lst_files),
             "3. Remove the following %s test name(s) from each file:" % len(test_names),
             "   " + "\n   ".join(test_names[:10]) + ("..." if len(test_names) > 10 else ""),
-            "4. Commit with message: 'Deprecated %s test(s) from LST'" % len(test_names),
+            "4. Commit with message:\n%s" % commit_message,
             "5. Push for review: git push origin HEAD:%s" % push_ref,
         ],
     }
@@ -24141,11 +24262,6 @@ def deprecate_lst_cr():
 
     from gerrit_lst_cr import GerritRestError, force_git_clone, git_fallback_enabled
 
-    if not commit_message:
-        commit_message = "Deprecated %s test(s) from %s" % (len(test_names), ", ".join(lst_files))
-        if jira_tickets:
-            commit_message += "\n\nJira: %s" % ", ".join(jira_tickets)
-
     if not force_git_clone():
         try:
             logger.info("deprecate_lst_cr: Gerrit REST edit branch=%s files=%s", branch, lst_files)
@@ -24155,6 +24271,7 @@ def deprecate_lst_cr():
                 handover_tickets=jira_tickets,
                 owner=gerrit_user,
             )
+            _stamp_cr_result("deprecation", test_names, record_branches, lst_files, result)
             return jsonify(result)
         except GerritRestError as exc:
             if not git_fallback_enabled():
@@ -24216,11 +24333,6 @@ def deprecate_lst_cr():
                 "files": per_file,
             })
 
-        if not commit_message:
-            commit_message = "Deprecated %s test(s) from %s" % (len(removed_all), ", ".join(lst_files))
-            if jira_tickets:
-                commit_message += "\n\nJira: %s" % ", ".join(jira_tickets)
-
         logger.info("deprecate_lst_cr: committing removal of %s test(s) on branch=%s", len(removed_all), branch)
         parsed = _commit_and_push_gerrit_cr(
             repo_dir,
@@ -24232,7 +24344,7 @@ def deprecate_lst_cr():
             gerrit_pwd=gerrit_pwd,
         )
         cr_url = parsed.get("gerrit_url") or ""
-        return jsonify({
+        payload = {
             "success": True,
             "message": "Deprecation CR created and pushed for review.",
             "cr_url": cr_url,
@@ -24243,7 +24355,9 @@ def deprecate_lst_cr():
             "files": per_file,
             "push_ref": push_ref,
             "generated_at": datetime.utcnow().isoformat(),
-        })
+        }
+        _stamp_cr_result("deprecation", test_names, record_branches, lst_files, payload)
+        return jsonify(payload)
     except subprocess.CalledProcessError as cpe:
         stderr = (cpe.stderr or "").strip()
         stdout = (cpe.stdout or "").strip()

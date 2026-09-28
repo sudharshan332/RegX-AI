@@ -221,3 +221,39 @@ class HandoverRecordsApiTests(unittest.TestCase):
             "/mcp/regression/deprecation-records", json={}, headers=headers
         )
         self.assertEqual(listed.get_json()["count"], 0)
+
+    def test_stamp_newest_batch_with_cr(self):
+        self.tf._add_handover_records(
+            ["cdp.foo.test_a", "cdp.foo.test_b"],
+            [],
+            "alice@nutanix.com",
+            branch="7.5.2",
+            lst_file="test_sets/milestones/7.5/CDP/foo.lst",
+            lst_files=["test_sets/milestones/7.5/CDP/foo.lst"],
+            cr_status="creating",
+        )
+        self.tf._add_handover_records(
+            ["cdp.foo.test_a"],
+            [],
+            "alice@nutanix.com",
+            branch="7.5.2",
+            lst_file="test_sets/milestones/7.5/CDP/foo.lst",
+            cr_status="creating",
+        )
+        stamped = self.tf._stamp_records_with_cr(
+            "handover",
+            ["cdp.foo.test_a", "cdp.foo.test_b"],
+            ["7.5.2", "ganges-7.5-stable"],
+            ["test_sets/milestones/7.5/CDP/foo.lst"],
+            "606185",
+            "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/606185",
+        )
+        self.assertEqual(stamped, 1)
+        rows = self.tf._load_handover_records()
+        stamped_rows = [r for r in rows if r.get("gerrit_change_id") == "606185"]
+        self.assertEqual(len(stamped_rows), 1)
+        self.assertEqual(stamped_rows[0]["test_name"], "cdp.foo.test_a")
+        self.assertEqual(stamped_rows[0]["cr_status"], "created")
+        older = [r for r in rows if r.get("test_name") == "cdp.foo.test_b"]
+        self.assertTrue(older)
+        self.assertFalse(older[0].get("gerrit_change_id"))

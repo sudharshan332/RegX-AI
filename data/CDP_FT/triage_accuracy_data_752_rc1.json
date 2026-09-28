@@ -1,7 +1,10 @@
 {
-  "generated_time": "2026-09-21T13:42:30.429849",
+  "generated_time": "2026-09-25T11:54:23.646985",
   "tag": "752_rc1",
   "task_ids": [
+    "6ab41d672bc0c4f62e5739e7",
+    "6ab3f87ad24d82e7c58a84d5",
+    "6ab3ef6a8e79cefda10c8609",
     "6ab0f8fc8e79ce3ac2788187",
     "6aabf294d24d82877902d8d3",
     "6aab4aee8e79ce96e2631831",
@@ -475,6 +478,14 @@
       "match_status": "Unmatched"
     },
     {
+      "testcase_name": "cdp.stargate.volume_group.grbac.test_volume_group_disk_rbac.TestVolumeGroupDiskRBAC.test_volume_group_disk_create",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-965553",
+      "jira_ticket": "ENG-965553",
+      "match_status": "Matched"
+    },
+    {
       "testcase_name": "cdp.stargate.volume_group.grbac.test_volume_group_disk_rbac.TestVolumeGroupDiskRBAC.test_volume_group_disk_delete",
       "regression_owner": "Suryaprabha",
       "status": "Failed",
@@ -484,14 +495,6 @@
     },
     {
       "testcase_name": "cdp.stargate.volume_group.grbac.test_volume_group_disk_rbac.TestVolumeGroupDiskRBAC.test_volume_group_disk_get",
-      "regression_owner": "Suryaprabha",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-965553",
-      "jira_ticket": "ENG-965553",
-      "match_status": "Matched"
-    },
-    {
-      "testcase_name": "cdp.stargate.volume_group.grbac.test_volume_group_disk_rbac.TestVolumeGroupDiskRBAC.test_volume_group_disk_create",
       "regression_owner": "Suryaprabha",
       "status": "Failed",
       "triage_genie_ticket": "ENG-965553",
@@ -555,10 +558,10 @@
       "match_status": ""
     },
     {
-      "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_set_throughput_batch_action_with_full_override",
+      "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_set_iops_for_single_vm___min_limit",
       "regression_owner": "Shilpa",
       "status": "Failed",
-      "triage_genie_ticket": "ENG-930010",
+      "triage_genie_ticket": "ENG-815048",
       "jira_ticket": "",
       "match_status": ""
     },
@@ -571,10 +574,10 @@
       "match_status": ""
     },
     {
-      "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_set_iops_for_single_vm___min_limit",
+      "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_set_throughput_batch_action_with_full_override",
       "regression_owner": "Shilpa",
       "status": "Failed",
-      "triage_genie_ticket": "ENG-815048",
+      "triage_genie_ticket": "ENG-930010",
       "jira_ticket": "",
       "match_status": ""
     },
@@ -619,20 +622,20 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "manageability.ui.pc.storage_widget.test_storage_provisioning.StorageOverProvisioning.test_cluster_sort",
-      "regression_owner": "Suryaprabha",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-965047",
-      "jira_ticket": "ENG-965047",
-      "match_status": "Matched"
-    },
-    {
       "testcase_name": "manageability.ui.pc.storage_widget.test_storage_provisioning.StorageOverProvisioning.test_all_error_msg_and_colour",
       "regression_owner": "Suryaprabha",
       "status": "Failed",
       "triage_genie_ticket": "ENG-938082",
       "jira_ticket": "ENG-965047",
       "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "manageability.ui.pc.storage_widget.test_storage_provisioning.StorageOverProvisioning.test_cluster_sort",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-965047",
+      "jira_ticket": "ENG-965047",
+      "match_status": "Matched"
     },
     {
       "testcase_name": "manageability.ui.pc.storage_widget.test_storage_provisioning.StorageOverProvisioning.test_cluster_sort___Dashboard",
@@ -659,14 +662,6 @@
       "match_status": ""
     },
     {
-      "testcase_name": "cdp.stargate.qos_policy.api.test_qos_policy_api.TestQOSPolicyApi.test_storage_qos_individual_policy_during_vm_creation",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-944188",
-      "jira_ticket": "AUTO-27813",
-      "match_status": "Unmatched"
-    },
-    {
       "testcase_name": "cdp.stargate.volume_group.odata.test_vg_disk_list_with_odata_support.TestVGDiskListWithOdataSupport.test_vg_disk_list_with_odata_support_rbac_user",
       "regression_owner": "Suryaprabha",
       "status": "Failed",
@@ -675,15 +670,7 @@
       "match_status": ""
     },
     {
-      "testcase_name": "cdp.stargate.qos_policy.api.test_qos_policy_api.TestQOSPolicyApi.test_storage_qos_individual_policy_update_attr_on_vm___unhosted_vdisk",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-944188",
-      "jira_ticket": "AUTO-27813",
-      "match_status": "Unmatched"
-    },
-    {
-      "testcase_name": "cdp.stargate.qos_policy.api.negative.test_qos_policy_negative.TestQOSPolicyNegative.test_qos_policy_individual_negative_throttle_limit",
+      "testcase_name": "cdp.stargate.qos_policy.api.test_qos_policy_api.TestQOSPolicyApi.test_storage_qos_individual_policy_during_vm_creation",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
@@ -699,7 +686,7 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.stargate.qos_policy.api.negative.test_qos_policy_negative.TestQOSPolicyNegative.test_qos_policy_individual_throttle_iops_less_than_100",
+      "testcase_name": "cdp.stargate.qos_policy.api.negative.test_qos_policy_negative.TestQOSPolicyNegative.test_qos_policy_individual_negative_throttle_limit",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
@@ -707,7 +694,15 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.stargate.qos_policy.api.test_qos_policy_api.TestQOSPolicyApi.test_storage_qos_individual_policy_vm_creation_batch",
+      "testcase_name": "cdp.stargate.qos_policy.api.test_qos_policy_api.TestQOSPolicyApi.test_storage_qos_individual_policy_update_attr_on_vm___unhosted_vdisk",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944188",
+      "jira_ticket": "AUTO-27813",
+      "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.stargate.qos_policy.api.negative.test_qos_policy_negative.TestQOSPolicyNegative.test_qos_policy_individual_throttle_iops_less_than_100",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
@@ -723,23 +718,15 @@
       "match_status": "Unmatched"
     },
     {
+      "testcase_name": "cdp.stargate.qos_policy.api.test_qos_policy_api.TestQOSPolicyApi.test_storage_qos_individual_policy_vm_creation_batch",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944188",
+      "jira_ticket": "AUTO-27813",
+      "match_status": "Unmatched"
+    },
+    {
       "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___compression_inline_postProcess",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-944188",
-      "jira_ticket": "AUTO-27813",
-      "match_status": "Unmatched"
-    },
-    {
-      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___update_non_compliance_attr",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-944188",
-      "jira_ticket": "AUTO-27813",
-      "match_status": "Unmatched"
-    },
-    {
-      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___protection_domain_restore_entities_via_clone",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
@@ -755,15 +742,15 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___rf_invalid_configs",
+      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___protection_domain_in_place_restore_entities",
       "regression_owner": "Shilpa",
       "status": "Failed",
-      "triage_genie_ticket": "ENG-948460",
-      "jira_ticket": "ENG-924286",
+      "triage_genie_ticket": "ENG-944188",
+      "jira_ticket": "AUTO-27813",
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___with_vg",
+      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___protection_domain_restore_entities_via_clone",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
@@ -779,7 +766,15 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___protection_domain_in_place_restore_entities",
+      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___rf_invalid_configs",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-948460",
+      "jira_ticket": "ENG-924286",
+      "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___update_non_compliance_attr",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
@@ -787,12 +782,12 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_override_dialog_when_qos_is_set_on_multiple_vms",
+      "testcase_name": "cdp.stargate.storage_policy.compliance.test_storage_compliance.TestStorageCompliance.test_storage_compliance___with_vg",
       "regression_owner": "Shilpa",
       "status": "Failed",
-      "triage_genie_ticket": "",
-      "jira_ticket": "",
-      "match_status": "N/A"
+      "triage_genie_ticket": "ENG-944188",
+      "jira_ticket": "AUTO-27813",
+      "match_status": "Unmatched"
     },
     {
       "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_iops_tp_relationship_table_show_details",
@@ -801,6 +796,14 @@
       "triage_genie_ticket": "ENG-946152",
       "jira_ticket": "",
       "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_override_dialog_when_qos_is_set_on_multiple_vms",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
     },
     {
       "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_remove_qos_attribute_batch_action_with_full_override",
@@ -819,18 +822,18 @@
       "match_status": ""
     },
     {
-      "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_set_iops_for_single_vm",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-946152",
-      "jira_ticket": "",
-      "match_status": ""
-    },
-    {
       "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_set_invalid_iops_for_single_vm",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-967005",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pc.qos.test_qos.QOSTest.test_set_iops_for_single_vm",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-946152",
       "jira_ticket": "",
       "match_status": ""
     },
@@ -843,7 +846,7 @@
       "match_status": ""
     },
     {
-      "testcase_name": "cdp.stargate.storage_policy.api.test_storage_policy.TestStoragePolicy.test_storage_policy___negative_create_update_with_multi_scope_filter_incorrect_entity_filter_incorrect_scope_filter_category_category_value",
+      "testcase_name": "cdp.stargate.storage_policy.api.test_storage_policy.TestStoragePolicy.test_storage_policy___multiple_policies_on_common_entity_via_multiple_categories",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
@@ -851,7 +854,7 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.stargate.storage_policy.api.test_storage_policy.TestStoragePolicy.test_storage_policy___multiple_policies_on_common_entity_via_multiple_categories",
+      "testcase_name": "cdp.stargate.storage_policy.api.test_storage_policy.TestStoragePolicy.test_storage_policy___negative_create_update_with_multi_scope_filter_incorrect_entity_filter_incorrect_scope_filter_category_category_value",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
@@ -1051,14 +1054,6 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.stargate.storage_policy.snapshot_clone.test_snapshot_clone.TestSPSnapshotClone.test_sp_snapshot___clone_inplace_restore_vm_on_pe",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-944188",
-      "jira_ticket": "AUTO-27813",
-      "match_status": "Unmatched"
-    },
-    {
       "testcase_name": "cdp.stargate.storage_policy.snapshot_clone.test_snapshot_clone.TestSPSnapshotClone.test_sp_recovery_point___clone_replicate_restore_vm_on_pc",
       "regression_owner": "Shilpa",
       "status": "Failed",
@@ -1067,7 +1062,23 @@
       "match_status": "Unmatched"
     },
     {
+      "testcase_name": "cdp.stargate.storage_policy.snapshot_clone.test_snapshot_clone.TestSPSnapshotClone.test_sp_snapshot___clone_inplace_restore_vm_on_pe",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944188",
+      "jira_ticket": "AUTO-27813",
+      "match_status": "Unmatched"
+    },
+    {
       "testcase_name": "cdp.stargate.qos_policy.vm_throttling.test_qos_policy.TestQOSPolicy.test_policy_advance___migration_error_injection_esx",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944188",
+      "jira_ticket": "AUTO-27813",
+      "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.stargate.qos_policy.vm_throttling.test_qos_policy.TestQOSPolicy.test_policy_advance___snapshot_esx",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
@@ -1091,7 +1102,7 @@
       "match_status": ""
     },
     {
-      "testcase_name": "cdp.stargate.qos_policy.vm_throttling.test_qos_policy.TestQOSPolicy.test_policy_advance___snapshot_esx",
+      "testcase_name": "cdp.stargate.storage_policy.snapshot_clone.test_snapshot_clone.TestSPSnapshotClone.test_sp_clone___pc_shared_data",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
@@ -1107,27 +1118,11 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.stargate.storage_policy.snapshot_clone.test_snapshot_clone.TestSPSnapshotClone.test_sp_clone___pc_shared_data",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-944188",
-      "jira_ticket": "AUTO-27813",
-      "match_status": "Unmatched"
-    },
-    {
       "testcase_name": "cdp.stargate.storage_policy.snapshot_clone.test_snapshot_clone.TestSPSnapshotClone.test_sp_recovery_point___shared_data",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944188",
       "jira_ticket": "AUTO-27813",
-      "match_status": "Unmatched"
-    },
-    {
-      "testcase_name": "cdp.blockstore.xmount.test_xmount.XmountTest.test_xmount___io_integrity",
-      "regression_owner": "Swapnil",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-950201",
-      "jira_ticket": "ENG-942286",
       "match_status": "Unmatched"
     },
     {
@@ -1137,6 +1132,14 @@
       "triage_genie_ticket": "ENG-973335",
       "jira_ticket": "ENG-973335",
       "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.blockstore.xmount.test_xmount.XmountTest.test_xmount___io_integrity",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-950201",
+      "jira_ticket": "ENG-942286",
+      "match_status": "Unmatched"
     },
     {
       "testcase_name": "cdp.blockstore.xmount.test_xmount_recovery.XmountRecoveryTest.test_xmount_crash_recovery",
@@ -1339,20 +1342,20 @@
       "match_status": "N/A"
     },
     {
-      "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___host_down_rack_aware_rf3",
-      "regression_owner": "Suryaprabha",
-      "status": "Failed",
-      "triage_genie_ticket": "",
-      "jira_ticket": "",
-      "match_status": "N/A"
-    },
-    {
       "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___disk_remove_rack_aware_rf3",
       "regression_owner": "Suryaprabha",
       "status": "Failed",
       "triage_genie_ticket": "ENG-673370",
       "jira_ticket": "",
       "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___host_down_rack_aware_rf3",
+      "regression_owner": "Suryaprabha",
+      "status": "Failed",
+      "triage_genie_ticket": "",
+      "jira_ticket": "",
+      "match_status": "N/A"
     },
     {
       "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___rack_to_node_awareness_rf2",
@@ -1363,7 +1366,7 @@
       "match_status": ""
     },
     {
-      "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___rack_aware_ftc_enforced",
+      "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___svm_down_rack_aware_rf2",
       "regression_owner": "Suryaprabha",
       "status": "Failed",
       "triage_genie_ticket": "",
@@ -1371,7 +1374,7 @@
       "match_status": "N/A"
     },
     {
-      "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___svm_down_rack_aware_rf2",
+      "testcase_name": "manageability.ui.pe.home_page.test_storage_summary_widget.StorageSummaryWidgetTest.test_storage_summary_widget___rack_aware_ftc_enforced",
       "regression_owner": "Suryaprabha",
       "status": "Failed",
       "triage_genie_ticket": "",
@@ -1483,6 +1486,14 @@
       "match_status": "N/A"
     },
     {
+      "testcase_name": "cdp.stargate.qos_policy.api.test_qos_policy_api.TestQOSPolicyApi.test_storage_qos_on_nutanix_vms___pcvm",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944188",
+      "jira_ticket": "AUTO-27813",
+      "match_status": "Unmatched"
+    },
+    {
       "testcase_name": "cdp.stargate.licensing.test_cdp_licensing.LicensingTest~~~Day0.test_licensing",
       "regression_owner": "Shilpa",
       "status": "Failed",
@@ -1496,14 +1507,6 @@
       "status": "Failed",
       "triage_genie_ticket": "ENG-962709",
       "jira_ticket": "ENG-967803",
-      "match_status": "Unmatched"
-    },
-    {
-      "testcase_name": "cdp.stargate.qos_policy.api.test_qos_policy_api.TestQOSPolicyApi.test_storage_qos_on_nutanix_vms___pcvm",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-944188",
-      "jira_ticket": "AUTO-27813",
       "match_status": "Unmatched"
     },
     {
@@ -1531,20 +1534,20 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_double_failures",
-      "regression_owner": "Swapnil",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-924186",
-      "jira_ticket": "ENG-974307",
-      "match_status": "Unmatched"
-    },
-    {
       "testcase_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_combination",
       "regression_owner": "Swapnil",
       "status": "Failed",
       "triage_genie_ticket": "ENG-966444",
       "jira_ticket": "ENG-966444",
       "match_status": "Matched"
+    },
+    {
+      "testcase_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_double_failures",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-924186",
+      "jira_ticket": "ENG-974307",
+      "match_status": "Unmatched"
     },
     {
       "testcase_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_ei_on_one_node",
@@ -1619,20 +1622,20 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.external_storage.stargate.test_external_storage_bg_scan_verification.ExternalStorageBgScanOps~~~PureStorage.test_background_scan_ops_with_external_storage",
-      "regression_owner": "Unknown user",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-967795",
-      "jira_ticket": "",
-      "match_status": ""
-    },
-    {
       "testcase_name": "cdp.external_storage.stargate.test_external_storage_scsi_unmap.ExternalStorageUnmapTest~~~PureStorage.test_external_storage_test_unmap",
       "regression_owner": "Unknown user",
       "status": "Failed",
       "triage_genie_ticket": "ENG-901901",
       "jira_ticket": "ENG-901901",
       "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.external_storage.stargate.test_external_storage_bg_scan_verification.ExternalStorageBgScanOps~~~PureStorage.test_background_scan_ops_with_external_storage",
+      "regression_owner": "Unknown user",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-967795",
+      "jira_ticket": "",
+      "match_status": ""
     },
     {
       "testcase_name": "cdp.external_storage.stargate.test_external_storage_vg_clone_abs_io_integrity.ExternalStorageABSVGCloneTest~~~PureStorage.test_external_storage_vg_clone_io_integrity___ei",
@@ -1651,19 +1654,19 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.external_storage.alert.test_alert.TestAlert~~~PureStorage.test_alert_blocked_io",
-      "regression_owner": "Unknown user",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-937324",
-      "jira_ticket": "ENG-977007",
-      "match_status": "Unmatched"
-    },
-    {
       "testcase_name": "cdp.external_storage.stargate.test_external_storage_genesis_ha.TestExternalStorageGenesisHA~~~PureStorage.test_external_storage_genesis_ha___stargate_crash",
       "regression_owner": "Unknown user",
       "status": "Failed",
       "triage_genie_ticket": "ENG-907130",
       "jira_ticket": "ENG-979693",
+      "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.external_storage.alert.test_alert.TestAlert~~~PureStorage.test_alert_blocked_io",
+      "regression_owner": "Unknown user",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-937324",
+      "jira_ticket": "ENG-977007",
       "match_status": "Unmatched"
     },
     {
@@ -1707,22 +1710,6 @@
       "match_status": "Matched"
     },
     {
-      "testcase_name": "cdp.external_storage.scalability.test_scalability.ExternalStorageScalability~~~PureStorage.test_volume_churn",
-      "regression_owner": "Unknown user",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-972802",
-      "jira_ticket": "ENG-976927",
-      "match_status": "Unmatched"
-    },
-    {
-      "testcase_name": "cdp.external_storage.curator.test_curator_external_storage.CuratorExternalStorage~~~PureStorage.test_hosting_swarm___ei",
-      "regression_owner": "Unknown user",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-968863",
-      "jira_ticket": "ENG-981356",
-      "match_status": "Unmatched"
-    },
-    {
       "testcase_name": "cdp.external_storage.scalability.test_scalability.ExternalStorageScalability~~~PureStorage.test_max_snapshots___max_mappings",
       "regression_owner": "Unknown user",
       "status": "Failed",
@@ -1731,18 +1718,26 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.external_storage.curator.test_curator_external_storage.CuratorExternalStorage~~~DellPowerFlex.test_large_file_ping_pong",
+      "testcase_name": "cdp.external_storage.scalability.test_scalability.ExternalStorageScalability~~~PureStorage.test_volume_churn",
       "regression_owner": "Unknown user",
       "status": "Failed",
-      "triage_genie_ticket": "ENG-902987",
-      "jira_ticket": "",
-      "match_status": ""
+      "triage_genie_ticket": "ENG-972802",
+      "jira_ticket": "ENG-976927",
+      "match_status": "Unmatched"
     },
     {
       "testcase_name": "cdp.external_storage.curator.test_curator_external_storage.CuratorExternalStorage~~~DellPowerFlex.test_deletion_and_stats___ei",
       "regression_owner": "Unknown user",
       "status": "Failed",
       "triage_genie_ticket": "ENG-981355",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "cdp.external_storage.curator.test_curator_external_storage.CuratorExternalStorage~~~DellPowerFlex.test_large_file_ping_pong",
+      "regression_owner": "Unknown user",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-902987",
       "jira_ticket": "",
       "match_status": ""
     },
@@ -1755,6 +1750,14 @@
       "match_status": ""
     },
     {
+      "testcase_name": "cdp.external_storage.stargate.test_stargate.TestStargate~~~DellPowerFlex.test_data_network_unavailable",
+      "regression_owner": "Unknown user",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-969955",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
       "testcase_name": "cdp.external_storage.stargate.test_compute_cluster_crash.TestComputeClusterCrash~~~DellPowerFlex.test_compute_cluster_hypervisors_crash",
       "regression_owner": "Swapnil",
       "status": "Failed",
@@ -1763,26 +1766,10 @@
       "match_status": ""
     },
     {
-      "testcase_name": "cdp.external_storage.stargate.test_external_storage_vg_clone_abs_io_integrity.ExternalStorageABSVGCloneTest~~~DellPowerFlex.test_external_storage_vg_clone_io_integrity___ei",
-      "regression_owner": "Sudharshan",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-965372",
-      "jira_ticket": "ENG-929630",
-      "match_status": "Unmatched"
-    },
-    {
       "testcase_name": "cdp.external_storage.stargate.test_external_storage_vg_disk_ops.TestExternalStorageVgDiskOps~~~DellPowerFlex.test_io_integrity",
       "regression_owner": "Sudharshan",
       "status": "Failed",
       "triage_genie_ticket": "ENG-957496",
-      "jira_ticket": "",
-      "match_status": ""
-    },
-    {
-      "testcase_name": "cdp.external_storage.stargate.test_stargate.TestStargate~~~DellPowerFlex.test_data_network_unavailable",
-      "regression_owner": "Unknown user",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-969955",
       "jira_ticket": "",
       "match_status": ""
     },
@@ -1803,6 +1790,14 @@
       "match_status": ""
     },
     {
+      "testcase_name": "cdp.external_storage.stargate.test_external_storage_vg_clone_abs_io_integrity.ExternalStorageABSVGCloneTest~~~DellPowerFlex.test_external_storage_vg_clone_io_integrity___ei",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-965372",
+      "jira_ticket": "ENG-929630",
+      "match_status": "Unmatched"
+    },
+    {
       "testcase_name": "cdp.external_storage.stargate.test_stargate.TestStargate~~~DellPowerFlex.test_alert_out_of_space",
       "regression_owner": "Unknown user",
       "status": "Failed",
@@ -1819,18 +1814,18 @@
       "match_status": "N/A"
     },
     {
-      "testcase_name": "cdp.external_storage.alert.test_alert.TestAlert~~~PureStorage.test_alert_for_connection_limit",
-      "regression_owner": "Unknown user",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-913024",
-      "jira_ticket": "ENG-977007",
-      "match_status": "Unmatched"
-    },
-    {
       "testcase_name": "cdp.external_storage.alert.test_alert.TestAlert~~~PureStorage.test_alert_out_of_resource",
       "regression_owner": "Unknown user",
       "status": "Failed",
       "triage_genie_ticket": "ENG-961461",
+      "jira_ticket": "ENG-977007",
+      "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.external_storage.alert.test_alert.TestAlert~~~PureStorage.test_alert_for_connection_limit",
+      "regression_owner": "Unknown user",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-913024",
       "jira_ticket": "ENG-977007",
       "match_status": "Unmatched"
     },
@@ -1899,20 +1894,20 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.blockstore.spdk.test_spdk_disk_workflows.TestSPDKDiskWorkflows~~~nvme_serviceability.test_spdk_disk_workflows",
-      "regression_owner": "Swapnil",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-944832",
-      "jira_ticket": "ENG-981498",
-      "match_status": "Unmatched"
-    },
-    {
       "testcase_name": "cdp.blockstore.infrastructure.test_blockstore_infrastructure.TestBlockstoreInfrastructure~~~nvme_serviceability.test_blockstore_remove_add_disk___hotplug",
       "regression_owner": "Swapnil",
       "status": "Failed",
       "triage_genie_ticket": "ENG-972614",
       "jira_ticket": "ENG-972614",
       "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.blockstore.spdk.test_spdk_disk_workflows.TestSPDKDiskWorkflows~~~nvme_serviceability.test_spdk_disk_workflows",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-944832",
+      "jira_ticket": "ENG-981498",
+      "match_status": "Unmatched"
     },
     {
       "testcase_name": "cdp.stargate.rdma.iser.test_iser.TestISER.test_vmotion_with_iser",
@@ -2003,14 +1998,6 @@
       "match_status": ""
     },
     {
-      "testcase_name": "cdp.hades.hawk_armor.test_hawk_armor.TestHawkArmor.test_hawk_armor_node_add_remove",
-      "regression_owner": "Thanuja",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-969163",
-      "jira_ticket": "ENG-969163",
-      "match_status": "Matched"
-    },
-    {
       "testcase_name": "cdp.hades.hawk_armor.test_hawk_armor.TestHawkArmor.test_secure_paths_on_hawk_armor_reset",
       "regression_owner": "Thanuja",
       "status": "Failed",
@@ -2019,12 +2006,12 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cassandra_medusa.one_node_one_disk_or_two_disk_ft_tests.io_integrity.test_cassandra_1n1d_2d_ft_with_io_integrity.CassandraOneNodeOneDiskOrTwoDiskFtTest.test_cassandra_1n1d_2d_ft_cluster___verify_disk_removal_forwarding_1",
-      "regression_owner": "Swapnil",
+      "testcase_name": "cdp.hades.hawk_armor.test_hawk_armor.TestHawkArmor.test_hawk_armor_node_add_remove",
+      "regression_owner": "Thanuja",
       "status": "Failed",
-      "triage_genie_ticket": "ENG-943775",
-      "jira_ticket": "ENG-837724",
-      "match_status": "Unmatched"
+      "triage_genie_ticket": "ENG-969163",
+      "jira_ticket": "ENG-969163",
+      "match_status": "Matched"
     },
     {
       "testcase_name": "cassandra_medusa.one_node_one_disk_or_two_disk_ft_tests.io_integrity.test_cassandra_1n1d_2d_ft_with_io_integrity.CassandraOneNodeOneDiskOrTwoDiskFtTest.test_cassandra_1n1d_2d_ft_cluster___verify_disk_removal_forwarding_2",
@@ -2035,10 +2022,10 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cassandra_medusa.one_node_one_disk_or_two_disk_ft_tests.io_integrity.test_cassandra_1n1d_2d_ft_with_io_integrity.CassandraOneNodeOneDiskOrTwoDiskFtTest.test_cassandra_1n1d_2d_ft_cluster___verify_2D_parallel_failure",
+      "testcase_name": "cassandra_medusa.one_node_one_disk_or_two_disk_ft_tests.io_integrity.test_cassandra_1n1d_2d_ft_with_io_integrity.CassandraOneNodeOneDiskOrTwoDiskFtTest.test_cassandra_1n1d_2d_ft_cluster___verify_disk_removal_forwarding_1",
       "regression_owner": "Swapnil",
       "status": "Failed",
-      "triage_genie_ticket": "DIAL-22265",
+      "triage_genie_ticket": "ENG-943775",
       "jira_ticket": "ENG-837724",
       "match_status": "Unmatched"
     },
@@ -2067,6 +2054,14 @@
       "match_status": "Unmatched"
     },
     {
+      "testcase_name": "cassandra_medusa.one_node_one_disk_or_two_disk_ft_tests.io_integrity.test_cassandra_1n1d_2d_ft_with_io_integrity.CassandraOneNodeOneDiskOrTwoDiskFtTest.test_cassandra_1n1d_2d_ft_cluster___verify_2D_parallel_failure",
+      "regression_owner": "Swapnil",
+      "status": "Failed",
+      "triage_genie_ticket": "DIAL-22265",
+      "jira_ticket": "ENG-837724",
+      "match_status": "Unmatched"
+    },
+    {
       "testcase_name": "manageability.ui.pe.rack_awareness.test_rack_awareness.RackAwarenessTest.test_verify_removing_a_node_from_hardware_page_displays_warning_message",
       "regression_owner": "Suryaprabha",
       "status": "Failed",
@@ -2091,20 +2086,20 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.curator.goldsuite.test_curator_gold_suite.CuratorGoldSuiteTest.test_gold___all",
-      "regression_owner": "Sudharshan",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-953321",
-      "jira_ticket": "ENG-953321",
-      "match_status": "Matched"
-    },
-    {
       "testcase_name": "cdp.curator.goldsuite.test_curator_gold_suite.CuratorGoldSuiteTest.test_gold___basic_rf3",
       "regression_owner": "Sudharshan",
       "status": "Failed",
       "triage_genie_ticket": "ENG-962337",
       "jira_ticket": "ENG-977411",
       "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.curator.goldsuite.test_curator_gold_suite.CuratorGoldSuiteTest.test_gold___all",
+      "regression_owner": "Sudharshan",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-953321",
+      "jira_ticket": "ENG-953321",
+      "match_status": "Matched"
     },
     {
       "testcase_name": "cdp.stargate.aes.test_bg_scan_verification.TestBackgroundScanOps.test_bg_scan_random_operations",
@@ -2267,7 +2262,15 @@
       "match_status": "Matched"
     },
     {
-      "testcase_name": "cdp.zookeeper.zk_leadership_blueprint.test_zk_leadership_blueprint.ZookeeperBlueprintTests~~~ReactiveApproach.test_leadership_distribution",
+      "testcase_name": "cdp.zookeeper.zk_leadership_blueprint.test_zk_leadership_blueprint.ZookeeperBlueprintTests.test_leadership_distribution_on_host_removal",
+      "regression_owner": "Swapnil",
+      "status": "Warning",
+      "triage_genie_ticket": "ENG-977342",
+      "jira_ticket": "ENG-977342",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.zookeeper.zk_leadership_blueprint.test_zk_leadership_blueprint.ZookeeperBlueprintTests~~~ReactiveApproach.test_leadership_distribution_on_node_removal_add",
       "regression_owner": "Swapnil",
       "status": "Warning",
       "triage_genie_ticket": "ENG-977342",
@@ -2283,15 +2286,7 @@
       "match_status": "Matched"
     },
     {
-      "testcase_name": "cdp.zookeeper.zk_leadership_blueprint.test_zk_leadership_blueprint.ZookeeperBlueprintTests.test_leadership_distribution_on_host_removal",
-      "regression_owner": "Swapnil",
-      "status": "Warning",
-      "triage_genie_ticket": "ENG-977342",
-      "jira_ticket": "ENG-977342",
-      "match_status": "Matched"
-    },
-    {
-      "testcase_name": "cdp.zookeeper.zk_leadership_blueprint.test_zk_leadership_blueprint.ZookeeperBlueprintTests~~~ReactiveApproach.test_leadership_distribution_on_node_removal_add",
+      "testcase_name": "cdp.zookeeper.zk_leadership_blueprint.test_zk_leadership_blueprint.ZookeeperBlueprintTests~~~ReactiveApproach.test_leadership_distribution",
       "regression_owner": "Swapnil",
       "status": "Warning",
       "triage_genie_ticket": "ENG-977342",
@@ -2323,19 +2318,19 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "cdp.stargate.volume_group.odata.test_vg_list_with_odata_support.TestVGListWithOdataSupport.test_vg_external_attachment_list_with_odata_support___nvmf",
-      "regression_owner": "Suryaprabha",
-      "status": "Warning",
-      "triage_genie_ticket": "ENG-973851",
-      "jira_ticket": "ENG-973851",
-      "match_status": "Matched"
-    },
-    {
       "testcase_name": "cdp.stargate.volume_group.odata.test_vg_list_with_odata_support.TestVGListWithOdataSupport.test_vg_external_attachment_list_with_odata_support_rbac_user___nvmf",
       "regression_owner": "Suryaprabha",
       "status": "Warning",
       "triage_genie_ticket": "ENG-939063",
       "jira_ticket": "ENG-939063",
+      "match_status": "Matched"
+    },
+    {
+      "testcase_name": "cdp.stargate.volume_group.odata.test_vg_list_with_odata_support.TestVGListWithOdataSupport.test_vg_external_attachment_list_with_odata_support___nvmf",
+      "regression_owner": "Suryaprabha",
+      "status": "Warning",
+      "triage_genie_ticket": "ENG-973851",
+      "jira_ticket": "ENG-973851",
       "match_status": "Matched"
     },
     {
@@ -2347,7 +2342,7 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "manageability.ui.pc.rack_awareness.test_rack_awareness_pc.RackAwarenessPCTest.test_verify_configure_rack_aware_with_rest___rf3",
+      "testcase_name": "manageability.ui.pc.rack_awareness.test_rack_awareness_pc.RackAwarenessPCTest.test_verify_configure_rack_aware_with_rest",
       "regression_owner": "Unknown user",
       "status": "Failed",
       "triage_genie_ticket": "",
@@ -2355,7 +2350,7 @@
       "match_status": "N/A"
     },
     {
-      "testcase_name": "manageability.ui.pc.rack_awareness.test_rack_awareness_pc.RackAwarenessPCTest.test_verify_configure_rack_aware_with_rest",
+      "testcase_name": "manageability.ui.pc.rack_awareness.test_rack_awareness_pc.RackAwarenessPCTest.test_verify_configure_rack_aware_with_rest___rf3",
       "regression_owner": "Unknown user",
       "status": "Failed",
       "triage_genie_ticket": "",
@@ -2387,20 +2382,20 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node_with_io_integrity.RoboAddNodeWithIOIntegrityTest.test_robo_from_one_to_four_node_with_io_integrity",
-      "regression_owner": "Unknown user",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-976229",
-      "jira_ticket": "ENG-976229",
-      "match_status": "Matched"
-    },
-    {
       "testcase_name": "cdp.hades.disk_operations.test_disk_operations.TestDiskOperations.test_add_new_disk",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-944832",
       "jira_ticket": "ENG-374254",
       "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "robo.robo_add_remove_node.test_robo_add_node_with_io_integrity.RoboAddNodeWithIOIntegrityTest.test_robo_from_one_to_four_node_with_io_integrity",
+      "regression_owner": "Unknown user",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-976229",
+      "jira_ticket": "ENG-976229",
+      "match_status": "Matched"
     },
     {
       "testcase_name": "cdp.stargate.tiering.test_optane_upmigrate.TestOptaneUpmigrate.test_optane_upmigrate___random_read",
@@ -2443,20 +2438,20 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "manageability.ui.pc.storage_policy.test_storage_policy.StoragePolicy~~~compliance.test_compliance_page",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-956499",
-      "jira_ticket": "ENG-848131",
-      "match_status": "Unmatched"
-    },
-    {
       "testcase_name": "manageability.ui.pc.storage_policy.test_storage_policy.StoragePolicy~~~compliance.test_policy_instance_page",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-947802",
       "jira_ticket": "ENG-947802",
       "match_status": "Matched"
+    },
+    {
+      "testcase_name": "manageability.ui.pc.storage_policy.test_storage_policy.StoragePolicy~~~compliance.test_compliance_page",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-956499",
+      "jira_ticket": "ENG-848131",
+      "match_status": "Unmatched"
     },
     {
       "testcase_name": "cdp.stargate.power_cycling.test_io_integrity_power_cycling.PowerCyclingIOIntegrityTest~~~AES_Brownfield.test_io_integrity___svm_power_cycle",
@@ -2899,18 +2894,18 @@
       "match_status": "Unmatched"
     },
     {
-      "testcase_name": "manageability.v4.storage_container.test_sdk_sc_stats.TestContainerStatsV4SDK.test_stats",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-958674",
-      "jira_ticket": "",
-      "match_status": ""
-    },
-    {
       "testcase_name": "manageability.v4.rbac.test_container_v4_rbac_api.TestContainerV4Api.test_ctr_clear_reserved_space_rbac",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-976511",
+      "jira_ticket": "",
+      "match_status": ""
+    },
+    {
+      "testcase_name": "manageability.v4.storage_container.test_sdk_sc_stats.TestContainerStatsV4SDK.test_stats",
+      "regression_owner": "Shilpa",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-958674",
       "jira_ticket": "",
       "match_status": ""
     },
@@ -3006,9 +3001,9 @@
       "testcase_name": "cdp.stargate.abs.test_shared_vg_abs_io_integrity.ABSSharedVGTest~~~ABS_Segmentation.test_shared_vg_io_integrity___ei",
       "regression_owner": "Sudharshan",
       "status": "Failed",
-      "triage_genie_ticket": "",
+      "triage_genie_ticket": "ENG-984107",
       "jira_ticket": "ENG-984107",
-      "match_status": ""
+      "match_status": "Matched"
     },
     {
       "testcase_name": "cdp.stargate.compression.test_compression.TestCompression.test_inline_compression_saving_with_upgrade",
@@ -3022,9 +3017,9 @@
       "testcase_name": "infrastructure.network_segmentation.test_cluster_ops.NetworkSegmentationWorkFlows~~~data_in_transit.test_create",
       "regression_owner": "Suryaprabha",
       "status": "Warning",
-      "triage_genie_ticket": "",
+      "triage_genie_ticket": "ENG-980580",
       "jira_ticket": "ENG-980580",
-      "match_status": ""
+      "match_status": "Matched"
     },
     {
       "testcase_name": "cdp.stargate.mixed_io_integrity.test_mixed.TestMixed~~~AES.test_mixed___ei_force_egroup_migrations",
@@ -3046,9 +3041,9 @@
       "testcase_name": "hyperv.dolc.test_vm_with_host_poweroff.VMWithHostReboot.test_host_poweroff___hyperv_2022",
       "regression_owner": "Unknown user",
       "status": "Failed",
-      "triage_genie_ticket": "",
-      "jira_ticket": "",
-      "match_status": "N/A"
+      "triage_genie_ticket": "ENG-984706",
+      "jira_ticket": "ENG-985914",
+      "match_status": "Unmatched"
     },
     {
       "testcase_name": "cdp.stargate.vmotion.test_vmotion.VmotionIOIntegrityTest~~~Blockstore_SPDK.test_mixed___ei",
@@ -3062,22 +3057,30 @@
       "testcase_name": "hyperv.dolc.test_uvm_migrate.VMMigrate.test_vm_migrate___hyperv_2022",
       "regression_owner": "Unknown user",
       "status": "Failed",
-      "triage_genie_ticket": "",
+      "triage_genie_ticket": "ENG-981530",
+      "jira_ticket": "ENG-985908",
+      "match_status": "Unmatched"
+    },
+    {
+      "testcase_name": "cdp.external_storage.curator.test_curator_external_storage.CuratorExternalStorage~~~PureStorage.test_hosting_swarm___ei",
+      "regression_owner": "Unknown user",
+      "status": "Failed",
+      "triage_genie_ticket": "ENG-981356",
       "jira_ticket": "",
-      "match_status": "N/A"
+      "match_status": ""
     }
   ],
   "triage_summary": {
     "total_failed_warning_count": 333,
-    "triaged_count": 217,
-    "triage_genie_count": 204,
-    "total_triage_genie_count": 292,
-    "triage_completed_percent": 65.2,
-    "triage_genie_percent": 94.0,
-    "total_triage_genie_percent": 87.7,
-    "matched_count": 72,
-    "unmatched_count": 132,
-    "matched_percent": 35.3,
-    "unmatched_percent": 64.7
+    "triaged_count": 218,
+    "triage_genie_count": 207,
+    "total_triage_genie_count": 296,
+    "triage_completed_percent": 65.5,
+    "triage_genie_percent": 95.0,
+    "total_triage_genie_percent": 88.9,
+    "matched_count": 74,
+    "unmatched_count": 133,
+    "matched_percent": 35.7,
+    "unmatched_percent": 64.3
   }
 }

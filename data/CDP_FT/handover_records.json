@@ -558,9 +558,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_add_node.RoboAddNodeToOneNodeTest.test_robo_add_node_to_one_node",
@@ -580,9 +582,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_add_node.RoboAddNodeToOneNodeTest.test_robo_add_node_to_one_node___normal_witness",
@@ -602,9 +606,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity",
@@ -624,9 +630,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___offline_HDD_witness",
@@ -646,9 +654,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___witness",
@@ -668,9 +678,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___offline_HDD",
@@ -690,9 +702,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_integrity",
@@ -712,9 +726,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_metadata_disk_replacement",
@@ -734,9 +750,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_ei_on_witness_vm",
@@ -756,9 +774,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_one_metadata_disk_replacement",
@@ -778,9 +798,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_split_brain_scenario",
@@ -800,9 +822,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_integrity_with_encryption",
@@ -822,9 +846,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_metadata_disk_replacement_with_encryption",
@@ -844,9 +870,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_background_encryption_robo_cluster",
@@ -866,9 +894,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_encryption_io_integrity_with_cluster_restart",
@@ -888,9 +918,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_mantle_key_workflow",
@@ -910,9 +942,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603182",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603182"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___witness_lkm_encryption",
@@ -932,9 +966,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_add_node.RoboAddNodeToOneNodeTest.test_robo_add_node_to_one_node",
@@ -954,9 +990,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_add_node.RoboAddNodeToOneNodeTest.test_robo_add_node_to_one_node___normal_witness",
@@ -976,9 +1014,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity",
@@ -998,9 +1038,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___offline_HDD_witness",
@@ -1020,9 +1062,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___witness",
@@ -1042,9 +1086,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___offline_HDD",
@@ -1064,9 +1110,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_integrity",
@@ -1086,9 +1134,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_metadata_disk_replacement",
@@ -1108,9 +1158,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_ei_on_witness_vm",
@@ -1130,9 +1182,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_one_metadata_disk_replacement",
@@ -1152,9 +1206,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_two_node.test_robo_two_node_with_io_integrity.RoboTwoNodeWithIOIntegrityTest.test_robo_two_node_with_io_integrity___two_node_split_brain_scenario",
@@ -1174,9 +1230,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_integrity_with_encryption",
@@ -1196,9 +1254,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_single_node.test_robo_single_node_with_io_integrity.RoboSingleNodeWithIOIntegrityTest.test_robo_single_node_with_io_integrity___single_node_metadata_disk_replacement_with_encryption",
@@ -1218,9 +1278,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_background_encryption_robo_cluster",
@@ -1240,9 +1302,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_encryption_io_integrity_with_cluster_restart",
@@ -1262,9 +1326,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "cdp.stargate.robo_encryption.test_io_integrity_compression_snapshot_encryption.CompressionSnapshotEncryptionIOIntegrityTest.test_mantle_key_workflow",
@@ -1284,9 +1350,11 @@
         "swapnil.wankhede@nutanix.com"
       ],
       "notes": "Handover CR requested via RegX.",
-      "cr_status": "creating",
+      "cr_status": "created",
       "cr_subject": "Testcase Handover",
-      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :"
+      "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENF-124q213\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "603247",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/603247"
     },
     {
       "test_name": "robo.robo_add_remove_node.test_robo_remove_node_from_two_node_with_io_integrity.RoboRemoveNodeFromTwoNodeWithIOIntegrityTest.test_robo_remove_node_two_node_with_io_integrity___witness_lkm_encryption",
@@ -3460,7 +3528,163 @@
       "cr_status": "creating",
       "cr_subject": "Testcase Handover",
       "cr_description": "Reviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-123123\nTests run               : \nTarget release          : master\nCode review URL         :"
+    },
+    {
+      "test_name": "cassandra_medusa.external_storage.resiliency.test_cassandra_resiliency.TestCassandraResiliency~~~DellPowerStore.test_cassandra_resiliency___active_node_removals_parallelly_5nodes_with_3active_nodes",
+      "tickets": [
+        "ENG-968752"
+      ],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-968752"
+      ],
+      "handover_date": "2026-09-24T08:30:36.701164",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Handover CR requested via RegX.",
+      "cr_status": "created",
+      "cr_subject": "Testcase Handover for external storage cassandra",
+      "cr_description": "Reviewers               : shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-968752\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "605562",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/605562"
+    },
+    {
+      "test_name": "cassandra_medusa.external_storage.resiliency.test_cassandra_resiliency.TestCassandraResiliency~~~DellPowerStore.test_cvms_rolling_reboot",
+      "tickets": [
+        "ENG-968752"
+      ],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-968752"
+      ],
+      "handover_date": "2026-09-24T08:30:36.701164",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Handover CR requested via RegX.",
+      "cr_status": "created",
+      "cr_subject": "Testcase Handover for external storage cassandra",
+      "cr_description": "Reviewers               : shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-968752\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "605562",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/605562"
+    },
+    {
+      "test_name": "cassandra_medusa.external_storage.resiliency.test_cassandra_resiliency.TestCassandraResiliency~~~DellPowerStore.test_cassandra_resiliency___simultaneous_failure_of_active_nodes_with_multiple_metadata_disks_5nodes_with_3active_nodes",
+      "tickets": [
+        "ENG-968752"
+      ],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-968752"
+      ],
+      "handover_date": "2026-09-24T08:30:36.701164",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Handover CR requested via RegX.",
+      "cr_status": "created",
+      "cr_subject": "Testcase Handover for external storage cassandra",
+      "cr_description": "Reviewers               : shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-968752\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "605562",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/605562"
+    },
+    {
+      "test_name": "cassandra_medusa.external_storage.resiliency.test_cassandra_resiliency.TestCassandraResiliency~~~DellPowerStore.test_cassandra_resiliency___network_failures_parallelly_5nodes_with_3active_nodes",
+      "tickets": [
+        "ENG-968752"
+      ],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-968752"
+      ],
+      "handover_date": "2026-09-24T08:30:36.701164",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Handover CR requested via RegX.",
+      "cr_status": "created",
+      "cr_subject": "Testcase Handover for external storage cassandra",
+      "cr_description": "Reviewers               : shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-968752\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "605562",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/605562"
+    },
+    {
+      "test_name": "cassandra_medusa.external_storage.resiliency.test_cassandra_resiliency.TestCassandraResiliency~~~DellPowerStore.test_cassandra_resiliency___multiple_cvms_shutdown_serially_5nodes_with_3active_nodes",
+      "tickets": [
+        "ENG-968752"
+      ],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-968752"
+      ],
+      "handover_date": "2026-09-24T08:30:36.701164",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Handover CR requested via RegX.",
+      "cr_status": "created",
+      "cr_subject": "Testcase Handover for external storage cassandra",
+      "cr_description": "Reviewers               : shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-968752\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "605562",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/605562"
+    },
+    {
+      "test_name": "cassandra_medusa.external_storage.resiliency.test_cassandra_resiliency.TestCassandraResiliency~~~DellPowerStore.test_cluster_all_services_restart",
+      "tickets": [
+        "ENG-968752"
+      ],
+      "bug_tickets": [],
+      "handover_tickets": [
+        "ENG-968752"
+      ],
+      "handover_date": "2026-09-24T08:30:36.701164",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "master",
+      "lst_file": "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst",
+      "lst_files": [
+        "test_sets/milestones/master/cdp/REGRESSION/onprem/Regression_team_owned_lst/regression_cdp_nutest_official_external_storage_dell.lst"
+      ],
+      "reviewers": [
+        "shilpa.sattigeri@nutanix.com"
+      ],
+      "notes": "Handover CR requested via RegX.",
+      "cr_status": "created",
+      "cr_subject": "Testcase Handover for external storage cassandra",
+      "cr_description": "Reviewers               : shilpa.sattigeri@nutanix.com\nTickets resolved        : ENG-968752\nTests run               : \nTarget release          : master\nCode review URL         :",
+      "gerrit_change_id": "605562",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/605562"
     }
   ],
-  "updated_at": "2026-09-22T07:21:27.307560"
+  "updated_at": "2026-09-24T08:30:36.702188"
 }
