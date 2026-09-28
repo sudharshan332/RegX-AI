@@ -56,8 +56,66 @@ export function fluxCategoryLabel(category) {
   return category ? String(category) : '';
 }
 
+/** Flux UI / API origin (task pages live at {base}/task/{record_id}). */
+export const FLUX_UI_BASE = (
+  process.env.REACT_APP_FLUX_API_BASE || 'http://10.61.4.219'
+).replace(/\/$/, '');
+
+export function fluxTaskUrl(recordId, taskUrl = null) {
+  const explicit = String(taskUrl || '').trim();
+  if (explicit) return explicit;
+  if (recordId == null || recordId === '') return '';
+  return `${FLUX_UI_BASE}/task/${recordId}`;
+}
+
 export const FLUX_MAX_WAIT_MS = 15 * 60 * 1000;
 export const FLUX_POLL_INTERVAL_MS = 10000;
+
+/** Persistable subset of a Flux job for results_<tag>.json → flux_quick_fix. */
+export function serializeFluxJob(job) {
+  if (!job || (!job.record_id && !job.ticket && !job.initiate_response)) return null;
+  return {
+    record_id: job.record_id || job.ticket?.record_id || job.initiate_response?.record_id || null,
+    status: job.status || job.ticket?.status || job.initiate_response?.status || null,
+    ticket: job.ticket || null,
+    initiate_response: job.initiate_response || null,
+    startedAt: job.startedAt || null,
+    resumeAttempted: !!job.resumeAttempted,
+    rerun: job.rerun || null,
+    error: job.error || null,
+  };
+}
+
+export function serializeFluxJobsMap(jobs) {
+  const out = {};
+  Object.entries(jobs || {}).forEach(([tid, job]) => {
+    const serialized = serializeFluxJob(job);
+    if (serialized) out[String(tid)] = serialized;
+  });
+  return out;
+}
+
+export function hydrateFluxJobsFromMap(fluxMap) {
+  const out = {};
+  Object.entries(fluxMap || {}).forEach(([tid, raw]) => {
+    if (!raw || typeof raw !== 'object') return;
+    const recordId = raw.record_id || raw.ticket?.record_id || raw.initiate_response?.record_id || null;
+    if (!recordId && !raw.ticket && !raw.initiate_response) return;
+    out[String(tid)] = {
+      record_id: recordId,
+      status: raw.status || raw.ticket?.status || raw.initiate_response?.status || null,
+      ticket: raw.ticket || raw.initiate_response || null,
+      initiate_response: raw.initiate_response || null,
+      startedAt: raw.startedAt || Date.now(),
+      resumeAttempted: !!raw.resumeAttempted,
+      rerun: raw.rerun || null,
+      error: raw.error || null,
+      resuming: false,
+      rerunning: false,
+    };
+  });
+  return out;
+}
 
 /** Safe React text: primitives only; objects/arrays must not be rendered as children. */
 export function textOrEmpty(value) {
@@ -135,6 +193,13 @@ export function fluxHasRootCause(ticket) {
   return Boolean(String(ticket?.root_cause || '').trim());
 }
 
+/** True when Flux analysis has RCA + confidence + failure_category for human review. */
+export function fluxAnalysisComplete(ticket) {
+  if (!fluxHasRootCause(ticket)) return false;
+  if (fluxConfidencePercent(ticket?.confidence) == null) return false;
+  return Boolean(String(ticket?.failure_category || '').trim());
+}
+
 export function fluxHasGerritCr(ticket) {
   return Boolean(String(ticket?.gerrit_url || '').trim() && String(ticket?.gerrit_change_id || '').trim());
 }
@@ -170,9 +235,11 @@ export function fluxShouldPoll(status, ticket, job = {}) {
   if (fluxPipelineError(ticket)) return false;
   const startedAt = Number(job.startedAt) || 0;
   if (startedAt && Date.now() - startedAt > FLUX_MAX_WAIT_MS) return false;
-  if (!fluxHasRootCause(ticket)) return true;
-  if (fluxCanCreateGerritCr(ticket) && !job.resumeAttempted) return true;
+  // After human clicks Create CR, keep polling until Gerrit CR appears.
   if (job.resumeAttempted && !fluxHasGerritCr(ticket)) return true;
+  // Analysis complete (RCA + confidence + category) → stop; human reviews before Create CR.
+  if (fluxAnalysisComplete(ticket)) return false;
+  if (!fluxHasRootCause(ticket)) return true;
   return FLUX_ACTIVE_STATUSES.has(s);
 }
 
@@ -1219,6 +1286,10 @@ export default function FailedTestcaseAnalysis() {
       setIntelligentTriageResults(triageOpen);
       setFirstLevelAiResults(flHydrate);
       setDeepAiResults(deepHydrate);
+      const fluxHydrated = hydrateFluxJobsFromMap(data.flux_quick_fix || {});
+      setFluxJobs(fluxHydrated);
+      fluxJobsRef.current = fluxHydrated;
+      fluxResumeInFlight.current = {};
     } catch (_) {
       setResults([]);
       setCursorAiResults({});
@@ -1228,12 +1299,15 @@ export default function FailedTestcaseAnalysis() {
       setIntelligentTriageResults({});
       setFirstLevelAiResults({});
       setDeepAiResults({});
+      setFluxJobs({});
+      fluxJobsRef.current = {};
+      fluxResumeInFlight.current = {};
     } finally {
       setLoading(false);
     }
   };
 
-  const saveResultsForTag = useCallback(async (tagName, rows, branch, cursorAiState = null, intelligentTriageState = null) => {
+  const saveResultsForTag = useCallback(async (tagName, rows, branch, cursorAiState = null, intelligentTriageState = null, fluxQuickFixState = null) => {
     if (!tagName) return;
     setSavingResults(true);
     try {
@@ -1242,6 +1316,7 @@ export default function FailedTestcaseAnalysis() {
         current_branch: branch,
         ...(cursorAiState ? { cursor_ai: cursorAiState } : {}),
         ...(intelligentTriageState ? { intelligent_triage: intelligentTriageState } : {}),
+        ...(fluxQuickFixState ? { flux_quick_fix: fluxQuickFixState } : {}),
       });
     } catch (_) {}
     setSavingResults(false);
@@ -1254,6 +1329,7 @@ export default function FailedTestcaseAnalysis() {
       && Object.keys(cursorAiResults).length === 0
       && Object.keys(followUpHistoryByTestcase).length === 0
       && Object.keys(intelligentTriageByTestcase).length === 0
+      && Object.keys(fluxJobs).length === 0
     ) return;
     saveResultsForTag(
       analysisTag,
@@ -1265,8 +1341,9 @@ export default function FailedTestcaseAnalysis() {
         follow_up_history_by_testcase: followUpHistoryByTestcase,
       },
       intelligentTriageByTestcase,
+      serializeFluxJobsMap(fluxJobs),
     );
-  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, followUpHistoryByTestcase, intelligentTriageByTestcase, saveResultsForTag]);
+  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, followUpHistoryByTestcase, intelligentTriageByTestcase, fluxJobs, saveResultsForTag]);
 
   const buildIncludeParam = useCallback((cols) => {
     const include = new Set(['basic', 'exception_summary', 'intermittent']);
@@ -1447,6 +1524,7 @@ export default function FailedTestcaseAnalysis() {
               follow_up_history_by_testcase: followUpHistoryByTestcase,
             },
             intelligentTriageByTestcase,
+            serializeFluxJobsMap(fluxJobsRef.current || fluxJobs),
           );
           // Re-load from disk so First Level / Deep AI for matching testcase_ids stay hydrated.
           try {
@@ -1463,6 +1541,11 @@ export default function FailedTestcaseAnalysis() {
               setFollowUpHistoryByTestcase(
                 data.cursor_ai.follow_up_history_by_testcase || followUpHistoryByTestcase
               );
+            }
+            if (data.flux_quick_fix && Object.keys(data.flux_quick_fix).length) {
+              const fluxHydrated = hydrateFluxJobsFromMap(data.flux_quick_fix);
+              setFluxJobs(prev => ({ ...fluxHydrated, ...prev }));
+              fluxJobsRef.current = { ...fluxHydrated, ...(fluxJobsRef.current || {}) };
             }
           } catch (_) {}
         }
@@ -2066,6 +2149,7 @@ export default function FailedTestcaseAnalysis() {
       status: 'starting',
       error: null,
       ticket: null,
+      initiate_response: null,
       rerun: null,
       startedAt: Date.now(),
       resumeAttempted: false,
@@ -2084,17 +2168,23 @@ export default function FailedTestcaseAnalysis() {
       }, { timeout: 60000 });
       const data = resp.data || {};
       const recordId = data.record_id || data.id;
+      const taskHref = fluxTaskUrl(recordId, data.task_url);
       updateFluxJob(testId, {
         record_id: recordId,
         status: data.status || 'queued',
         ticket: data,
+        initiate_response: data,
         error: null,
       });
       appendFollowUpMessage(testId, {
         role: 'assistant',
         data: {
-          follow_up_answer: `Started Flux Quick Fix for ${jiraKey} on target branch \`${targetBranch}\`.`,
+          follow_up_answer: taskHref
+            ? `Started Flux Quick Fix for ${jiraKey} on target branch \`${targetBranch}\`. Track progress: ${taskHref}`
+            : `Started Flux Quick Fix for ${jiraKey} on target branch \`${targetBranch}\`.`,
           suggested_action: null,
+          flux_task_url: taskHref || null,
+          flux_record_id: recordId || null,
         },
         mode: 'system',
       });
@@ -2186,6 +2276,11 @@ export default function FailedTestcaseAnalysis() {
     }
     if (tag === 'flux') {
       const ctx = getDeepChatContext();
+      const existingJob = ctx?.testcaseId ? (fluxJobsRef.current[ctx.testcaseId] || fluxJobs[ctx.testcaseId]) : null;
+      if (existingJob?.record_id || existingJob?.ticket?.root_cause) {
+        // Hydrated / in-progress Flux job — show status panel, skip branch form.
+        return;
+      }
       if (ctx?.resultRow) prepareDeepAiFluxForm(ctx.resultRow);
     }
   };
@@ -3468,6 +3563,7 @@ export default function FailedTestcaseAnalysis() {
       status: 'starting',
       error: null,
       ticket: null,
+      initiate_response: null,
       rerun: null,
       startedAt: Date.now(),
       resumeAttempted: false,
@@ -3490,6 +3586,7 @@ export default function FailedTestcaseAnalysis() {
         record_id: recordId,
         status: data.status || 'queued',
         ticket: data,
+        initiate_response: data,
         error: null,
       });
     } catch (err) {
@@ -3610,35 +3707,6 @@ export default function FailedTestcaseAnalysis() {
             ticket,
             error: pipelineError || timeoutError || null,
           });
-          if (
-            !pipelineError
-            && !timeoutError
-            && fluxCanCreateGerritCr(ticket)
-            && !job.resumeAttempted
-            && !fluxResumeInFlight.current[testId]
-          ) {
-            fluxResumeInFlight.current[testId] = true;
-            updateFluxJob(testId, { resumeAttempted: true, resuming: true, error: null });
-            try {
-              const resp = await api.post(`${FLUX_API}/tickets/${job.record_id}/resume`, {}, { timeout: 60000 });
-              if (cancelled) return;
-              const resumed = resp.data || {};
-              updateFluxJob(testId, {
-                resuming: false,
-                status: resumed.status || 'fixing',
-                ticket: { ...ticket, ...resumed },
-              });
-            } catch (err) {
-              if (cancelled) return;
-              const message = err.response?.data?.error || err.message || 'Failed to resume Flux pipeline';
-              fluxResumeInFlight.current[testId] = false;
-              updateFluxJob(testId, {
-                resuming: false,
-                resumeAttempted: false,
-                error: message,
-              });
-            }
-          }
         } catch (err) {
           if (cancelled) return;
           const message = err.response?.data?.error || err.message || 'Failed to poll Flux ticket';
@@ -3826,8 +3894,12 @@ export default function FailedTestcaseAnalysis() {
         const gerritUrl = ticket.gerrit_url || '';
         const gerritId = ticket.gerrit_change_id || '';
         const running = fluxIsRunning(job.status, ticket, job);
+        const analysisDone = fluxAnalysisComplete(ticket);
+        const taskHref = fluxTaskUrl(job.record_id || ticket.record_id, ticket.task_url || job.initiate_response?.task_url);
         const rerunHref = job.rerun?.rerun_task_id ? jitaResultsUrl(job.rerun.rerun_task_id) : '';
-        const statusLabel = running ? 'Running' : (ticket.status || job.status);
+        const statusLabel = running
+          ? (job.resuming ? 'Creating CR…' : 'Running')
+          : (analysisDone ? 'Analysis complete' : (ticket.status || job.status));
         return (
           <td key={colId} className="flux-quick-fix-cell">
             <button
@@ -3839,16 +3911,27 @@ export default function FailedTestcaseAnalysis() {
             >
               {running ? 'Running' : 'Flux Quick Fix'}
             </button>
+            {taskHref && (
+              <a
+                href={taskHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flux-task-link"
+                title={taskHref}
+              >
+                Flux task {job.record_id || ticket.record_id}
+              </a>
+            )}
             {job.error && <div className="flux-job-error" title={job.error}>{job.error}</div>}
             {statusLabel && status !== 'starting' && (
               <div className="flux-job-status">Status: {statusLabel}</div>
             )}
             {(confidence != null || categoryLabel) && (
               <div className="flux-review-meta">
-                {confidence != null && <span className="flux-confidence">{confidence}%</span>}
+                {confidence != null && <span className="flux-confidence">Confidence: {confidence}%</span>}
                 {categoryLabel && (
                   <span className={`flux-category-chip flux-category-${String(ticket.failure_category || '').toLowerCase()}`}>
-                    {categoryLabel}
+                    {ticket.failure_category || categoryLabel}
                   </span>
                 )}
               </div>
@@ -3864,13 +3947,13 @@ export default function FailedTestcaseAnalysis() {
                 )}
               </details>
             )}
-            {canCreateCr && !gerritUrl && !job.resumeAttempted && (
+            {canCreateCr && !gerritUrl && (
               <button
                 type="button"
                 className="btn-flux-create-cr"
                 disabled={job.resuming || running}
                 onClick={() => handleFluxCreateGerritCr(result)}
-                title="Approve and create a Gerrit CR"
+                title="Review RCA, then create a Gerrit CR"
               >
                 {job.resuming ? 'Creating CR…' : 'Create Gerrit CR'}
               </button>
@@ -4442,26 +4525,73 @@ export default function FailedTestcaseAnalysis() {
                         {deepAiResult.root_cause}
                       </div>
                     )}
-                    <button
-                      type="button"
-                      className="btn-view-analysis"
-                      onClick={() => {
-                        setFollowUpHistory(followUpHistoryByTestcase[result.testcase_id] || []);
-                        setFollowUpMode('ask');
-                        setFollowUpInput('');
-                        resetDeepAiActionUi();
-                        setTriageAnalysisModal({
-                          kind: 'deep',
-                          testcase_name: result.testcase_name,
-                          testcase_id: result.testcase_id,
-                          resultRow: result,
-                          session_id: deepAiResult.session_id || cursorAiSessions[result.testcase_id] || null,
-                          ...deepAiResult,
-                        });
-                      }}
-                    >
-                      View Deep AI
-                    </button>
+                    {(() => {
+                      const fluxJob = fluxJobs[result.testcase_id] || {};
+                      const fluxTicket = fluxJob.ticket || {};
+                      const fluxConf = fluxConfidencePercent(fluxTicket.confidence);
+                      const fluxCat = fluxTicket.failure_category || '';
+                      const fluxTaskHref = fluxTaskUrl(
+                        fluxJob.record_id || fluxTicket.record_id,
+                        fluxTicket.task_url || fluxJob.initiate_response?.task_url,
+                      );
+                      return (
+                        <div className="flux-it-summary">
+                          <div className="flux-it-view-row">
+                            <button
+                              type="button"
+                              className="btn-view-analysis"
+                              onClick={() => {
+                                setFollowUpHistory(followUpHistoryByTestcase[result.testcase_id] || []);
+                                setFollowUpMode('ask');
+                                setFollowUpInput('');
+                                resetDeepAiActionUi();
+                                if (fluxJob.record_id || fluxTicket.root_cause) {
+                                  setDeepAiActionTag('flux');
+                                }
+                                setTriageAnalysisModal({
+                                  kind: 'deep',
+                                  testcase_name: result.testcase_name,
+                                  testcase_id: result.testcase_id,
+                                  resultRow: result,
+                                  session_id: deepAiResult.session_id || cursorAiSessions[result.testcase_id] || null,
+                                  ...deepAiResult,
+                                });
+                              }}
+                            >
+                              View details
+                            </button>
+                            {(fluxConf != null || fluxCat) && (
+                              <div className="flux-review-meta">
+                                {fluxConf != null && (
+                                  <span className="flux-confidence">Confidence: {fluxConf}%</span>
+                                )}
+                                {fluxCat && (
+                                  <span className={`flux-category-chip flux-category-${String(fluxCat).toLowerCase()}`}>
+                                    {fluxCat}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          {fluxTaskHref && (
+                            <a
+                              href={fluxTaskHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flux-task-link"
+                            >
+                              Flux task {fluxJob.record_id || fluxTicket.record_id}
+                            </a>
+                          )}
+                          {fluxTicket.root_cause && (
+                            <details className="flux-rca">
+                              <summary>View RCA</summary>
+                              <pre className="flux-rca-text">{fluxTicket.root_cause}</pre>
+                            </details>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
@@ -5752,58 +5882,193 @@ export default function FailedTestcaseAnalysis() {
                   {deepAiActionTag === 'flux' && isDeepAiTestIssue(triageAnalysisModal) && (
                     <div className="deep-ai-flux-panel">
                       <div className="deep-ai-flux-panel-title">Flux Quick Fix</div>
-                      <p className="deep-ai-chat-hint">
-                        Select the nutest target branch, then start Flux on this page
-                        {deepAiFluxForm.taskId ? ` (Jita task ${deepAiFluxForm.taskId})` : ''}.
-                      </p>
-                      <label className="deep-ai-flux-branch-label" htmlFor="deep-ai-flux-target-branch">
-                        Target branch
-                      </label>
-                      <div className="deep-ai-flux-branch-row">
-                        <input
-                          id="deep-ai-flux-target-branch"
-                          type="text"
-                          list="deep-ai-flux-branch-options"
-                          className="flux-branch-input deep-ai-flux-branch-input"
-                          value={deepAiFluxForm.branch || ''}
-                          disabled={deepAiFluxForm.loading || deepAiFluxForm.starting}
-                          onChange={e => setDeepAiFluxForm(prev => ({ ...prev, branch: e.target.value }))}
-                          placeholder="e.g. master or ganges-7.6-stable"
-                        />
-                        <datalist id="deep-ai-flux-branch-options">
-                          <option value="master" />
-                          <option value="ganges-7.6-stable" />
-                          <option value="ganges-7.6-stable-pc" />
-                          <option value="ganges-7.5-stable" />
-                        </datalist>
-                        <button
-                          type="button"
-                          className="btn-flux-quick-fix"
-                          disabled={
-                            deepAiFluxForm.loading
-                            || deepAiFluxForm.starting
-                            || !(deepAiFluxForm.branch || '').trim()
-                            || !fluxFirstJiraKey(triageAnalysisModal.resultRow)
-                          }
-                          title={
-                            fluxFirstJiraKey(triageAnalysisModal.resultRow)
-                              ? 'Start Flux Quick Fix with selected target branch'
-                              : 'Add a Jira ticket first'
-                          }
-                          onClick={() => startDeepAiFluxQuickFix(triageAnalysisModal.resultRow)}
-                        >
-                          {deepAiFluxForm.starting ? 'Starting…' : 'Start Flux Quick Fix'}
-                        </button>
-                      </div>
-                      {deepAiFluxForm.loading && (
-                        <div className="flux-branch-loading">Loading nutest-py3-tests_branch from JITA…</div>
-                      )}
-                      {deepAiFluxForm.error && (
-                        <div className="flux-job-error">{deepAiFluxForm.error}</div>
-                      )}
-                      {!fluxFirstJiraKey(triageAnalysisModal.resultRow) && (
-                        <div className="flux-job-error">Add / Approve a Jira ticket before starting Flux.</div>
-                      )}
+                      {(() => {
+                        const resultRow = triageAnalysisModal.resultRow;
+                        const testId = triageAnalysisModal.testcase_id;
+                        const job = fluxJobs[testId] || {};
+                        const ticket = job.ticket || {};
+                        const confidence = fluxConfidencePercent(ticket.confidence);
+                        const categoryRaw = ticket.failure_category || '';
+                        const categoryLabel = fluxCategoryLabel(categoryRaw);
+                        const canCreateCr = fluxCanCreateGerritCr(ticket);
+                        const gerritUrl = ticket.gerrit_url || '';
+                        const gerritId = ticket.gerrit_change_id || '';
+                        const running = fluxIsRunning(job.status, ticket, job);
+                        const analysisDone = fluxAnalysisComplete(ticket);
+                        const taskHref = fluxTaskUrl(
+                          job.record_id || ticket.record_id,
+                          ticket.task_url || job.initiate_response?.task_url,
+                        );
+                        const rerunHref = job.rerun?.rerun_task_id ? jitaResultsUrl(job.rerun.rerun_task_id) : '';
+                        const hasJob = !!(job.record_id || ticket.root_cause || job.initiate_response);
+                        return (
+                          <>
+                            {!hasJob && (
+                              <>
+                                <p className="deep-ai-chat-hint">
+                                  Select the nutest target branch, then start Flux on this page
+                                  {deepAiFluxForm.taskId ? ` (Jita task ${deepAiFluxForm.taskId})` : ''}.
+                                </p>
+                                <label className="deep-ai-flux-branch-label" htmlFor="deep-ai-flux-target-branch">
+                                  Target branch
+                                </label>
+                                <div className="deep-ai-flux-branch-row">
+                                  <input
+                                    id="deep-ai-flux-target-branch"
+                                    type="text"
+                                    list="deep-ai-flux-branch-options"
+                                    className="flux-branch-input deep-ai-flux-branch-input"
+                                    value={deepAiFluxForm.branch || ''}
+                                    disabled={deepAiFluxForm.loading || deepAiFluxForm.starting}
+                                    onChange={e => setDeepAiFluxForm(prev => ({ ...prev, branch: e.target.value }))}
+                                    placeholder="e.g. master or ganges-7.6-stable"
+                                  />
+                                  <datalist id="deep-ai-flux-branch-options">
+                                    <option value="master" />
+                                    <option value="ganges-7.6-stable" />
+                                    <option value="ganges-7.6-stable-pc" />
+                                    <option value="ganges-7.5-stable" />
+                                  </datalist>
+                                  <button
+                                    type="button"
+                                    className="btn-flux-quick-fix"
+                                    disabled={
+                                      deepAiFluxForm.loading
+                                      || deepAiFluxForm.starting
+                                      || !(deepAiFluxForm.branch || '').trim()
+                                      || !fluxFirstJiraKey(resultRow)
+                                    }
+                                    title={
+                                      fluxFirstJiraKey(resultRow)
+                                        ? 'Start Flux Quick Fix with selected target branch'
+                                        : 'Add a Jira ticket first'
+                                    }
+                                    onClick={() => startDeepAiFluxQuickFix(resultRow)}
+                                  >
+                                    {deepAiFluxForm.starting ? 'Starting…' : 'Start Flux Quick Fix'}
+                                  </button>
+                                </div>
+                                {deepAiFluxForm.loading && (
+                                  <div className="flux-branch-loading">Loading nutest-py3-tests_branch from JITA…</div>
+                                )}
+                                {deepAiFluxForm.error && (
+                                  <div className="flux-job-error">{deepAiFluxForm.error}</div>
+                                )}
+                                {!fluxFirstJiraKey(resultRow) && (
+                                  <div className="flux-job-error">Add / Approve a Jira ticket before starting Flux.</div>
+                                )}
+                              </>
+                            )}
+                            {hasJob && (
+                              <div className="deep-ai-flux-status">
+                                {taskHref && (
+                                  <a
+                                    href={taskHref}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="flux-task-link"
+                                  >
+                                    {taskHref}
+                                  </a>
+                                )}
+                                <div className="flux-job-status">
+                                  Status:{' '}
+                                  {running
+                                    ? (job.resuming ? 'Creating CR…' : 'Running')
+                                    : (analysisDone ? 'Analysis complete — review RCA' : (ticket.status || job.status || 'queued'))}
+                                </div>
+                                {(confidence != null || categoryRaw) && (
+                                  <div className="flux-review-meta">
+                                    {confidence != null && (
+                                      <span className="flux-confidence">Confidence: {confidence}%</span>
+                                    )}
+                                    {categoryRaw && (
+                                      <span className={`flux-category-chip flux-category-${String(categoryRaw).toLowerCase()}`}>
+                                        {categoryRaw}
+                                      </span>
+                                    )}
+                                    {categoryLabel && categoryLabel !== categoryRaw && (
+                                      <span className="flux-category-hint">({categoryLabel})</span>
+                                    )}
+                                  </div>
+                                )}
+                                {ticket.root_cause && (
+                                  <details className="flux-rca" open>
+                                    <summary>View RCA</summary>
+                                    <pre className="flux-rca-text">{ticket.root_cause}</pre>
+                                    {ticket.remediation_strategy && (
+                                      <div className="flux-remediation">
+                                        <strong>Remediation:</strong> {ticket.remediation_strategy}
+                                      </div>
+                                    )}
+                                  </details>
+                                )}
+                                {job.error && <div className="flux-job-error">{job.error}</div>}
+                                {canCreateCr && !gerritUrl && (
+                                  <button
+                                    type="button"
+                                    className="btn-flux-create-cr"
+                                    disabled={job.resuming || running}
+                                    onClick={() => handleFluxCreateGerritCr(resultRow)}
+                                  >
+                                    {job.resuming ? 'Creating CR…' : 'Create Gerrit CR'}
+                                  </button>
+                                )}
+                                {(gerritUrl || gerritId) && (
+                                  <a
+                                    href={gerritUrl || undefined}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="flux-gerrit-link"
+                                  >
+                                    CR: {gerritId || gerritUrl}
+                                  </a>
+                                )}
+                                {gerritUrl && (
+                                  <button
+                                    type="button"
+                                    className="btn-flux-rerun-cr"
+                                    disabled={job.rerunning}
+                                    onClick={() => handleFluxRerunWithCr(resultRow)}
+                                  >
+                                    {job.rerunning ? 'Rerunning…' : 'Rerun with CR'}
+                                  </button>
+                                )}
+                                {job.rerun?.rerun_task_id && (
+                                  rerunHref ? (
+                                    <a href={rerunHref} target="_blank" rel="noopener noreferrer" className="flux-rerun-link">
+                                      JITA: {job.rerun.rerun_task_id}
+                                    </a>
+                                  ) : (
+                                    <div className="flux-rerun-link">JITA: {job.rerun.rerun_task_id}</div>
+                                  )
+                                )}
+                                {job.rerun?.error && <div className="flux-job-error">{job.rerun.error}</div>}
+                                {!running && !job.resuming && (
+                                  <button
+                                    type="button"
+                                    className="btn-secondary deep-ai-flux-restart"
+                                    onClick={() => {
+                                      updateFluxJob(testId, {
+                                        status: null,
+                                        record_id: null,
+                                        ticket: null,
+                                        initiate_response: null,
+                                        error: null,
+                                        resumeAttempted: false,
+                                        rerun: null,
+                                      });
+                                      prepareDeepAiFluxForm(resultRow);
+                                    }}
+                                  >
+                                    Start new Flux Quick Fix
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                   )}
 

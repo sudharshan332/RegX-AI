@@ -1,5 +1,6 @@
 import {
   FLUX_MAX_WAIT_MS,
+  fluxAnalysisComplete,
   fluxCanCreateGerritCr,
   fluxCategoryLabel,
   fluxConfidencePercent,
@@ -11,6 +12,9 @@ import {
   fluxNutestTargetBranch,
   fluxPipelineError,
   fluxShouldPoll,
+  fluxTaskUrl,
+  hydrateFluxJobsFromMap,
+  serializeFluxJobsMap,
 } from './FailedTestcaseAnalysis';
 
 jest.mock('../api', () => ({
@@ -114,7 +118,7 @@ describe('Flux Quick Fix helpers', () => {
     }, job)).toBe(false);
   });
 
-  test('keeps polling after RCA to auto-resume genuine test bugs, then for gerrit ids', () => {
+  test('stops polling after RCA for human review; resumes poll only after Create CR', () => {
     const job = { record_id: 22, startedAt: Date.now() };
     const rca = {
       status: 'failed',
@@ -123,8 +127,33 @@ describe('Flux Quick Fix helpers', () => {
       confidence: 0.9,
     };
     expect(fluxHasRootCause(rca)).toBe(true);
-    expect(fluxShouldPoll('failed', rca, job)).toBe(true);
+    expect(fluxAnalysisComplete(rca)).toBe(true);
+    expect(fluxShouldPoll('failed', rca, job)).toBe(false);
     expect(fluxShouldPoll('fixing', rca, { ...job, resumeAttempted: true })).toBe(true);
+  });
+
+  test('builds Flux task URL from record_id', () => {
+    expect(fluxTaskUrl(21)).toBe('http://10.61.4.219/task/21');
+    expect(fluxTaskUrl(21, 'http://example/task/21')).toBe('http://example/task/21');
+    expect(fluxTaskUrl(null)).toBe('');
+  });
+
+  test('serializes and hydrates flux jobs for results JSON', () => {
+    const jobs = {
+      tc1: {
+        record_id: 21,
+        status: 'queued',
+        initiate_response: { record_id: 21, status: 'queued', jira_key: 'ENG-1' },
+        ticket: { record_id: 21, root_cause: 'x', confidence: 0.92, failure_category: 'test_bug' },
+        startedAt: 123,
+      },
+    };
+    const serialized = serializeFluxJobsMap(jobs);
+    expect(serialized.tc1.record_id).toBe(21);
+    expect(serialized.tc1.initiate_response.jira_key).toBe('ENG-1');
+    const hydrated = hydrateFluxJobsFromMap(serialized);
+    expect(hydrated.tc1.record_id).toBe(21);
+    expect(hydrated.tc1.ticket.failure_category).toBe('test_bug');
   });
 
   test('stops polling after 15 minutes without RCA', () => {

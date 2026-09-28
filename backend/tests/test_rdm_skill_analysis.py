@@ -106,6 +106,31 @@ class TestRdmSkillAnalysisMapping(unittest.TestCase):
         self.assertEqual(mapped["recommended_action"], "create_jira")
         self.assertEqual(mapped["suggested_jira_project"], "ENG")
 
+    def test_merge_mcp_health_down_if_probe_or_agent_fails(self):
+        merge = self.ns["_merge_rdm_mcp_health"]
+        merged = merge(
+            {
+                "glean": {"ok": False, "status": "unavailable"},
+                "sourcegraph": {"ok": True, "status": "ok"},
+            },
+            {"glean": "ok", "sourcegraph": "unavailable", "notes": "sourcegraph timeout"},
+        )
+        self.assertFalse(merged["glean"]["ok"])
+        self.assertFalse(merged["sourcegraph"]["ok"])
+        self.assertEqual(merged["notes"], "sourcegraph timeout")
+
+    def test_merge_mcp_health_ok_when_probe_and_agent_ok(self):
+        merge = self.ns["_merge_rdm_mcp_health"]
+        merged = merge(
+            {
+                "glean": {"ok": True, "status": "ok"},
+                "sourcegraph": {"ok": True, "status": "ok"},
+            },
+            {"glean": "ok", "sourcegraph": "ok"},
+        )
+        self.assertTrue(merged["glean"]["ok"])
+        self.assertTrue(merged["sourcegraph"]["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()
