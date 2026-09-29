@@ -101,10 +101,11 @@ export function hydrateFluxJobsFromMap(fluxMap) {
     if (!raw || typeof raw !== 'object') return;
     const recordId = raw.record_id || raw.ticket?.record_id || raw.initiate_response?.record_id || null;
     if (!recordId && !raw.ticket && !raw.initiate_response) return;
+    const ticket = raw.ticket || raw.initiate_response || null;
     out[String(tid)] = {
       record_id: recordId,
       status: raw.status || raw.ticket?.status || raw.initiate_response?.status || null,
-      ticket: raw.ticket || raw.initiate_response || null,
+      ticket: ticket ? normalizeFluxTicket(ticket) : null,
       initiate_response: raw.initiate_response || null,
       startedAt: raw.startedAt || Date.now(),
       resumeAttempted: !!raw.resumeAttempted,
@@ -200,8 +201,47 @@ export function fluxAnalysisComplete(ticket) {
   return Boolean(String(ticket?.failure_category || '').trim());
 }
 
+const FLUX_GERRIT_CR_URL_BASE = 'https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+';
+
+/** Gerrit change id and web URL from a Flux ticket, including numeric-id-only payloads. */
+export function fluxGerritFields(ticket) {
+  const rawId = ticket?.gerrit_change_id
+    ?? ticket?.gerrit_change_number
+    ?? ticket?.change_number
+    ?? '';
+  const gerrit_change_id = String(rawId ?? '').trim();
+  let gerrit_url = String(ticket?.gerrit_url || ticket?.cr_url || '').trim();
+  if (!gerrit_url && /^\d+$/.test(gerrit_change_id)) {
+    gerrit_url = `${FLUX_GERRIT_CR_URL_BASE}/${gerrit_change_id}`;
+  }
+  return { gerrit_change_id, gerrit_url };
+}
+
+export function normalizeFluxTicket(ticket) {
+  if (!ticket || typeof ticket !== 'object') return ticket || null;
+  const fields = fluxGerritFields(ticket);
+  const next = { ...ticket };
+  if (fields.gerrit_change_id) next.gerrit_change_id = fields.gerrit_change_id;
+  if (fields.gerrit_url) next.gerrit_url = fields.gerrit_url;
+  return next;
+}
+
 export function fluxHasGerritCr(ticket) {
-  return Boolean(String(ticket?.gerrit_url || '').trim() && String(ticket?.gerrit_change_id || '').trim());
+  const fields = fluxGerritFields(ticket);
+  return Boolean(fields.gerrit_url && fields.gerrit_change_id);
+}
+
+/** Persisted job still waiting on a Gerrit CR that may already exist in Flux. */
+export function fluxNeedsTicketRefresh(job) {
+  if (!job?.record_id) return false;
+  return !fluxHasGerritCr(job.ticket);
+}
+
+/** Create CR was started and the page still has no change id or URL. */
+export function fluxCanReloadCr(job) {
+  if (!job?.record_id || !job.resumeAttempted) return false;
+  const fields = fluxGerritFields(job.ticket);
+  return !fields.gerrit_url && !fields.gerrit_change_id;
 }
 
 export function fluxPipelineError(ticket) {
@@ -233,10 +273,11 @@ export function fluxShouldPoll(status, ticket, job = {}) {
   if (!job.record_id && s !== 'starting') return false;
   if (fluxHasGerritCr(ticket)) return false;
   if (fluxPipelineError(ticket)) return false;
+  // After human clicks Create CR, keep polling until Gerrit CR appears.
+  // The 15-minute cap applies only while waiting for RCA, before Create CR.
+  if (job.resumeAttempted && !fluxHasGerritCr(ticket)) return true;
   const startedAt = Number(job.startedAt) || 0;
   if (startedAt && Date.now() - startedAt > FLUX_MAX_WAIT_MS) return false;
-  // After human clicks Create CR, keep polling until Gerrit CR appears.
-  if (job.resumeAttempted && !fluxHasGerritCr(ticket)) return true;
   // Analysis complete (RCA + confidence + category) → stop; human reviews before Create CR.
   if (fluxAnalysisComplete(ticket)) return false;
   if (!fluxHasRootCause(ticket)) return true;
@@ -1093,6 +1134,7 @@ export default function FailedTestcaseAnalysis() {
   const [fluxJobs, setFluxJobs] = useState({});
   const fluxJobsRef = useRef({});
   const fluxResumeInFlight = useRef({});
+  const fluxRefreshedRecordIds = useRef(new Set());
   const [fluxBranchPrompt, setFluxBranchPrompt] = useState(null);
 
   // Saved tags management
@@ -3617,7 +3659,7 @@ export default function FailedTestcaseAnalysis() {
       const data = resp.data || {};
       updateFluxJob(testId, {
         status: data.status || 'fixing',
-        ticket: { ...(job.ticket || {}), ...data },
+        ticket: normalizeFluxTicket({ ...(job.ticket || {}), ...data }),
         resuming: false,
       });
     } catch (err) {
@@ -3632,10 +3674,47 @@ export default function FailedTestcaseAnalysis() {
     }
   };
 
+  const applyFluxTicketResponse = (testId, job, data) => {
+    const ticket = normalizeFluxTicket(data || {});
+    const pipelineError = fluxPipelineError(ticket);
+    const startedAt = job?.startedAt || Date.now();
+    const timedOut = Date.now() - startedAt > FLUX_MAX_WAIT_MS;
+    let timeoutError = null;
+    if (
+      !job?.resumeAttempted
+      && !pipelineError
+      && timedOut
+      && !fluxHasRootCause(ticket)
+      && !fluxHasGerritCr(ticket)
+    ) {
+      timeoutError = 'Flux Quick Fix timed out after 15 minutes waiting for root cause analysis.';
+    }
+    updateFluxJob(testId, {
+      status: pipelineError ? 'failed' : (ticket.status || job?.status),
+      ticket,
+      error: pipelineError || timeoutError || null,
+      reloadingCr: false,
+    });
+  };
+
+  const handleFluxReloadCr = async (result) => {
+    const testId = result.testcase_id;
+    const job = fluxJobsRef.current[testId] || fluxJobs[testId];
+    if (!testId || !job?.record_id) return;
+    updateFluxJob(testId, { reloadingCr: true, error: null });
+    try {
+      const { data } = await api.get(`${FLUX_API}/tickets/${job.record_id}`);
+      applyFluxTicketResponse(testId, job, data);
+    } catch (err) {
+      const message = err.response?.data?.error || err.message || 'Failed to reload Flux CR';
+      updateFluxJob(testId, { reloadingCr: false, error: message });
+    }
+  };
+
   const handleFluxRerunWithCr = async (result) => {
     const testId = result.testcase_id;
     const job = fluxJobsRef.current[testId] || fluxJobs[testId];
-    const gerritUrl = job?.ticket?.gerrit_url;
+    const gerritUrl = fluxGerritFields(job?.ticket).gerrit_url;
     if (!testId || !gerritUrl) return;
     if (!result.agave_task_id) {
       alert('No JITA task id available to retrigger.');
@@ -3694,19 +3773,7 @@ export default function FailedTestcaseAnalysis() {
         try {
           const { data } = await api.get(`${FLUX_API}/tickets/${job.record_id}`);
           if (cancelled) return;
-          const ticket = data || {};
-          const startedAt = job.startedAt || Date.now();
-          const timedOut = Date.now() - startedAt > FLUX_MAX_WAIT_MS;
-          const pipelineError = fluxPipelineError(ticket);
-          let timeoutError = null;
-          if (!pipelineError && timedOut && !fluxHasRootCause(ticket) && !fluxHasGerritCr(ticket)) {
-            timeoutError = 'Flux Quick Fix timed out after 15 minutes waiting for root cause analysis.';
-          }
-          updateFluxJob(testId, {
-            status: pipelineError ? 'failed' : (ticket.status || job.status),
-            ticket,
-            error: pipelineError || timeoutError || null,
-          });
+          applyFluxTicketResponse(testId, job, data);
         } catch (err) {
           if (cancelled) return;
           const message = err.response?.data?.error || err.message || 'Failed to poll Flux ticket';
@@ -3721,6 +3788,41 @@ export default function FailedTestcaseAnalysis() {
       clearInterval(timer);
     };
   }, [fluxPollKey]);
+
+  const fluxRefreshKey = Object.values(fluxJobs)
+    .filter(job => fluxNeedsTicketRefresh(job))
+    .map(job => String(job.record_id))
+    .sort()
+    .join(',');
+
+  const analysisTagRef = useRef(analysisTag);
+  analysisTagRef.current = analysisTag;
+
+  useEffect(() => {
+    if (!analysisTag || !fluxRefreshKey) return undefined;
+    const tagAtStart = analysisTag;
+    const jobs = fluxJobsRef.current || {};
+    const pending = Object.entries(jobs).filter(([, job]) => {
+      if (!fluxNeedsTicketRefresh(job)) return false;
+      const token = `${tagAtStart}:${job.record_id}`;
+      if (fluxRefreshedRecordIds.current.has(token)) return false;
+      fluxRefreshedRecordIds.current.add(token);
+      return true;
+    });
+    if (!pending.length) return undefined;
+    pending.forEach(async ([testId, job]) => {
+      try {
+        const { data } = await api.get(`${FLUX_API}/tickets/${job.record_id}`);
+        if (analysisTagRef.current !== tagAtStart) return;
+        applyFluxTicketResponse(testId, job, data);
+      } catch (err) {
+        if (analysisTagRef.current !== tagAtStart) return;
+        const message = err.response?.data?.error || err.message || 'Failed to reload Flux ticket';
+        updateFluxJob(testId, { error: message, reloadingCr: false });
+      }
+    });
+    return undefined;
+  }, [analysisTag, fluxRefreshKey]);
 
   // --------------- End Intelligent Triage handlers ---------------
 
@@ -3891,12 +3993,14 @@ export default function FailedTestcaseAnalysis() {
         const confidence = fluxConfidencePercent(ticket.confidence);
         const categoryLabel = fluxCategoryLabel(ticket.failure_category);
         const canCreateCr = fluxCanCreateGerritCr(ticket);
-        const gerritUrl = ticket.gerrit_url || '';
-        const gerritId = ticket.gerrit_change_id || '';
+        const gerrit = fluxGerritFields(ticket);
+        const gerritUrl = gerrit.gerrit_url || '';
+        const gerritId = gerrit.gerrit_change_id || '';
         const running = fluxIsRunning(job.status, ticket, job);
         const analysisDone = fluxAnalysisComplete(ticket);
         const taskHref = fluxTaskUrl(job.record_id || ticket.record_id, ticket.task_url || job.initiate_response?.task_url);
         const rerunHref = job.rerun?.rerun_task_id ? jitaResultsUrl(job.rerun.rerun_task_id) : '';
+        const canReloadCr = fluxCanReloadCr(job);
         const statusLabel = running
           ? (job.resuming ? 'Creating CR…' : 'Running')
           : (analysisDone ? 'Analysis complete' : (ticket.status || job.status));
@@ -3956,6 +4060,17 @@ export default function FailedTestcaseAnalysis() {
                 title="Review RCA, then create a Gerrit CR"
               >
                 {job.resuming ? 'Creating CR…' : 'Create Gerrit CR'}
+              </button>
+            )}
+            {canReloadCr && (
+              <button
+                type="button"
+                className="btn-flux-reload-cr"
+                disabled={job.reloadingCr}
+                onClick={() => handleFluxReloadCr(result)}
+                title="Reload this Flux ticket and pick up the Gerrit CR"
+              >
+                {job.reloadingCr ? 'Reloading CR…' : 'Reload CR'}
               </button>
             )}
             {(gerritUrl || gerritId) && (
@@ -4521,9 +4636,10 @@ export default function FailedTestcaseAnalysis() {
                       </span>
                     )}
                     {deepAiResult.root_cause && (
-                      <div className="deep-ai-summary" title={deepAiResult.root_cause}>
-                        {deepAiResult.root_cause}
-                      </div>
+                      <details className="deep-ai-rca">
+                        <summary>Root Cause</summary>
+                        <div className="deep-ai-summary">{deepAiResult.root_cause}</div>
+                      </details>
                     )}
                     {(() => {
                       const fluxJob = fluxJobs[result.testcase_id] || {};
@@ -5891,8 +6007,10 @@ export default function FailedTestcaseAnalysis() {
                         const categoryRaw = ticket.failure_category || '';
                         const categoryLabel = fluxCategoryLabel(categoryRaw);
                         const canCreateCr = fluxCanCreateGerritCr(ticket);
-                        const gerritUrl = ticket.gerrit_url || '';
-                        const gerritId = ticket.gerrit_change_id || '';
+                        const gerrit = fluxGerritFields(ticket);
+                        const gerritUrl = gerrit.gerrit_url || '';
+                        const gerritId = gerrit.gerrit_change_id || '';
+                        const canReloadCr = fluxCanReloadCr(job);
                         const running = fluxIsRunning(job.status, ticket, job);
                         const analysisDone = fluxAnalysisComplete(ticket);
                         const taskHref = fluxTaskUrl(
@@ -6012,6 +6130,17 @@ export default function FailedTestcaseAnalysis() {
                                     onClick={() => handleFluxCreateGerritCr(resultRow)}
                                   >
                                     {job.resuming ? 'Creating CR…' : 'Create Gerrit CR'}
+                                  </button>
+                                )}
+                                {canReloadCr && (
+                                  <button
+                                    type="button"
+                                    className="btn-flux-reload-cr"
+                                    disabled={job.reloadingCr}
+                                    onClick={() => handleFluxReloadCr(resultRow)}
+                                    title="Reload this Flux ticket and pick up the Gerrit CR"
+                                  >
+                                    {job.reloadingCr ? 'Reloading CR…' : 'Reload CR'}
                                   </button>
                                 )}
                                 {(gerritUrl || gerritId) && (

@@ -3344,6 +3344,19 @@ a.glean-snippet-title:hover {
   overflow-y: auto;
 }
 
+.deep-ai-rca {
+  font-size: 11px;
+  width: 100%;
+}
+
+.deep-ai-rca summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6c3483;
+  user-select: none;
+}
+
 .deep-ai-summary {
   font-size: 11px;
   color: #2c3e50;
@@ -3351,6 +3364,10 @@ a.glean-snippet-title:hover {
   padding: 4px 6px;
   border-radius: 3px;
   border-left: 3px solid #9b59b6;
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow: auto;
+  margin-top: 4px;
 }
 
 .triage-badge-high {
@@ -3595,6 +3612,7 @@ a.glean-snippet-title:hover {
 
 .btn-flux-quick-fix,
 .btn-flux-create-cr,
+.btn-flux-reload-cr,
 .btn-flux-rerun-cr {
   border: none;
   border-radius: 4px;
@@ -3620,6 +3638,14 @@ a.glean-snippet-title:hover {
   background: #17633e;
 }
 
+.btn-flux-reload-cr {
+  background: #6b5b3a;
+}
+
+.btn-flux-reload-cr:hover:not(:disabled) {
+  background: #56492e;
+}
+
 .btn-flux-rerun-cr {
   background: #1d6fa5;
 }
@@ -3630,6 +3656,7 @@ a.glean-snippet-title:hover {
 
 .btn-flux-quick-fix:disabled,
 .btn-flux-create-cr:disabled,
+.btn-flux-reload-cr:disabled,
 .btn-flux-rerun-cr:disabled {
   background: #bdc3c7;
   cursor: not-allowed;

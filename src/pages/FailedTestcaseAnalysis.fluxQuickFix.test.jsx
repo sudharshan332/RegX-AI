@@ -5,15 +5,19 @@ import {
   fluxCategoryLabel,
   fluxConfidencePercent,
   fluxFirstJiraKey,
+  fluxCanReloadCr,
+  fluxGerritFields,
   fluxHasGerritCr,
   fluxHasRootCause,
   fluxIsRunning,
   fluxLatestStageMessage,
+  fluxNeedsTicketRefresh,
   fluxNutestTargetBranch,
   fluxPipelineError,
   fluxShouldPoll,
   fluxTaskUrl,
   hydrateFluxJobsFromMap,
+  normalizeFluxTicket,
   serializeFluxJobsMap,
 } from './FailedTestcaseAnalysis';
 
@@ -159,6 +163,44 @@ describe('Flux Quick Fix helpers', () => {
   test('stops polling after 15 minutes without RCA', () => {
     const job = { record_id: 22, startedAt: Date.now() - FLUX_MAX_WAIT_MS - 1000 };
     expect(fluxShouldPoll('failed', { status: 'failed' }, job)).toBe(false);
+  });
+
+  test('keeps polling after Create CR even when the 15 minute RCA window has passed', () => {
+    const job = {
+      record_id: 49,
+      resumeAttempted: true,
+      startedAt: Date.now() - FLUX_MAX_WAIT_MS - 1000,
+    };
+    const ticket = {
+      status: 'fixing',
+      root_cause: 'Bad assert',
+      failure_category: 'test_bug',
+      confidence: 0.91,
+      gerrit_change_id: null,
+      gerrit_url: null,
+    };
+    expect(fluxShouldPoll('fixing', ticket, job)).toBe(true);
+    expect(fluxNeedsTicketRefresh(job)).toBe(true);
+    expect(fluxCanReloadCr({ ...job, ticket })).toBe(true);
+    expect(fluxShouldPoll('fixing', {
+      ...ticket,
+      gerrit_url: 'https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/604518',
+      gerrit_change_id: '604518',
+    }, job)).toBe(false);
+  });
+
+  test('builds a Gerrit URL when Flux returns only a numeric change id', () => {
+    const fields = fluxGerritFields({ gerrit_change_id: 604518, gerrit_url: null });
+    expect(fields.gerrit_change_id).toBe('604518');
+    expect(fields.gerrit_url).toBe('https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/604518');
+    expect(fluxHasGerritCr({ gerrit_change_id: '604518' })).toBe(true);
+    const normalized = normalizeFluxTicket({ id: 49, gerrit_change_id: '604518', gerrit_url: null });
+    expect(normalized.gerrit_url).toBe(fields.gerrit_url);
+    expect(fluxCanReloadCr({
+      record_id: 49,
+      resumeAttempted: true,
+      ticket: { gerrit_change_id: '604518' },
+    })).toBe(false);
   });
 
   test('latest stage message comes from the last task event', () => {

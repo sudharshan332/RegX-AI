@@ -20835,7 +20835,7 @@ def _test_matches_component(test_name, component):
     return component.lower() in parts
 
 
-def _normalize_test_status(status):
+def _display_test_status(status):
     s = (status or "").strip().lower()
     if s in ("succeeded", "success", "passed", "pass"):
         return "Succeeded"
@@ -20922,7 +20922,7 @@ def _answer_component_test_question(question, tag=None, task_ids=None, list_limi
         name = _test_name_from_result(r)
         if not _test_matches_component(name, component):
             continue
-        st = _normalize_test_status(r.get("status"))
+        st = _display_test_status(r.get("status"))
         status_counts[st] += 1
         matched.append({"name": name, "status": st})
 
