@@ -19,6 +19,10 @@ class TestNaiClient(unittest.TestCase):
         self.assertEqual(nai_client.sanitize_api_key('"abc-123"'), "abc-123")
         self.assertEqual(nai_client.sanitize_api_key("crsr****mnop"), "")
 
+    def test_looks_like_key_name(self):
+        self.assertTrue(nai_client.looks_like_key_name("CDP-DPRO-5192-AINTNX-1047"))
+        self.assertFalse(nai_client.looks_like_key_name("4f990cff-bbcc-4d15-aa19-9436ce3b8308"))
+
     def test_cosine_similarity(self):
         self.assertAlmostEqual(nai_client.cosine_similarity([1, 0], [1, 0]), 1.0)
         self.assertAlmostEqual(nai_client.cosine_similarity([1, 0], [0, 1]), 0.0)

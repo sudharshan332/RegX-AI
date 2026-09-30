@@ -418,14 +418,30 @@ export default function KeyManagementPanel({ onClose }) {
       {validationResults && (
         <div className="validation-results">
           <h3>Validation Results</h3>
-          {Object.entries(validationResults.results || {}).map(([key, result]) => (
+          {Object.entries(validationResults.results || {})
+            .filter(([key]) => key !== 'nai_combined')
+            .map(([key, result]) => {
+              const labelMap = {
+                nai_api_key: 'NAI Reasoning Access Key',
+                nai_embed_api_key: 'NAI Embedding Access Key',
+                cursor_api_key: 'Cursor API Key',
+                atlassian_jira_token: 'Atlassian Jira Personal Token',
+                atlassian_confluence_token: 'Atlassian Confluence Personal Token',
+                gerrit_http_password: 'Gerrit HTTP Password',
+                sourcegraph_token: 'Sourcegraph Token',
+                flux_username: 'Flux Username',
+                flux_password: 'Flux Password',
+                ai_provider: 'AI Provider',
+              };
+              const label = labelMap[key] || key.replace(/_/g, ' ');
+              return (
             <div
               key={key}
               className={`validation-item ${
                 result.valid === true ? 'valid' : result.valid === false ? 'invalid' : 'skipped'
               }`}
             >
-              <span className="validation-key">{key.replace(/_/g, ' ')}</span>
+              <span className="validation-key">{label}</span>
               <span
                 className={`validation-status ${
                   result.valid === true ? 'valid' : result.valid === false ? 'invalid' : 'skipped'
@@ -435,7 +451,8 @@ export default function KeyManagementPanel({ onClose }) {
               </span>
               {result.message && <p className="validation-message">{result.message}</p>}
             </div>
-          ))}
+              );
+            })}
         </div>
       )}
 
