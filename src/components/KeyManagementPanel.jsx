@@ -234,10 +234,10 @@ export default function KeyManagementPanel({ onClose }) {
           </button>
         </div>
         <p className="help-text">
-          Required for NAI AI ops. Must be authorized for Reasoning/chat on{' '}
-          <code>nai-dre.corp.../enterpriseai/gateway/v1/chat/completions</code>{' '}
-          (model <code>nemotron-3-fp4-04</code>). Paste only the token — not{' '}
-          <code>Bearer ...</code> and not an embeddings Key Name.
+          Required for NAI AI ops. Use the corp chat Access Key that works with{' '}
+          <code>curl https://nai-dre.corp.p10y.ntnxdpro.com/enterpriseai/gateway/v1/chat/completions</code>{' '}
+          (model <code>nemotron3-fp4-uni</code>). Paste only the token — not{' '}
+          <code>Bearer ...</code>, not a Key Name, and not the beta embeddings key.
         </p>
       </div>
 

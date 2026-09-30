@@ -106,6 +106,7 @@ def looks_like_key_name(value: Optional[str]) -> bool:
 _MODEL_ALIASES = {
     NAI_REASONING_DISPLAY: NAI_REASONING_MODEL,
     "nemotron-3-fp4-04": NAI_REASONING_MODEL,
+    "nemotron-3-fp4-05": NAI_REASONING_MODEL,
     "nemotron3-fp4-uni": NAI_REASONING_MODEL,
     "hack-reason": NAI_REASONING_MODEL,
     "claude-sonnet-4-5": NAI_REASONING_MODEL,
@@ -184,17 +185,19 @@ def resolve_api_key(
 
 def _headers(api_key: str, auth_style: str = "bearer") -> Dict[str, str]:
     key = sanitize_api_key(api_key)
+    # Match the known-good curl sample for Reasoning: Authorization + Content-Type only.
     headers = {
-        "Accept": "application/json",
         "Content-Type": "application/json",
     }
     style = (auth_style or "bearer").strip().lower()
     if style == "api-key":
         # Some Enterprise AI gateways accept raw api-key header.
+        headers["Accept"] = "application/json"
         headers["api-key"] = key
         headers["x-api-key"] = key
     elif style == "both":
         # Gateway + upstream inference: send both common forms.
+        headers["Accept"] = "application/json"
         headers["Authorization"] = f"Bearer {key}"
         headers["api-key"] = key
         headers["x-api-key"] = key
@@ -339,23 +342,30 @@ def _ordered_bases(candidates: Sequence[str], preferred: str = "") -> List[str]:
 
 
 def _pick_best_nai_error(errors: Sequence[Tuple[str, NaiError]]) -> NaiError:
-    """Prefer actionable auth errors over 'API key is not provided' from weak auth styles."""
+    """Prefer corp Reasoning errors over beta 404 noise from wrong hosts."""
     if not errors:
         return NaiError("NAI request failed with no endpoints attempted", status=502)
 
-    def score(item: Tuple[str, NaiError]) -> Tuple[int, int]:
+    corp_marker = "nai-dre.corp.p10y.ntnxdpro.com"
+
+    def score(item: Tuple[str, NaiError]) -> Tuple[int, int, int]:
         label, exc = item
         body = f"{exc} {exc.body}".lower()
-        # Deprioritize empty-key noise from api-key-only probes.
+        on_corp = 1 if corp_marker in label else 0
+        # Deprioritize empty-key noise and wrong-host 404s.
         if "api key is not provided" in body:
-            return (0, exc.status or 0)
+            return (0, on_corp, exc.status or 0)
+        if exc.status == 404 and not on_corp:
+            return (0, on_corp, 0)
         if "multi-endpoint" in body:
-            return (2, exc.status or 0)
+            return (2, on_corp, exc.status or 0)
         if exc.status in (401, 403):
-            return (3, exc.status or 0)
+            return (3, on_corp, exc.status or 0)
+        if on_corp and "bearer" in label:
+            return (5, on_corp, exc.status or 0)
         if "bearer" in label:
-            return (4, exc.status or 0)
-        return (1, exc.status or 0)
+            return (4, on_corp, exc.status or 0)
+        return (1, on_corp, exc.status or 0)
 
     label, best = max(errors, key=score)
     detail = " | ".join(f"{lbl} -> {exc}" for lbl, exc in errors[:5])
@@ -374,21 +384,31 @@ def _post_with_failover(
     candidates: Sequence[str],
     working: Dict[str, str],
     timeout: int = 120,
+    auth_styles: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Try host/auth combinations until one accepts the key."""
     key = sanitize_api_key(api_key)
-    bases = _ordered_bases(candidates, working.get("base") or "")
+    # Do not pin a previously-failed beta host ahead of the known-good corp chat base.
+    bases = [b for b in candidates if b] if candidates else []
+    seen = set()
+    ordered_bases: List[str] = []
+    for base in bases:
+        b = base.rstrip("/")
+        if b and b not in seen:
+            seen.add(b)
+            ordered_bases.append(b)
+
     # Prefer Bearer (matches NAI curl samples); then both; api-key last.
-    auth_styles: List[str] = []
+    styles: List[str] = []
     preferred_auth = (working.get("auth") or "bearer").lower()
-    for style in (preferred_auth, "bearer", "both", "api-key"):
-        if style not in auth_styles:
-            auth_styles.append(style)
+    for style in list(auth_styles or (preferred_auth, "bearer", "both", "api-key")):
+        if style and style not in styles:
+            styles.append(style)
 
     errors: List[Tuple[str, NaiError]] = []
-    for base in bases:
+    for base in ordered_bases:
         url = f"{base.rstrip('/')}/{path_suffix.lstrip('/')}"
-        for style in auth_styles:
+        for style in styles:
             label = f"{url} [{style}]"
             try:
                 data = _post_json(url, payload, key, timeout=timeout, auth_style=style)
@@ -398,25 +418,39 @@ def _post_with_failover(
                 return data
             except NaiError as exc:
                 errors.append((label, exc))
+                # Wrong path: skip other auth styles on this host.
+                if exc.status == 404:
+                    break
                 # Non-auth failures on a reachable host: don't keep thrashing styles.
-                if exc.status and exc.status not in (401, 403, 404):
+                if exc.status and exc.status not in (401, 403):
                     raise
                 continue
     raise _pick_best_nai_error(errors)
 
 
 def _chat_base_candidates() -> List[str]:
-    """Prefer the NAI environment that already authenticated embeddings."""
-    preferred = []
-    embed_base = (_WORKING_EMBED.get("base") or "").rstrip("/")
-    if embed_base:
-        preferred.append(embed_base)
-        # Same host, alternate gateway/v1 path.
-        if embed_base.endswith("/gateway/v1"):
-            preferred.append(embed_base[: -len("/gateway/v1")] + "/v1")
-        elif embed_base.endswith("/v1") and "/gateway/" not in embed_base:
-            preferred.append(embed_base[: -len("/v1")] + "/gateway/v1")
-    return _ordered_bases(list(preferred) + list(_CHAT_BASE_CANDIDATES), _WORKING_CHAT.get("base") or "")
+    """Reasoning/chat is on corp gateway; embeddings are on beta — do not mix preference.
+
+    Known-good curl:
+      https://nai-dre.corp.p10y.ntnxdpro.com/enterpriseai/gateway/v1/chat/completions
+    """
+    corp_gateway = "https://nai-dre.corp.p10y.ntnxdpro.com/enterpriseai/gateway/v1"
+    preferred_working = (_WORKING_CHAT.get("base") or "").rstrip("/")
+    # Only reuse a prior working chat base when it is the corp gateway (never beta).
+    pinned = preferred_working if "nai-dre.corp." in preferred_working else ""
+    return _ordered_bases(
+        [
+            pinned,
+            NAI_CHAT_BASE,
+            corp_gateway,
+            "https://nai-dre.corp.p10y.ntnxdpro.com/enterpriseai/v1",
+            # Beta chat paths are last-resort only; /embeddings living on beta does not
+            # mean chat/completions is available there (often 404).
+            "https://nai-dre.beta.p10y.ntnxdpro.com/enterpriseai/gateway/v1",
+            "https://nai-dre.beta.p10y.ntnxdpro.com/enterpriseai/v1",
+        ],
+        "",
+    )
 
 
 def chat_completions(
@@ -452,6 +486,7 @@ def chat_completions(
         payload["max_tokens"] = int(max_tokens)
     if temperature is not None:
         payload["temperature"] = temperature
+    # Bearer-first on corp gateway (exact curl shape); other styles only as fallback.
     return _post_with_failover(
         "chat/completions",
         payload,
@@ -459,6 +494,7 @@ def chat_completions(
         candidates=_chat_base_candidates(),
         working=_WORKING_CHAT,
         timeout=timeout,
+        auth_styles=("bearer", "both"),
     )
 
 
@@ -588,6 +624,9 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
 def _validate_chat_key(api_key: str) -> Dict[str, Any]:
     """Live check against reasoning chat/completions gateway."""
     key = sanitize_api_key(api_key)
+    corp_chat = (
+        "https://nai-dre.corp.p10y.ntnxdpro.com/enterpriseai/gateway/v1/chat/completions"
+    )
     if not key:
         return {"valid": None, "message": "Not provided"}
     if looks_like_key_name(key):
@@ -596,11 +635,14 @@ def _validate_chat_key(api_key: str) -> Dict[str, Any]:
             "message": (
                 "This looks like an NAI Key Name (label), not the secret Access Key. "
                 "Paste the token used in `Authorization: Bearer <token>` for "
-                "chat/completions."
+                f"{corp_chat}."
             ),
         }
     try:
-        # Exact shape from the NAI curl sample (no max_tokens / stream).
+        # Exact shape from the known-good corp curl sample (no max_tokens / stream).
+        # Force corp-first candidates (never prefer beta just because embeddings work there).
+        _WORKING_CHAT["base"] = "https://nai-dre.corp.p10y.ntnxdpro.com/enterpriseai/gateway/v1"
+        _WORKING_CHAT["auth"] = "bearer"
         resp = chat_completions(
             [
                 {"role": "system", "content": "You are helpful"},
@@ -608,7 +650,7 @@ def _validate_chat_key(api_key: str) -> Dict[str, Any]:
             ],
             api_key=key,
             max_tokens=None,
-            timeout=45,
+            timeout=60,
         )
         text = extract_message_content(resp)
         used_base = _WORKING_CHAT.get("base") or NAI_CHAT_BASE
@@ -616,32 +658,40 @@ def _validate_chat_key(api_key: str) -> Dict[str, Any]:
             "valid": True,
             "message": (
                 f"Reasoning OK against {used_base} "
-                f"(model {NAI_REASONING_DISPLAY} / {NAI_REASONING_MODEL}, "
+                f"(requested {NAI_REASONING_MODEL}, "
                 f"auth={_WORKING_CHAT.get('auth') or 'bearer'})"
             ),
             "sample": (text or "")[:80],
             "endpoint": f"{used_base}/chat/completions",
         }
     except NaiError as exc:
-        body = (exc.body or str(exc)).lower()
-        hint = ""
-        if "multi-endpoint" in body or exc.status in (401, 403):
-            hint = (
-                " NAI rejected this token for chat/completions on corp+beta "
-                "gateway/v1 variants. You need a Reasoning/chat Access Key "
-                "(secret token), not an embeddings-only key or Key Name. "
-                "Re-issue a chat key in NAI for model nemotron3-fp4-uni."
-            )
+        body = f"{exc} {exc.body}".lower()
+        hint = (
+            f" Save the corp chat Access Key (the Bearer token that works with "
+            f"`curl {corp_chat}`) into NAI Reasoning Access Key. "
+            "Do not reuse the beta embeddings token here — Embedding and Reasoning "
+            "use different NAI hosts/keys."
+        )
         if exc.status in (401, 403):
             return {
                 "valid": False,
                 "message": f"Unauthorized on Reasoning endpoint: {exc}.{hint}",
-                "endpoint": f"{NAI_CHAT_BASE}/chat/completions",
+                "endpoint": corp_chat,
+            }
+        if exc.status == 404 or "404" in body:
+            return {
+                "valid": False,
+                "message": (
+                    f"Reasoning chat endpoint failed: {exc}.{hint} "
+                    "If curl to corp gateway works, re-paste that same token and "
+                    "restart the backend so it uses corp-first routing."
+                ),
+                "endpoint": corp_chat,
             }
         return {
             "valid": None,
-            "message": f"Reasoning live check failed: {exc}",
-            "endpoint": f"{NAI_CHAT_BASE}/chat/completions",
+            "message": f"Reasoning live check failed: {exc}.{hint}",
+            "endpoint": corp_chat,
         }
     except Exception as exc:
         return {"valid": None, "message": f"Could not reach NAI Reasoning: {exc}"}
