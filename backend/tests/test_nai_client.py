@@ -11,6 +11,14 @@ class TestNaiClient(unittest.TestCase):
         self.assertEqual(nai_client.resolve_model("hack-reason"), "nemotron3-fp4-uni")
         self.assertEqual(nai_client.resolve_model(None), "nemotron3-fp4-uni")
 
+    def test_sanitize_api_key_strips_bearer_and_quotes(self):
+        self.assertEqual(
+            nai_client.sanitize_api_key('Bearer  abc-123 '),
+            "abc-123",
+        )
+        self.assertEqual(nai_client.sanitize_api_key('"abc-123"'), "abc-123")
+        self.assertEqual(nai_client.sanitize_api_key("crsr****mnop"), "")
+
     def test_cosine_similarity(self):
         self.assertAlmostEqual(nai_client.cosine_similarity([1, 0], [1, 0]), 1.0)
         self.assertAlmostEqual(nai_client.cosine_similarity([1, 0], [0, 1]), 0.0)
@@ -37,6 +45,17 @@ class TestNaiClient(unittest.TestCase):
         args, kwargs = mock_chat.call_args
         self.assertEqual(kwargs["api_key"], "test-key")
         self.assertEqual(args[0][0]["role"], "system")
+
+    @patch.object(nai_client, "_validate_embed_key")
+    @patch.object(nai_client, "_validate_chat_key")
+    def test_validate_api_key_reports_both(self, mock_chat, mock_embed):
+        mock_chat.return_value = {"valid": False, "message": "Unauthorized on Reasoning"}
+        mock_embed.return_value = {"valid": True, "message": "Embedding OK"}
+        result = nai_client.validate_api_key("chat-key", embed_api_key="embed-key")
+        self.assertFalse(result["valid"])
+        self.assertIn("Reasoning:", result["message"])
+        self.assertIn("Embedding:", result["message"])
+        self.assertTrue(result["embedding"]["valid"])
 
 
 if __name__ == "__main__":

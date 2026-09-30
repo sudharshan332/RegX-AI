@@ -6506,6 +6506,7 @@ def resolve_user_settings_tokens(username=None):
         "username": uname,
         "cursor_api_key": None,
         "nai_api_key": None,
+        "nai_embed_api_key": None,
         "ai_provider": get_ai_provider(uname) if uname else "cursor",
         "atlassian_jira_token": None,
         "atlassian_confluence_token": None,
@@ -6523,6 +6524,7 @@ def resolve_user_settings_tokens(username=None):
     for key in (
         "cursor_api_key",
         "nai_api_key",
+        "nai_embed_api_key",
         "atlassian_jira_token",
         "atlassian_confluence_token",
         "sourcegraph_token",
@@ -6562,8 +6564,8 @@ def require_ai_provider_key(username=None, provider=None):
         return provider, (
             {
                 "error": (
-                    "NAI Access Key missing in User Settings → API Keys. "
-                    "Save the NAI Access Key, then retry."
+                    "NAI Reasoning Access Key missing in User Settings → API Keys. "
+                    "Save a chat/completions Access Key (not an embeddings-only key), then retry."
                 ),
                 "require_key_setup": True,
                 "ai_provider": "nai",
@@ -6622,7 +6624,21 @@ def mcp_token_status_for_user(username=None):
         "nai": {
             "ok": bool(toks.get("nai_api_key") or nai_client.env_api_key()),
             "error": None if (toks.get("nai_api_key") or nai_client.env_api_key()) else (
-                "NAI Access Key missing in User Settings → API Keys."
+                "NAI Reasoning Access Key missing in User Settings → API Keys."
+            ),
+        },
+        "nai_embed": {
+            "ok": bool(
+                toks.get("nai_embed_api_key")
+                or toks.get("nai_api_key")
+                or nai_client.env_embed_api_key()
+            ),
+            "error": None if (
+                toks.get("nai_embed_api_key")
+                or toks.get("nai_api_key")
+                or nai_client.env_embed_api_key()
+            ) else (
+                "NAI Embedding Access Key missing in User Settings → API Keys."
             ),
         },
         "ai_provider": toks.get("ai_provider") or "cursor",
@@ -19357,13 +19373,33 @@ def validate_user_api_keys():
     nai_key = (body.get("nai_api_key") or "").strip()
     if not nai_key or "****" in nai_key:
         nai_key = get_user_key(username, "nai_api_key") or ""
-    if not nai_key:
+    nai_embed_key = (body.get("nai_embed_api_key") or "").strip()
+    if not nai_embed_key or "****" in nai_embed_key:
+        nai_embed_key = get_user_key(username, "nai_embed_api_key") or ""
+    if not nai_key and not nai_embed_key:
         results["nai_api_key"] = {
             "valid": None,
-            "message": "Not provided — required when AI Provider is NAI",
+            "message": "Not provided — required when AI Provider is NAI (Reasoning/chat key)",
+        }
+        results["nai_embed_api_key"] = {
+            "valid": None,
+            "message": "Not provided — optional if Reasoning key also covers embeddings",
         }
     else:
-        results["nai_api_key"] = nai_client.validate_api_key(nai_key)
+        nai_check = nai_client.validate_api_key(nai_key, embed_api_key=nai_embed_key or None)
+        results["nai_api_key"] = nai_check.get("chat") or {
+            "valid": nai_check.get("valid"),
+            "message": nai_check.get("message"),
+        }
+        results["nai_embed_api_key"] = nai_check.get("embedding") or {
+            "valid": None,
+            "message": "Embedding check not run",
+        }
+        # Keep a combined summary for older UI readers.
+        results["nai_combined"] = {
+            "valid": nai_check.get("valid"),
+            "message": nai_check.get("message"),
+        }
 
     provider_raw = body.get("ai_provider")
     if provider_raw is not None and str(provider_raw).strip():

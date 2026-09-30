@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 ALLOWED_KEY_NAMES = (
     "cursor_api_key",
     "nai_api_key",
+    "nai_embed_api_key",
     "atlassian_jira_token",
     "atlassian_confluence_token",
     "gerrit_http_password",
@@ -264,6 +265,15 @@ def upsert_user_keys(username: str, keys: Dict[str, str]) -> Dict[str, str]:
         val = str(value or "").strip()
         if not val or "****" in val:
             continue
+        # NAI keys are often pasted from curl with a Bearer prefix / quotes.
+        if key_name in ("nai_api_key", "nai_embed_api_key"):
+            try:
+                from nai_client import sanitize_api_key
+
+                val = sanitize_api_key(val) or val
+            except Exception:
+                if val.lower().startswith("bearer "):
+                    val = val[7:].strip()
         to_write[key_name] = val
     if not to_write and not prefs_to_write:
         raise ValueError(
