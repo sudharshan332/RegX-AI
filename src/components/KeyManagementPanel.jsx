@@ -5,6 +5,7 @@ import './KeyManagementPanel.css';
 const EMPTY_KEYS = {
   cursor_api_key: '',
   nai_api_key: '',
+  nai_embed_api_key: '',
   ai_provider: 'cursor',
   atlassian_jira_token: '',
   atlassian_confluence_token: '',
@@ -25,6 +26,7 @@ export default function KeyManagementPanel({ onClose }) {
   const [showKeys, setShowKeys] = useState({
     cursor_api_key: false,
     nai_api_key: false,
+    nai_embed_api_key: false,
     atlassian_jira_token: false,
     atlassian_confluence_token: false,
     gerrit_http_password: false,
@@ -212,14 +214,14 @@ export default function KeyManagementPanel({ onClose }) {
       </div>
 
       <div className="key-section">
-        <label htmlFor="nai-api-key">NAI Access Key</label>
+        <label htmlFor="nai-api-key">NAI Reasoning Access Key</label>
         <div className="input-with-toggle">
           <input
             id="nai-api-key"
             type={showKeys.nai_api_key ? 'text' : 'password'}
             value={keys.nai_api_key}
             onChange={(e) => handleChange('nai_api_key', e.target.value)}
-            placeholder="Bearer token from NAI gateway"
+            placeholder="UUID / token for chat/completions (no Bearer prefix)"
             disabled={saving || validating}
           />
           <button
@@ -232,8 +234,39 @@ export default function KeyManagementPanel({ onClose }) {
           </button>
         </div>
         <p className="help-text">
-          Required when AI Provider is NAI. Used for chat/completions
-          (nemotron-3-fp4-04 / nemotron3-fp4-uni) and embeddings (eng-embed-01).
+          Required for NAI AI ops. Must be authorized for Reasoning/chat on{' '}
+          <code>nai-dre.corp.../enterpriseai/gateway/v1/chat/completions</code>{' '}
+          (model <code>nemotron-3-fp4-04</code>). Paste only the token — not{' '}
+          <code>Bearer ...</code> and not an embeddings Key Name.
+        </p>
+      </div>
+
+      <div className="key-section">
+        <label htmlFor="nai-embed-api-key">NAI Embedding Access Key</label>
+        <div className="input-with-toggle">
+          <input
+            id="nai-embed-api-key"
+            type={showKeys.nai_embed_api_key ? 'text' : 'password'}
+            value={keys.nai_embed_api_key}
+            onChange={(e) => handleChange('nai_embed_api_key', e.target.value)}
+            placeholder="Optional if Reasoning key also covers embeddings"
+            disabled={saving || validating}
+          />
+          <button
+            type="button"
+            className="toggle-visibility-btn"
+            onClick={() => toggleShowKey('nai_embed_api_key')}
+            title={showKeys.nai_embed_api_key ? 'Hide key' : 'Show key'}
+          >
+            {showKeys.nai_embed_api_key ? '👁️' : '👁️‍🗨️'}
+          </button>
+        </div>
+        <p className="help-text">
+          Used for RAG re-rank on{' '}
+          <code>nai-dre.beta.../enterpriseai/v1/embeddings</code> (model{' '}
+          <code>eng-embed-01</code>). If omitted, the Reasoning key is tried.
+          Embeddings-only keys will fail Reasoning Test Keys with
+          &quot;multi-endpoint types&quot; — that is expected; put them here instead.
         </p>
       </div>
 

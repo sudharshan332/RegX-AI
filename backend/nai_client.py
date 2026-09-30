@@ -41,10 +41,24 @@ NAI_EMBED_BASE = os.getenv(
 
 # Legacy aliases still honored as env fallbacks (never hardcode secrets in git).
 _ENV_KEY_NAMES = ("NAI_API_KEY", "AI_API_KEY")
+_ENV_EMBED_KEY_NAMES = ("NAI_EMBED_API_KEY", "NAI_API_KEY", "AI_API_KEY")
 
 SSL_CTX = ssl.create_default_context()
 SSL_CTX.check_hostname = False
 SSL_CTX.verify_mode = ssl.CERT_NONE
+
+
+def sanitize_api_key(value: Optional[str]) -> str:
+    """Normalize pasted keys: trim, drop quotes, strip a leading 'Bearer '."""
+    key = str(value or "").strip()
+    if not key or "****" in key:
+        return ""
+    if (key.startswith('"') and key.endswith('"')) or (key.startswith("'") and key.endswith("'")):
+        key = key[1:-1].strip()
+    # Users often paste the full header value from curl samples.
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+    return key
 
 # Map UI / legacy model ids onto the NAI reasoning model.
 _MODEL_ALIASES = {
@@ -79,7 +93,15 @@ def resolve_model(model: Optional[str] = None) -> str:
 
 def env_api_key() -> str:
     for name in _ENV_KEY_NAMES:
-        val = (os.getenv(name) or "").strip()
+        val = sanitize_api_key(os.getenv(name) or "")
+        if val:
+            return val
+    return ""
+
+
+def env_embed_api_key() -> str:
+    for name in _ENV_EMBED_KEY_NAMES:
+        val = sanitize_api_key(os.getenv(name) or "")
         if val:
             return val
     return ""
@@ -88,26 +110,40 @@ def env_api_key() -> str:
 def resolve_api_key(
     username: Optional[str] = None,
     explicit: Optional[str] = None,
+    *,
+    purpose: str = "chat",
 ) -> str:
-    """Prefer explicit → per-user Settings key → env fallback."""
-    if explicit and str(explicit).strip() and "****" not in str(explicit):
-        return str(explicit).strip()
+    """Prefer explicit → per-user Settings key → env fallback.
+
+    ``purpose``:
+      - ``chat`` / ``reasoning`` → ``nai_api_key``
+      - ``embed`` / ``embedding`` → ``nai_embed_api_key`` then ``nai_api_key``
+    """
+    cleaned = sanitize_api_key(explicit)
+    if cleaned:
+        return cleaned
     uname = (username or "").strip()
+    want_embed = purpose in ("embed", "embedding", "embeddings")
+    key_names = (
+        ("nai_embed_api_key", "nai_api_key") if want_embed else ("nai_api_key",)
+    )
     if uname:
         try:
             from user_keys import get_user_key
 
-            user_key = get_user_key(uname, "nai_api_key")
-            if user_key and str(user_key).strip():
-                return str(user_key).strip()
+            for key_name in key_names:
+                user_key = sanitize_api_key(get_user_key(uname, key_name) or "")
+                if user_key:
+                    return user_key
         except Exception as exc:
-            logger.warning("Could not load nai_api_key for %s: %s", uname, exc)
-    return env_api_key()
+            logger.warning("Could not load NAI key for %s: %s", uname, exc)
+    return env_embed_api_key() if want_embed else env_api_key()
 
 
 def _headers(api_key: str) -> Dict[str, str]:
+    key = sanitize_api_key(api_key)
     return {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {key}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
@@ -156,18 +192,20 @@ def chat_completions(
     timeout: int = 120,
 ) -> Dict[str, Any]:
     """Call NAI chat/completions. Returns the raw JSON response."""
-    key = resolve_api_key(username=username, explicit=api_key)
+    key = resolve_api_key(username=username, explicit=api_key, purpose="chat")
     if not key:
         raise NaiError(
-            "NAI Access Key missing. Save it under Settings → API Keys → NAI Access Key.",
+            "NAI Reasoning Access Key missing. Save it under Settings → API Keys → NAI Reasoning Access Key.",
             status=403,
         )
+    # Match Enterprise AI gateway samples: model + messages are required.
+    # Keep optional fields minimal — some gateway key types reject extras.
     payload: Dict[str, Any] = {
         "model": resolve_model(model),
         "messages": list(messages),
-        "max_tokens": int(max_tokens),
-        "stream": False,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
     if temperature is not None:
         payload["temperature"] = temperature
     url = f"{NAI_CHAT_BASE}/chat/completions"
@@ -237,10 +275,11 @@ def embeddings(
     timeout: int = 60,
 ) -> List[List[float]]:
     """Return embedding vectors for one or more input strings."""
-    key = resolve_api_key(username=username, explicit=api_key)
+    key = resolve_api_key(username=username, explicit=api_key, purpose="embed")
     if not key:
         raise NaiError(
-            "NAI Access Key missing. Save it under Settings → API Keys → NAI Access Key.",
+            "NAI Embedding Access Key missing. Save it under Settings → API Keys "
+            "(NAI Embedding Access Key, or Reasoning key if shared).",
             status=403,
         )
     if isinstance(inputs, str):
@@ -284,30 +323,131 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     return dot / ((na ** 0.5) * (nb ** 0.5))
 
 
-def validate_api_key(api_key: str) -> Dict[str, Any]:
-    """Best-effort live check against chat/completions."""
-    key = (api_key or "").strip()
-    if not key or "****" in key:
+def _validate_chat_key(api_key: str) -> Dict[str, Any]:
+    """Live check against reasoning chat/completions gateway."""
+    key = sanitize_api_key(api_key)
+    if not key:
         return {"valid": None, "message": "Not provided"}
     try:
+        # Closest to the NAI curl sample (system+user, tiny reply).
         text = chat_text(
             "You are helpful",
             "Reply with exactly one word: hello",
             api_key=key,
             max_tokens=16,
-            timeout=30,
+            timeout=45,
         )
         return {
             "valid": True,
-            "message": f"NAI reachable (model {NAI_REASONING_MODEL})",
+            "message": (
+                f"Reasoning OK against {NAI_CHAT_BASE} "
+                f"(model {NAI_REASONING_DISPLAY} / {NAI_REASONING_MODEL})"
+            ),
             "sample": (text or "")[:80],
+            "endpoint": f"{NAI_CHAT_BASE}/chat/completions",
         }
     except NaiError as exc:
+        body = (exc.body or str(exc)).lower()
+        hint = ""
+        if "multi-endpoint" in body or exc.status in (401, 403):
+            hint = (
+                " This key is not authorized for the Reasoning/chat gateway. "
+                "Use a chat/completions Access Key for corp "
+                f"({NAI_CHAT_BASE}), not an embeddings-only key/name."
+            )
         if exc.status in (401, 403):
-            return {"valid": False, "message": f"Unauthorized: {exc}"}
-        return {"valid": None, "message": f"Live check failed: {exc}"}
+            return {
+                "valid": False,
+                "message": f"Unauthorized on Reasoning endpoint: {exc}.{hint}",
+                "endpoint": f"{NAI_CHAT_BASE}/chat/completions",
+            }
+        return {
+            "valid": None,
+            "message": f"Reasoning live check failed: {exc}",
+            "endpoint": f"{NAI_CHAT_BASE}/chat/completions",
+        }
     except Exception as exc:
-        return {"valid": None, "message": f"Could not reach NAI: {exc}"}
+        return {"valid": None, "message": f"Could not reach NAI Reasoning: {exc}"}
+
+
+def _validate_embed_key(api_key: str) -> Dict[str, Any]:
+    """Live check against embeddings endpoint."""
+    key = sanitize_api_key(api_key)
+    if not key:
+        return {"valid": None, "message": "Not provided"}
+    try:
+        vectors = embeddings(["nai key validation ping"], api_key=key, timeout=45)
+        dims = len(vectors[0]) if vectors else 0
+        return {
+            "valid": True,
+            "message": (
+                f"Embedding OK against {NAI_EMBED_BASE} "
+                f"(model {NAI_EMBEDDING_MODEL}, dims={dims})"
+            ),
+            "endpoint": f"{NAI_EMBED_BASE}/embeddings",
+        }
+    except NaiError as exc:
+        body = (exc.body or str(exc)).lower()
+        hint = ""
+        if "multi-endpoint" in body or exc.status in (401, 403):
+            hint = (
+                " This key is not authorized for embeddings. "
+                "Use the Embedding Access Key / API key for "
+                f"{NAI_EMBED_BASE} (model {NAI_EMBEDDING_MODEL})."
+            )
+        if exc.status in (401, 403):
+            return {
+                "valid": False,
+                "message": f"Unauthorized on Embedding endpoint: {exc}.{hint}",
+                "endpoint": f"{NAI_EMBED_BASE}/embeddings",
+            }
+        return {
+            "valid": None,
+            "message": f"Embedding live check failed: {exc}",
+            "endpoint": f"{NAI_EMBED_BASE}/embeddings",
+        }
+    except Exception as exc:
+        return {"valid": None, "message": f"Could not reach NAI Embedding: {exc}"}
+
+
+def validate_api_key(api_key: str, embed_api_key: Optional[str] = None) -> Dict[str, Any]:
+    """Validate Reasoning and Embedding keys against their real endpoints.
+
+    Returns overall ``valid`` True only if Reasoning succeeds (required for AI ops).
+    Embedding is reported separately; a shared key is tried for both when embed
+    key is omitted.
+    """
+    chat_key = sanitize_api_key(api_key)
+    embed_key = sanitize_api_key(embed_api_key) or chat_key
+    if not chat_key and not embed_key:
+        return {"valid": None, "message": "Not provided"}
+
+    chat_result = _validate_chat_key(chat_key) if chat_key else {
+        "valid": None,
+        "message": "Reasoning key not provided",
+    }
+    embed_result = _validate_embed_key(embed_key) if embed_key else {
+        "valid": None,
+        "message": "Embedding key not provided",
+    }
+
+    parts = [
+        f"Reasoning: {chat_result.get('message')}",
+        f"Embedding: {embed_result.get('message')}",
+    ]
+    if chat_result.get("valid") is True:
+        overall = True
+    elif chat_result.get("valid") is False:
+        overall = False
+    else:
+        overall = None
+
+    return {
+        "valid": overall,
+        "message": " | ".join(parts),
+        "chat": chat_result,
+        "embedding": embed_result,
+    }
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.I)

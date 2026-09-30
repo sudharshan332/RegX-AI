@@ -86,12 +86,18 @@ class TestUserKeys(unittest.TestCase):
         self.assertEqual(get_ai_provider("dave"), "cursor")
         masked = upsert_user_keys(
             "dave",
-            {"ai_provider": "nai", "nai_api_key": "nai-access-key-value-1234"},
+            {
+                "ai_provider": "nai",
+                "nai_api_key": "nai-access-key-value-1234",
+                "nai_embed_api_key": "nai-embed-key-value-5678",
+            },
         )
         self.assertEqual(masked["ai_provider"], "nai")
         self.assertIn("****", masked["nai_api_key"])
+        self.assertIn("****", masked["nai_embed_api_key"])
         self.assertEqual(get_ai_provider("dave"), "nai")
         self.assertEqual(get_user_key("dave", "nai_api_key"), "nai-access-key-value-1234")
+        self.assertEqual(get_user_key("dave", "nai_embed_api_key"), "nai-embed-key-value-5678")
         # Provider-only save (no new secrets) must succeed.
         again = upsert_user_keys("dave", {"ai_provider": "cursor"})
         self.assertEqual(again["ai_provider"], "cursor")
