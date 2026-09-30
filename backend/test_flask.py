@@ -18,6 +18,7 @@ import ssl
 import subprocess
 import tempfile
 import shutil
+import uuid
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from collections import defaultdict
@@ -174,7 +175,10 @@ from user_keys import (
     store_login_credential,
     get_login_credential,
     clear_login_credential,
+    get_ai_provider,
+    normalize_ai_provider,
 )
+import nai_client
 from flux_client import (
     FluxError,
     FluxKeySetupError,
@@ -6501,6 +6505,8 @@ def resolve_user_settings_tokens(username=None):
     out = {
         "username": uname,
         "cursor_api_key": None,
+        "nai_api_key": None,
+        "ai_provider": get_ai_provider(uname) if uname else "cursor",
         "atlassian_jira_token": None,
         "atlassian_confluence_token": None,
         "sourcegraph_token": None,
@@ -6510,10 +6516,13 @@ def resolve_user_settings_tokens(username=None):
         "missing": [],
     }
     if not uname:
-        out["missing"] = list(out.keys() - {"username", "missing"})
+        out["missing"] = [
+            k for k in out.keys() if k not in ("username", "missing", "ai_provider")
+        ]
         return out
     for key in (
         "cursor_api_key",
+        "nai_api_key",
         "atlassian_jira_token",
         "atlassian_confluence_token",
         "sourcegraph_token",
@@ -6526,7 +6535,53 @@ def resolve_user_settings_tokens(username=None):
             out[key] = str(val).strip()
         else:
             out["missing"].append(key)
+    out["ai_provider"] = get_ai_provider(uname)
     return out
+
+
+def resolve_ai_provider(username=None, explicit=None):
+    """Return active AI provider (`cursor` or `nai`) for the complete tool."""
+    if explicit is not None and str(explicit).strip():
+        return normalize_ai_provider(explicit)
+    uname = (username or _current_username() or "").strip()
+    return get_ai_provider(uname) if uname else "cursor"
+
+
+def require_ai_provider_key(username=None, provider=None):
+    """
+    Ensure the selected AI provider has a configured access key.
+    Returns (provider, error_response_or_None).
+    error_response is a (jsonify_dict, status) tuple when missing.
+    """
+    uname = (username or _current_username() or "").strip()
+    provider = resolve_ai_provider(uname, provider)
+    toks = resolve_user_settings_tokens(uname)
+    if provider == "nai":
+        if toks.get("nai_api_key") or nai_client.env_api_key():
+            return provider, None
+        return provider, (
+            {
+                "error": (
+                    "NAI Access Key missing in User Settings → API Keys. "
+                    "Save the NAI Access Key, then retry."
+                ),
+                "require_key_setup": True,
+                "ai_provider": "nai",
+                "mcp_token_status": mcp_token_status_for_user(uname),
+            },
+            403,
+        )
+    if toks.get("cursor_api_key"):
+        return provider, None
+    return provider, (
+        {
+            "error": format_mcp_token_connection_error("cursor", uname),
+            "require_key_setup": True,
+            "ai_provider": "cursor",
+            "mcp_token_status": mcp_token_status_for_user(uname),
+        },
+        403,
+    )
 
 
 def build_atlassian_tokens_for_bridge(username=None):
@@ -6564,6 +6619,13 @@ def mcp_token_status_for_user(username=None):
                 "Cursor API key missing in User Settings → API Keys."
             ),
         },
+        "nai": {
+            "ok": bool(toks.get("nai_api_key") or nai_client.env_api_key()),
+            "error": None if (toks.get("nai_api_key") or nai_client.env_api_key()) else (
+                "NAI Access Key missing in User Settings → API Keys."
+            ),
+        },
+        "ai_provider": toks.get("ai_provider") or "cursor",
     }
     return status
 
@@ -10450,16 +10512,14 @@ def rdm_skill_analyze():
             return jsonify({"success": False, "error": "testcase_name or rdm_link is required"}), 400
 
         username = _current_username()
+        provider, key_err = require_ai_provider_key(username, data.get("ai_provider"))
+        if key_err:
+            err_body = dict(key_err[0])
+            err_body["success"] = False
+            return jsonify(err_body), key_err[1]
+
         user_toks = resolve_user_settings_tokens(username)
         cursor_api_key = user_toks.get("cursor_api_key")
-        if not cursor_api_key:
-            return jsonify({
-                "success": False,
-                "error": format_mcp_token_connection_error("cursor", username),
-                "require_key_setup": True,
-                "mcp_token_status": mcp_token_status_for_user(username),
-            }), 403
-
         atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
         rdm_info = None
@@ -10511,21 +10571,32 @@ def rdm_skill_analyze():
             "atlassian_tokens": atlassian_tokens,
         }
 
-        resp = requests.post(
-            f"{CURSOR_BRIDGE_URL}/analyze-testcase",
-            json=payload,
-            timeout=600,
-        )
-        if resp.status_code != 200:
-            error_msg = (
-                resp.json().get("error", resp.text)
-                if resp.headers.get("content-type", "").startswith("application/json")
-                else resp.text
+        if provider == "nai":
+            try:
+                _session_id, analysis = _run_nai_testcase_analysis(payload, username=username)
+            except nai_client.NaiError as nai_err:
+                return jsonify({
+                    "success": False,
+                    "error": str(nai_err),
+                    "ai_provider": "nai",
+                    "require_key_setup": nai_err.status in (401, 403),
+                }), 502 if nai_err.status not in (401, 403) else 403
+        else:
+            resp = requests.post(
+                f"{CURSOR_BRIDGE_URL}/analyze-testcase",
+                json=payload,
+                timeout=600,
             )
-            return jsonify({"success": False, "error": "Bridge error: %s" % error_msg}), 502
+            if resp.status_code != 200:
+                error_msg = (
+                    resp.json().get("error", resp.text)
+                    if resp.headers.get("content-type", "").startswith("application/json")
+                    else resp.text
+                )
+                return jsonify({"success": False, "error": "Bridge error: %s" % error_msg}), 502
 
-        bridge = resp.json()
-        analysis = bridge.get("analysis") or {}
+            bridge = resp.json()
+            analysis = bridge.get("analysis") or {}
         mapped = _normalize_rdm_skill_analysis(analysis, rdm_message=rdm_message)
         mcp_health = _merge_rdm_mcp_health(mcp_probe, analysis.get("mcp_status") or {})
         glean_mcp_ok = bool((mcp_health.get("glean") or {}).get("ok"))
@@ -18758,8 +18829,19 @@ def debug_inspect_jp(jp_id):
 # AI Analysis Endpoints
 # ======================================================
 
-def _call_ai_chat(system_prompt, user_content, max_tokens=2048):
-    """Helper to call the Nutanix AI chat endpoint."""
+def _call_ai_chat(system_prompt, user_content, max_tokens=2048, username=None, provider=None):
+    """Helper to call the active AI chat backend (NAI or legacy Nutanix/Cursor path)."""
+    uname = (username or _current_username() or "").strip() or None
+    provider = resolve_ai_provider(uname, provider)
+    if provider == "nai":
+        return nai_client.chat_text(
+            system_prompt or "You are a helpful assistant.",
+            user_content or "",
+            username=uname,
+            max_tokens=max_tokens,
+            timeout=90,
+        )
+    # Legacy shared Nutanix AI endpoint (env AI_BASE / AI_API_KEY)
     payload = {
         "model": "hack-reason",
         "messages": [
@@ -18786,6 +18868,123 @@ def _call_ai_chat(system_prompt, user_content, max_tokens=2048):
             raise Exception("AI returned no choices")
         content = (choices[0].get("message") or {}).get("content", "")
         return content.strip()
+
+
+def _nai_new_session_id():
+    return "nai-%s" % uuid.uuid4().hex[:16]
+
+
+def _run_nai_testcase_analysis(payload, username=None):
+    """Deep testcase analysis via NAI reasoning model."""
+    analysis = nai_client.analyze_testcase_with_nai(
+        testcase_name=payload.get("testcase_name") or "",
+        exception_summary=payload.get("exception_summary") or "",
+        exception=payload.get("exception") or "",
+        steps_log=payload.get("steps_log") or "",
+        nutest_test_log=payload.get("nutest_test_log") or "",
+        test_log_url=payload.get("test_log_url") or "",
+        jira_tickets=payload.get("jira_tickets") or [],
+        failure_stage=payload.get("failure_stage") or "",
+        triage_genie_ticket=payload.get("triage_genie_ticket") or "",
+        glean_tickets=payload.get("glean_tickets") or [],
+        glean_snippets=payload.get("glean_snippets") or [],
+        analysis_type=payload.get("analysis_type") or "failed",
+        rdm_url=payload.get("rdm_url") or "",
+        rdm_message=payload.get("rdm_message") or "",
+        username=username,
+    )
+    session_id = _nai_new_session_id()
+    # Keep a light in-memory session so follow-ups can resume with prior analysis.
+    with _cursor_ai_jobs_lock:
+        _cursor_ai_jobs[session_id] = {
+            "provider": "nai",
+            "status": "done",
+            "analysis": analysis,
+            "created_at": datetime.now().isoformat(),
+            "username": (username or "").strip().lower(),
+        }
+    return session_id, analysis
+
+
+def _process_nai_batch_job(job_id, testcases, username):
+    """Background worker for NAI batch Deep AI analysis."""
+    try:
+        for idx, tc in enumerate(testcases):
+            try:
+                session_id, analysis = _run_nai_testcase_analysis(tc, username=username)
+                with _cursor_ai_jobs_lock:
+                    job = _cursor_ai_jobs.get(job_id) or {}
+                    results = job.setdefault("results", {})
+                    tid = tc.get("testcase_id") or tc.get("testcase_name") or str(idx)
+                    results[str(tid)] = {
+                        "success": True,
+                        "session_id": session_id,
+                        "analysis": analysis,
+                    }
+                    job["completed"] = int(job.get("completed") or 0) + 1
+                    job["status"] = "running"
+                    _cursor_ai_jobs[job_id] = job
+            except Exception as tc_err:
+                logger.error("[nai-batch] testcase failed: %s", tc_err, exc_info=True)
+                with _cursor_ai_jobs_lock:
+                    job = _cursor_ai_jobs.get(job_id) or {}
+                    results = job.setdefault("results", {})
+                    tid = tc.get("testcase_id") or tc.get("testcase_name") or str(idx)
+                    results[str(tid)] = {
+                        "success": False,
+                        "error": str(tc_err),
+                    }
+                    job["completed"] = int(job.get("completed") or 0) + 1
+                    _cursor_ai_jobs[job_id] = job
+        with _cursor_ai_jobs_lock:
+            job = _cursor_ai_jobs.get(job_id) or {}
+            job["status"] = "done"
+            _cursor_ai_jobs[job_id] = job
+    except Exception as exc:
+        logger.error("[nai-batch] job %s failed: %s", job_id, exc, exc_info=True)
+        with _cursor_ai_jobs_lock:
+            job = _cursor_ai_jobs.get(job_id) or {}
+            job["status"] = "error"
+            job["error"] = str(exc)
+            _cursor_ai_jobs[job_id] = job
+
+
+def _embed_texts_for_rag(texts, username=None):
+    """Return embedding vectors via NAI when provider is nai; else None."""
+    uname = (username or _current_username() or "").strip() or None
+    if resolve_ai_provider(uname) != "nai":
+        return None
+    try:
+        return nai_client.embeddings(texts, username=uname)
+    except Exception as exc:
+        logger.warning("[nai-embed] embeddings failed: %s", exc)
+        return None
+
+
+def _rerank_docs_with_nai_embeddings(question, docs, username=None, top_k=8):
+    """Optional semantic re-rank of RAG docs using NAI eng-embed-01."""
+    if not docs or not (question or "").strip():
+        return docs
+    texts = []
+    for doc in docs:
+        if isinstance(doc, dict):
+            texts.append(
+                " ".join(
+                    str(doc.get(k) or "")
+                    for k in ("title", "summary", "text", "content", "testcase_name", "root_cause")
+                )[:2000]
+            )
+        else:
+            texts.append(str(doc)[:2000])
+    vectors = _embed_texts_for_rag([question] + texts, username=username)
+    if not vectors or len(vectors) != len(texts) + 1:
+        return docs
+    qv = vectors[0]
+    scored = []
+    for doc, vec in zip(docs, vectors[1:]):
+        scored.append((nai_client.cosine_similarity(qv, vec), doc))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [doc for _, doc in scored[:top_k]]
 
 
 def _build_owner_tickets_fallback_analysis(all_tickets, jira_details, owner_for_ticket, ticket_test_count, tag):
@@ -19153,6 +19352,29 @@ def validate_user_api_keys():
         results["cursor_api_key"] = {
             "valid": None,
             "message": "Format unusual — still saved if you clicked Save",
+        }
+
+    nai_key = (body.get("nai_api_key") or "").strip()
+    if not nai_key or "****" in nai_key:
+        nai_key = get_user_key(username, "nai_api_key") or ""
+    if not nai_key:
+        results["nai_api_key"] = {
+            "valid": None,
+            "message": "Not provided — required when AI Provider is NAI",
+        }
+    else:
+        results["nai_api_key"] = nai_client.validate_api_key(nai_key)
+
+    provider_raw = body.get("ai_provider")
+    if provider_raw is not None and str(provider_raw).strip():
+        results["ai_provider"] = {
+            "valid": True,
+            "message": "Active provider: %s" % normalize_ai_provider(provider_raw),
+        }
+    else:
+        results["ai_provider"] = {
+            "valid": True,
+            "message": "Active provider: %s" % get_ai_provider(username),
         }
 
     # Prefer request body plaintext; otherwise use decrypted User Settings store.
@@ -19692,25 +19914,20 @@ _cursor_ai_jobs_lock = threading.Lock()
 @app.route("/api/mcp/regression/cursor-ai/analyze-testcase", methods=["POST"])
 @jwt_required
 def cursor_ai_analyze_testcase():
-    """Trigger deep AI analysis for a single failed testcase via the Cursor bridge."""
+    """Trigger deep AI analysis for a single failed testcase (Cursor SDK or NAI)."""
     try:
         body = request.get_json(force=True) or {}
         testcase_name = body.get("testcase_name", "")
         if not testcase_name:
             return jsonify({"error": "testcase_name is required"}), 400
 
-        # Get user API keys for Cursor SDK
         username = _current_username()
+        provider, key_err = require_ai_provider_key(username, body.get("ai_provider"))
+        if key_err:
+            return jsonify(key_err[0]), key_err[1]
+
         user_toks = resolve_user_settings_tokens(username)
         cursor_api_key = user_toks.get("cursor_api_key")
-
-        if not cursor_api_key:
-            return jsonify({
-                "error": format_mcp_token_connection_error("cursor", username),
-                "require_key_setup": True,
-                "mcp_token_status": mcp_token_status_for_user(username),
-            }), 403
-
         atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
         exception_summary = body.get("exception_summary", "")
@@ -19774,6 +19991,23 @@ def cursor_ai_analyze_testcase():
             "atlassian_tokens": atlassian_tokens,
         }
 
+        if provider == "nai":
+            try:
+                session_id, analysis = _run_nai_testcase_analysis(payload, username=username)
+            except nai_client.NaiError as nai_err:
+                return jsonify({
+                    "error": str(nai_err),
+                    "ai_provider": "nai",
+                    "require_key_setup": (nai_err.status in (401, 403)),
+                }), 502 if nai_err.status not in (401, 403) else 403
+            return jsonify({
+                "success": True,
+                "session_id": session_id,
+                "analysis": analysis,
+                "ai_provider": "nai",
+                "model": nai_client.NAI_REASONING_DISPLAY,
+            })
+
         resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/analyze-testcase",
             json=payload,
@@ -19781,13 +20015,14 @@ def cursor_ai_analyze_testcase():
         )
         if resp.status_code != 200:
             error_msg = resp.json().get("error", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
-            return jsonify({"error": f"Bridge error: {error_msg}"}), 502
+            return jsonify({"error": f"Bridge error: {error_msg}", "ai_provider": "cursor"}), 502
 
         data = resp.json()
         return jsonify({
             "success": True,
             "session_id": data.get("session_id", ""),
             "analysis": data.get("analysis", {}),
+            "ai_provider": "cursor",
         })
 
     except requests.exceptions.ConnectionError:
@@ -19811,18 +20046,13 @@ def cursor_ai_analyze_batch():
         if not testcases:
             return jsonify({"error": "testcases array is required"}), 400
 
-        # Get user API keys for Cursor SDK (login user's User Settings)
         username = _current_username()
+        provider, key_err = require_ai_provider_key(username, body.get("ai_provider"))
+        if key_err:
+            return jsonify(key_err[0]), key_err[1]
+
         user_toks = resolve_user_settings_tokens(username)
         cursor_api_key = user_toks.get("cursor_api_key")
-
-        if not cursor_api_key:
-            return jsonify({
-                "error": format_mcp_token_connection_error("cursor", username),
-                "require_key_setup": True,
-                "mcp_token_status": mcp_token_status_for_user(username),
-            }), 403
-
         atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
         # Enrich each testcase with logs if missing
@@ -19836,6 +20066,29 @@ def cursor_ai_analyze_batch():
                 tc["nutest_test_log"] = logs.get("nutest_test_log", "")[:5000]
             enriched.append(tc)
 
+        if provider == "nai":
+            job_id = "nai-batch-%s" % uuid.uuid4().hex[:12]
+            with _cursor_ai_jobs_lock:
+                _cursor_ai_jobs[job_id] = {
+                    "status": "running",
+                    "provider": "nai",
+                    "total": len(enriched),
+                    "completed": 0,
+                    "results": {},
+                    "created_at": datetime.now().isoformat(),
+                }
+            threading.Thread(
+                target=_process_nai_batch_job,
+                args=(job_id, enriched, username),
+                daemon=True,
+            ).start()
+            return jsonify({
+                "success": True,
+                "job_id": job_id,
+                "total": len(enriched),
+                "ai_provider": "nai",
+            })
+
         resp = requests.post(
             f"{CURSOR_BRIDGE_URL}/analyze-batch",
             json={
@@ -19847,7 +20100,7 @@ def cursor_ai_analyze_batch():
         )
         if resp.status_code != 200:
             error_msg = resp.json().get("error", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
-            return jsonify({"error": f"Bridge error: {error_msg}"}), 502
+            return jsonify({"error": f"Bridge error: {error_msg}", "ai_provider": "cursor"}), 502
 
         data = resp.json()
         job_id = data.get("job_id", "")
@@ -19856,12 +20109,18 @@ def cursor_ai_analyze_batch():
         with _cursor_ai_jobs_lock:
             _cursor_ai_jobs[job_id] = {
                 "status": "running",
+                "provider": "cursor",
                 "total": len(enriched),
                 "completed": 0,
                 "created_at": datetime.now().isoformat(),
             }
 
-        return jsonify({"success": True, "job_id": job_id, "total": len(enriched)})
+        return jsonify({
+            "success": True,
+            "job_id": job_id,
+            "total": len(enriched),
+            "ai_provider": "cursor",
+        })
 
     except requests.exceptions.ConnectionError:
         return jsonify({"error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start"}), 503
@@ -19876,6 +20135,19 @@ def cursor_ai_analyze_batch():
 def cursor_ai_job_status(job_id):
     """Poll the status of an async batch analysis job from the Cursor bridge."""
     try:
+        # Local NAI batch jobs are served from in-memory store.
+        with _cursor_ai_jobs_lock:
+            local_job = _cursor_ai_jobs.get(job_id)
+        if local_job and local_job.get("provider") == "nai":
+            return jsonify({
+                "success": True,
+                "status": local_job.get("status") or "running",
+                "total": local_job.get("total") or 0,
+                "completed": local_job.get("completed") or 0,
+                "results": local_job.get("results") or {},
+                "ai_provider": "nai",
+            })
+
         resp = requests.get(
             f"{CURSOR_BRIDGE_URL}/status/{job_id}",
             timeout=10,
@@ -20141,18 +20413,53 @@ def cursor_ai_follow_up():
         if not session_id:
             return jsonify({"error": "session_id is required"}), 400
 
-        # Get user API keys for Cursor SDK (login user's User Settings)
         username = _current_username()
+        provider, key_err = require_ai_provider_key(username, body.get("ai_provider"))
+        # NAI sessions always route to NAI regardless of current toggle.
+        if str(session_id).startswith("nai-"):
+            provider = "nai"
+        if key_err and provider == "cursor":
+            return jsonify(key_err[0]), key_err[1]
+        if provider == "nai":
+            nai_key_err = require_ai_provider_key(username, "nai")[1]
+            if nai_key_err:
+                return jsonify(nai_key_err[0]), nai_key_err[1]
+            prior = recovery_context.get("latest_analysis") or ticket_ctx or {}
+            with _cursor_ai_jobs_lock:
+                stored = (_cursor_ai_jobs.get(session_id) or {}).get("analysis") or {}
+            if stored:
+                prior = {**stored, **prior}
+            try:
+                analysis = nai_client.follow_up_with_nai(
+                    question,
+                    prior_analysis=prior,
+                    recovery_context=recovery_context,
+                    username=username,
+                )
+            except nai_client.NaiError as nai_err:
+                return jsonify({
+                    "error": str(nai_err),
+                    "ai_provider": "nai",
+                    "require_key_setup": nai_err.status in (401, 403),
+                }), 502 if nai_err.status not in (401, 403) else 403
+            with _cursor_ai_jobs_lock:
+                _cursor_ai_jobs[session_id] = {
+                    "provider": "nai",
+                    "status": "done",
+                    "analysis": {**(prior or {}), **analysis},
+                    "created_at": datetime.now().isoformat(),
+                    "username": (username or "").strip().lower(),
+                }
+            return jsonify({
+                "success": True,
+                "session_id": session_id,
+                "analysis": analysis,
+                "ai_provider": "nai",
+                "mcp_token_status": mcp_token_status_for_user(username),
+            })
+
         user_toks = resolve_user_settings_tokens(username)
         cursor_api_key = user_toks.get("cursor_api_key")
-
-        if not cursor_api_key:
-            return jsonify({
-                "error": format_mcp_token_connection_error("cursor", username),
-                "require_key_setup": True,
-                "mcp_token_status": mcp_token_status_for_user(username),
-            }), 403
-
         atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
         resp = requests.post(
@@ -21167,10 +21474,20 @@ def _rag_rdm_pattern_dicts():
     return []
 
 
-def _try_cursor_ai_rag_answer(question, regression_context="", tag=None):
+def _try_cursor_ai_rag_answer(question, regression_context="", tag=None, username=None):
     """Retrieve from local RegX JSON; LLM only for synthesis. None = fall through."""
     try:
-        return _rag_answer_chat_question(
+        uname = (username or _current_username() or "").strip() or None
+
+        def _call_ai(system_prompt, user_content, max_tokens=2048):
+            return _call_ai_chat(
+                system_prompt,
+                user_content,
+                max_tokens=max_tokens,
+                username=uname,
+            )
+
+        result = _rag_answer_chat_question(
             question,
             tag=tag,
             regression_context=regression_context,
@@ -21181,8 +21498,27 @@ def _try_cursor_ai_rag_answer(question, regression_context="", tag=None):
                 "deprecation": _load_deprecation_records,
                 "rdm_patterns": _rag_rdm_pattern_dicts,
             },
-            call_ai=_call_ai_chat,
+            call_ai=_call_ai,
         )
+        # When NAI is selected, optionally semantic-rerank retrieved docs via embeddings
+        # and regenerate the synthesis if the RAG layer exposed documents.
+        if (
+            result
+            and resolve_ai_provider(uname) == "nai"
+            and isinstance(result.get("documents"), list)
+            and result.get("documents")
+        ):
+            reranked = _rerank_docs_with_nai_embeddings(
+                question, result["documents"], username=uname, top_k=8
+            )
+            if reranked and reranked != result.get("documents"):
+                result = dict(result)
+                result["documents"] = reranked
+                result["source"] = result.get("source") or "rag"
+                result["embedding_model"] = nai_client.NAI_EMBEDDING_MODEL
+        if result:
+            result["ai_provider"] = resolve_ai_provider(uname)
+        return result
     except Exception as e:
         logger.warning("[cursor-ai-rag] answer failed: %s", e)
         return None
@@ -21209,6 +21545,7 @@ def _local_or_rag_chat_reply(question, regression_context="", tag=None, task_ids
         question,
         regression_context=regression_context,
         tag=tag,
+        username=username,
     )
     if rag_result and rag_result.get("reply"):
         _remember_chat_attach(username, rag_result, tag)
@@ -21293,14 +21630,77 @@ def cursor_ai_chat_stream():
         )
 
     username = _current_username()
-    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
-    if not cursor_api_key:
-        return jsonify({
-            "error": "Cursor API key required for chat. Add it under Settings → API Keys.",
-            "require_key_setup": True,
-        }), 403
+    provider, key_err = require_ai_provider_key(username, body.get("ai_provider"))
+    if key_err:
+        return jsonify(key_err[0]), key_err[1]
 
     system_prompt = _build_chat_system_prompt(mode, mcp_servers)[:2500]
+
+    if provider == "nai":
+        chat_messages = [{"role": "system", "content": system_prompt}]
+        if regression_context:
+            chat_messages.append({
+                "role": "system",
+                "content": (
+                    "Current regression run data (authoritative — use for counts/metrics):\n"
+                    + str(regression_context)[:4000]
+                ),
+            })
+        for msg in messages:
+            role = msg.get("role", "user")
+            if role in ("user", "assistant"):
+                chat_messages.append({"role": role, "content": msg.get("content", "")})
+
+        def nai_gen():
+            try:
+                reply = nai_client.chat_messages(
+                    chat_messages,
+                    username=username,
+                    max_tokens=4096,
+                    timeout=180,
+                )
+                for chunk in nai_client.sse_chat_events(
+                    reply,
+                    model=nai_client.NAI_REASONING_DISPLAY,
+                    agent_id=agent_id,
+                    session_id=session_id or _nai_new_session_id(),
+                    source="nai",
+                ):
+                    # UI also understands `delta`; emit both shapes.
+                    text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, (bytes, bytearray)) else str(chunk)
+                    if '"type": "token"' in text:
+                        try:
+                            payload = json.loads(text[len("data: "):].strip())
+                            yield (
+                                "data: "
+                                + json.dumps({"type": "delta", "text": payload.get("text") or ""})
+                                + "\n\n"
+                            ).encode("utf-8")
+                        except Exception:
+                            yield chunk
+                    else:
+                        yield chunk
+            except nai_client.NaiError as nai_err:
+                yield (
+                    "data: "
+                    + json.dumps({"type": "error", "message": str(nai_err)})
+                    + "\n\n"
+                ).encode("utf-8")
+            except Exception as stream_exc:
+                logger.error("[cursor-ai-chat-stream] NAI error: %s", stream_exc)
+                yield (
+                    "data: "
+                    + json.dumps({"type": "error", "message": str(stream_exc)})
+                    + "\n\n"
+                ).encode("utf-8")
+
+        return Response(
+            stream_with_context(nai_gen()),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
 
     def gen():
         try:
@@ -21358,7 +21758,7 @@ def cursor_ai_chat_stream():
 @app.route("/api/mcp/regression/cursor-ai/chat", methods=["POST"])
 @jwt_required
 def cursor_ai_chat():
-    """Interactive chat: prefer Cursor Bridge (user key), else Nutanix AI."""
+    """Interactive chat: NAI or Cursor SDK based on User Settings AI provider toggle."""
     try:
         body = request.get_json(force=True) or {}
         messages = body.get("messages", [])
@@ -21381,6 +21781,8 @@ def cursor_ai_chat():
                 last_user_msg = (m.get("content") or "").strip()
                 break
         scope_tag = (body.get("tag") or "").strip() or None
+        username = _current_username()
+        provider, key_err = require_ai_provider_key(username, body.get("ai_provider"))
 
         if last_user_msg:
             local_reply, local_source = _local_or_rag_chat_reply(
@@ -21388,7 +21790,7 @@ def cursor_ai_chat():
                 regression_context=regression_context,
                 tag=scope_tag,
                 task_ids=body.get("task_ids") or [],
-                username=_current_username(),
+                username=username,
             )
             if local_reply:
                 return jsonify({
@@ -21397,33 +21799,14 @@ def cursor_ai_chat():
                     "mode": mode,
                     "model": model,
                     "source": local_source or "local",
+                    "ai_provider": provider,
                     "tools_used": [],
                 })
 
+        if key_err:
+            return jsonify(key_err[0]), key_err[1]
+
         system_prompt = _build_chat_system_prompt(mode, mcp_servers)
-
-        # Prefer Cursor Bridge when the user has a Cursor API key — Nutanix AI
-        # enterprise key is frequently expired/unauthorized in local/dev setups.
-        username = _current_username()
-        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
-        if cursor_api_key:
-            bridge_body, bridge_status = _cursor_bridge_chat(
-                messages,
-                system_prompt,
-                mode,
-                agent_id=agent_id,
-                session_id=session_id,
-                regression_context=regression_context,
-            )
-            if bridge_body.get("success"):
-                return jsonify(bridge_body), bridge_status
-            logger.warning(
-                "[cursor-ai-chat] Cursor Bridge preferred path failed (%s); trying Nutanix AI",
-                bridge_body.get("error", bridge_status),
-            )
-        else:
-            bridge_body, bridge_status = None, None
-
         chat_messages = [{"role": "system", "content": system_prompt}]
         if regression_context:
             chat_messages.append({
@@ -21437,6 +21820,49 @@ def cursor_ai_chat():
             role = msg.get("role", "user")
             if role in ("user", "assistant"):
                 chat_messages.append({"role": role, "content": msg.get("content", "")})
+
+        if provider == "nai":
+            try:
+                content = nai_client.chat_messages(
+                    chat_messages,
+                    username=username,
+                    max_tokens=4096,
+                    timeout=120,
+                )
+            except nai_client.NaiError as nai_err:
+                return jsonify({
+                    "error": str(nai_err),
+                    "ai_provider": "nai",
+                    "require_key_setup": nai_err.status in (401, 403),
+                }), 502 if nai_err.status not in (401, 403) else 403
+            return jsonify({
+                "success": True,
+                "reply": content,
+                "mode": mode,
+                "model": nai_client.NAI_REASONING_DISPLAY,
+                "source": "nai",
+                "ai_provider": "nai",
+                "tools_used": [],
+            })
+
+        cursor_api_key = get_user_key(username, "cursor_api_key") if username else None
+        bridge_body, bridge_status = None, None
+        if cursor_api_key:
+            bridge_body, bridge_status = _cursor_bridge_chat(
+                messages,
+                system_prompt,
+                mode,
+                agent_id=agent_id,
+                session_id=session_id,
+                regression_context=regression_context,
+            )
+            if bridge_body.get("success"):
+                bridge_body["ai_provider"] = "cursor"
+                return jsonify(bridge_body), bridge_status
+            logger.warning(
+                "[cursor-ai-chat] Cursor Bridge preferred path failed (%s); trying legacy AI",
+                bridge_body.get("error", bridge_status),
+            )
 
         ai_model = model
         if model in ("claude-sonnet-4.6-high", "claude-sonnet-4.6"):
@@ -21482,18 +21908,18 @@ def cursor_ai_chat():
                     "reply": content.strip(),
                     "mode": mode,
                     "model": model,
+                    "ai_provider": "cursor",
                     "tools_used": tools_used,
                 })
         except (urllib.error.HTTPError, urllib.error.URLError) as e:
             if isinstance(e, urllib.error.HTTPError):
                 error_body = e.read().decode() if e.fp else ""
                 logger.error(f"[cursor-ai-chat] HTTP error: {e.code} - {error_body[:500]}")
-                # Fall back to Cursor Bridge if Nutanix AI failed and we haven't tried yet
                 if not cursor_api_key:
                     return jsonify({
                         "error": (
-                            "Nutanix AI failed and no Cursor API key is configured. "
-                            "Add Cursor API key under Settings → API Keys."
+                            "AI backend failed and no Cursor API key is configured. "
+                            "Add Cursor API key under Settings → API Keys, or switch to NAI."
                         ),
                         "require_key_setup": True,
                         "raw_error": error_body[:300],
@@ -24905,16 +25331,14 @@ def failed_analysis_deep_ai():
                 })
 
         username = _current_username()
+        provider, key_err = require_ai_provider_key(username, body.get("ai_provider"))
+        if key_err:
+            err_body = dict(key_err[0])
+            err_body["success"] = False
+            return jsonify(err_body), key_err[1]
+
         user_toks = resolve_user_settings_tokens(username)
         cursor_api_key = user_toks.get("cursor_api_key")
-        if not cursor_api_key:
-            return jsonify({
-                "success": False,
-                "error": format_mcp_token_connection_error("cursor", username),
-                "require_key_setup": True,
-                "mcp_token_status": mcp_token_status_for_user(username),
-            }), 403
-
         atlassian_tokens = build_atlassian_tokens_for_bridge(username)
 
         first_level = _run_first_level_ai_analysis(test_result, run_ai=False)
@@ -24983,29 +25407,41 @@ def failed_analysis_deep_ai():
             "skill_fallback_local": True,
         }
 
-        resp = requests.post(
-            f"{CURSOR_BRIDGE_URL}/analyze-testcase",
-            json=payload,
-            timeout=600,
-        )
-        if resp.status_code != 200:
-            error_msg = (
-                resp.json().get("error", resp.text)
-                if resp.headers.get("content-type", "").startswith("application/json")
-                else resp.text
+        if provider == "nai":
+            try:
+                session_id, analysis = _run_nai_testcase_analysis(payload, username=username)
+            except nai_client.NaiError as nai_err:
+                return jsonify({
+                    "success": False,
+                    "error": str(nai_err),
+                    "ai_provider": "nai",
+                    "require_key_setup": nai_err.status in (401, 403),
+                }), 502 if nai_err.status not in (401, 403) else 403
+            data = {"analysis": analysis, "session_id": session_id, "mcp_health": {}}
+        else:
+            resp = requests.post(
+                f"{CURSOR_BRIDGE_URL}/analyze-testcase",
+                json=payload,
+                timeout=600,
             )
-            return jsonify({"success": False, "error": "Bridge error: %s" % error_msg}), 502
+            if resp.status_code != 200:
+                error_msg = (
+                    resp.json().get("error", resp.text)
+                    if resp.headers.get("content-type", "").startswith("application/json")
+                    else resp.text
+                )
+                return jsonify({"success": False, "error": "Bridge error: %s" % error_msg}), 502
 
-        data = resp.json()
-        analysis = data.get("analysis") or {}
-        session_id = data.get("session_id", "")
-        mcp_health = data.get("mcp_health") or analysis.get("mcp_health") or {
+            data = resp.json()
+            analysis = data.get("analysis") or {}
+            session_id = data.get("session_id", "")
+        mcp_health = data.get("mcp_health") or (analysis or {}).get("mcp_health") or {
             "sourcegraph": {
                 "service": "sourcegraph",
-                "available": True,
-                "ok": True,
-                "error": None,
-                "claimed_success": True,
+                "available": provider == "cursor",
+                "ok": provider == "cursor",
+                "error": None if provider == "cursor" else "not_used_with_nai",
+                "claimed_success": provider == "cursor",
             },
             "glean": {
                 "service": "glean",
@@ -25033,6 +25469,16 @@ def failed_analysis_deep_ai():
             "error": token_status["cursor"]["error"],
             "claimed_success": token_status["cursor"]["ok"],
             "source": "user_settings",
+        }
+        mcp_health["nai"] = {
+            "service": "nai",
+            "available": bool(user_toks.get("nai_api_key") or nai_client.env_api_key()),
+            "ok": token_status.get("nai", {}).get("ok"),
+            "error": token_status.get("nai", {}).get("error"),
+            "claimed_success": token_status.get("nai", {}).get("ok"),
+            "source": "user_settings",
+            "reasoning_model": nai_client.NAI_REASONING_DISPLAY,
+            "embedding_model": nai_client.NAI_EMBEDDING_MODEL,
         }
         if isinstance(analysis, dict):
             for field in ("root_cause", "suggested_fix", "triage_report", "follow_up_answer"):
@@ -25065,6 +25511,10 @@ def failed_analysis_deep_ai():
             "deep_ai_started": True,
             "deep_ai_recommended": True,
             "ux_entry": "deep_ai",  # merged UX with Cursor AI column via shared session
+            "ai_provider": provider,
+            "model": (
+                nai_client.NAI_REASONING_DISPLAY if provider == "nai" else None
+            ),
         }
 
         tag_name = (body.get("tag") or test_result.get("tag") or "").strip()

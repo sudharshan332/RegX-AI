@@ -43,7 +43,12 @@ const SOURCE_LABELS = {
   rag: 'Local retrieval',
   ai: 'RAG + AI',
   cursor: 'Cursor',
+  nai: 'NAI',
 };
+
+const NAI_MODELS = [
+  { id: 'nemotron-3-fp4-04', label: 'NAI nemotron-3-fp4-04' },
+];
 
 const SYNCABLE_SKILLS = [
   { id: 'triage-rdm-deployment-failure', label: 'triage-rdm-deployment-failure' },
@@ -63,6 +68,9 @@ function scopeKeyOf(scope) {
 export default function CursorAI() {
   const [mode, setMode] = useState('ask');
   const [model, setModel] = useState('claude-sonnet-4-5');
+  const [aiProvider, setAiProvider] = useState(
+    () => localStorage.getItem('regx_ai_provider') || 'cursor'
+  );
   const [streaming, setStreaming] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -74,6 +82,7 @@ export default function CursorAI() {
   const [chatAgentId, setChatAgentId] = useState(null);
   const [chatSessionId, setChatSessionId] = useState(null);
   const [warming, setWarming] = useState(false);
+  const [providerSaving, setProviderSaving] = useState(false);
   const [regressionCtx, setRegressionCtx] = useState(null);
   // Default MCP off — enabling all servers made every chat cold-start slow.
   const [enabledServers, setEnabledServers] = useState(
@@ -81,6 +90,7 @@ export default function CursorAI() {
   );
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const activeModels = aiProvider === 'nai' ? NAI_MODELS : MODELS;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -91,7 +101,12 @@ export default function CursorAI() {
   }, []);
 
   // Pre-warm a chat agent so the first message resumes (~6s) not cold-starts (~16s).
+  // Skip for NAI — Cursor Bridge warm is only used by the Cursor SDK path.
   const warmAgent = useCallback(async () => {
+    if (aiProvider === 'nai') {
+      setWarming(false);
+      return;
+    }
     setWarming(true);
     try {
       const { data } = await api.post(`${API_BASE}/chat-warm`, { model });
@@ -104,7 +119,7 @@ export default function CursorAI() {
     } finally {
       setWarming(false);
     }
-  }, [model]);
+  }, [model, aiProvider]);
 
   // Load the active regression run summary so data questions ("success count")
   // are answered instantly from real numbers (no slow MCP round-trips).
@@ -184,9 +199,57 @@ export default function CursorAI() {
     const handleOpenSettings = () => {
       setShowSettings(true);
     };
+    const handleProviderChanged = (evt) => {
+      const next = evt?.detail || localStorage.getItem('regx_ai_provider') || 'cursor';
+      setAiProvider(next);
+      if (next === 'nai') setModel('nemotron-3-fp4-04');
+    };
     window.addEventListener('openCursorAiSettings', handleOpenSettings);
-    return () => window.removeEventListener('openCursorAiSettings', handleOpenSettings);
+    window.addEventListener('regxAiProviderChanged', handleProviderChanged);
+    return () => {
+      window.removeEventListener('openCursorAiSettings', handleOpenSettings);
+      window.removeEventListener('regxAiProviderChanged', handleProviderChanged);
+    };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get('/mcp/regression/user-keys');
+        if (cancelled) return;
+        const provider = data?.ai_provider === 'nai' ? 'nai' : 'cursor';
+        setAiProvider(provider);
+        localStorage.setItem('regx_ai_provider', provider);
+        if (provider === 'nai') setModel('nemotron-3-fp4-04');
+      } catch (_) {
+        /* keep local default */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const switchAiProvider = async (next) => {
+    if (!next || next === aiProvider || providerSaving) return;
+    setProviderSaving(true);
+    try {
+      await api.put('/mcp/regression/user-keys', { ai_provider: next });
+      setAiProvider(next);
+      localStorage.setItem('regx_ai_provider', next);
+      window.dispatchEvent(new CustomEvent('regxAiProviderChanged', { detail: next }));
+      if (next === 'nai') {
+        setModel('nemotron-3-fp4-04');
+        setChatAgentId(null);
+        setChatSessionId(null);
+      } else if (model === 'nemotron-3-fp4-04') {
+        setModel('claude-sonnet-4-5');
+      }
+    } catch (err) {
+      alert(err.response?.data?.error || err.message || 'Failed to switch AI provider');
+    } finally {
+      setProviderSaving(false);
+    }
+  };
 
   const handleSend = async () => {
     const trimmed = input.trim();
@@ -231,6 +294,7 @@ export default function CursorAI() {
           messages: outgoing.map(m => ({ role: m.role, content: m.content })),
           mode,
           model,
+          ai_provider: aiProvider,
           mcp_servers: activeServers,
           agent_id: chatAgentId || '',
           session_id: chatSessionId || '',
@@ -384,6 +448,27 @@ export default function CursorAI() {
           <h1 className="cursor-ai-title">Cursor AI</h1>
           <div className="cursor-ai-controls">
             <div className="control-group">
+              <label className="control-label">AI</label>
+              <div className="mode-selector ai-provider-selector" role="group" aria-label="AI Provider">
+                <button
+                  className={`mode-btn ${aiProvider === 'cursor' ? 'active' : ''}`}
+                  onClick={() => switchAiProvider('cursor')}
+                  disabled={providerSaving}
+                  title="Use Cursor SDK for AI operations"
+                >
+                  Cursor SDK
+                </button>
+                <button
+                  className={`mode-btn ${aiProvider === 'nai' ? 'active' : ''}`}
+                  onClick={() => switchAiProvider('nai')}
+                  disabled={providerSaving}
+                  title="Use Nutanix Enterprise AI (NAI) for AI operations"
+                >
+                  NAI
+                </button>
+              </div>
+            </div>
+            <div className="control-group">
               <label className="control-label">Mode</label>
               <div className="mode-selector">
                 {MODES.map(m => (
@@ -405,7 +490,7 @@ export default function CursorAI() {
                 value={model}
                 onChange={e => setModel(e.target.value)}
               >
-                {MODELS.map(m => (
+                {activeModels.map(m => (
                   <option key={m.id} value={m.id}>{m.label}</option>
                 ))}
               </select>

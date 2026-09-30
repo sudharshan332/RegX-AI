@@ -1688,6 +1688,43 @@ a.glean-snippet-title:hover {
   background: #5b4cdb;
 }
 
+.ai-provider-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 4px;
+}
+
+.ai-provider-toolbar-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.ai-provider-chip {
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #475569;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ai-provider-chip.active {
+  background: #0f766e;
+  border-color: #0f766e;
+  color: #fff;
+}
+
+.ai-provider-chip:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .btn-cursor-ai-batch {
   background: linear-gradient(135deg, #6c5ce7, #a29bfe);
   color: white;
