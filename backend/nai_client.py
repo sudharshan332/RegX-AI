@@ -193,6 +193,11 @@ def _headers(api_key: str, auth_style: str = "bearer") -> Dict[str, str]:
         # Some Enterprise AI gateways accept raw api-key header.
         headers["api-key"] = key
         headers["x-api-key"] = key
+    elif style == "both":
+        # Gateway + upstream inference: send both common forms.
+        headers["Authorization"] = f"Bearer {key}"
+        headers["api-key"] = key
+        headers["x-api-key"] = key
     else:
         headers["Authorization"] = f"Bearer {key}"
     return headers
@@ -205,12 +210,100 @@ def _post_json(
     timeout: int = 120,
     auth_style: str = "bearer",
 ) -> Dict[str, Any]:
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, headers=_headers(api_key, auth_style=auth_style), method="POST"
-    )
+    """POST JSON while preserving auth headers across redirects.
+
+    stdlib urllib (and requests on cross-host redirects) strip ``Authorization``,
+    which surfaces as NAI 401 ``API key is not provided`` on chat/completions
+    even when the same token works for /embeddings.
+    """
+    headers = _headers(api_key, auth_style=auth_style)
+    body_bytes = json.dumps(payload).encode("utf-8")
+
+    # Prefer requests (already used by Flask app) with manual redirect following.
     try:
-        with urllib.request.urlopen(req, context=SSL_CTX, timeout=timeout) as resp:
+        import requests
+
+        current = url
+        for _ in range(6):
+            resp = requests.post(
+                current,
+                data=body_bytes,
+                headers=headers,
+                timeout=timeout,
+                verify=False,
+                allow_redirects=False,
+            )
+            if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("Location") or ""
+                if not loc:
+                    break
+                current = urllib.parse.urljoin(current, loc)
+                # 303 must become GET per RFC; NAI gateways normally use 307/308.
+                if resp.status_code == 303:
+                    get_resp = requests.get(
+                        current,
+                        headers={k: v for k, v in headers.items() if k.lower() != "content-type"},
+                        timeout=timeout,
+                        verify=False,
+                        allow_redirects=False,
+                    )
+                    if get_resp.status_code != 200:
+                        raise NaiError(
+                            f"NAI HTTP {get_resp.status_code}: {(get_resp.text or '')[:300]}",
+                            status=get_resp.status_code,
+                            body=(get_resp.text or "")[:500],
+                        )
+                    try:
+                        return get_resp.json() if get_resp.text else {}
+                    except ValueError as exc:
+                        raise NaiError(
+                            f"NAI returned non-JSON body: {exc}",
+                            body=(get_resp.text or "")[:500],
+                        ) from exc
+                continue
+            if resp.status_code != 200:
+                raise NaiError(
+                    f"NAI HTTP {resp.status_code}: {(resp.text or '')[:300]}",
+                    status=resp.status_code,
+                    body=(resp.text or "")[:500],
+                )
+            try:
+                return resp.json() if resp.text else {}
+            except ValueError as exc:
+                raise NaiError(
+                    f"NAI returned non-JSON body: {exc}",
+                    body=(resp.text or "")[:500],
+                ) from exc
+        raise NaiError(f"NAI redirect loop or missing Location for {url}", status=502)
+    except ImportError:
+        pass
+    except NaiError:
+        raise
+    except Exception as exc:
+        # Fall through to urllib if requests transport fails unexpectedly.
+        logger.warning("NAI requests transport failed (%s); falling back to urllib", exc)
+
+    class _AuthRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+            newreq = urllib.request.HTTPRedirectHandler.redirect_request(
+                self, req, fp, code, msg, headers, newurl
+            )
+            if newreq is None:
+                return None
+            # Re-attach auth headers urllib strips on redirect.
+            for hdr in ("Authorization", "api-key", "x-api-key", "Api-Key", "X-Api-Key"):
+                val = req.get_header(hdr) or req.headers.get(hdr)
+                if val:
+                    newreq.add_unredirected_header(hdr, val)
+            return newreq
+
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=SSL_CTX),
+        _AuthRedirectHandler(),
+    )
+    req = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
+    try:
+        with opener.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             if resp.getcode() != 200:
                 raise NaiError(f"NAI HTTP {resp.getcode()}", status=resp.getcode(), body=raw[:500])
@@ -245,6 +338,34 @@ def _ordered_bases(candidates: Sequence[str], preferred: str = "") -> List[str]:
     return out
 
 
+def _pick_best_nai_error(errors: Sequence[Tuple[str, NaiError]]) -> NaiError:
+    """Prefer actionable auth errors over 'API key is not provided' from weak auth styles."""
+    if not errors:
+        return NaiError("NAI request failed with no endpoints attempted", status=502)
+
+    def score(item: Tuple[str, NaiError]) -> Tuple[int, int]:
+        label, exc = item
+        body = f"{exc} {exc.body}".lower()
+        # Deprioritize empty-key noise from api-key-only probes.
+        if "api key is not provided" in body:
+            return (0, exc.status or 0)
+        if "multi-endpoint" in body:
+            return (2, exc.status or 0)
+        if exc.status in (401, 403):
+            return (3, exc.status or 0)
+        if "bearer" in label:
+            return (4, exc.status or 0)
+        return (1, exc.status or 0)
+
+    label, best = max(errors, key=score)
+    detail = " | ".join(f"{lbl} -> {exc}" for lbl, exc in errors[:5])
+    return NaiError(
+        f"{best} (tried {len(errors)} endpoint/auth variants; best={label})",
+        status=best.status,
+        body=(best.body or "") + (f"\nAttempts: {detail}" if detail else ""),
+    )
+
+
 def _post_with_failover(
     path_suffix: str,
     payload: Dict[str, Any],
@@ -257,17 +378,18 @@ def _post_with_failover(
     """Try host/auth combinations until one accepts the key."""
     key = sanitize_api_key(api_key)
     bases = _ordered_bases(candidates, working.get("base") or "")
-    auth_styles = []
+    # Prefer Bearer (matches NAI curl samples); then both; api-key last.
+    auth_styles: List[str] = []
     preferred_auth = (working.get("auth") or "bearer").lower()
-    for style in (preferred_auth, "bearer", "api-key"):
+    for style in (preferred_auth, "bearer", "both", "api-key"):
         if style not in auth_styles:
             auth_styles.append(style)
 
-    errors: List[str] = []
-    last_exc: Optional[NaiError] = None
+    errors: List[Tuple[str, NaiError]] = []
     for base in bases:
         url = f"{base.rstrip('/')}/{path_suffix.lstrip('/')}"
         for style in auth_styles:
+            label = f"{url} [{style}]"
             try:
                 data = _post_json(url, payload, key, timeout=timeout, auth_style=style)
                 working["base"] = base.rstrip("/")
@@ -275,20 +397,26 @@ def _post_with_failover(
                 logger.info("NAI %s succeeded via base=%s auth=%s", path_suffix, base, style)
                 return data
             except NaiError as exc:
-                last_exc = exc
-                errors.append(f"{url} [{style}] -> {exc}")
+                errors.append((label, exc))
                 # Non-auth failures on a reachable host: don't keep thrashing styles.
                 if exc.status and exc.status not in (401, 403, 404):
                     raise
                 continue
-    if last_exc is not None:
-        detail = " | ".join(errors[:4])
-        raise NaiError(
-            f"{last_exc} (tried {len(errors)} endpoint/auth variants)",
-            status=last_exc.status,
-            body=(last_exc.body or "") + (f"\nAttempts: {detail}" if detail else ""),
-        )
-    raise NaiError("NAI request failed with no endpoints attempted", status=502)
+    raise _pick_best_nai_error(errors)
+
+
+def _chat_base_candidates() -> List[str]:
+    """Prefer the NAI environment that already authenticated embeddings."""
+    preferred = []
+    embed_base = (_WORKING_EMBED.get("base") or "").rstrip("/")
+    if embed_base:
+        preferred.append(embed_base)
+        # Same host, alternate gateway/v1 path.
+        if embed_base.endswith("/gateway/v1"):
+            preferred.append(embed_base[: -len("/gateway/v1")] + "/v1")
+        elif embed_base.endswith("/v1") and "/gateway/" not in embed_base:
+            preferred.append(embed_base[: -len("/v1")] + "/gateway/v1")
+    return _ordered_bases(list(preferred) + list(_CHAT_BASE_CANDIDATES), _WORKING_CHAT.get("base") or "")
 
 
 def chat_completions(
@@ -328,7 +456,7 @@ def chat_completions(
         "chat/completions",
         payload,
         key,
-        candidates=_CHAT_BASE_CANDIDATES,
+        candidates=_chat_base_candidates(),
         working=_WORKING_CHAT,
         timeout=timeout,
     )
@@ -565,20 +693,42 @@ def validate_api_key(api_key: str, embed_api_key: Optional[str] = None) -> Dict[
     Returns overall ``valid`` True only if Reasoning succeeds (required for AI ops).
     Embedding is reported separately; a shared key is tried for both when embed
     key is omitted.
+
+    Embedding is validated first so a successful embed host can be preferred for
+    the Reasoning/chat failover (same NAI environment).
     """
     chat_key = sanitize_api_key(api_key)
     embed_key = sanitize_api_key(embed_api_key) or chat_key
     if not chat_key and not embed_key:
         return {"valid": None, "message": "Not provided"}
 
-    chat_result = _validate_chat_key(chat_key) if chat_key else {
-        "valid": None,
-        "message": "Reasoning key not provided",
-    }
+    # Embed first — seeds _WORKING_EMBED for chat host preference.
     embed_result = _validate_embed_key(embed_key) if embed_key else {
         "valid": None,
         "message": "Embedding key not provided",
     }
+    # If Reasoning field empty but Embedding key works, try that token for chat too.
+    chat_try_key = chat_key or (embed_key if embed_result.get("valid") is True else "")
+    chat_result = _validate_chat_key(chat_try_key) if chat_try_key else {
+        "valid": None,
+        "message": "Reasoning key not provided",
+    }
+    # One more attempt: if dedicated Reasoning key failed with empty-key/redirect
+    # symptoms, retry chat using the known-good Embedding token on the embed host.
+    if (
+        chat_result.get("valid") is False
+        and embed_result.get("valid") is True
+        and embed_key
+        and chat_key
+        and embed_key != chat_key
+    ):
+        retry = _validate_chat_key(embed_key)
+        if retry.get("valid") is True:
+            chat_result = retry
+            chat_result["message"] = (
+                (retry.get("message") or "")
+                + " (used Embedding Access Key for chat — consider saving it as Reasoning key too)"
+            )
 
     parts = [
         f"Reasoning: {chat_result.get('message')}",

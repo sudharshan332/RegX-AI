@@ -60,6 +60,14 @@ class TestNaiClient(unittest.TestCase):
         self.assertIn("Reasoning:", result["message"])
         self.assertIn("Embedding:", result["message"])
         self.assertTrue(result["embedding"]["valid"])
+        # Embed validated first, then chat (and retry with embed key).
+        self.assertGreaterEqual(mock_embed.call_count, 1)
+        self.assertGreaterEqual(mock_chat.call_count, 1)
+
+    def test_headers_both_style_includes_authorization(self):
+        headers = nai_client._headers("abc-123", auth_style="both")
+        self.assertEqual(headers.get("Authorization"), "Bearer abc-123")
+        self.assertEqual(headers.get("api-key"), "abc-123")
 
 
 if __name__ == "__main__":
