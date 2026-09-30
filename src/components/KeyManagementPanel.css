@@ -236,3 +236,46 @@
   color: #856404;
   line-height: 1.5;
 }
+
+.ai-provider-toggle {
+  display: inline-flex;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.ai-provider-btn {
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ai-provider-btn:hover:not(:disabled) {
+  color: #1e293b;
+  background: #e2e8f0;
+}
+
+.ai-provider-btn.active {
+  background: #0f766e;
+  color: #fff;
+}
+
+.ai-provider-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.help-text code {
+  font-size: 11px;
+  background: #f1f5f9;
+  padding: 1px 4px;
+  border-radius: 3px;
+}

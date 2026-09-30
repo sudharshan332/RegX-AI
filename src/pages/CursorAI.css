@@ -93,6 +93,11 @@
   box-shadow: 0 1px 3px rgba(99, 102, 241, 0.3);
 }
 
+.ai-provider-selector .mode-btn.active {
+  background: #0f766e;
+  box-shadow: 0 1px 3px rgba(15, 118, 110, 0.3);
+}
+
 /* Model Select */
 .model-select {
   background: #ffffff;

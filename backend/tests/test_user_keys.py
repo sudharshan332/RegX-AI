@@ -5,6 +5,7 @@ import unittest
 
 from user_keys import (
     clear_login_credential,
+    get_ai_provider,
     get_login_credential,
     get_user_key,
     get_user_keys_masked,
@@ -80,6 +81,21 @@ class TestUserKeys(unittest.TestCase):
         self.assertEqual(get_login_credential("alice"), "ldap-password-value")
         clear_login_credential("alice")
         self.assertIsNone(get_login_credential("alice"))
+
+    def test_ai_provider_pref_and_nai_key(self):
+        self.assertEqual(get_ai_provider("dave"), "cursor")
+        masked = upsert_user_keys(
+            "dave",
+            {"ai_provider": "nai", "nai_api_key": "nai-access-key-value-1234"},
+        )
+        self.assertEqual(masked["ai_provider"], "nai")
+        self.assertIn("****", masked["nai_api_key"])
+        self.assertEqual(get_ai_provider("dave"), "nai")
+        self.assertEqual(get_user_key("dave", "nai_api_key"), "nai-access-key-value-1234")
+        # Provider-only save (no new secrets) must succeed.
+        again = upsert_user_keys("dave", {"ai_provider": "cursor"})
+        self.assertEqual(again["ai_provider"], "cursor")
+        self.assertEqual(get_ai_provider("dave"), "cursor")
 
 
 if __name__ == "__main__":

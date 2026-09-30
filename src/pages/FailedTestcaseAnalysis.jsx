@@ -1032,6 +1032,10 @@ export default function FailedTestcaseAnalysis() {
   const [followUpLoading, setFollowUpLoading] = useState(false);
   const [followUpHistory, setFollowUpHistory] = useState([]);
   const [followUpHistoryByTestcase, setFollowUpHistoryByTestcase] = useState({});
+  const [aiProvider, setAiProvider] = useState(
+    () => localStorage.getItem('regx_ai_provider') || 'cursor'
+  );
+  const [aiProviderSaving, setAiProviderSaving] = useState(false);
   // Ask is the fast path (answer from existing analysis; minimal/no MCP).
   // Use Agent/Plan only when the user wants deeper re-investigation.
   const [followUpMode, setFollowUpMode] = useState('ask');
@@ -1144,6 +1148,45 @@ export default function FailedTestcaseAnalysis() {
   const [savingResults, setSavingResults] = useState(false);
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
   const tagPickerRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get('/mcp/regression/user-keys');
+        if (cancelled) return;
+        const provider = data?.ai_provider === 'nai' ? 'nai' : 'cursor';
+        setAiProvider(provider);
+        localStorage.setItem('regx_ai_provider', provider);
+      } catch (_) {
+        /* keep local default */
+      }
+    })();
+    const onProvider = (evt) => {
+      const next = evt?.detail || localStorage.getItem('regx_ai_provider') || 'cursor';
+      setAiProvider(next === 'nai' ? 'nai' : 'cursor');
+    };
+    window.addEventListener('regxAiProviderChanged', onProvider);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('regxAiProviderChanged', onProvider);
+    };
+  }, []);
+
+  const switchAiProvider = async (next) => {
+    if (!next || next === aiProvider || aiProviderSaving) return;
+    setAiProviderSaving(true);
+    try {
+      await api.put('/mcp/regression/user-keys', { ai_provider: next });
+      setAiProvider(next);
+      localStorage.setItem('regx_ai_provider', next);
+      window.dispatchEvent(new CustomEvent('regxAiProviderChanged', { detail: next }));
+    } catch (err) {
+      alert(err.response?.data?.error || err.message || 'Failed to switch AI provider');
+    } finally {
+      setAiProviderSaving(false);
+    }
+  };
 
   const toggleStatus = (statusId) => {
     setSelectedStatuses(prev =>
@@ -2952,7 +2995,7 @@ export default function FailedTestcaseAnalysis() {
     } catch (err) {
       const data = err.response?.data || {};
       if (data.require_key_setup) {
-        alert('Cursor API key required. Configure it in Settings.');
+        alert(data.error || 'AI access key required. Configure it in Settings → API Keys.');
       } else {
         alert('AI RDM Failure Analysis failed: ' + (data.error || err.message));
       }
@@ -5295,14 +5338,41 @@ export default function FailedTestcaseAnalysis() {
               >
                 {bulkUpdating ? 'Updating…' : 'Bulk Update'}
               </button>
+              <div className="ai-provider-toolbar" role="group" aria-label="AI Provider">
+                <span className="ai-provider-toolbar-label">AI</span>
+                <button
+                  type="button"
+                  className={`ai-provider-chip ${aiProvider === 'cursor' ? 'active' : ''}`}
+                  disabled={aiProviderSaving}
+                  onClick={() => switchAiProvider('cursor')}
+                  title="Use Cursor SDK for Deep AI / batch analysis"
+                >
+                  Cursor SDK
+                </button>
+                <button
+                  type="button"
+                  className={`ai-provider-chip ${aiProvider === 'nai' ? 'active' : ''}`}
+                  disabled={aiProviderSaving}
+                  onClick={() => switchAiProvider('nai')}
+                  title="Use NAI (nemotron-3-fp4-04) for Deep AI / batch analysis"
+                >
+                  NAI
+                </button>
+              </div>
               <button
                 type="button"
                 className="btn-cursor-ai-batch"
                 disabled={selectedRows.length === 0 || !!cursorAiBatchJobId}
                 onClick={handleCursorAiBatchAnalyze}
-                title="Deep-analyze selected testcases via Cursor AI agent + nutest source"
+                title={
+                  aiProvider === 'nai'
+                    ? 'Deep-analyze selected testcases via NAI reasoning model'
+                    : 'Deep-analyze selected testcases via Cursor AI agent + nutest source'
+                }
               >
-                {cursorAiBatchJobId ? 'AI Analyzing…' : 'Cursor AI Analyze Selected'}
+                {cursorAiBatchJobId
+                  ? 'AI Analyzing…'
+                  : (aiProvider === 'nai' ? 'NAI Analyze Selected' : 'Cursor AI Analyze Selected')}
               </button>
               <button
                 type="button"

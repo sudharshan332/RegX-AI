@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_KEY_NAMES = (
     "cursor_api_key",
+    "nai_api_key",
     "atlassian_jira_token",
     "atlassian_confluence_token",
     "gerrit_http_password",
@@ -28,6 +29,12 @@ ALLOWED_KEY_NAMES = (
     "flux_username",
     "flux_password",
 )
+
+# Non-secret preferences stored plaintext alongside encrypted keys.
+ALLOWED_PREFS = ("ai_provider",)
+AI_PROVIDER_VALUES = ("cursor", "nai")
+DEFAULT_AI_PROVIDER = "cursor"
+_PREFS_BLOB_KEY = "_prefs"
 
 _LOCK = threading.Lock()
 _FERNET = None
@@ -174,9 +181,45 @@ def get_user_key(username: str, key_name: str) -> Optional[str]:
             return None
 
 
+def normalize_ai_provider(value: Optional[str]) -> str:
+    """Return a valid AI provider id (`cursor` or `nai`)."""
+    raw = str(value or "").strip().lower()
+    if raw in ("cursor", "cursor_sdk", "cursor-sdk"):
+        return "cursor"
+    if raw in ("nai", "nutanix", "nutanix_ai", "enterprise_ai"):
+        return "nai"
+    return DEFAULT_AI_PROVIDER
+
+
+def get_user_pref(username: str, pref_name: str, default: Optional[str] = None) -> Optional[str]:
+    """Return a plaintext preference for the user."""
+    if not username or pref_name not in ALLOWED_PREFS:
+        return default
+    with _LOCK:
+        data = _load_raw()
+        user_blob = (data.get("users") or {}).get(str(username).strip().lower()) or {}
+        prefs = user_blob.get(_PREFS_BLOB_KEY) or {}
+        if not isinstance(prefs, dict):
+            return default
+        val = prefs.get(pref_name)
+        if val is None or str(val).strip() == "":
+            return default
+        if pref_name == "ai_provider":
+            return normalize_ai_provider(val)
+        return str(val).strip()
+
+
+def get_ai_provider(username: Optional[str] = None) -> str:
+    """AI backend for the complete tool: `cursor` (SDK) or `nai`."""
+    if not username:
+        return DEFAULT_AI_PROVIDER
+    return get_user_pref(username, "ai_provider", DEFAULT_AI_PROVIDER) or DEFAULT_AI_PROVIDER
+
+
 def get_user_keys_masked(username: str) -> Dict[str, str]:
     """Return all known keys for user, values masked (empty string if unset)."""
     out = {k: "" for k in ALLOWED_KEY_NAMES}
+    out["ai_provider"] = DEFAULT_AI_PROVIDER
     if not username:
         return out
     with _LOCK:
@@ -192,27 +235,41 @@ def get_user_keys_masked(username: str) -> Dict[str, str]:
                 # Decrypt failed (e.g. old key) — still show a placeholder so UI
                 # knows a value exists and user can re-enter it.
                 out[key_name] = "****"
+        prefs = user_blob.get(_PREFS_BLOB_KEY) or {}
+        if isinstance(prefs, dict) and prefs.get("ai_provider"):
+            out["ai_provider"] = normalize_ai_provider(prefs.get("ai_provider"))
     return out
 
 
 def upsert_user_keys(username: str, keys: Dict[str, str]) -> Dict[str, str]:
     """
     Merge plaintext keys into the store (encrypt). Skips blank / masked values.
+    Also accepts preference ``ai_provider`` (cursor|nai).
     Returns masked view after save.
     """
     if not username:
         raise ValueError("username required")
     uname = str(username).strip().lower()
     to_write = {}
+    prefs_to_write = {}
     for key_name, value in (keys or {}).items():
+        if key_name in ALLOWED_PREFS:
+            if key_name == "ai_provider":
+                prefs_to_write[key_name] = normalize_ai_provider(value)
+            elif value is not None and str(value).strip():
+                prefs_to_write[key_name] = str(value).strip()
+            continue
         if key_name not in ALLOWED_KEY_NAMES:
             continue
         val = str(value or "").strip()
         if not val or "****" in val:
             continue
         to_write[key_name] = val
-    if not to_write:
-        raise ValueError("No keys to save. Paste a new token (masked values are not re-saved).")
+    if not to_write and not prefs_to_write:
+        raise ValueError(
+            "No keys to save. Paste a new token or change AI provider "
+            "(masked values are not re-saved)."
+        )
 
     with _LOCK:
         # Ensure fernet is initialized before write
@@ -222,6 +279,12 @@ def upsert_user_keys(username: str, keys: Dict[str, str]) -> Dict[str, str]:
         blob = users.setdefault(uname, {})
         for key_name, val in to_write.items():
             blob[key_name] = _encrypt(val)
+        if prefs_to_write:
+            prefs = blob.get(_PREFS_BLOB_KEY)
+            if not isinstance(prefs, dict):
+                prefs = {}
+            prefs.update(prefs_to_write)
+            blob[_PREFS_BLOB_KEY] = prefs
         _save_raw(data)
     return get_user_keys_masked(uname)
 

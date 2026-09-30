@@ -4,6 +4,8 @@ import './KeyManagementPanel.css';
 
 const EMPTY_KEYS = {
   cursor_api_key: '',
+  nai_api_key: '',
+  ai_provider: 'cursor',
   atlassian_jira_token: '',
   atlassian_confluence_token: '',
   gerrit_http_password: '',
@@ -22,6 +24,7 @@ export default function KeyManagementPanel({ onClose }) {
   const [success, setSuccess] = useState(null);
   const [showKeys, setShowKeys] = useState({
     cursor_api_key: false,
+    nai_api_key: false,
     atlassian_jira_token: false,
     atlassian_confluence_token: false,
     gerrit_http_password: false,
@@ -38,8 +41,17 @@ export default function KeyManagementPanel({ onClose }) {
     try {
       const response = await api.get('/mcp/regression/user-keys');
       const loadedKeys = { ...EMPTY_KEYS, ...(response.data || {}) };
+      if (!loadedKeys.ai_provider) loadedKeys.ai_provider = 'cursor';
       setKeys(loadedKeys);
       setOriginalKeys(loadedKeys);
+      try {
+        localStorage.setItem('regx_ai_provider', loadedKeys.ai_provider);
+        window.dispatchEvent(
+          new CustomEvent('regxAiProviderChanged', { detail: loadedKeys.ai_provider })
+        );
+      } catch (_) {
+        /* ignore */
+      }
     } catch (err) {
       console.error('Failed to load keys:', err);
       setError('Failed to load existing keys');
@@ -53,17 +65,23 @@ export default function KeyManagementPanel({ onClose }) {
     try {
       const keysToSave = {};
       Object.keys(keys).forEach((key) => {
+        if (key === 'ai_provider') {
+          if ((keys.ai_provider || 'cursor') !== (originalKeys.ai_provider || 'cursor')) {
+            keysToSave.ai_provider = keys.ai_provider || 'cursor';
+          }
+          return;
+        }
         const value = (keys[key] || '').trim();
         if (value && !value.includes('****')) {
           keysToSave[key] = value;
         }
       });
       if (Object.keys(keysToSave).length === 0) {
-        setError('No new keys to save. Enter a new value in any field, then click Save.');
+        setError('No new keys to save. Enter a new value or change AI provider, then click Save.');
         return;
       }
       await api.put('/mcp/regression/user-keys', keysToSave);
-      setSuccess('Keys saved successfully!');
+      setSuccess('Settings saved successfully!');
       await loadKeys();
       setTimeout(() => {
         if (onClose) onClose();
@@ -82,8 +100,9 @@ export default function KeyManagementPanel({ onClose }) {
     setValidating(true);
     try {
       // Send only fresh (non-masked) values; backend loads saved tokens itself.
-      const keysToValidate = {};
+      const keysToValidate = { ai_provider: keys.ai_provider || 'cursor' };
       Object.keys(keys).forEach((key) => {
+        if (key === 'ai_provider') return;
         const value = keys[key];
         if (value && !value.includes('****')) {
           keysToValidate[key] = value;
@@ -113,25 +132,56 @@ export default function KeyManagementPanel({ onClose }) {
     setShowKeys((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const hasChanges = () =>
-    Object.keys(keys).some((key) => {
+  const hasChanges = () => {
+    if ((keys.ai_provider || 'cursor') !== (originalKeys.ai_provider || 'cursor')) {
+      return true;
+    }
+    return Object.keys(keys).some((key) => {
+      if (key === 'ai_provider') return false;
       const value = (keys[key] || '').trim();
       const original = (originalKeys[key] || '').trim();
       return value && value !== original && !value.includes('****');
     });
+  };
 
   return (
     <div className="key-management-panel">
       <h2>API Key Configuration</h2>
       <p className="panel-description">
-        Paste your Atlassian Jira Personal Token and click <strong>Save</strong>.
-        Dashboard Jira status / product-vs-test lookups use that saved token.
-        Test Keys is optional and may fail if Jira is unreachable — that does not
-        block ticket data after Save.
+        Choose the AI backend for the complete tool (Deep AI, chat, RAG), then paste
+        the matching access key and click <strong>Save</strong>.
+        Dashboard Jira status / product-vs-test lookups use the Atlassian token.
       </p>
 
       {error && <div className="message-banner error-banner">{error}</div>}
       {success && <div className="message-banner success-banner">{success}</div>}
+
+      <div className="key-section">
+        <label>AI Provider</label>
+        <div className="ai-provider-toggle" role="group" aria-label="AI Provider">
+          <button
+            type="button"
+            className={`ai-provider-btn ${(keys.ai_provider || 'cursor') === 'cursor' ? 'active' : ''}`}
+            onClick={() => handleChange('ai_provider', 'cursor')}
+            disabled={saving || validating}
+          >
+            Cursor SDK
+          </button>
+          <button
+            type="button"
+            className={`ai-provider-btn ${(keys.ai_provider || 'cursor') === 'nai' ? 'active' : ''}`}
+            onClick={() => handleChange('ai_provider', 'nai')}
+            disabled={saving || validating}
+          >
+            NAI
+          </button>
+        </div>
+        <p className="help-text">
+          Applies across Cursor AI chat, Deep AI analysis, First Level synthesis, and RAG.
+          NAI uses reasoning model <code>nemotron-3-fp4-04</code> and embedding{' '}
+          <code>eng-embed-01</code>.
+        </p>
+      </div>
 
       <div className="key-section">
         <label htmlFor="cursor-api-key">Cursor API Key</label>
@@ -154,10 +204,36 @@ export default function KeyManagementPanel({ onClose }) {
           </button>
         </div>
         <p className="help-text">
-          Required for AI analysis features. Get yours from{' '}
+          Required when AI Provider is Cursor SDK. Get yours from{' '}
           <a href="https://cursor.com/settings" target="_blank" rel="noopener noreferrer">
             cursor.com/settings
           </a>
+        </p>
+      </div>
+
+      <div className="key-section">
+        <label htmlFor="nai-api-key">NAI Access Key</label>
+        <div className="input-with-toggle">
+          <input
+            id="nai-api-key"
+            type={showKeys.nai_api_key ? 'text' : 'password'}
+            value={keys.nai_api_key}
+            onChange={(e) => handleChange('nai_api_key', e.target.value)}
+            placeholder="Bearer token from NAI gateway"
+            disabled={saving || validating}
+          />
+          <button
+            type="button"
+            className="toggle-visibility-btn"
+            onClick={() => toggleShowKey('nai_api_key')}
+            title={showKeys.nai_api_key ? 'Hide key' : 'Show key'}
+          >
+            {showKeys.nai_api_key ? '👁️' : '👁️‍🗨️'}
+          </button>
+        </div>
+        <p className="help-text">
+          Required when AI Provider is NAI. Used for chat/completions
+          (nemotron-3-fp4-04 / nemotron3-fp4-uni) and embeddings (eng-embed-01).
         </p>
       </div>
 
