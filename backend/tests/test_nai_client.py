@@ -69,6 +69,17 @@ class TestNaiClient(unittest.TestCase):
         self.assertEqual(headers.get("Authorization"), "Bearer abc-123")
         self.assertEqual(headers.get("api-key"), "abc-123")
 
+    def test_chat_base_candidates_corp_first(self):
+        nai_client._WORKING_EMBED["base"] = (
+            "https://nai-dre.beta.p10y.ntnxdpro.com/enterpriseai/v1"
+        )
+        nai_client._WORKING_CHAT["base"] = ""
+        bases = nai_client._chat_base_candidates()
+        self.assertTrue(bases[0].startswith("https://nai-dre.corp."))
+        self.assertIn("/gateway/v1", bases[0])
+        # Beta must not be preferred just because embeddings authenticated there.
+        self.assertNotIn("nai-dre.beta.", bases[0])
+
 
 if __name__ == "__main__":
     unittest.main()
