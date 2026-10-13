@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import api from '../api';
 import { API_BASE_URL, jitaJobProfileWebUrl } from '../config';
 import './DynamicJobProfile.css';
@@ -94,12 +94,79 @@ export const buildMigrationPayload = (jp, form) => {
     // container__unlimited, infra__cdp, and max_deployments__0 only.
     sync_to_tcms: true,
     tcms_sync_branch: form.tcmsSyncBranch,
-    // Reuse the source JP's existing test set unchanged (no new test set created).
+    // Link every test set already on the source JP. No new test set is created,
+    // and an explicit single test set is not sent, so the clone keeps the full list.
     testcase_names: [],
     reuse_source_ts: true,
     dyn_name_date: formatLocalYyyymmdd(),
   };
 };
+
+/** NOS / PC / test-option / TCMS branch field with the same JITA name search as Manage Job Profile. */
+function BranchSuggestField({ label, value, onChange, placeholder }) {
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const reqId = useRef(0);
+  const debounce = useRef(null);
+
+  const search = (query) => {
+    if (debounce.current) clearTimeout(debounce.current);
+    if (!query || query.trim().length < 2) {
+      setResults([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    debounce.current = setTimeout(async () => {
+      const id = ++reqId.current;
+      try {
+        const response = await api.post(`${API_BASE}/search-branches`, { query: query.trim() });
+        if (id !== reqId.current) return;
+        setResults(Array.isArray(response.data?.branches) ? response.data.branches : []);
+      } catch (_) {
+        if (id === reqId.current) setResults([]);
+      } finally {
+        if (id === reqId.current) setLoading(false);
+      }
+    }, 300);
+  };
+
+  return (
+    <div className="djp-form-group djp-branch-field">
+      <label>{label}</label>
+      <input
+        type="text"
+        value={value}
+        autoComplete="off"
+        onChange={(e) => {
+          const next = e.target.value;
+          onChange(next);
+          search(next);
+        }}
+        onBlur={() => setTimeout(() => setResults([]), 150)}
+        placeholder={placeholder}
+      />
+      {loading && <small className="djp-field-status">Searching...</small>}
+      {results.length > 0 && (
+        <div className="djp-pool-results djp-branch-results">
+          {results.map((name) => (
+            <div
+              key={name}
+              className={`djp-pool-item ${value === name ? 'selected' : ''}`}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onChange(name);
+                setResults([]);
+              }}
+            >
+              {name}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const getErrorMessage = (error) => {
   if (error?.response?.data?.error) return error.response.data.error;
@@ -151,6 +218,7 @@ export default function ReleaseMigration({ embedded = false }) {
 
   const successCount = results.filter((r) => r.status === 'success').length;
   const failedCount = results.filter((r) => r.status === 'failed').length;
+  const existsCount = results.filter((r) => r.status === 'exists').length;
   const progressPct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
 
   const handleSearch = async () => {
@@ -276,6 +344,14 @@ export default function ReleaseMigration({ embedded = false }) {
               jpUrl: jpUrl || '',
               warnings: Array.isArray(resp.data.warnings) ? resp.data.warnings : [],
             });
+          } else if (resp.data?.already_exists) {
+            const existing = resp.data.job_profile || {};
+            updateResult(jp._id, {
+              status: 'exists',
+              newName: existing.name || migrateVersionString(jp.name, detectOldVersion(jp, form.oldVersion), form.newVersion),
+              message: resp.data.error || 'Job Profile already exists. No new job profile was created.',
+              jpUrl: existing.ui_url || jitaJobProfileWebUrl(existing._id, existing.name) || '',
+            });
           } else {
             updateResult(jp._id, {
               status: 'failed',
@@ -283,8 +359,19 @@ export default function ReleaseMigration({ embedded = false }) {
             });
           }
         } catch (e) {
-          // Log the failure in the UI but keep the loop going for the rest.
-          updateResult(jp._id, { status: 'failed', message: `Failed on JP: ${jp.name} — ${getErrorMessage(e)}` });
+          const data = e?.response?.data || {};
+          if (e?.response?.status === 409 || data.already_exists) {
+            const existing = data.job_profile || {};
+            updateResult(jp._id, {
+              status: 'exists',
+              newName: existing.name || migrateVersionString(jp.name, detectOldVersion(jp, form.oldVersion), form.newVersion),
+              message: data.error || 'Job Profile already exists. No new job profile was created.',
+              jpUrl: existing.ui_url || '',
+            });
+          } else {
+            // Log the failure in the UI but keep the loop going for the rest.
+            updateResult(jp._id, { status: 'failed', message: `Failed on JP: ${jp.name} — ${getErrorMessage(e)}` });
+          }
         } finally {
           done += 1;
           setProgress({ done, total: queue.length });
@@ -297,7 +384,13 @@ export default function ReleaseMigration({ embedded = false }) {
     setMigrating(false);
   };
 
-  const statusLabel = { pending: 'Queued', running: 'Cloning…', success: 'Done', failed: 'Failed' };
+  const statusLabel = {
+    pending: 'Queued',
+    running: 'Cloning…',
+    success: 'Done',
+    failed: 'Failed',
+    exists: 'Exists',
+  };
 
   const content = (
     <>
@@ -422,42 +515,30 @@ export default function ReleaseMigration({ embedded = false }) {
         <div className="rm-subsection">
           <div className="rm-subsection-title">Branches</div>
           <div className="rm-form-grid">
-            <div className="djp-form-group">
-              <label>NOS cluster branch</label>
-              <input
-                type="text"
-                value={nosBranch}
-                onChange={(e) => setNosBranch(e.target.value)}
-                placeholder="e.g. ganges7.7-stable"
-              />
-            </div>
-            <div className="djp-form-group">
-              <label>Prism Central branch</label>
-              <input
-                type="text"
-                value={pcBranch}
-                onChange={(e) => setPcBranch(e.target.value)}
-                placeholder="e.g. ganges7.7-stable-pc"
-              />
-            </div>
-            <div className="djp-form-group">
-              <label>Test option branch</label>
-              <input
-                type="text"
-                value={testOptionBranch}
-                onChange={(e) => setTestOptionBranch(e.target.value)}
-                placeholder="e.g. ganges7.7-stable"
-              />
-            </div>
-            <div className="djp-form-group">
-              <label>TCMS sync branch</label>
-              <input
-                type="text"
-                value={tcmsSyncBranch}
-                onChange={(e) => setTcmsSyncBranch(e.target.value)}
-                placeholder="e.g. ganges7.7-stable"
-              />
-            </div>
+            <BranchSuggestField
+              label="NOS cluster branch"
+              value={nosBranch}
+              onChange={setNosBranch}
+              placeholder="Type to search (e.g. ganges-7.7)"
+            />
+            <BranchSuggestField
+              label="Prism Central branch"
+              value={pcBranch}
+              onChange={setPcBranch}
+              placeholder="Type to search (e.g. ganges-7.7-pc)"
+            />
+            <BranchSuggestField
+              label="Test option branch"
+              value={testOptionBranch}
+              onChange={setTestOptionBranch}
+              placeholder="Type to search (e.g. ganges-7.7)"
+            />
+            <BranchSuggestField
+              label="TCMS sync branch"
+              value={tcmsSyncBranch}
+              onChange={setTcmsSyncBranch}
+              placeholder="Type to search (e.g. ganges-7.7)"
+            />
           </div>
         </div>
       </div>
@@ -477,6 +558,9 @@ export default function ReleaseMigration({ embedded = false }) {
               </span>
               <span className="rm-progress-summary">
                 <span className="rm-chip rm-chip-success">{successCount} ok</span>
+                {existsCount > 0 && (
+                  <span className="rm-chip rm-chip-exists">{existsCount} already exist</span>
+                )}
                 <span className="rm-chip rm-chip-failed">{failedCount} failed</span>
               </span>
             </div>
@@ -514,7 +598,7 @@ export default function ReleaseMigration({ embedded = false }) {
                 </span>
                 <div className="rm-result-body">
                   <div className="rm-result-name">
-                    {r.jpUrl && r.status === 'success' ? (
+                    {r.jpUrl && (r.status === 'success' || r.status === 'exists') ? (
                       <a href={r.jpUrl} target="_blank" rel="noreferrer">{r.newName}</a>
                     ) : (
                       <span>{r.newName}</span>
@@ -523,6 +607,12 @@ export default function ReleaseMigration({ embedded = false }) {
                       <span className="rm-result-source"> (from {r.sourceName})</span>
                     )}
                   </div>
+                  {r.message && r.status === 'success' && (
+                    <div className="rm-result-msg">{r.message}</div>
+                  )}
+                  {r.message && r.status === 'exists' && (
+                    <div className="rm-result-msg rm-result-msg-exists">{r.message}</div>
+                  )}
                   {r.message && r.status === 'failed' && (
                     <div className="rm-result-msg rm-result-msg-error">{r.message}</div>
                   )}

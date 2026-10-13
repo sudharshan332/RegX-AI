@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from dynamic_jp_clone import (  # noqa: E402
+    apply_clone_patch_fields,
     apply_clone_retain_exceptions,
     apply_destination_nos,
     apply_destination_pc,
@@ -17,6 +18,12 @@ from dynamic_jp_clone import (  # noqa: E402
     catalog_test_to_row,
     clear_run_tests_with_tags,
     apply_clone_test_defaults,
+    clone_target_block,
+    collect_clone_test_set_ids,
+    gerrit_patch_branch,
+    plan_source_test_set_links,
+    resolve_clone_patches,
+    restore_clone_patch_tags,
     restore_clone_service,
     is_master_branch,
     nutest_mainline_branch,
@@ -525,6 +532,313 @@ class TestRestoreCloneService(unittest.TestCase):
     def test_non_dict_is_a_no_op(self):
         self.assertFalse(restore_clone_service(None, {}))
         self.assertFalse(restore_clone_service({}, None))
+
+
+def _official_jp_77():
+    """Official 7.7 JP with several test-set shapes and both patch sides."""
+    test_patch = (
+        "https://nugerrit.ntnxdpro.com/changes/"
+        "nutest-py3-tests~ganges-7.7-stable~I111/patch?zip"
+    )
+    fw_patch = (
+        "https://nugerrit.ntnxdpro.com/changes/"
+        "nutest-py3~ganges-7.7-stable~I222/patch?zip"
+    )
+    return {
+        "name": "CDP_Regression_FullReg_7.7_Official",
+        "test_sets": [
+            {"$oid": "a" * 24},
+            {"_id": {"$oid": "b" * 24}},
+            "c" * 24,
+            {"id": "e" * 24, "name": "extra-by-id"},
+        ],
+        "test_set": {"name": "legacy-only", "path": "test_sets/milestones/7.7/legacy"},
+        "test_framework_metadata": {
+            "test": {"branch": "ganges-7.7-stable", "commit": "abc", "patch_url": test_patch},
+            "framework": {"branch": "ganges-7.7-stable", "commit": "def", "patch_url": fw_patch},
+        },
+        "patch_url": fw_patch,
+        "tester_tags": [
+            "official",
+            "infra__cdp",
+            "patch_url__" + test_patch,
+            "framework_patch_url__" + fw_patch,
+            "752_rc1",
+        ],
+        "nutest-py3-tests_branch": "ganges-7.7-stable",
+    }, test_patch, fw_patch
+
+
+class TestCloneTestSetLinks(unittest.TestCase):
+    def test_77_to_761_links_every_testset_shape(self):
+        source, _test_patch, _fw_patch = _official_jp_77()
+        # Legacy singular ref is ignored while test_sets is populated, and it has
+        # no id — it must be reported, not silently attached as a fake id.
+        source["test_sets"].append({"name": "missing-id-set"})
+        plan = plan_source_test_set_links(source)
+        self.assertEqual(plan["ids"], ["a" * 24, "b" * 24, "c" * 24, "e" * 24])
+        self.assertEqual(plan["unresolved"], ["missing-id-set"])
+        self.assertTrue(any("missing-id-set" in w for w in plan["warnings"]))
+
+    def test_empty_test_sets_falls_back_to_every_legacy_ref(self):
+        source = {
+            "test_sets": [],
+            "test_set": [
+                {"$oid": "1" * 24},
+                {"_id": "2" * 24},
+                {"name": "no-id"},
+            ],
+        }
+        ids, unresolved = collect_clone_test_set_ids(source)
+        self.assertEqual(ids, ["1" * 24, "2" * 24])
+        self.assertEqual(unresolved, ["no-id"])
+
+    def test_duplicate_ids_kept_once_in_source_order(self):
+        source = {
+            "test_sets": [
+                {"$oid": "A" * 24},
+                {"$oid": "a" * 24},
+                "b" * 24,
+            ]
+        }
+        ids, unresolved = collect_clone_test_set_ids(source)
+        self.assertEqual(ids, ["A" * 24, "b" * 24])
+        self.assertEqual(unresolved, [])
+
+    def test_explicit_selection_does_not_pull_the_rest(self):
+        source, _, _ = _official_jp_77()
+        plan = plan_source_test_set_links(source, explicit_id="only-this")
+        self.assertEqual(plan["ids"], ["only-this"])
+        self.assertEqual(plan["warnings"], [])
+
+    def test_other_versions_use_the_same_full_list(self):
+        source = {
+            "name": "CDP_Regression_7.5_Official",
+            "test_sets": [{"$oid": "a" * 24}, {"$oid": "b" * 24}, {"$oid": "c" * 24}],
+        }
+        plan = plan_source_test_set_links(source)
+        self.assertEqual(len(plan["ids"]), 3)
+
+
+class TestClonePatches(unittest.TestCase):
+    def test_gerrit_branch_from_patch_url(self):
+        url = (
+            "https://nugerrit.ntnxdpro.com/changes/"
+            "nutest-py3-tests~ganges-7.7-stable~Iabc/patch?zip"
+        )
+        self.assertEqual(gerrit_patch_branch(url), "ganges-7.7-stable")
+        self.assertEqual(gerrit_patch_branch("https://example.com/patch.zip"), "")
+
+    def test_77_to_761_reports_incompatible_patches_instead_of_keeping_them(self):
+        source, test_patch, fw_patch = _official_jp_77()
+        payload = {
+            "test_framework_metadata": source["test_framework_metadata"],
+            "patch_url": source["patch_url"],
+            "tester_tags": list(source["tester_tags"]),
+        }
+        test_kept, fw_kept, warnings = resolve_clone_patches(source, "ganges-7.6.1-stable")
+        self.assertIsNone(test_kept)
+        self.assertIsNone(fw_kept)
+        self.assertEqual(len(warnings), 2)
+        self.assertIn(test_patch, warnings[0])
+        self.assertIn("ganges-7.7-stable", warnings[0])
+        self.assertIn("ganges-7.6.1-stable", warnings[0])
+        self.assertIn(fw_patch, warnings[1])
+        apply_clone_patch_fields(payload, "ganges-7.6.1-stable", test_kept, fw_kept)
+        clear_run_tests_with_tags(payload)
+        restore_clone_patch_tags(payload, source, test_kept, fw_kept)
+        self.assertNotIn("patch_url", payload["test_framework_metadata"]["test"])
+        self.assertNotIn("patch_url", payload["test_framework_metadata"]["framework"])
+        self.assertNotIn("patch_url", payload)
+        self.assertEqual(payload["test_framework_metadata"]["test"]["branch"], "ganges-7.6.1-stable")
+        joined = " ".join(payload["tester_tags"])
+        self.assertNotIn("patch_url__", joined)
+        self.assertIn("official", payload["tester_tags"])
+        self.assertIn("infra__cdp", payload["tester_tags"])
+
+    def test_same_mainline_7606_to_761_keeps_patch_data(self):
+        test_patch = (
+            "https://nugerrit.ntnxdpro.com/changes/"
+            "nutest-py3-tests~ganges-7.6.0.6-stable~I333/patch?zip"
+        )
+        fw_patch = (
+            "https://nugerrit.ntnxdpro.com/changes/"
+            "nutest-py3~ganges-7.6-stable~I444/patch?zip"
+        )
+        source = {
+            "test_framework_metadata": {
+                "test": {"branch": "ganges-7.6.0.6-stable", "patch_url": test_patch},
+                "framework": {"branch": "ganges-7.6-stable", "patch_url": fw_patch},
+            },
+            "patch_url": fw_patch,
+            "tester_tags": ["official", "patch_url__" + test_patch, "framework_patch_url__" + fw_patch],
+        }
+        payload = {
+            "test_framework_metadata": source["test_framework_metadata"],
+            "patch_url": fw_patch,
+            "tester_tags": list(source["tester_tags"]),
+        }
+        test_kept, fw_kept, warnings = resolve_clone_patches(source, "ganges-7.6.1-stable")
+        self.assertEqual(warnings, [])
+        self.assertEqual(test_kept, test_patch)
+        self.assertEqual(fw_kept, fw_patch)
+        apply_clone_patch_fields(payload, "ganges-7.6.1-stable", test_kept, fw_kept)
+        clear_run_tests_with_tags(payload)
+        restore_clone_patch_tags(payload, source, test_kept, fw_kept)
+        self.assertEqual(payload["test_framework_metadata"]["test"]["patch_url"], test_patch)
+        self.assertEqual(payload["test_framework_metadata"]["framework"]["patch_url"], fw_patch)
+        self.assertEqual(payload["patch_url"], fw_patch)
+        self.assertIn("patch_url__" + test_patch, payload["tester_tags"])
+        self.assertIn("framework_patch_url__" + fw_patch, payload["tester_tags"])
+        self.assertIn("official", payload["tester_tags"])
+
+    def test_75_to_73_is_also_incompatible(self):
+        source = {
+            "test_framework_metadata": {
+                "test": {
+                    "branch": "ganges-7.5-stable",
+                    "patch_url": "https://example.com/changes/nutest-py3-tests~ganges-7.5-stable~I9/patch?zip",
+                },
+                "framework": {},
+            }
+        }
+        test_kept, fw_kept, warnings = resolve_clone_patches(source, "ganges-7.3-stable")
+        self.assertIsNone(test_kept)
+        self.assertIsNone(fw_kept)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("ganges-7.5-stable", warnings[0])
+
+    def test_patch_without_a_known_branch_is_kept(self):
+        source = {
+            "test_framework_metadata": {
+                "test": {"patch_url": "https://example.com/patches/tests.zip"},
+                "framework": {},
+            }
+        }
+        test_kept, fw_kept, warnings = resolve_clone_patches(source, "ganges-7.6.1-stable")
+        self.assertEqual(test_kept, "https://example.com/patches/tests.zip")
+        self.assertIsNone(fw_kept)
+        self.assertEqual(warnings, [])
+
+    def test_top_level_patch_url_is_the_framework_patch(self):
+        source = {
+            "patch_url": "https://example.com/changes/nutest-py3~ganges-7.6-stable~I1/patch?zip",
+            "test_framework_metadata": {"framework": {"branch": "ganges-7.6-stable"}},
+            "nutest-py3-tests_branch": "ganges-7.6-stable",
+        }
+        _test_kept, fw_kept, warnings = resolve_clone_patches(source, "ganges-7.6.1-stable")
+        self.assertEqual(fw_kept, source["patch_url"])
+        self.assertEqual(warnings, [])
+
+    def test_caller_override_replaces_source_patch(self):
+        source, _test_patch, _fw_patch = _official_jp_77()
+        override = "https://example.com/changes/nutest-py3-tests~ganges-7.6-stable~Inew/patch?zip"
+        test_kept, fw_kept, warnings = resolve_clone_patches(
+            source,
+            "ganges-7.6.1-stable",
+            test_override=override,
+            framework_override=override,
+        )
+        self.assertEqual(test_kept, override)
+        self.assertEqual(fw_kept, override)
+        self.assertEqual(warnings, [])
+
+    def test_encoded_branch_wins_over_metadata_branch(self):
+        url = (
+            "https://nugerrit.ntnxdpro.com/changes/"
+            "nutest-py3-tests~ganges-7.6-stable~Ikeep/patch?zip"
+        )
+        source = {
+            "test_framework_metadata": {
+                "test": {"branch": "ganges-7.7-stable", "patch_url": url},
+                "framework": {},
+            }
+        }
+        test_kept, _, warnings = resolve_clone_patches(source, "ganges-7.6.1-stable")
+        self.assertEqual(test_kept, url)
+        self.assertEqual(warnings, [])
+
+
+class TestCloneTestSetsAndPatchesTogether(unittest.TestCase):
+    def test_77_source_to_761_keeps_testsets_and_flags_patches(self):
+        source, test_patch, fw_patch = _official_jp_77()
+        plan = plan_source_test_set_links(source)
+        test_kept, fw_kept, warnings = resolve_clone_patches(source, "ganges-7.6.1-stable")
+        payload = {
+            "name": "CDP_Regression_FullReg_7.6.1_Official",
+            "test_sets": [{"$oid": oid} for oid in plan["ids"]],
+            "tester_tags": list(source["tester_tags"]),
+            "test_framework_metadata": source["test_framework_metadata"],
+            "patch_url": source["patch_url"],
+        }
+        apply_clone_patch_fields(payload, "ganges-7.6.1-stable", test_kept, fw_kept)
+        clear_run_tests_with_tags(payload)
+        restore_clone_patch_tags(payload, source, test_kept, fw_kept)
+        self.assertEqual(
+            [row["$oid"] for row in payload["test_sets"]],
+            ["a" * 24, "b" * 24, "c" * 24, "e" * 24],
+        )
+        self.assertIsNone(test_kept)
+        self.assertIsNone(fw_kept)
+        self.assertTrue(any(test_patch in w for w in warnings))
+        self.assertTrue(any(fw_patch in w for w in warnings))
+        self.assertNotIn("patch_url", payload)
+
+    def test_compatible_official_jp_keeps_testsets_and_patches(self):
+        test_patch = "https://nugerrit.ntnxdpro.com/changes/nutest-py3-tests~ganges-7.6-stable~Ia/patch?zip"
+        fw_patch = "https://nugerrit.ntnxdpro.com/changes/nutest-py3~ganges-7.6-stable~Ib/patch?zip"
+        source = {
+            "test_sets": [{"$oid": "a" * 24}, {"$oid": "b" * 24}],
+            "test_framework_metadata": {
+                "test": {"branch": "ganges-7.6-stable", "patch_url": test_patch},
+                "framework": {"branch": "ganges-7.6-stable", "patch_url": fw_patch},
+            },
+            "patch_url": fw_patch,
+            "tester_tags": ["official", "patch_url__" + test_patch],
+        }
+        plan = plan_source_test_set_links(source)
+        test_kept, fw_kept, warnings = resolve_clone_patches(source, "7.6.1")
+        self.assertEqual(plan["ids"], ["a" * 24, "b" * 24])
+        self.assertEqual(warnings, [])
+        self.assertEqual(test_kept, test_patch)
+        self.assertEqual(fw_kept, fw_patch)
+
+
+class TestCloneDuplicateStop(unittest.TestCase):
+    def test_existing_target_blocks_create(self):
+        block = clone_target_block("abc123", None, "CDP_Regression_FullReg_7.6.1_Official")
+        self.assertEqual(block["status"], 409)
+        self.assertTrue(block["body"]["already_exists"])
+        self.assertFalse(block["body"]["success"])
+        self.assertIn("already exists", block["body"]["error"])
+        self.assertIn("left unchanged", block["body"]["error"])
+        self.assertEqual(block["body"]["job_profile"]["_id"], "abc123")
+        self.assertNotIn("created", block["body"])
+
+    def test_lookup_failure_blocks_create(self):
+        block = clone_target_block(None, "JITA name lookup returned HTTP 500", "CDP_7.6.1")
+        self.assertEqual(block["status"], 503)
+        self.assertFalse(block["body"]["success"])
+        self.assertNotIn("already_exists", block["body"])
+        self.assertIn("No job profile was created", block["body"]["error"])
+
+    def test_free_name_allows_create(self):
+        self.assertIsNone(clone_target_block(None, None, "CDP_Regression_FullReg_7.6.1_Official"))
+        self.assertIsNone(clone_target_block("", "", "name"))
+
+    def test_create_route_stops_before_any_jita_post(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "test_flask.py")
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        start = src.index("def dynamic_jp_create(")
+        end = src.index("\ndef dynamic_jp_update(")
+        body = src[start:end]
+        abort_at = body.index("clone_target_block(")
+        post_at = body.index("requests.post(")
+        self.assertLess(abort_at, post_at)
+        # The stop returns the block status; it does not fall through into create.
+        window = body[abort_at:post_at]
+        self.assertIn('return jsonify(body), block["status"]', window)
 
 
 if __name__ == "__main__":

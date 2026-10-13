@@ -155,18 +155,24 @@ from tag_extra_task_ids import (
     remove_extras_for_tag,
 )
 from dynamic_jp_clone import (
+    apply_clone_patch_fields,
     apply_clone_retain_exceptions,
     apply_clone_test_defaults,
     apply_destination_nos,
     apply_destination_pc,
     apply_latest_smoke_on_current_branches,
     clear_run_tests_with_tags,
+    clone_target_block,
     is_master_branch,
     nutest_mainline_branch,
     pc_branch_search_query,
+    plan_source_test_set_links,
+    resolve_clone_patches,
     resolve_clone_pc_branch,
+    restore_clone_patch_tags,
     restore_clone_service,
     set_sut_branch,
+    test_set_ref_oid,
 )
 from user_keys import (
     get_user_key,
@@ -16472,6 +16478,13 @@ def dynamic_jp_create():
         version_to = (req_data.get("version_to") or "").strip()
         clone_to_branch = (req_data.get("clone_to_branch") or "").strip()
         pc_branch_unresolved = None
+        # Filled in clone mode. Stay empty for fresh create so later PUT/response
+        # code can always read them.
+        patch_clone_warnings = []
+        test_set_link_warnings = []
+        resolved_test_patch = None
+        resolved_framework_patch = None
+        linked_ts_ids = None
 
         # Clone-to: NOS/TCMS use the destination AOS branch. NuTest uses the
         # release mainline (7.6.0.6 → ganges-7.6-stable; master → master).
@@ -16567,17 +16580,7 @@ def dynamic_jp_create():
                 return jsonify({"error": f"Source JP '{source_jp_id}' returned empty data. It may not exist."}), 404
 
         def _test_set_ref_oid(ref):
-            if isinstance(ref, dict):
-                if "$oid" in ref:
-                    return str(ref["$oid"]).strip() or None
-                inner = ref.get("_id")
-                if isinstance(inner, dict) and "$oid" in inner:
-                    return str(inner["$oid"]).strip() or None
-                if isinstance(inner, str) and inner.strip():
-                    return inner.strip()
-            if isinstance(ref, str) and ref.strip():
-                return ref.strip()
-            return None
+            return test_set_ref_oid(ref)
 
         def _jp_test_set_refs_list(jp):
             """Refs attached to a job profile: `test_sets` (list) or legacy `test_set` (list or one dict)."""
@@ -16822,16 +16825,19 @@ def dynamic_jp_create():
         reuse_ts_display_name = None
 
         if reuse_source_ts and not create_fresh:
-            tid = source_testset_id or ts_name_resolved_id
-            if not tid and source_jp:
-                refs = _jp_test_set_refs_list(source_jp)
-                if refs:
-                    tid = _test_set_ref_oid(refs[0])
-            if not tid:
+            # No explicit test set (release migration / whole-JP clone): link every
+            # source test set. An explicit id stays a single selection.
+            explicit_ts = str(source_testset_id or ts_name_resolved_id or "").strip() or None
+            ts_plan = plan_source_test_set_links(source_jp, explicit_id=explicit_ts)
+            if not ts_plan["ids"]:
+                detail = (" " + " ".join(ts_plan["warnings"])) if ts_plan["warnings"] else ""
                 return jsonify({
                     "error": "reuse_source_ts requires a selected source test set or a source job profile "
-                             "that has at least one test set.",
+                             "that has at least one test set with an id." + detail,
                 }), 400
+            linked_ts_ids = list(ts_plan["ids"])
+            test_set_link_warnings.extend(ts_plan["warnings"])
+            tid = linked_ts_ids[0]
             linked_ts_id_for_reuse = str(tid).strip()
             st_oid = None
             if source_ts:
@@ -16859,7 +16865,10 @@ def dynamic_jp_create():
                         reuse_ts_display_name = linked_ts_id_for_reuse
                 except (requests.exceptions.RequestException, ValueError):
                     reuse_ts_display_name = linked_ts_id_for_reuse
-            logger.info(f"[create] reuse_source_ts=True, linked_ts_id={linked_ts_id_for_reuse}, name={reuse_ts_display_name}")
+            logger.info(
+                f"[create] reuse_source_ts=True, linked_ts_ids={linked_ts_ids}, "
+                f"name={reuse_ts_display_name}"
+            )
 
         # Release Migration: derive migrated JP/TS names + description from the source by
         # replacing the old release version with the new one. The old version is taken from
@@ -16919,8 +16928,12 @@ def dynamic_jp_create():
             new_ts_name = f"{ts_prefix}{reserved_seq}"
 
         # 4. Pre-check: verify JP and TS names; pick alternatives if the requested name exists
-        def _name_exists(entity_type, name):
-            """Check if a JP or TS with this exact name already exists. Returns ID or None."""
+        def _name_exists(entity_type, name, strict=False):
+            """Check if a JP or TS with this exact name already exists. Returns ID or None.
+
+            ``strict=True`` raises when the lookup cannot be completed so a clone
+            does not proceed and create a duplicate.
+            """
             try:
                 rq = json.dumps({"name": name})
                 logger.info(f"[create] Pre-check {entity_type} name='{name}', raw_query={rq}")
@@ -16931,7 +16944,10 @@ def dynamic_jp_create():
                 )
                 logger.info(f"[create] Pre-check {entity_type} response: HTTP {resp.status_code}, "
                             f"body={resp.text[:300]}")
-                if resp.status_code == 200:
+                if resp.status_code != 200:
+                    if strict:
+                        raise RuntimeError(f"JITA name lookup returned HTTP {resp.status_code}")
+                elif resp.status_code == 200:
                     items = resp.json().get("data", [])
                     if items and isinstance(items[0], dict):
                         matched_name = items[0].get("name", "")
@@ -16944,6 +16960,8 @@ def dynamic_jp_create():
                             logger.info(f"[create] Pre-check returned '{matched_name}' which doesn't exactly match '{name}', treating as no match")
             except Exception as e:
                 logger.warning(f"[create] Pre-check for {entity_type} '{name}' failed: {e}")
+                if strict:
+                    raise
             return None
 
         def _pick_unique_name(entity_type, base_name, kind="Job Profile"):
@@ -16963,9 +16981,35 @@ def dynamic_jp_create():
             return fallback, f"{kind} name {orig!r} exists; using time-based name {fallback!r}."
 
         jp_name_adjust_warn = None
-        new_jp_name, _adj = _pick_unique_name("job_profiles", new_jp_name, "Job Profile")
-        if _adj:
-            jp_name_adjust_warn = _adj
+        if not create_fresh:
+            # Stop before any test-set or job-profile POST. A suffix like _2 would
+            # be a second JP for the same target name.
+            lookup_error = None
+            existing_jp_id = None
+            try:
+                existing_jp_id = _name_exists("job_profiles", new_jp_name, strict=True)
+            except Exception as e:
+                lookup_error = str(e)
+            block = clone_target_block(existing_jp_id, lookup_error, new_jp_name)
+            if block:
+                body = dict(block["body"])
+                if existing_jp_id and isinstance(body.get("job_profile"), dict):
+                    body["job_profile"] = {
+                        "_id": existing_jp_id,
+                        "name": new_jp_name,
+                        "ui_url": _jita_browser_entity_url(
+                            JITA_WEB_JOB_PROFILE_URL, existing_jp_id, new_jp_name
+                        ),
+                    }
+                logger.info(
+                    f"[create] Clone stopped before create: status={block['status']} "
+                    f"name={new_jp_name!r} existing={existing_jp_id}"
+                )
+                return jsonify(body), block["status"]
+        else:
+            new_jp_name, _adj = _pick_unique_name("job_profiles", new_jp_name, "Job Profile")
+            if _adj:
+                jp_name_adjust_warn = _adj
 
         def _apply_custom_args_to_existing_ts(ts_id):
             """Merge the newly passed test/framework args into an already-existing TS via PUT.
@@ -17016,11 +17060,14 @@ def dynamic_jp_create():
             created_ts_id = linked_ts_id_for_reuse
             ts_reused = True
             if testcase_names:
+                n_linked = len(linked_ts_ids) if linked_ts_ids else 1
                 ts_create_warning = (
-                    "reuse_source_ts: cloned job profile uses the existing test set unchanged; "
+                    f"reuse_source_ts: cloned job profile links {n_linked} existing test set(s) unchanged; "
                     "testcase names in the request were not written to JITA."
                 )
-            logger.info(f"[create] Linked JP to existing test set id={created_ts_id} (reuse_source_ts)")
+            logger.info(
+                f"[create] Linked JP to existing test sets {linked_ts_ids or [created_ts_id]} (reuse_source_ts)"
+            )
         elif existing_ts_id:
             created_ts_id = existing_ts_id
             ts_reused = True
@@ -17319,8 +17366,11 @@ def dynamic_jp_create():
                 if 'email' in key.lower() or 'mail' in key.lower() or key in ['emails', 'scheduling_options', 'user_groups']:
                     logger.info(f"[create] Source JP email field '{key}': {source_jp.get(key)}")
 
-        # Link to new test set if created
-        if created_ts_id:
+        # Link every reused source test set. A newly created test set is a single id.
+        if linked_ts_ids:
+            new_jp_payload["test_sets"] = [{"$oid": oid} for oid in linked_ts_ids]
+            new_jp_payload.pop("test_set", None)
+        elif created_ts_id:
             new_jp_payload["test_sets"] = [{"$oid": created_ts_id}]
             new_jp_payload.pop("test_set", None)
 
@@ -17425,40 +17475,26 @@ def dynamic_jp_create():
             # Only update name, description, test_sets (already done above)
             logger.info(f"[create] Clone mode — preserving source JP config "
                         f"(infra={new_jp_payload.get('infra', 'N/A')[:80] if isinstance(new_jp_payload.get('infra'), str) else 'present'})")
-            # Always apply the user-selected test framework branch (Test Options page),
-            # and layer patch URLs on top when provided. Previously the branch was only
-            # set when a patch URL existed, so cloning without a patch left it unchanged.
-            tmeta = new_jp_payload.get("test_framework_metadata")
-            tmeta = dict(tmeta) if isinstance(tmeta, dict) else {}
-            test_m = tmeta.get("test")
-            test_m = dict(test_m) if isinstance(test_m, dict) else {}
-            fw_m = tmeta.get("framework")
-            fw_m = dict(fw_m) if isinstance(fw_m, dict) else {}
-            test_m["branch"] = nutest_branch
-            test_m["commit"] = None
-            fw_m["branch"] = nutest_branch
-            fw_m["commit"] = None
-            if test_patch_url:
-                test_m["patch_url"] = test_patch_url
-            else:
-                test_m.pop("patch_url", None)
-            if framework_patch_url:
-                fw_m["patch_url"] = framework_patch_url
-            else:
-                fw_m.pop("patch_url", None)
-            tmeta["test"] = test_m
-            tmeta["framework"] = fw_m
-            new_jp_payload["test_framework_metadata"] = tmeta
-            new_jp_payload["test_framework"] = "nutest-py3-tests"
-            new_jp_payload["nutest-py3-tests_branch"] = nutest_branch
-            if framework_patch_url:
-                new_jp_payload["patch_url"] = framework_patch_url
-            else:
-                new_jp_payload.pop("patch_url", None)
+            # Keep source patches that apply to the destination NuTest branch.
+            # Request URLs override. An incompatible source patch is omitted and
+            # reported — it is not stripped with no explanation.
+            resolved_test_patch, resolved_framework_patch, patch_clone_warnings = resolve_clone_patches(
+                source_jp,
+                nutest_branch,
+                test_override=test_patch_url,
+                framework_override=framework_patch_url,
+            )
+            apply_clone_patch_fields(
+                new_jp_payload,
+                nutest_branch,
+                resolved_test_patch,
+                resolved_framework_patch,
+            )
             logger.info(
                 f"[create] Clone mode — set test framework (nutest) branch={nutest_branch} "
                 f"(from clone_to={clone_to_branch or nos_branch}), "
-                f"patches(test={bool(test_patch_url)}, fw={bool(framework_patch_url)})"
+                f"patches(test={bool(resolved_test_patch)}, fw={bool(resolved_framework_patch)}, "
+                f"warnings={len(patch_clone_warnings)})"
             )
 
         # Clone-to / Release Migration: overwrite NOS (and PC when resolved) before Latest.
@@ -17503,6 +17539,21 @@ def dynamic_jp_create():
             )
             jp["retain_resources_config"] = _ensure_retain_duration(
                 jp.get("retain_resources_config"), RETAIN_DURATION_72H_MIN
+            )
+
+        def _reapply_clone_patches(jp):
+            """Write resolved patches again after JITA GET (POST can drop them).
+
+            Also restores patch tester tags after the infra-tag filter. No-op for
+            fresh create, which applies request patch URLs on its own path.
+            """
+            if create_fresh or not isinstance(jp, dict):
+                return
+            apply_clone_patch_fields(
+                jp, nutest_branch, resolved_test_patch, resolved_framework_patch
+            )
+            restore_clone_patch_tags(
+                jp, source_jp, resolved_test_patch, resolved_framework_patch
             )
 
         _reapply_clone_retain(new_jp_payload)
@@ -17588,6 +17639,8 @@ def dynamic_jp_create():
                 "[create] preserve_source_config=True — kept source email/visibility; "
                 "run_tests_with_tags disabled; additional tags filtered to allowlist"
             )
+        if not create_fresh:
+            _reapply_clone_patches(new_jp_payload)
         _ensure_cdp_reg_jarvis_user_groups(new_jp_payload)
 
         # Tags will be applied via a separate PUT after creation (same
@@ -17702,6 +17755,7 @@ def dynamic_jp_create():
                             _force_email_on_and_clear_tag_filters(jp_data)
                         _ensure_cdp_reg_jarvis_user_groups(jp_data)
                         _reapply_clone_retain(jp_data)
+                        _reapply_clone_patches(jp_data)
                         logger.info(
                             f"[create] Re-applied email + tag filters "
                             f"(send_emails={jp_data.get('send_emails')}, emails={jp_data.get('emails')})"
@@ -17803,6 +17857,7 @@ def dynamic_jp_create():
                             _force_email_on_and_clear_tag_filters(jp_data)
                         _ensure_cdp_reg_jarvis_user_groups(jp_data)
                         _reapply_clone_retain(jp_data)
+                        _reapply_clone_patches(jp_data)
 
                         put_payload = {}
                         for k, v in jp_data.items():
@@ -17839,6 +17894,8 @@ def dynamic_jp_create():
             warnings.append(ts_fetch_warning)
         if ts_create_warning:
             warnings.append(ts_create_warning)
+        warnings.extend(test_set_link_warnings)
+        warnings.extend(patch_clone_warnings)
         if pc_branch_unresolved:
             warnings.append(
                 f"PC branch '{pc_branch_unresolved}' was not found in JITA; "
@@ -17850,8 +17907,14 @@ def dynamic_jp_create():
             warnings.append(tcms_cleanup_warning)
 
         ts_msg = ""
-        if created_ts_id:
+        if linked_ts_ids and len(linked_ts_ids) > 1:
+            ts_msg = f" (linked {len(linked_ts_ids)} existing test sets)"
+        elif created_ts_id:
             ts_msg = f" (reused existing {new_ts_name})" if ts_reused else f" and {new_ts_name}"
+
+        test_sets_out = (
+            [{"_id": oid, "reused": True} for oid in linked_ts_ids] if linked_ts_ids else None
+        )
 
         return jsonify({
             "success": True,
@@ -17867,6 +17930,7 @@ def dynamic_jp_create():
                 "reused": ts_reused,
                 "ui_url": _jita_browser_entity_url(JITA_WEB_TEST_SET_URL, created_ts_id, new_ts_name),
             } if created_ts_id else None,
+            "test_sets": test_sets_out,
             "message": f"Created {new_jp_name}{ts_msg}",
             "warnings": warnings if warnings else None,
         })

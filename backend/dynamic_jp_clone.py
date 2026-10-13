@@ -1,4 +1,8 @@
-"""Pure helpers for dynamic JP clone-to, retain defaults, and catalog test selection."""
+"""Pure helpers for dynamic JP clone-to, retain defaults, and catalog test selection.
+
+Clone transfer (test sets, patches, duplicate stop) is decided here so the
+Flask create route can apply it without inventing JITA writes of its own.
+"""
 
 import copy
 import re
@@ -406,6 +410,309 @@ def apply_clone_test_defaults(jp_payload):
     jp_payload["test_service"] = DEFAULT_TEST_SERVICE
     jp_payload["skip_bad_tests"] = True
     return True
+
+
+def test_set_ref_oid(ref):
+    """Return a JITA test-set id from one ``test_sets`` / ``test_set`` entry.
+
+    Accepts a raw id string, ``{"$oid": ...}``, or a document whose ``_id`` / ``id``
+    is either of those. Returns None when the entry has no id (callers must report
+    it rather than drop it quietly).
+    """
+    if isinstance(ref, dict):
+        if "$oid" in ref:
+            oid = str(ref.get("$oid") or "").strip()
+            return oid or None
+        for key in ("_id", "id"):
+            inner = ref.get(key)
+            if isinstance(inner, dict) and "$oid" in inner:
+                oid = str(inner.get("$oid") or "").strip()
+                if oid:
+                    return oid
+            if isinstance(inner, str) and inner.strip():
+                return inner.strip()
+    if isinstance(ref, str) and ref.strip():
+        return ref.strip()
+    return None
+
+
+def _describe_unresolved_test_set(ref):
+    if isinstance(ref, str) and ref.strip():
+        return ref.strip()
+    if isinstance(ref, dict):
+        for key in ("name", "path", "test_set"):
+            val = ref.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return "(unnamed test set)"
+
+
+def job_profile_test_set_refs(jp):
+    """Refs on a job profile.
+
+    ``test_sets`` (list) is the current field. When it is missing or empty, fall
+    back to legacy ``test_set`` (one dict or a list). A non-empty ``test_sets``
+    wins so a stale singular mirror is not mixed in as a second copy.
+    """
+    if not isinstance(jp, dict):
+        return []
+    raw = jp.get("test_sets")
+    if raw is None or raw == []:
+        raw = jp.get("test_set")
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return list(raw)
+    return [raw]
+
+
+def collect_clone_test_set_ids(jp):
+    """Every linkable test-set id on ``jp``, plus labels for entries with no id.
+
+    Order follows the source JP. Duplicate ids are kept once. This is the full
+    list — callers must not keep only the first entry.
+    """
+    ids = []
+    unresolved = []
+    seen = set()
+    for ref in job_profile_test_set_refs(jp):
+        oid = test_set_ref_oid(ref)
+        if not oid:
+            unresolved.append(_describe_unresolved_test_set(ref))
+            continue
+        key = oid.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ids.append(oid)
+    return ids, unresolved
+
+
+def plan_source_test_set_links(source_jp, explicit_id=None):
+    """Decide which source test sets a clone should link.
+
+    An explicit id (the Dynamic JP "use this test set" selection) links only
+    that id. With no explicit id, every test set on the source JP is linked.
+    Entries that have no id are listed in ``warnings`` and are not dropped silently.
+    """
+    explicit = str(explicit_id or "").strip()
+    if explicit:
+        return {"ids": [explicit], "unresolved": [], "warnings": []}
+    ids, unresolved = collect_clone_test_set_ids(source_jp)
+    warnings = [
+        f"Test set {label!r} from the source job profile was not linked "
+        "because it has no test set id."
+        for label in unresolved
+    ]
+    return {"ids": ids, "unresolved": unresolved, "warnings": warnings}
+
+
+_GERRIT_PATCH_BRANCH_RE = re.compile(r"/changes/[^/]*?~([^~/]+)(?:~|/)")
+
+
+def gerrit_patch_branch(patch_url):
+    """Branch encoded in a Gerrit ``project~branch~id`` patch URL, or ``""``."""
+    match = _GERRIT_PATCH_BRANCH_RE.search(str(patch_url or ""))
+    return match.group(1).strip() if match else ""
+
+
+def branches_share_nutest_mainline(left, right):
+    """True when two branches use the same NuTest mainline.
+
+    ``7.6.0.6`` and ``7.6.1`` both map to ``ganges-7.6-stable``. ``7.7`` and
+    ``7.6.1`` do not. ``master`` matches only ``master``.
+    """
+    a = (left or "").strip()
+    b = (right or "").strip()
+    if not a or not b:
+        return False
+    if a.lower() == b.lower():
+        return True
+    return nutest_mainline_branch(a).lower() == nutest_mainline_branch(b).lower()
+
+
+def _source_side_patch(source_jp, kind):
+    """Return ``(patch_url, recorded_branch)`` for ``test`` or ``framework``.
+
+    Framework also reads the top-level ``patch_url`` JITA keeps in sync with
+    ``test_framework_metadata.framework.patch_url``. Recorded branch falls back
+    to the JP NuTest branch when the side metadata has none.
+    """
+    if not isinstance(source_jp, dict):
+        return "", ""
+    tfm = source_jp.get("test_framework_metadata")
+    if not isinstance(tfm, dict):
+        tfm = {}
+    side = tfm.get(kind) if isinstance(tfm.get(kind), dict) else {}
+    url = str(side.get("patch_url") or "").strip()
+    branch = str(side.get("branch") or "").strip()
+    if kind == "framework" and not url:
+        url = str(source_jp.get("patch_url") or "").strip()
+    if not branch:
+        branch = str(
+            source_jp.get("nutest-py3-tests_branch") or source_jp.get("nutest_branch") or ""
+        ).strip()
+    return url, branch
+
+
+def _patch_kind_label(kind):
+    return "NuTest tests patch" if kind == "test" else "Framework patch"
+
+
+def resolve_clone_patches(source_jp, dest_branch, test_override=None, framework_override=None):
+    """Decide which patches the clone should keep.
+
+    A non-empty override is the caller's patch for this clone and is kept as
+    given. Otherwise the source patch is kept when it targets the destination
+    NuTest branch (same branch, or the same release mainline such as 7.6.0.6
+    and 7.6.1). A patch whose target branch does not match is omitted and
+    described in the returned warnings — it is not dropped without a reason.
+
+    When the patch URL and the source JP carry no branch, the patch is kept.
+    Compatibility cannot be disproved, so the patch is not removed.
+
+    Returns ``(test_patch_url_or_None, framework_patch_url_or_None, warnings)``.
+    """
+    dest = (dest_branch or "").strip()
+    warnings = []
+    kept = {}
+    for kind, override in (("test", test_override), ("framework", framework_override)):
+        override_url = str(override or "").strip()
+        if override_url:
+            kept[kind] = override_url
+            continue
+        url, recorded = _source_side_patch(source_jp, kind)
+        if not url:
+            kept[kind] = None
+            continue
+        basis = gerrit_patch_branch(url) or recorded
+        if basis and dest and not branches_share_nutest_mainline(basis, dest):
+            kept[kind] = None
+            warnings.append(
+                f"{_patch_kind_label(kind)} was not copied because it is not compatible "
+                f"with destination branch {dest!r}. It targets {basis!r}. Patch URL: {url}"
+            )
+            continue
+        kept[kind] = url
+    return kept.get("test"), kept.get("framework"), warnings
+
+
+def apply_clone_patch_fields(jp_payload, nutest_branch, test_patch, framework_patch):
+    """Write NuTest branch and the resolved patch URLs onto a JP payload.
+
+    ``None`` removes that patch field so an incompatible source patch does not
+    ride along on the deep-copied payload. Does not invent a URL.
+    """
+    if not isinstance(jp_payload, dict):
+        return False
+    tmeta = jp_payload.get("test_framework_metadata")
+    tmeta = dict(tmeta) if isinstance(tmeta, dict) else {}
+    test_m = dict(tmeta.get("test") if isinstance(tmeta.get("test"), dict) else {})
+    fw_m = dict(tmeta.get("framework") if isinstance(tmeta.get("framework"), dict) else {})
+    branch = (nutest_branch or "").strip()
+    if branch:
+        test_m["branch"] = branch
+        fw_m["branch"] = branch
+        jp_payload["nutest-py3-tests_branch"] = branch
+    test_m["commit"] = None
+    fw_m["commit"] = None
+    if test_patch:
+        test_m["patch_url"] = test_patch
+    else:
+        test_m.pop("patch_url", None)
+    if framework_patch:
+        fw_m["patch_url"] = framework_patch
+        jp_payload["patch_url"] = framework_patch
+    else:
+        fw_m.pop("patch_url", None)
+        jp_payload.pop("patch_url", None)
+    tmeta["test"] = test_m
+    tmeta["framework"] = fw_m
+    jp_payload["test_framework_metadata"] = tmeta
+    jp_payload["test_framework"] = "nutest-py3-tests"
+    return True
+
+
+def restore_clone_patch_tags(jp_payload, source_jp, test_patch, framework_patch):
+    """Put back source tester tags that record a patch this clone kept.
+
+    ``clear_run_tests_with_tags`` drops ``patch_url__`` / ``framework_patch_url__``
+    tags because they are not infra allowlist tags. Call this after that filter.
+    Tags for a patch that was rejected as incompatible are left off.
+    """
+    if not isinstance(jp_payload, dict) or not isinstance(source_jp, dict):
+        return False
+    kept_by_prefix = (
+        ("patch_url__", str(test_patch or "").strip()),
+        ("framework_patch_url__", str(framework_patch or "").strip()),
+    )
+    extras = []
+    seen_extra = set()
+    for raw in _coerce_tag_list(source_jp.get("tester_tags")):
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        lower = name.lower()
+        for prefix, url in kept_by_prefix:
+            if url and lower.startswith(prefix) and url.lower() in lower:
+                if lower not in seen_extra:
+                    extras.append(name)
+                    seen_extra.add(lower)
+                break
+    if not extras:
+        return False
+    if "tester_tags" not in jp_payload:
+        jp_payload["tester_tags"] = list(extras)
+        return True
+    current = _coerce_tag_list(jp_payload.get("tester_tags"))
+    merged = list(current)
+    seen = {str(tag).lower() for tag in merged}
+    for tag in extras:
+        if tag.lower() not in seen:
+            merged.append(tag)
+            seen.add(tag.lower())
+    jp_payload["tester_tags"] = merged
+    return True
+
+
+def clone_target_block(existing_id, lookup_error, name):
+    """Stop a clone before any JITA create when the target JP is unsafe to add.
+
+    Returns ``{"status", "body"}`` when the caller must not POST a job profile
+    or test set. Returns None when the name is free and the lookup succeeded.
+
+    * ``existing_id`` set: that JP is already there. Do not create another and
+      do not modify it.
+    * ``lookup_error`` set: the existence check failed. Do not create, because
+      a missed check would duplicate the JP.
+    """
+    label = str(name or "").strip() or "(unnamed)"
+    if lookup_error:
+        return {
+            "status": 503,
+            "body": {
+                "success": False,
+                "error": (
+                    f"Could not verify whether Job Profile {label!r} already exists "
+                    f"({lookup_error}). No job profile was created."
+                ),
+            },
+        }
+    existing = str(existing_id or "").strip()
+    if existing:
+        return {
+            "status": 409,
+            "body": {
+                "success": False,
+                "already_exists": True,
+                "error": (
+                    f"Job Profile {label!r} already exists (ID: {existing}). "
+                    "No new job profile was created, and the existing one was left unchanged."
+                ),
+                "job_profile": {"_id": existing, "name": label},
+            },
+        }
+    return None
 
 
 def restore_clone_service(jp_payload, source_jp):
