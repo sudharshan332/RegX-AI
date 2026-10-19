@@ -2889,7 +2889,7 @@ export default function RegressionHome() {
                   </td>
                   <td style={{ textAlign: "center", verticalAlign: "middle" }}>
                     {renderTaskButton(
-                      globalJitaTaskIds.length > 0 ? globalJitaTaskIds : row.actualTasks,
+                      row.actualTasks,
                       "Regression_Run_Tasks"
                     )}
                   </td>
@@ -4855,7 +4855,7 @@ function renderTaskButton(taskIds, buttonName) {
         {...dataAttrs}
         style={btnStyle}
       >
-        {buttonName}
+        {buttonName} ({ids.length})
       </a>
     );
   }

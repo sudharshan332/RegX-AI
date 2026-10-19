@@ -1005,6 +1005,34 @@ def process_failed_tests(task_id, agave_task):
 # JITA GET /tasks?raw_query=... blows up with 414 when $in list is huge.
 _JITA_TASK_ID_BATCH = 40
 
+# Official regression tasks created in the JITA UI (not via RegX) do not get the
+# cdp_reg_jarvis user_groups stamp. Without these creators, a task that carries
+# the selected tester tag is still dropped from the dashboard.
+_DIRECT_JITA_REGRESSION_CREATORS = (
+    "suryaprabha.k",
+)
+
+
+def _regression_tag_created_by():
+    names = set(CDP_REG_JARVIS_MEMBERS) | set(_DIRECT_JITA_REGRESSION_CREATORS)
+    return sorted(str(n).strip().lower() for n in names if str(n).strip())
+
+
+def _regression_tag_raw_query(tag):
+    """JITA raw_query for a dashboard tag.
+
+    A task matches when it has the tester tag and component ``main``, and it was
+    either created by a regression runner or stamped with ``cdp_reg_jarvis``.
+    """
+    return {
+        "$or": [
+            {"created_by": {"$in": _regression_tag_created_by()}},
+            {"user_groups": {"$in": [CDP_REG_JARVIS_GROUP]}},
+        ],
+        "tester_tags": {"$in": [tag]},
+        "system_under_test.component": "main",
+    }
+
 
 def _fetch_regression_tasks_raw(tag=None, task_ids=None, only=None):
     """Low-level JITA task list fetch (no tag-extra merge). Batches large task_id lists."""
@@ -1055,19 +1083,7 @@ def _fetch_regression_tasks_raw(tag=None, task_ids=None, only=None):
             return merged
 
         if tag:
-            raw_query = {
-                "$or": [
-                    {
-                        "created_by": {
-                            "$in": ["shilpa.sattigeri", "sudharshan.musali"]
-                        }
-                    },
-                    {"user_groups": {"$in": ["cdp_reg_jarvis"]}},
-                ],
-                "tester_tags": {"$in": [tag]},
-                "system_under_test.component": "main",
-            }
-            return _one_get(raw_query)
+            return _one_get(_regression_tag_raw_query(tag))
 
         raise ValueError("Either tag or task_ids must be provided")
     except requests.exceptions.ConnectionError as e:

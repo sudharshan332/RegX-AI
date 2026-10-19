@@ -66,5 +66,38 @@ class TestFetchTasksBatch(unittest.TestCase):
         self.assertEqual(len(calls[2]), 15)
 
 
+def _load_tag_query():
+    path = os.path.join(os.path.dirname(__file__), "..", "test_flask.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    start = src.index("_DIRECT_JITA_REGRESSION_CREATORS = (")
+    end = src.index("def _fetch_regression_tasks_raw(")
+    ns = {
+        "CDP_REG_JARVIS_MEMBERS": {
+            "shilpa.sattigeri",
+            "sudharshan.musali",
+            "thanuja.c",
+            "swapnil.wankhede",
+        },
+        "CDP_REG_JARVIS_GROUP": "cdp_reg_jarvis",
+    }
+    exec(src[start:end], ns)  # noqa: S102
+    return ns["_regression_tag_raw_query"]
+
+
+class TestRegressionTagQuery(unittest.TestCase):
+    def test_includes_direct_jita_creator_with_tag(self):
+        raw_query = _load_tag_query()("7.6.1_RC")
+        creators = raw_query["$or"][0]["created_by"]["$in"]
+        self.assertIn("suryaprabha.k", creators)
+        self.assertIn("shilpa.sattigeri", creators)
+        self.assertEqual(raw_query["tester_tags"], {"$in": ["7.6.1_RC"]})
+        self.assertEqual(raw_query["system_under_test.component"], "main")
+        self.assertEqual(
+            raw_query["$or"][1],
+            {"user_groups": {"$in": ["cdp_reg_jarvis"]}},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
