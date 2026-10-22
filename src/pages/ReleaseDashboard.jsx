@@ -12,6 +12,31 @@ const COLOR_LABEL = {
   not_run: "Not run",
 };
 
+const COLOR_HELP = {
+  black: "Not handed over, or only some tests match. The number is the percent handed over.",
+  red: "Handed over and executed. Pass rate is 80% or below.",
+  yellow: "Handed over and executed. Pass rate is above 80%, with failures.",
+  green: "Handed over, executed, and all passed.",
+  not_run: "Handed over, and at least one test has no result.",
+};
+
+const TEST_HELP = {
+  black: "Not handed over.",
+  red: "Failed.",
+  green: "Passed.",
+  not_run: "No pass or fail result.",
+};
+
+function ColorTip({ color, help, className, children }) {
+  const text = help || COLOR_HELP[color];
+  return (
+    <span className={`rd-color${className ? ` ${className}` : ""}`}>
+      {children}
+      {text ? <span className="rd-color-note">{text}</span> : null}
+    </span>
+  );
+}
+
 function jiraId(ticket) {
   const match = String(ticket || "").match(/[A-Z][A-Z0-9]+-\d+/i);
   return match ? match[0].toUpperCase() : String(ticket || "");
@@ -37,7 +62,7 @@ function testColor(test) {
 function FeatTests({ title, tests }) {
   return (
     <div className="rd-split">
-      <h3>{title} ({tests.length})</h3>
+      <h3>{title} <span>{tests.length}</span></h3>
       {tests.length === 0 ? (
         <p className="rd-status">None</p>
       ) : (
@@ -56,7 +81,10 @@ function FeatTests({ title, tests }) {
               const color = testColor(test);
               return (
               <tr key={test.name} className={`rd-test-row rd-test-${color}`}>
-                <td className="rd-test-name">{test.name}</td>
+                <td className="rd-test-name">
+                  {test.name}
+                  <span className="rd-color-note">{TEST_HELP[color]}</span>
+                </td>
                 <td>{test.status || "—"}</td>
                 <td>{test.issue_type || "—"}</td>
                 <td>
@@ -115,62 +143,42 @@ export default function ReleaseDashboard() {
 
   const feats = data?.feats || [];
 
+  const summary = data?.summary || {};
+
   return (
     <div className="rd-page">
-      <header className="rd-header">
+      <div className="rd-top">
         <h1>Release Dashboard</h1>
-        <p>
-          Feats are the folders under{" "}
-          {data?.sourcegraph ? (
-            <a href={data.sourcegraph} target="_blank" rel="noreferrer">{data.root}</a>
-          ) : (
-            <span>the release tree</span>
-          )}
-          . Each folder under FEATS is its own row. A feat is fully handed over only when its tests also match the REGRESSION folder. Read only.
-        </p>
-      </header>
-
-      <div className="rd-toolbar">
-        <label htmlFor="rd-release">Release</label>
-        <select
-          id="rd-release"
-          value={milestone}
-          onChange={(event) => setMilestone(event.target.value)}
-        >
-          {RELEASES.map((release) => (
-            <option key={release} value={release}>{release}</option>
-          ))}
-        </select>
-        {data && !loading && (
-          <span className="rd-summary">
-            {data.feat_count} feats
-            {" · "}
-            <span className="rd-swatch rd-black" /> {data.summary?.black || 0}
-            {" · "}
-            <span className="rd-swatch rd-red" /> {data.summary?.red || 0}
-            {" · "}
-            <span className="rd-swatch rd-yellow" /> {data.summary?.yellow || 0}
-            {" · "}
-            <span className="rd-swatch rd-green" /> {data.summary?.green || 0}
-            {" · "}
-            <span className="rd-swatch rd-not_run" /> {data.summary?.not_run || 0}
-          </span>
-        )}
+        <label className="rd-release" htmlFor="rd-release">
+          Release
+          <select
+            id="rd-release"
+            value={milestone}
+            onChange={(event) => setMilestone(event.target.value)}
+          >
+            {RELEASES.map((release) => (
+              <option key={release} value={release}>{release}</option>
+            ))}
+          </select>
+        </label>
       </div>
 
-      <ul className="rd-legend">
-        <li><span className="rd-swatch rd-black" /> Handover not started (0%), or only some tests match regression (shows the percent).</li>
-        <li><span className="rd-swatch rd-red" /> Feat and regression tests match, all executed, pass rate 80% or below.</li>
-        <li><span className="rd-swatch rd-yellow" /> Feat and regression tests match, all executed, pass rate above 80% with failures.</li>
-        <li><span className="rd-swatch rd-green" /> Feat and regression tests match, all executed, all passed.</li>
-        <li><span className="rd-swatch rd-not_run" /> Fully handed over, and at least one test has no pass or fail result.</li>
-      </ul>
+      {data && !loading && (
+        <div className="rd-metrics">
+          <div className="rd-metric">{data.feat_count} feats</div>
+          <ColorTip color="black" className="rd-metric"><span className="rd-swatch rd-black" />{summary.black || 0}</ColorTip>
+          <ColorTip color="red" className="rd-metric"><span className="rd-swatch rd-red" />{summary.red || 0}</ColorTip>
+          <ColorTip color="yellow" className="rd-metric"><span className="rd-swatch rd-yellow" />{summary.yellow || 0}</ColorTip>
+          <ColorTip color="green" className="rd-metric"><span className="rd-swatch rd-green" />{summary.green || 0}</ColorTip>
+          <ColorTip color="not_run" className="rd-metric"><span className="rd-swatch rd-not_run" />{summary.not_run || 0}</ColorTip>
+        </div>
+      )}
 
-      {loading && <p className="rd-status">Loading feats from TCMS…</p>}
+      {loading && <p className="rd-status">Loading…</p>}
       {error && <p className="rd-error">{error}</p>}
 
       {!loading && !error && data && feats.length === 0 && (
-        <p className="rd-status">No feats found under {data.root}.</p>
+        <p className="rd-status">No feats for this release.</p>
       )}
 
       {feats.length > 0 && (
@@ -207,19 +215,20 @@ export default function ReleaseDashboard() {
                     <td>{feat.not_run}</td>
                     <td>{feat.pass_rate == null ? "—" : `${feat.pass_rate}%`}</td>
                     <td>
-                      <span className={`rd-status-box rd-${feat.color}`}>{statusLabel(feat)}</span>
+                      <ColorTip color={feat.color} className="rd-color-end">
+                        <span className={`rd-status-box rd-${feat.color}`}>{statusLabel(feat)}</span>
+                      </ColorTip>
                     </td>
                   </tr>
                   {isOpen && (
                     <tr className="rd-expand">
                       <td colSpan={7}>
-                        <p>{feat.handed_over}/{feat.total} feat tests match the regression folder.</p>
                         <FeatTests
-                          title="In the feat folder only"
+                          title="Not handed over"
                           tests={feat.tests.filter((test) => !test.in_regression)}
                         />
                         <FeatTests
-                          title="In both feat and regression"
+                          title="Handed over"
                           tests={feat.tests.filter((test) => test.in_regression)}
                         />
                       </td>
