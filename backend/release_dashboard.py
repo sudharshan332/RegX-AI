@@ -34,6 +34,7 @@ RELEASES = {
         "branch": "ganges-7.6-stable",
     },
 }
+_ROOT_RE = re.compile(r"^test_sets/milestones/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+$")
 _PASS = {"succeeded", "passed", "success", "pass"}
 _FAIL = {"failed", "failure", "fail", "error"}
 _PAGE_SIZE = 500
@@ -101,27 +102,62 @@ def _paths(test_sets):
     return paths
 
 
-def release_info(milestone):
-    cfg = RELEASES.get(milestone)
-    if not cfg:
+def nutest_branch_for(nos):
+    """Map a NOS version to the nutest branch that holds its feat tree.
+
+    master stays on master. 7.6.1 and 7.5.1 use the train branch
+    ganges-7.6-stable and ganges-7.5-stable. Any longer version uses
+    ganges-<major>.<minor>-stable.
+    """
+    text = (nos or "").strip()
+    low = text.lower()
+    if low in ("master", "main"):
+        return {"milestone": "master", "branch": "master"}
+    match = re.match(r"^ganges-(\d+\.\d+(?:\.\d+)*)-stable$", low)
+    version = match.group(1) if match else text
+    parts = version.split(".")
+    if len(parts) < 2 or not all(part.isdigit() for part in parts):
         return None
-    root = cfg["root"].strip("/")
+    train = "%s.%s" % (parts[0], parts[1])
+    return {"milestone": version, "branch": "ganges-%s-stable" % train}
+
+
+def _safe_root(root):
+    root = (root or "").strip().strip("/")
+    if ".." in root or not _ROOT_RE.match(root):
+        return ""
+    return root
+
+
+def release_info(milestone, root=None, branch=None):
+    cfg = RELEASES.get(milestone)
+    if cfg and not root:
+        root = cfg["root"]
+        branch = cfg["branch"]
+    root = _safe_root(root)
+    if not root:
+        return None
+    if not branch:
+        mapped = nutest_branch_for(milestone)
+        branch = mapped["branch"] if mapped else ""
+    if not branch:
+        return None
     return {
         "milestone": milestone,
         "root": root,
-        "branch": cfg["branch"],
-        "sourcegraph": "%s/%s@%s/-/tree/%s" % (_SG, _REPO, cfg["branch"], root),
+        "branch": branch,
+        "sourcegraph": "%s/%s@%s/-/tree/%s" % (_SG, _REPO, branch, root),
     }
 
 
-def classify_path(path, milestone):
+def classify_path(path, milestone, root=None):
     """Return (feat_name or '', in_regression) for one test-set path.
 
     Feats are the directories under <root>/FEATS/, one row per directory.
     Nested folders stay separate (FEAT-19686/FEAT-17396 is not FEAT-19686).
     <root>/REGRESSION/ is the handover set and is not a feat row.
     """
-    info = release_info(milestone)
+    info = release_info(milestone, root=root)
     if not info:
         return "", False
     lowered = path.lower()
@@ -164,7 +200,7 @@ def _overall_run(item):
     return run if isinstance(run, dict) else {}
 
 
-def parse_row(item, milestone):
+def parse_row(item, milestone, root=None):
     if not isinstance(item, dict):
         return None
     tc = item.get("test_case") if isinstance(item.get("test_case"), dict) else {}
@@ -174,7 +210,7 @@ def parse_row(item, milestone):
     feats = {}
     in_regression = False
     for path in _paths(tc.get("test_sets")):
-        feat, is_reg = classify_path(path, milestone)
+        feat, is_reg = classify_path(path, milestone, root=root)
         if feat:
             feats[feat.lower()] = feat
         if is_reg:
@@ -223,10 +259,13 @@ def _color(tests):
     return color, round(rate), handed, passed, failed, not_run
 
 
-def build_dashboard(rows, milestone):
+def build_dashboard(rows, milestone, root=None, branch=None):
+    info = release_info(milestone, root=root, branch=branch)
+    if not info:
+        return {"milestone": milestone, "feat_count": 0, "summary": {}, "feats": []}
     by_name = {}
     for item in rows or []:
-        parsed = parse_row(item, milestone)
+        parsed = parse_row(item, milestone, root=info["root"])
         if parsed is None:
             continue
         key = parsed["name"].lower()
@@ -279,13 +318,14 @@ def build_dashboard(rows, milestone):
     summary = {"black": 0, "red": 0, "yellow": 0, "green": 0, "not_run": 0}
     for feat in feats:
         summary[feat["color"]] = summary.get(feat["color"], 0) + 1
-    info = release_info(milestone) or {"milestone": milestone}
     info.update({"feat_count": len(feats), "summary": summary, "feats": feats})
     return info
 
 
-def fetch_milestone_rows(milestone):
-    info = release_info(milestone)
+def fetch_milestone_rows(milestone, root=None, branch=None):
+    info = release_info(milestone, root=root, branch=branch)
+    if not info:
+        raise DashboardError("Unsupported release")
     root = re.escape(info["root"])
     match = {
         "$and": [
@@ -338,18 +378,54 @@ def fetch_milestone_rows(milestone):
     return rows
 
 
+def lookup_release(nos):
+    """7.6.1 uses ganges-7.6-stable. 7.5.1 uses ganges-7.5-stable."""
+    mapped = nutest_branch_for(nos)
+    if not mapped:
+        raise DashboardError("Enter a NOS version such as 7.5.1")
+    milestone = mapped["milestone"]
+    if milestone in RELEASES:
+        return release_info(milestone)
+    return release_info(
+        milestone,
+        root="test_sets/milestones/%s/CDP" % milestone,
+        branch=mapped["branch"],
+    )
+
+
 def register_routes(app, jwt_required):
     @app.route("/mcp/regression/release-dashboard", methods=["GET"])
     @app.route("/api/mcp/regression/release-dashboard", methods=["GET"])
     @jwt_required
     def release_dashboard_status():
         milestone = (request.args.get("milestone") or "7.7").strip()
-        if not _MILESTONE_RE.match(milestone) or milestone not in RELEASES:
+        root = (request.args.get("root") or "").strip()
+        branch = (request.args.get("branch") or "").strip()
+        if not _MILESTONE_RE.match(milestone):
+            return jsonify({"error": "Unsupported release"}), 400
+        if milestone not in RELEASES and not root:
             return jsonify({
-                "error": "Unsupported release. Use 7.7 or 7.6.",
+                "error": "Add this release with + so its feat folder can be found.",
             }), 400
+        info = release_info(milestone, root=root or None, branch=branch or None)
+        if not info:
+            return jsonify({"error": "Unsupported release"}), 400
         try:
-            rows = fetch_milestone_rows(milestone)
+            rows = fetch_milestone_rows(info["milestone"], root=info["root"], branch=info["branch"])
         except DashboardError as exc:
             return jsonify({"error": str(exc)}), 502
-        return jsonify(build_dashboard(rows, milestone))
+        return jsonify(build_dashboard(
+            rows, info["milestone"], root=info["root"], branch=info["branch"],
+        ))
+
+    @app.route("/mcp/regression/release-dashboard/lookup", methods=["POST"])
+    @app.route("/api/mcp/regression/release-dashboard/lookup", methods=["POST"])
+    @jwt_required
+    def release_dashboard_lookup():
+        body = request.get_json(silent=True) or {}
+        nos = body.get("nos") or body.get("milestone") or ""
+        try:
+            info = lookup_release(nos)
+        except DashboardError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify(info)

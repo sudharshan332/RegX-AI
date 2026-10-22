@@ -31,15 +31,87 @@
   color: #52606d;
 }
 
-.rd-release select {
+.rd-release select,
+.rd-add-form input,
+.rd-add-form button,
+.rd-add {
   height: 36px;
-  min-width: 96px;
-  padding: 0 12px;
   border: 1px solid #d5dbe3;
   border-radius: 8px;
   background: #fff;
   font-size: 14px;
   color: #1f2933;
+}
+
+.rd-release select {
+  min-width: 110px;
+  padding: 0 12px;
+}
+
+.rd-add {
+  width: 36px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  color: #334e68;
+}
+
+.rd-add:hover,
+.rd-add-form button:hover {
+  border-color: #9aa5b1;
+}
+
+.rd-add-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rd-add-form input {
+  width: 96px;
+  padding: 0 10px;
+}
+
+.rd-add-form button {
+  padding: 0 12px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.rd-add-error {
+  font-size: 12px;
+  font-weight: 600;
+  color: #9b1c1c;
+}
+
+.rd-adding {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #52606d;
+  white-space: nowrap;
+}
+
+.rd-spin {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #d9e2ec;
+  border-top-color: #334e68;
+  border-radius: 50%;
+  animation: rd-spin 0.7s linear infinite;
+}
+
+@keyframes rd-spin {
+  to { transform: rotate(360deg); }
+}
+
+.rd-branch {
+  font-size: 12px;
+  font-weight: 600;
+  color: #7b8794;
 }
 
 .rd-metrics {
@@ -223,6 +295,30 @@
   background: #f8fafc;
   padding: 8px 16px 18px;
   text-align: left;
+}
+
+.rd-counts {
+  display: flex;
+  gap: 8px;
+}
+
+.rd-counts div {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 12px;
+  background: #fff;
+  border: 1px solid #e4e8ee;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #52606d;
+}
+
+.rd-counts strong {
+  font-size: 15px;
+  color: #1f2933;
 }
 
 .rd-split {
