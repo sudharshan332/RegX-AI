@@ -5,7 +5,35 @@ import "./ReleaseDashboard.css";
 
 const API = `${API_BASE_URL}/mcp/regression/release-dashboard`;
 const JIRA_URL = "https://jira.nutanix.com/browse/";
-const RELEASES = ["7.7", "7.6"];
+const DEFAULT_RELEASES = [
+  { milestone: "7.7" },
+  { milestone: "7.6" },
+];
+const SAVED_RELEASES_KEY = "regx.release-dashboard.releases";
+const BUILTIN = new Set(DEFAULT_RELEASES.map((item) => item.milestone));
+
+function savedReleases() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SAVED_RELEASES_KEY) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item) => item && item.milestone && !BUILTIN.has(item.milestone));
+  } catch (err) {
+    return [];
+  }
+}
+
+function rememberReleases(releases) {
+  const extras = releases
+    .filter((item) => item && item.milestone && !BUILTIN.has(item.milestone))
+    .map((item) => ({
+      milestone: item.milestone,
+      root: item.root || "",
+      branch: item.branch || "",
+      sourcegraph: item.sourcegraph || "",
+      lookedUp: true,
+    }));
+  localStorage.setItem(SAVED_RELEASES_KEY, JSON.stringify(extras));
+}
 
 const COLOR_LABEL = {
   green: "Passed",
@@ -62,7 +90,7 @@ function testColor(test) {
 function FeatTests({ title, tests }) {
   return (
     <div className="rd-split">
-      <h3>{title} <span>{tests.length}</span></h3>
+      <h3>{title}</h3>
       {tests.length === 0 ? (
         <p className="rd-status">None</p>
       ) : (
@@ -110,20 +138,32 @@ function FeatTests({ title, tests }) {
 }
 
 export default function ReleaseDashboard() {
+  const [releases, setReleases] = useState(() => [...DEFAULT_RELEASES, ...savedReleases()]);
   const [milestone, setMilestone] = useState("7.7");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState(null);
   const [openFeat, setOpenFeat] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [addError, setAddError] = useState("");
+  const [addBusy, setAddBusy] = useState(false);
+
+  const selected = releases.find((item) => item.milestone === milestone) || { milestone };
 
   useEffect(() => {
     let cancelled = false;
+    const current = releases.find((item) => item.milestone === milestone) || { milestone };
+
     setLoading(true);
     setError("");
     setData(null);
     setOpenFeat("");
+    const params = { milestone };
+    if (current.root) params.root = current.root;
+    if (current.branch) params.branch = current.branch;
     api
-      .get(API, { params: { milestone }, timeout: 180000 })
+      .get(API, { params, timeout: 180000 })
       .then((response) => {
         if (!cancelled) setData(response.data);
       })
@@ -139,7 +179,37 @@ export default function ReleaseDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [milestone]);
+  }, [milestone, releases]);
+
+  function addRelease(event) {
+    event.preventDefault();
+    const nos = draft.trim();
+    if (!nos || addBusy) return;
+    setAddBusy(true);
+    setAddError("");
+    api
+      .post(`${API}/lookup`, { nos }, { timeout: 60000 })
+      .then((response) => {
+        const info = response.data || {};
+        if (!info.milestone) {
+          setAddError("No feat folder found for that version");
+          return;
+        }
+        setReleases((prev) => {
+          const rest = prev.filter((item) => item.milestone !== info.milestone);
+          const next = [...rest, { ...info, lookedUp: true }];
+          rememberReleases(next);
+          return next;
+        });
+        setMilestone(info.milestone);
+        setDraft("");
+        setAdding(false);
+      })
+      .catch((err) => {
+        setAddError(err.response?.data?.error || err.message || "Could not find that release");
+      })
+      .finally(() => setAddBusy(false));
+  }
 
   const feats = data?.feats || [];
 
@@ -149,18 +219,52 @@ export default function ReleaseDashboard() {
     <div className="rd-page">
       <div className="rd-top">
         <h1>Release Dashboard</h1>
-        <label className="rd-release" htmlFor="rd-release">
-          Release
+        <div className="rd-release">
+          <label htmlFor="rd-release">Release</label>
           <select
             id="rd-release"
             value={milestone}
             onChange={(event) => setMilestone(event.target.value)}
           >
-            {RELEASES.map((release) => (
-              <option key={release} value={release}>{release}</option>
+            {releases.map((release) => (
+              <option key={release.milestone} value={release.milestone}>
+                {release.milestone}
+              </option>
             ))}
           </select>
-        </label>
+          {adding ? (
+            <form className="rd-add-form" onSubmit={addRelease}>
+              <input
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder="7.5.1"
+                aria-label="NOS version"
+                autoFocus
+              />
+              <button type="submit" disabled={addBusy}>Add</button>
+              <button type="button" disabled={addBusy} onClick={() => { setAdding(false); setAddError(""); }}>Cancel</button>
+            </form>
+          ) : (
+            <button
+              type="button"
+              className="rd-add"
+              title="Add a NOS version"
+              onClick={() => { setAdding(true); setAddError(""); }}
+            >
+              +
+            </button>
+          )}
+          {addBusy ? (
+            <span className="rd-adding" role="status">
+              <span className="rd-spin" aria-hidden="true" />
+              Adding {draft.trim()}
+            </span>
+          ) : null}
+          {addError ? <span className="rd-add-error">{addError}</span> : null}
+          {selected.branch && selected.milestone !== selected.branch ? (
+            <span className="rd-branch" title={selected.sourcegraph || selected.branch}>{selected.branch}</span>
+          ) : null}
+        </div>
       </div>
 
       {data && !loading && (
@@ -197,6 +301,8 @@ export default function ReleaseDashboard() {
           <tbody>
             {feats.map((feat) => {
               const isOpen = openFeat === feat.name;
+              const handed = feat.tests.filter((test) => test.in_regression);
+              const pending = feat.tests.filter((test) => !test.in_regression);
               return (
                 <React.Fragment key={feat.name}>
                   <tr>
@@ -223,14 +329,12 @@ export default function ReleaseDashboard() {
                   {isOpen && (
                     <tr className="rd-expand">
                       <td colSpan={7}>
-                        <FeatTests
-                          title="Not handed over"
-                          tests={feat.tests.filter((test) => !test.in_regression)}
-                        />
-                        <FeatTests
-                          title="Handed over"
-                          tests={feat.tests.filter((test) => test.in_regression)}
-                        />
+                        <div className="rd-counts">
+                          <div>Handed over <strong>{handed.length}</strong></div>
+                          <div>Not handed over <strong>{pending.length}</strong></div>
+                        </div>
+                        {handed.length > 0 && <FeatTests title="Handed over" tests={handed} />}
+                        <FeatTests title="Not handed over" tests={pending} />
                       </td>
                     </tr>
                   )}

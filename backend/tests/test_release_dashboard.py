@@ -157,5 +157,42 @@ class ReleaseDashboardColorTests(unittest.TestCase):
         self.assertIsNone(data["feats"][0]["pass_rate"])
 
 
+class ReleaseBranchTests(unittest.TestCase):
+    def test_patch_versions_use_the_train_branch(self):
+        self.assertEqual(rd.nutest_branch_for("7.6.1"), {
+            "milestone": "7.6.1",
+            "branch": "ganges-7.6-stable",
+        })
+        self.assertEqual(rd.nutest_branch_for("7.5.1"), {
+            "milestone": "7.5.1",
+            "branch": "ganges-7.5-stable",
+        })
+        self.assertEqual(rd.nutest_branch_for("master")["branch"], "master")
+        self.assertEqual(rd.nutest_branch_for("ganges-7.6-stable")["milestone"], "7.6")
+
+    def test_added_version_uses_its_milestone_folder_and_train_branch(self):
+        info = rd.lookup_release("7.6.1")
+        self.assertEqual(info["root"], "test_sets/milestones/7.6.1/CDP")
+        self.assertEqual(info["branch"], "ganges-7.6-stable")
+
+    def test_custom_root_groups_a_release_that_is_not_built_in(self):
+        root = "test_sets/milestones/7.6.1/CDP"
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.t1", [
+                root + "/FEATS/FEAT-18439/suite.lst",
+                root + "/REGRESSION/official.lst",
+            ], status="Succeeded"),
+        ], "7.6.1", root=root, branch="ganges-7.6-stable")
+        self.assertEqual(data["feats"][0]["name"], "FEAT-18439")
+        self.assertEqual(data["feats"][0]["color"], "green")
+        self.assertEqual(data["branch"], "ganges-7.6-stable")
+        self.assertEqual(data["root"], root)
+
+    def test_known_releases_skip_the_search(self):
+        info = rd.lookup_release("7.6")
+        self.assertEqual(info["branch"], "ganges-7.6-stable")
+        self.assertEqual(info["root"], "test_sets/milestones/7.6/CDP")
+
+
 if __name__ == "__main__":
     unittest.main()
