@@ -25827,6 +25827,11 @@ def flux_nutest_branch():
         return jsonify({"error": "Failed to fetch JITA task %s" % task_id}), 502
 
 
+# Read-only release dashboard. Imported here so a failure cannot change earlier routes.
+from release_dashboard import register_routes as register_release_dashboard_routes
+register_release_dashboard_routes(app, jwt_required)
+
+
 # ======================================================
 # App Runner
 # ======================================================

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import RegressionHome from './RegressionHome';
+import ReleaseDashboard from './pages/ReleaseDashboard';
 import RunPlan from './pages/RunPlan';
 import Handover from './pages/Handover';
 import TestcaseManagement from './pages/TestcaseManagement';
@@ -17,6 +18,7 @@ import './App.css';
 
 const PAGE_COMPONENTS = {
   home: RegressionHome,
+  'release-dashboard': ReleaseDashboard,
   'run-plan': RunPlan,
   handover: Handover,
   testcase: TestcaseManagement,
@@ -51,6 +53,7 @@ function Dashboard() {
 
   const menuItems = [
     { id: 'home', label: 'Home', icon: '🏠', description: 'Regression Overview' },
+    { id: 'release-dashboard', label: 'Release Dashboard', icon: '🗂️', description: 'CDP feat handover status' },
     { id: 'run-plan', label: 'Run Plan', icon: '📅', description: 'Regression Scheduling' },
     { id: 'handover', label: 'Handover', icon: '📤', description: 'New Testcase Onboarding' },
     { id: 'testcase', label: 'Testcase Management', icon: '📋', description: 'Testcase Management' },

@@ -1,0 +1,161 @@
+"""Color rules for the read-only release dashboard."""
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import release_dashboard as rd  # noqa: E402
+
+
+def _row(name, paths, status="", issue_type="", tickets=None):
+    last_result = []
+    if status or issue_type or tickets:
+        last_result = [{
+            "pass_name": "overall",
+            "run": {
+                "status": status,
+                "issue_type": issue_type,
+                "tickets": tickets or [],
+            },
+        }]
+    return {
+        "name": name,
+        "test_case": {
+            "name": name,
+            "test_sets": paths,
+            "owners": ["owner@nutanix.com"],
+        },
+        "last_result": last_result,
+    }
+
+
+FEAT = "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/Kronos-FEAT-1/suite.lst"
+REG = "test_sets/milestones/7.7/CDP/FunctionalTest/REGRESSION/official.lst"
+TRANSIT = "test_sets/intransit/CDP/FunctionalTest/FEATS/Kronos-FEAT-1/suite.lst"
+OTHER_RELEASE = "test_sets/milestones/7.6/CDP/REGRESSION/official.lst"
+
+
+class ReleaseDashboardColorTests(unittest.TestCase):
+    def test_black_when_nothing_is_in_regression(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.t1", [FEAT]),
+            _row("cdp.a.Test.t2", [FEAT, TRANSIT, OTHER_RELEASE]),
+        ], "7.7")
+        feat = data["feats"][0]
+        self.assertEqual(feat["name"], "Kronos-FEAT-1")
+        self.assertEqual(feat["color"], "black")
+        self.assertEqual(feat["handed_over"], 0)
+        self.assertEqual(feat["total"], 2)
+
+    def test_black_when_handover_is_partial(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.t1", [FEAT, REG], status="Succeeded"),
+            _row("cdp.a.Test.t2", [FEAT]),
+        ], "7.7")
+        feat = data["feats"][0]
+        self.assertEqual(feat["color"], "black")
+        self.assertEqual(feat["handed_over"], 1)
+        self.assertEqual(feat["total"], 2)
+
+    def test_same_test_name_in_a_separate_regression_row_counts(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.t1", [FEAT]),
+            _row("cdp.a.Test.t1", [REG], status="Succeeded"),
+        ], "7.7")
+        feat = data["feats"][0]
+        self.assertEqual(feat["color"], "green")
+        self.assertEqual(feat["total"], 1)
+        self.assertEqual(feat["tests"][0]["status"], "Succeeded")
+
+    def test_green_when_every_matched_test_passed(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.t1", [FEAT, REG], status="Succeeded"),
+            _row("cdp.a.Test.t2", [FEAT, REG], status="Passed"),
+        ], "7.7")
+        self.assertEqual(data["feats"][0]["color"], "green")
+        self.assertEqual(data["feats"][0]["pass_rate"], 100)
+
+    def test_yellow_when_pass_rate_is_above_80(self):
+        rows = [
+            _row("cdp.a.Test.t%s" % i, [FEAT, REG], status="Succeeded")
+            for i in range(9)
+        ]
+        rows.append(_row(
+            "cdp.a.Test.fail",
+            [FEAT, REG],
+            status="Failed",
+            issue_type="Product",
+            tickets=["ENG-1"],
+        ))
+        feat = rd.build_dashboard(rows, "7.7")["feats"][0]
+        self.assertEqual(feat["color"], "yellow")
+        self.assertEqual(feat["pass_rate"], 90)
+        failed = feat["tests"][0]
+        self.assertEqual(failed["name"], "cdp.a.Test.fail")
+        self.assertEqual(failed["issue_type"], "Product")
+        self.assertEqual(failed["tickets"], ["ENG-1"])
+
+    def test_red_when_pass_rate_is_80_or_below(self):
+        rows = [
+            _row("cdp.a.Test.p%s" % i, [FEAT, REG], status="Succeeded")
+            for i in range(8)
+        ]
+        rows.extend(
+            _row("cdp.a.Test.f%s" % i, [FEAT, REG], status="Failed")
+            for i in range(2)
+        )
+        feat = rd.build_dashboard(rows, "7.7")["feats"][0]
+        self.assertEqual(feat["color"], "red")
+        self.assertEqual(feat["pass_rate"], 80)
+
+    def test_regression_folder_is_not_listed_as_a_feat(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.t1", [FEAT]),
+            _row("cdp.a.Test.t2", [REG], status="Failed"),
+        ], "7.7")
+        self.assertEqual([feat["name"] for feat in data["feats"]], ["Kronos-FEAT-1"])
+        self.assertEqual(data["root"], "test_sets/milestones/7.7/CDP/FunctionalTest")
+        self.assertIn("ganges-7.7-stable", data["sourcegraph"])
+
+    def test_nested_feat_folders_are_separate_rows(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.a", [
+                "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/FEAT-19686/FEAT-17396/a.lst",
+            ]),
+            _row("cdp.a.Test.b", [
+                "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/FEAT-19686/FEAT-18094/b.lst",
+            ]),
+            _row("cdp.a.Test.c", [
+                "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/FEAT-19506/c.lst",
+            ]),
+            _row("cdp.a.Test.reg", [REG], status="Failed"),
+        ], "7.7")
+        self.assertEqual(
+            [feat["name"] for feat in data["feats"]],
+            ["FEAT-19506", "FEAT-19686/FEAT-17396", "FEAT-19686/FEAT-18094"],
+        )
+
+    def test_7_6_groups_each_feat_under_feats(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.t1", [
+                "test_sets/milestones/7.6/CDP/FEATS/Janus-FEAT-1/suite.lst",
+                "test_sets/milestones/7.6/CDP/REGRESSION/official.lst",
+            ], status="Succeeded"),
+        ], "7.6")
+        self.assertEqual(data["feats"][0]["name"], "Janus-FEAT-1")
+        self.assertEqual(data["feats"][0]["color"], "green")
+        self.assertEqual(data["root"], "test_sets/milestones/7.6/CDP")
+        self.assertIn("ganges-7.6-stable", data["sourcegraph"])
+
+    def test_not_run_when_handover_is_complete_but_a_test_has_no_result(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.t1", [FEAT, REG], status="Succeeded"),
+            _row("cdp.a.Test.t2", [FEAT, REG]),
+        ], "7.7")
+        self.assertEqual(data["feats"][0]["color"], "not_run")
+        self.assertIsNone(data["feats"][0]["pass_rate"])
+
+
+if __name__ == "__main__":
+    unittest.main()
