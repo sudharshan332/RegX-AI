@@ -87,6 +87,7 @@ def _result_kind(status):
 
 def _ticket_ids(raw):
     ids = []
+    seen = set()
     for item in raw or []:
         if isinstance(item, str):
             text = item.strip()
@@ -100,8 +101,15 @@ def _ticket_ids(raw):
             ).strip()
         else:
             text = ""
-        if text and text not in ids:
-            ids.append(text)
+        if not text:
+            continue
+        if _JIRA_RE.fullmatch(text):
+            text = text.upper()
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        ids.append(text)
     return ids
 
 
@@ -229,11 +237,12 @@ def _run_time(run):
         return 0
 
 
-def _branch_run(item):
-    """Latest run recorded on this milestone, not a carried-over overall.
+def _chosen_entry(item):
+    """Latest pass entry on this milestone, not a carried-over overall.
 
     RC1/RC2/RC3 are the runs on this release. overall can say succeeded
-    when none of those passes actually ran.
+    when none of those passes actually ran. The entry (not just its run)
+    is kept so QI published on that pass stays with the same result.
     """
     last_result = item.get("last_result")
     if not isinstance(last_result, list):
@@ -247,19 +256,25 @@ def _branch_run(item):
         name = str(entry.get("pass_name") or "").strip()
         run = entry.get("run") if isinstance(entry.get("run"), dict) else {}
         if name.lower() == "overall":
-            overall = run
+            overall = entry
             continue
         if not name:
             continue
         has_branch_pass = True
         if str(run.get("status") or "").strip():
-            ran.append((_run_time(run), _pass_number(name), run))
+            ran.append((_run_time(run), _pass_number(name), entry))
     if has_branch_pass:
         if not ran:
             return {}
         ran.sort()
         return ran[-1][2]
     return overall if isinstance(overall, dict) else {}
+
+
+def _branch_run(item):
+    entry = _chosen_entry(item)
+    run = entry.get("run") if isinstance(entry, dict) else None
+    return run if isinstance(run, dict) else {}
 
 
 def parse_row(item, milestone, root=None):
@@ -291,21 +306,52 @@ def parse_row(item, milestone, root=None):
         "owners": _owners(tc.get("owners")),
         "feats": feats,
         "target_branch": str(item.get("target_branch") or "").strip(),
+        "run_time": _run_time(run),
     }
 
 
-def _merge_test(existing, incoming):
+def _branch_rank(record, release_branch, milestone):
+    """2 this release, 1 branch unknown, 0 a different product line."""
+    target = record.get("target_branch") or ""
+    if not target:
+        return 1
+    if _branch_matches_release(target, release_branch, milestone):
+        return 2
+    return 0
+
+
+def _take_merged_status(existing, incoming):
+    existing["status"] = incoming["status"]
+    existing["issue_type"] = incoming["issue_type"]
+    existing["tickets"] = incoming["tickets"]
+    existing["run_time"] = incoming.get("run_time") or 0
+    if incoming.get("target_branch"):
+        existing["target_branch"] = incoming["target_branch"]
+
+
+def _merge_test(existing, incoming, release_branch, milestone):
     existing["in_regression"] = existing["in_regression"] or incoming["in_regression"]
-    if _blank_status(existing["status"]) and not _blank_status(incoming["status"]):
-        existing["status"] = incoming["status"]
-        existing["issue_type"] = incoming["issue_type"]
-        existing["tickets"] = incoming["tickets"]
     if not existing["owners"] and incoming["owners"]:
         existing["owners"] = incoming["owners"]
-    if incoming.get("target_branch") and not existing.get("target_branch"):
-        existing["target_branch"] = incoming["target_branch"]
     for key, display in incoming["feats"].items():
         existing["feats"].setdefault(key, display)
+    existing_rank = _branch_rank(existing, release_branch, milestone)
+    incoming_rank = _branch_rank(incoming, release_branch, milestone)
+    if incoming_rank > existing_rank:
+        _take_merged_status(existing, incoming)
+        return
+    if incoming_rank < existing_rank:
+        return
+    incoming_time = incoming.get("run_time") or 0
+    existing_time = existing.get("run_time") or 0
+    if incoming_time > existing_time:
+        _take_merged_status(existing, incoming)
+        return
+    if incoming_time == existing_time and _blank_status(existing["status"]) and not _blank_status(incoming["status"]):
+        _take_merged_status(existing, incoming)
+        return
+    if incoming.get("target_branch") and not existing.get("target_branch"):
+        existing["target_branch"] = incoming["target_branch"]
 
 
 def _color(tests):
@@ -320,16 +366,16 @@ def _color(tests):
         return "not_run", None, handed, passed, failed, not_run
     if failed == 0:
         return "green", 100, handed, passed, failed, not_run
-    rate = (100.0 * passed) / (passed + failed)
+    rate = int(round((100.0 * passed) / (passed + failed)))
     color = "yellow" if rate > 80 else "red"
-    return color, round(rate), handed, passed, failed, not_run
+    return color, rate, handed, passed, failed, not_run
 
 
 def _branch_matches_release(target_branch, release_branch, milestone):
     """True when this row's branch is the selected release, including its -pc build."""
     branch = (target_branch or "").strip().lower()
     release = (release_branch or "").strip().lower()
-    if not branch:
+    if not branch or branch.startswith("ncc"):
         return False
     if release and (branch == release or branch.startswith(release + "-")):
         return True
@@ -354,7 +400,7 @@ def build_dashboard(rows, milestone, root=None, branch=None):
             parsed["name_key"] = key
             by_name[key] = parsed
         else:
-            _merge_test(current, parsed)
+            _merge_test(current, parsed, info["branch"], info["milestone"])
 
     for record in by_name.values():
         target = record.get("target_branch") or ""
@@ -577,16 +623,7 @@ def qi_tone(value):
 
 
 def _published_qi(item):
-    last_result = item.get("last_result")
-    if not isinstance(last_result, list):
-        return None
-    chosen = None
-    for entry in last_result:
-        if isinstance(entry, dict) and str(entry.get("pass_name") or "").lower() == "overall":
-            chosen = entry
-            break
-    if chosen is None and last_result and isinstance(last_result[0], dict):
-        chosen = last_result[0]
+    chosen = _chosen_entry(item)
     if not isinstance(chosen, dict):
         return None
     published = chosen.get("published")
@@ -1242,7 +1279,11 @@ def build_comparison(tcms_records, tag_results):
     """
     tcms = {}
     for rec in tcms_records or []:
-        key = rec["name"].lower()
+        if not isinstance(rec, dict):
+            continue
+        key = str(rec.get("name") or "").strip().lower()
+        if not key:
+            continue
         current = tcms.get(key)
         if current is None:
             tcms[key] = dict(rec)
@@ -1418,6 +1459,8 @@ def active_bugs_by_component(records, latest_jita):
     latest = latest_jita or {}
     buckets = {}
     for rec in records or []:
+        if not isinstance(rec, dict) or not str(rec.get("name") or "").strip():
+            continue
         for name in _record_components(rec):
             bucket = buckets.setdefault(name, {"tests": [], "names": set()})
             bucket["tests"].append(rec)

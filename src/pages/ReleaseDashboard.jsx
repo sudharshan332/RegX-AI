@@ -56,11 +56,6 @@ function readLastMilestone(username) {
   }
 }
 
-const COLOR_LABEL = {
-  green: "Passed",
-  not_run: "Not run",
-};
-
 const COLOR_HELP = {
   black: "Not handed over, or only some tests match. The number is the percent handed over.",
   red: "Handed over and executed. Pass rate is 80% or below.",
@@ -91,14 +86,49 @@ function jiraId(ticket) {
   return match ? match[0].toUpperCase() : String(ticket || "");
 }
 
-function statusLabel(feat) {
-  if (feat.color === "black") {
-    const pct = feat.total ? Math.round((100 * feat.handed_over) / feat.total) : 0;
-    return `${pct}%`;
-  }
-  if (feat.pass_rate != null) return `${feat.pass_rate}%`;
-  return COLOR_LABEL[feat.color] || "";
+function countOf(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number;
 }
+
+function handoverPct(feat) {
+  const total = countOf(feat.total);
+  if (!total) return null;
+  const handed = Math.min(countOf(feat.handed_over), total);
+  return Math.round((100 * handed) / total);
+}
+
+function executionPct(feat) {
+  const total = countOf(feat.total);
+  if (!total) return null;
+  const executed = Math.min(countOf(feat.passed) + countOf(feat.failed), total);
+  return Math.round((100 * executed) / total);
+}
+
+function executedPassPct(feat) {
+  const executed = countOf(feat.passed) + countOf(feat.failed);
+  if (!executed) return 0;
+  return Math.round((100 * countOf(feat.passed)) / executed);
+}
+
+function pctLabel(pct) {
+  return pct == null ? "—" : `${pct}%`;
+}
+
+function bandColor(pct) {
+  if (pct == null || pct <= 0) return "black";
+  if (pct <= 79) return "red";
+  if (pct < 100) return "yellow";
+  return "green";
+}
+
+const BAND_HELP = {
+  black: "0%.",
+  red: "1% to 79%.",
+  yellow: "80% to 99%.",
+  green: "100%.",
+};
 
 function resultLabel(test) {
   const status = (test.status || "").trim();
@@ -493,7 +523,6 @@ export default function ReleaseDashboard() {
   }
 
   const feats = data?.feats || [];
-  const featSummary = data?.summary || {};
   const execution = summary?.execution || {};
   const handover = summary?.handover;
   const report = comparison?.comparison;
@@ -517,7 +546,7 @@ export default function ReleaseDashboard() {
 
   function exportExcel() {
     const rows = [[
-      "Feat", "Handed over", "Passed", "Failed", "Not run", "Pass %", "Status",
+      "Feat", "Handed over", "Passed", "Failed", "Not run", "Pass %", "Handover %", "Execution %", "Pass %",
     ]];
     feats.forEach((feat) => {
       const handed = (feat.tests || []).filter((test) => test.in_regression);
@@ -529,7 +558,9 @@ export default function ReleaseDashboard() {
         feat.failed,
         feat.not_run,
         feat.pass_rate == null ? "—" : `${feat.pass_rate}%`,
-        statusLabel(feat),
+        pctLabel(handoverPct(feat)),
+        pctLabel(executionPct(feat)),
+        pctLabel(executedPassPct(feat)),
       ]);
       rows.push(["Handed over", handed.length, "Not handed over", pending.length]);
       const addTests = (title, tests) => {
@@ -556,7 +587,7 @@ export default function ReleaseDashboard() {
     });
     const sheet = XLSX.utils.aoa_to_sheet(rows);
     sheet["!cols"] = [
-      { wch: 80 }, { wch: 16 }, { wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 12 }, { wch: 14 },
+      { wch: 80 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 12 },
     ];
     const book = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book, sheet, "Release");
@@ -1055,11 +1086,6 @@ export default function ReleaseDashboard() {
           {data && !loading && (
             <div className="rd-metrics">
               <div className="rd-metric">{data.feat_count} feats</div>
-              <ColorTip color="black" className="rd-metric"><span className="rd-swatch rd-black" />{featSummary.black || 0}</ColorTip>
-              <ColorTip color="red" className="rd-metric"><span className="rd-swatch rd-red" />{featSummary.red || 0}</ColorTip>
-              <ColorTip color="yellow" className="rd-metric"><span className="rd-swatch rd-yellow" />{featSummary.yellow || 0}</ColorTip>
-              <ColorTip color="green" className="rd-metric"><span className="rd-swatch rd-green" />{featSummary.green || 0}</ColorTip>
-              <ColorTip color="not_run" className="rd-metric"><span className="rd-swatch rd-not_run" />{featSummary.not_run || 0}</ColorTip>
               <button type="button" className="rd-export" onClick={exportExcel}>Export</button>
             </div>
           )}
@@ -1072,6 +1098,13 @@ export default function ReleaseDashboard() {
           )}
 
           {feats.length > 0 && (
+            <>
+            <div className="rd-legend">
+              <span className="rd-legend-item"><span className="rd-swatch rd-black" />0%</span>
+              <span className="rd-legend-item"><span className="rd-swatch rd-red" />1% to 79%</span>
+              <span className="rd-legend-item"><span className="rd-swatch rd-yellow" />80% to 99%</span>
+              <span className="rd-legend-item"><span className="rd-swatch rd-green" />100%</span>
+            </div>
             <table className="rd-table">
               <thead>
                 <tr>
@@ -1081,14 +1114,17 @@ export default function ReleaseDashboard() {
                   <th>Failed</th>
                   <th>Not run</th>
                   <th>Pass %</th>
-                  <th>Status</th>
+                  <th>Handover %</th>
+                  <th>Execution %</th>
+                  <th>Pass %</th>
                 </tr>
               </thead>
               <tbody>
                 {feats.map((feat) => {
                   const isOpen = openFeats.has(feat.name);
-                  const handed = feat.tests.filter((test) => test.in_regression);
-                  const pending = feat.tests.filter((test) => !test.in_regression);
+                  const tests = feat.tests || [];
+                  const handed = tests.filter((test) => test.in_regression);
+                  const pending = tests.filter((test) => !test.in_regression);
                   return (
                     <React.Fragment key={feat.name}>
                       <tr>
@@ -1107,14 +1143,24 @@ export default function ReleaseDashboard() {
                         <td>{feat.not_run}</td>
                         <td>{feat.pass_rate == null ? "—" : `${feat.pass_rate}%`}</td>
                         <td>
-                          <ColorTip color={feat.color} className="rd-color-end">
-                            <span className={`rd-status-box rd-${feat.color}`}>{statusLabel(feat)}</span>
+                          <ColorTip color={bandColor(handoverPct(feat))} help={BAND_HELP[bandColor(handoverPct(feat))]} className="rd-color-end">
+                            <span className={`rd-status-box rd-${bandColor(handoverPct(feat))}`}>{pctLabel(handoverPct(feat))}</span>
+                          </ColorTip>
+                        </td>
+                        <td>
+                          <ColorTip color={bandColor(executionPct(feat))} help={`(passed + failed) / total. ${BAND_HELP[bandColor(executionPct(feat))]}`} className="rd-color-end">
+                            <span className={`rd-status-box rd-${bandColor(executionPct(feat))}`}>{pctLabel(executionPct(feat))}</span>
+                          </ColorTip>
+                        </td>
+                        <td>
+                          <ColorTip color={bandColor(executedPassPct(feat))} help={`passed / (passed + failed). ${BAND_HELP[bandColor(executedPassPct(feat))]}`} className="rd-color-end">
+                            <span className={`rd-status-box rd-${bandColor(executedPassPct(feat))}`}>{pctLabel(executedPassPct(feat))}</span>
                           </ColorTip>
                         </td>
                       </tr>
                       {isOpen && (
                         <tr className="rd-expand">
-                          <td colSpan={7}>
+                          <td colSpan={9}>
                             <div className="rd-counts">
                               <div>Handed over <strong>{handed.length}</strong></div>
                               <div>Not handed over <strong>{pending.length}</strong></div>
@@ -1129,6 +1175,7 @@ export default function ReleaseDashboard() {
                 })}
               </tbody>
             </table>
+            </>
           )}
         </div>
       )}

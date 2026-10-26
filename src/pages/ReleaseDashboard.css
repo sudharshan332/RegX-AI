@@ -467,6 +467,22 @@
   margin-bottom: 16px;
 }
 
+.rd-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: #52606d;
+  font-size: 13px;
+}
+
+.rd-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .rd-metric {
   display: inline-flex;
   align-items: center;
@@ -644,6 +660,7 @@
 }
 
 .rd-export {
+  margin-left: auto;
   height: 34px;
   padding: 0 14px;
   border: 1px solid #d5dbe3;
@@ -716,7 +733,7 @@
 .rd-test-green,
 .rd-test-green td { background: #d8f3dc; }
 .rd-test-not_run,
-.rd-test-not_run td { background: #fff4cc; }
+.rd-test-not_run td { background: #e4e7eb; }
 
 .rd-test-name {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
