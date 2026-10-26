@@ -72,13 +72,47 @@ function jiraId(ticket) {
 }
 
 function statusLabel(feat) {
-  if (feat.color === "black") {
-    const pct = feat.total ? Math.round((100 * feat.handed_over) / feat.total) : 0;
-    return `${pct}%`;
-  }
+  if (feat.color === "black") return handoverLabel(feat);
   if (feat.pass_rate != null) return `${feat.pass_rate}%`;
   return COLOR_LABEL[feat.color] || "";
 }
+
+function handoverPct(feat) {
+  const total = feat.total || 0;
+  if (!total) return null;
+  return Math.round((100 * (feat.handed_over || 0)) / total);
+}
+
+function handoverLabel(feat) {
+  const pct = handoverPct(feat);
+  return pct == null ? "—" : `${pct}%`;
+}
+
+function executionPct(feat) {
+  const total = feat.total || 0;
+  if (!total) return null;
+  return Math.round((100 * ((feat.passed || 0) + (feat.failed || 0))) / total);
+}
+
+function executionLabel(feat) {
+  const pct = executionPct(feat);
+  return pct == null ? "—" : `${pct}%`;
+}
+
+function executionColor(feat) {
+  const pct = executionPct(feat);
+  if (pct == null || pct <= 0) return "black";
+  if (pct <= 79) return "red";
+  if (pct < 100) return "yellow";
+  return "green";
+}
+
+const EXECUTION_HELP = {
+  black: "0% executed. Passed + failed is none of the tests.",
+  red: "1% to 79% executed. Passed + failed, as a percent of all tests.",
+  yellow: "80% to 99% executed. Passed + failed, as a percent of all tests.",
+  green: "100% executed. Every test has a pass or fail.",
+};
 
 function resultLabel(test) {
   const status = (test.status || "").trim();
@@ -235,7 +269,7 @@ export default function ReleaseDashboard() {
 
   function exportExcel() {
     const rows = [[
-      "Feat", "Handed over", "Passed", "Failed", "Not run", "Pass %", "Status",
+      "Feat", "Handed over", "Passed", "Failed", "Not run", "Pass %", "Handover %", "Execution %",
     ]];
     feats.forEach((feat) => {
       const handed = (feat.tests || []).filter((test) => test.in_regression);
@@ -248,6 +282,7 @@ export default function ReleaseDashboard() {
         feat.not_run,
         feat.pass_rate == null ? "—" : `${feat.pass_rate}%`,
         statusLabel(feat),
+        executionLabel(feat),
       ]);
       rows.push(["Handed over", handed.length, "Not handed over", pending.length]);
       const addTests = (title, tests) => {
@@ -274,7 +309,7 @@ export default function ReleaseDashboard() {
     });
     const sheet = XLSX.utils.aoa_to_sheet(rows);
     sheet["!cols"] = [
-      { wch: 80 }, { wch: 16 }, { wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 12 }, { wch: 14 },
+      { wch: 80 }, { wch: 16 }, { wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 12 }, { wch: 14 }, { wch: 14 },
     ];
     const book = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book, sheet, "Release");
@@ -362,7 +397,8 @@ export default function ReleaseDashboard() {
               <th>Failed</th>
               <th>Not run</th>
               <th>Pass %</th>
-              <th>Status</th>
+              <th>Handover %</th>
+              <th>Execution %</th>
             </tr>
           </thead>
           <tbody>
@@ -392,10 +428,15 @@ export default function ReleaseDashboard() {
                         <span className={`rd-status-box rd-${feat.color}`}>{statusLabel(feat)}</span>
                       </ColorTip>
                     </td>
+                    <td>
+                      <ColorTip color={executionColor(feat)} help={EXECUTION_HELP[executionColor(feat)]} className="rd-color-end">
+                        <span className={`rd-status-box rd-${executionColor(feat)}`}>{executionLabel(feat)}</span>
+                      </ColorTip>
+                    </td>
                   </tr>
                   {isOpen && (
                     <tr className="rd-expand">
-                      <td colSpan={7}>
+                      <td colSpan={8}>
                         <div className="rd-counts">
                           <div>Handed over <strong>{handed.length}</strong></div>
                           <div>Not handed over <strong>{pending.length}</strong></div>
