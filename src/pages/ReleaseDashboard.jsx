@@ -100,16 +100,23 @@ function statusLabel(feat) {
   return COLOR_LABEL[feat.color] || "";
 }
 
+function countOf(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number;
+}
+
 function executionPct(feat) {
-  const total = feat.total || 0;
+  const total = countOf(feat.total);
   if (!total) return null;
-  return Math.round((100 * ((feat.passed || 0) + (feat.failed || 0))) / total);
+  const executed = Math.min(countOf(feat.passed) + countOf(feat.failed), total);
+  return Math.round((100 * executed) / total);
 }
 
 function executedPassPct(feat) {
-  const executed = (feat.passed || 0) + (feat.failed || 0);
+  const executed = countOf(feat.passed) + countOf(feat.failed);
   if (!executed) return 0;
-  return Math.round((100 * (feat.passed || 0)) / executed);
+  return Math.round((100 * countOf(feat.passed)) / executed);
 }
 
 function pctLabel(pct) {
@@ -1123,8 +1130,9 @@ export default function ReleaseDashboard() {
               <tbody>
                 {feats.map((feat) => {
                   const isOpen = openFeats.has(feat.name);
-                  const handed = feat.tests.filter((test) => test.in_regression);
-                  const pending = feat.tests.filter((test) => !test.in_regression);
+                  const tests = feat.tests || [];
+                  const handed = tests.filter((test) => test.in_regression);
+                  const pending = tests.filter((test) => !test.in_regression);
                   return (
                     <React.Fragment key={feat.name}>
                       <tr>

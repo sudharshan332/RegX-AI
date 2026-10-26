@@ -201,6 +201,16 @@ class ReleaseDashboardColorTests(unittest.TestCase):
         self.assertFalse(rd._branch_matches_release(
             "ncc-6.0.0-release", "ganges-7.6-stable", "7.6",
         ))
+        self.assertFalse(rd._branch_matches_release(
+            "ncc-7.6-release", "ganges-7.6-stable", "7.6",
+        ))
+        self.assertTrue(rd._branch_matches_release(
+            "ganges-7.6.1-stable-pc", "ganges-7.6-stable", "7.6.1",
+        ))
+        self.assertTrue(rd._branch_matches_release(
+            "AOS-ganges-7.6-stable-tar", "ganges-7.6-stable", "7.6",
+        ))
+        self.assertFalse(rd._branch_matches_release("", "ganges-7.6-stable", "7.6"))
 
     def test_not_run_when_handover_is_complete_but_a_test_has_no_result(self):
         data = rd.build_dashboard([
@@ -246,6 +256,94 @@ class ReleaseBranchTests(unittest.TestCase):
         info = rd.lookup_release("7.6")
         self.assertEqual(info["branch"], "ganges-7.6-stable")
         self.assertEqual(info["root"], "test_sets/milestones/7.6/CDP")
+
+    def test_bad_versions_and_roots_are_rejected(self):
+        self.assertIsNone(rd.nutest_branch_for(""))
+        self.assertIsNone(rd.nutest_branch_for("7"))
+        self.assertIsNone(rd.nutest_branch_for("7.6.1/../../etc"))
+        with self.assertRaises(rd.DashboardError):
+            rd.lookup_release("nope")
+        self.assertEqual(rd._safe_root("test_sets/milestones/7.6/../secret"), "")
+        empty = rd.build_dashboard(
+            [_row("cdp.a.Test.t1", [FEAT], status="Succeeded")],
+            "7.7",
+            root="test_sets/milestones/7.7/../secret",
+        )
+        self.assertEqual(empty["feats"], [])
+
+    def test_matching_branch_row_beats_an_earlier_other_product_row(self):
+        first = _row("cdp.a.Test.t1", [FEAT], status="Succeeded")
+        first["target_branch"] = "ncc-7.7-release"
+        second = _row("cdp.a.Test.t1", [REG])
+        second["target_branch"] = "ganges-7.7-stable"
+        second["last_result"] = [{
+            "pass_name": "RC1",
+            "run": {"status": "Failed", "end_time": {"$date": 50}, "tickets": ["ENG-9"]},
+        }]
+        data = rd.build_dashboard([first, second], "7.7")
+        test = data["feats"][0]["tests"][0]
+        self.assertEqual(test["status"], "Failed")
+        self.assertEqual(test["tickets"], ["ENG-9"])
+        self.assertTrue(test["in_regression"])
+        self.assertEqual(data["feats"][0]["color"], "red")
+
+    def test_later_not_run_on_this_branch_beats_an_older_failure(self):
+        older = _row("cdp.a.Test.t1", [FEAT, REG])
+        older["target_branch"] = "ganges-7.7-stable"
+        older["last_result"] = [{
+            "pass_name": "RC1",
+            "run": {"status": "Failed", "end_time": {"$date": 10}},
+        }]
+        newer = _row("cdp.a.Test.t1", [FEAT, REG])
+        newer["target_branch"] = "ganges-7.7-stable-pc"
+        newer["last_result"] = [{
+            "pass_name": "RC2",
+            "run": {"status": "Not run", "end_time": {"$date": 20}},
+        }]
+        data = rd.build_dashboard([older, newer], "7.7")
+        self.assertEqual(data["feats"][0]["tests"][0]["status"], "Not run")
+        self.assertEqual(data["feats"][0]["color"], "not_run")
+
+    def test_missing_target_branch_still_uses_the_result(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.t1", [FEAT, REG], status="Succeeded"),
+        ], "7.7")
+        self.assertEqual(data["feats"][0]["tests"][0]["status"], "Succeeded")
+        self.assertEqual(data["feats"][0]["color"], "green")
+
+    def test_displayed_pass_rate_matches_the_color_band(self):
+        rows = [
+            _row("cdp.a.Test.p%s" % i, [FEAT, REG], status="Succeeded")
+            for i in range(804)
+        ]
+        rows.extend(
+            _row("cdp.a.Test.f%s" % i, [FEAT, REG], status="Error")
+            for i in range(196)
+        )
+        feat = rd.build_dashboard(rows, "7.7")["feats"][0]
+        self.assertEqual(feat["pass_rate"], 80)
+        self.assertEqual(feat["color"], "red")
+        self.assertEqual(feat["failed"], 196)
+
+    def test_one_test_in_two_feat_folders_is_listed_on_both(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.shared", [
+                "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/Alpha/a.lst",
+                "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/Beta/b.lst",
+                REG,
+            ], status="Succeeded"),
+        ], "7.7")
+        self.assertEqual([feat["name"] for feat in data["feats"]], ["Alpha", "Beta"])
+        self.assertEqual(data["feats"][0]["total"], 1)
+        self.assertEqual(data["feats"][1]["total"], 1)
+
+    def test_owners_and_tickets_from_dicts_are_kept(self):
+        row = _row("cdp.a.Test.t1", [FEAT, REG], status="Failed")
+        row["test_case"]["owners"] = [{"email": "a@nutanix.com"}, "b@nutanix.com", {"email": "a@nutanix.com"}]
+        row["last_result"][0]["run"]["tickets"] = [{"key": "eng-4"}, "ENG-4", "ENG-5"]
+        test = rd.build_dashboard([row], "7.7")["feats"][0]["tests"][0]
+        self.assertEqual(test["owners"], ["a@nutanix.com", "b@nutanix.com"])
+        self.assertEqual(test["tickets"], ["ENG-4", "ENG-5"])
 
 
 ROOT_761 = "test_sets/milestones/7.6.1/CDP"
@@ -560,6 +658,37 @@ class ReleaseSummaryTests(unittest.TestCase):
         ])
         self.assertEqual(rd.load_jita_tags("7.6.1", path=path), saved)
         self.assertEqual(rd.load_jita_tags("7.7", path=path), [])
+
+    def test_qi_comes_from_the_pass_that_supplied_the_status(self):
+        row = _summary_row("cdp.a.Test.t1", [FEAT_761, REG_761], status="Succeeded", qi=99)
+        row["last_result"] = [
+            {"pass_name": "overall", "run": {"status": "Succeeded"}, "published": {"operation_success_percentage": 99}},
+            {"pass_name": "RC2", "run": {"status": "Failed", "end_time": {"$date": 5}}, "published": {"operation_success_percentage": 40}},
+        ]
+        summary = rd.build_summary([row], "7.6.1", "all", root=ROOT_761, branch="ganges-7.6-stable")
+        self.assertEqual(summary["execution"]["failed"], 1)
+        self.assertEqual(summary["execution"]["qi"], 40.0)
+        blank = _summary_row("cdp.a.Test.t2", [FEAT_761], qi=99)
+        blank["last_result"] = [
+            {"pass_name": "overall", "run": {"status": "Succeeded"}, "published": {"operation_success_percentage": 99}},
+            {"pass_name": "RC1", "run": {"status": ""}},
+        ]
+        quiet = rd.build_summary([blank], "7.6.1", "feat", root=ROOT_761, branch="ganges-7.6-stable")
+        self.assertEqual(quiet["execution"]["not_run"], 1)
+        self.assertIsNone(quiet["execution"]["qi"])
+
+    def test_comparison_and_bugs_skip_rows_without_a_name(self):
+        report = rd.build_comparison(
+            [{"status": "Failed", "result": "fail"}, None, {"name": "cdp.a", "status": "Failed", "result": "fail", "tickets": []}],
+            [{"label": "Full regression", "tag": "full", "tests": [None, {"status": "Failed"}, {"name": "cdp.a", "status": "Failed"}]}],
+        )
+        self.assertEqual(report["matched_count"], 1)
+        bugs = rd.active_bugs_by_component(
+            [{"result": "fail", "tickets": ["ENG-1"], "components": ["Curator"]}, {"name": "cdp.a", "result": "fail", "qi": 1, "tickets": ["ENG-1"], "components": ["Curator"]}],
+            {},
+        )
+        self.assertEqual(bugs[0]["component"], "Curator")
+        self.assertEqual(len(bugs[0]["top_qi"]), 1)
         with self.assertRaises(rd.DashboardError):
             rd.normalize_tags([{"label": "Full regression", "tag": "bad\ntag"}])
 
