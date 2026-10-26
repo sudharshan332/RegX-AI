@@ -1,7 +1,15 @@
 {
-  "generated_time": "2026-09-25T11:54:23.646985",
+  "generated_time": "2026-10-16T08:02:30.031946",
   "tag": "752_rc1",
   "task_ids": [
+    "6ad1d930b5e4758ea855c930",
+    "6ac5a1e3d24d82fe9cb975de",
+    "6abcfd55d24d825b0bbed6d9",
+    "6abcfd55d24d825b026d42e9",
+    "6abcf557b5e4756503a310db",
+    "6abcf556b5e47564fe7637d9",
+    "6abcf5568e79ce36a742f989",
+    "6abc9ca68e79ce43ff466a49",
     "6ab41d672bc0c4f62e5739e7",
     "6ab3f87ad24d82e7c58a84d5",
     "6ab3ef6a8e79cefda10c8609",
@@ -468,14 +476,6 @@
       "triage_genie_ticket": "ENG-951523",
       "jira_ticket": "",
       "match_status": ""
-    },
-    {
-      "testcase_name": "cdp.stargate.adaptive_rf3.io_integrity.test_adaptive_rf3.AdaptiveRF3IOIntegrity.test_adaptive_rf3___disk_removal_and_node_offline_parallel_with_encryption",
-      "regression_owner": "Sudharshan",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-885266",
-      "jira_ticket": "ENG-979593",
-      "match_status": "Unmatched"
     },
     {
       "testcase_name": "cdp.stargate.volume_group.grbac.test_volume_group_disk_rbac.TestVolumeGroupDiskRBAC.test_volume_group_disk_create",
@@ -2638,26 +2638,10 @@
       "match_status": "Matched"
     },
     {
-      "testcase_name": "cdp.stargate.erasure_code.test_ec_vm_clone_io_integrity.ECCloneVMIntegrityTest.test_ec_vm_clone_io_integrity",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-977521",
-      "jira_ticket": "",
-      "match_status": ""
-    },
-    {
       "testcase_name": "cdp.stargate.erasure_code.test_ec_mixed_io_integrity.ECMixedIOIntegrityTest~~~Blockstore_SPDK.test_ei_io_integrity",
       "regression_owner": "Shilpa",
       "status": "Failed",
       "triage_genie_ticket": "ENG-942286",
-      "jira_ticket": "",
-      "match_status": ""
-    },
-    {
-      "testcase_name": "cdp.stargate.erasure_code.test_ec_vm_clone_io_integrity.ECCloneVMIntegrityTest~~~Inline_EC.test_ec_vm_clone_io_integrity",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-977521",
       "jira_ticket": "",
       "match_status": ""
     },
@@ -2918,38 +2902,6 @@
       "match_status": ""
     },
     {
-      "testcase_name": "cdp.stargate.abs.test_abs_segmentation_upgrade.TestABSSegmentationUpgrade.test_abs_segmentation_block_enable_during_upgrade",
-      "regression_owner": "Unknown user",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-979590",
-      "jira_ticket": "",
-      "match_status": ""
-    },
-    {
-      "testcase_name": "cdp.stargate.abs.test_abs_segmentation_ns1_compatibility.TestABSSegmentationNS1Compatibility.test_abs_segmentation_enable_ns1_with_ns2",
-      "regression_owner": "Sudharshan",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-979590",
-      "jira_ticket": "",
-      "match_status": ""
-    },
-    {
-      "testcase_name": "cdp.stargate.abs.test_scsi3_pr.SCSI3PRTest~~~ABS_Segmentation.test_scsi3_pr",
-      "regression_owner": "Sudharshan",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-978730",
-      "jira_ticket": "ENG-984107",
-      "match_status": "Unmatched"
-    },
-    {
-      "testcase_name": "cdp.stargate.erasure_code.test_ec_vm_clone_io_integrity.ECCloneVMIntegrityTest~~~AES.test_ec_vm_clone_io_integrity___vaai_clone",
-      "regression_owner": "Shilpa",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-977521",
-      "jira_ticket": "",
-      "match_status": ""
-    },
-    {
       "testcase_name": "cdp.curator.goldsuite.test_curator_gold_suite.CuratorGoldSuiteTest.test_gold___planned_maintenance",
       "regression_owner": "Unknown user",
       "status": "Failed",
@@ -2961,17 +2913,17 @@
       "testcase_name": "cdp.stargate.erasure_code.node_down.test_ec_node_down_integrity.ECNodeDownIntegrityTest.test_ec_node_down_integrity___erasure_two_blocks_down",
       "regression_owner": "Shilpa",
       "status": "Failed",
-      "triage_genie_ticket": "",
+      "triage_genie_ticket": "ENG-969955",
       "jira_ticket": "ENG-924344",
-      "match_status": ""
+      "match_status": "Unmatched"
     },
     {
       "testcase_name": "cdp.stargate.erasure_code.node_down.test_ec_node_down_integrity.ECNodeDownIntegrityTest~~~AES.test_ec_node_down_integrity___erasure_two_blocks_down",
       "regression_owner": "Shilpa",
       "status": "Failed",
-      "triage_genie_ticket": "",
+      "triage_genie_ticket": "ENG-977340",
       "jira_ticket": "ENG-924344",
-      "match_status": ""
+      "match_status": "Unmatched"
     },
     {
       "testcase_name": "cdp.stargate.erasure_code.node_down.test_ec_node_down_integrity.ECNodeDownIntegrityTest~~~Inline_EC.test_ec_node_down_integrity___erasure_one_block_down",
@@ -2996,14 +2948,6 @@
       "triage_genie_ticket": "ENG-978764",
       "jira_ticket": "",
       "match_status": ""
-    },
-    {
-      "testcase_name": "cdp.stargate.abs.test_shared_vg_abs_io_integrity.ABSSharedVGTest~~~ABS_Segmentation.test_shared_vg_io_integrity___ei",
-      "regression_owner": "Sudharshan",
-      "status": "Failed",
-      "triage_genie_ticket": "ENG-984107",
-      "jira_ticket": "ENG-984107",
-      "match_status": "Matched"
     },
     {
       "testcase_name": "cdp.stargate.compression.test_compression.TestCompression.test_inline_compression_saving_with_upgrade",
@@ -3071,16 +3015,16 @@
     }
   ],
   "triage_summary": {
-    "total_failed_warning_count": 333,
-    "triaged_count": 218,
-    "triage_genie_count": 207,
-    "total_triage_genie_count": 296,
-    "triage_completed_percent": 65.5,
-    "triage_genie_percent": 95.0,
-    "total_triage_genie_percent": 88.9,
-    "matched_count": 74,
+    "total_failed_warning_count": 325,
+    "triaged_count": 215,
+    "triage_genie_count": 206,
+    "total_triage_genie_count": 290,
+    "triage_completed_percent": 66.2,
+    "triage_genie_percent": 95.8,
+    "total_triage_genie_percent": 89.2,
+    "matched_count": 73,
     "unmatched_count": 133,
-    "matched_percent": 35.7,
-    "unmatched_percent": 64.3
+    "matched_percent": 35.4,
+    "unmatched_percent": 64.6
   }
 }

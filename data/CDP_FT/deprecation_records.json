@@ -395,7 +395,205 @@
         "test_sets/cdp/regression_cdp_intransit_tests.lst"
       ],
       "commit_message": "Testcase Deprecation\n\nReviewers               : swapnil.wankhede@nutanix.com\nTickets resolved        : ENG-987072\nTests run               : \nTarget release          : master\nCode review URL         : \n\nRemove the testcase from the intransit files"
+    },
+    {
+      "test_name": "cdp.hades.disk_operations.test_disk_operations.TestDiskOperations.test_remove_add_disk",
+      "deprecation_date": "2026-10-23T12:09:29.832053",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+      "jira_tickets": [
+        "ENG-982271"
+      ],
+      "reviewers": [
+        "thanuja.c@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/SMART_QUAL/regression_cdp_smart_qual.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : thanuja.c@nutanix.com\nTickets resolved        : ENG-982271\nTests run               : \nTarget release          : ganges-7.6-stable\nCode review URL         : \n\nRemove nested 1.0 testcase from the 7.6.1 branch",
+      "gerrit_change_id": "625469",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/625469"
+    },
+    {
+      "test_name": "cdp.hades.nvme_hdd_support.test_nvme_hdd_node_ops.TestNvmeHddNodeOps.test_hybrid_node_add_to_hybrid_cluster",
+      "deprecation_date": "2026-10-23T12:09:29.832053",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+      "jira_tickets": [
+        "ENG-982271"
+      ],
+      "reviewers": [
+        "thanuja.c@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/SMART_QUAL/regression_cdp_smart_qual.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : thanuja.c@nutanix.com\nTickets resolved        : ENG-982271\nTests run               : \nTarget release          : ganges-7.6-stable\nCode review URL         : \n\nRemove nested 1.0 testcase from the 7.6.1 branch",
+      "gerrit_change_id": "625469",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/625469"
+    },
+    {
+      "test_name": "cdp.hades.bad_disk_tests.test_bad_disk_on_reboot.HandleBadDiskTest.test_disk_partition_removal",
+      "deprecation_date": "2026-10-23T12:09:29.832053",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+      "jira_tickets": [
+        "ENG-982271"
+      ],
+      "reviewers": [
+        "thanuja.c@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/SMART_QUAL/regression_cdp_smart_qual.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : thanuja.c@nutanix.com\nTickets resolved        : ENG-982271\nTests run               : \nTarget release          : ganges-7.6-stable\nCode review URL         : \n\nRemove nested 1.0 testcase from the 7.6.1 branch",
+      "gerrit_change_id": "625469",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/625469"
+    },
+    {
+      "test_name": "cdp.hades.disk_operations.test_disk_operations.TestDiskOperations.test_add_new_disk",
+      "deprecation_date": "2026-10-23T12:09:29.832053",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+      "jira_tickets": [
+        "ENG-982271"
+      ],
+      "reviewers": [
+        "thanuja.c@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/SMART_QUAL/regression_cdp_smart_qual.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : thanuja.c@nutanix.com\nTickets resolved        : ENG-982271\nTests run               : \nTarget release          : ganges-7.6-stable\nCode review URL         : \n\nRemove nested 1.0 testcase from the 7.6.1 branch",
+      "gerrit_change_id": "625469",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/625469"
+    },
+    {
+      "test_name": "cdp.hades.disk_service.test_bad_disk_on_reboot.HandleBadDiskTest.test_disk_partition_removal",
+      "deprecation_date": "2026-10-23T12:09:29.832053",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+      "jira_tickets": [
+        "ENG-982271"
+      ],
+      "reviewers": [
+        "thanuja.c@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/SMART_QUAL/regression_cdp_smart_qual.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : thanuja.c@nutanix.com\nTickets resolved        : ENG-982271\nTests run               : \nTarget release          : ganges-7.6-stable\nCode review URL         : \n\nRemove nested 1.0 testcase from the 7.6.1 branch",
+      "gerrit_change_id": "625469",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/625469"
+    },
+    {
+      "test_name": "cdp.hades.nvme_hdd_support.test_nvme_hdd_disk_replacement.TestNvmeHddDiskReplacement.test_hdd_addition_on_all_flash_nvme_node",
+      "deprecation_date": "2026-10-23T12:09:29.832053",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+      "jira_tickets": [
+        "ENG-982271"
+      ],
+      "reviewers": [
+        "thanuja.c@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/SMART_QUAL/regression_cdp_smart_qual.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : thanuja.c@nutanix.com\nTickets resolved        : ENG-982271\nTests run               : \nTarget release          : ganges-7.6-stable\nCode review URL         : \n\nRemove nested 1.0 testcase from the 7.6.1 branch",
+      "gerrit_change_id": "625469",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/625469"
+    },
+    {
+      "test_name": "cdp.hades.nvme_hdd_support.test_nvme_hdd_disk_replacement.TestNvmeHddDiskReplacement.test_hdd_replacement_with_nvme",
+      "deprecation_date": "2026-10-23T12:09:29.832053",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+      "jira_tickets": [
+        "ENG-982271"
+      ],
+      "reviewers": [
+        "thanuja.c@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/SMART_QUAL/regression_cdp_smart_qual.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : thanuja.c@nutanix.com\nTickets resolved        : ENG-982271\nTests run               : \nTarget release          : ganges-7.6-stable\nCode review URL         : \n\nRemove nested 1.0 testcase from the 7.6.1 branch",
+      "gerrit_change_id": "625469",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/625469"
+    },
+    {
+      "test_name": "cdp.hades.nvme_hdd_support.test_nvme_hdd_node_ops.TestNvmeHddNodeOps.test_hybrid_node_add_to_blockstore_eligible_cluster",
+      "deprecation_date": "2026-10-23T12:09:29.832053",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+      "jira_tickets": [
+        "ENG-982271"
+      ],
+      "reviewers": [
+        "thanuja.c@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/SMART_QUAL/regression_cdp_smart_qual.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : thanuja.c@nutanix.com\nTickets resolved        : ENG-982271\nTests run               : \nTarget release          : ganges-7.6-stable\nCode review URL         : \n\nRemove nested 1.0 testcase from the 7.6.1 branch",
+      "gerrit_change_id": "625469",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/625469"
+    },
+    {
+      "test_name": "cdp.hades.nvme_hdd_support.test_nvme_hdd_node_ops.TestNvmeHddNodeOps.test_hybrid_node_add_to_hybrid_cluster_with_ssd_hdd",
+      "deprecation_date": "2026-10-23T12:09:29.832053",
+      "by_whom": "swapnil.wankhede@nutanix.com",
+      "branch": "ganges-7.6-stable",
+      "lst_file": "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+      "jira_tickets": [
+        "ENG-982271"
+      ],
+      "reviewers": [
+        "thanuja.c@nutanix.com"
+      ],
+      "notes": "Deprecation CR requested via RegX.",
+      "cr_status": "created",
+      "lst_files": [
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/regression_cdp_nutest_official_gold_suite_ahv.lst",
+        "test_sets/milestones/7.6.1/CDP/REGRESSION/SMART_QUAL/regression_cdp_smart_qual.lst"
+      ],
+      "commit_message": "Testcase Deprecation\n\nReviewers               : thanuja.c@nutanix.com\nTickets resolved        : ENG-982271\nTests run               : \nTarget release          : ganges-7.6-stable\nCode review URL         : \n\nRemove nested 1.0 testcase from the 7.6.1 branch",
+      "gerrit_change_id": "625469",
+      "cr_url": "https://nugerrit.ntnxdpro.com/c/nutest-py3-tests/+/625469"
     }
   ],
-  "updated_at": "2026-09-28T05:53:44.964857"
+  "updated_at": "2026-10-23T12:09:38.903307"
 }

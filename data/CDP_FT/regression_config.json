@@ -1,11 +1,39 @@
 {
   "input_mode": "tag",
-  "default_tag": "752_rc1",
+  "default_tag": "7.6.1_RC",
   "added_tags": [
     "cdp_master_full_reg",
-    "752_rc1"
+    "752_rc1",
+    "7.6.1_RC"
   ],
-  "tag": "752_rc1",
+  "tag": "7.6.1_RC",
   "task_ids": [],
-  "tag_extra_task_ids": {}
+  "tag_extra_task_ids": {
+    "7.6.1_RC": [
+      "6ad0b6f02bc0c44f97438ce6",
+      "6ad0b707d24d82d599d50fb6",
+      "6ada2da92bc0c4b698cdbd1d",
+      "6ad32f1a2bc0c4be81b54b67",
+      "6ad98be9d24d8206d504f642",
+      "6ad98ade8e79ce6f6882cf1e",
+      "6ada2e988e79ce4e68419cc8",
+      "6ad10b5cb5e4755126471fb2",
+      "6ad0b8ead24d82d596090a27",
+      "6ad98c412bc0c4b6a71de5cb",
+      "6ad10b56d24d82d5912ad70b",
+      "6ad839b7b5e475896bdcafad",
+      "6ad838fa2bc0c485c0612dd9",
+      "6ad10b328e79ce6fe9e37f0c",
+      "6ad10b288e79ce78be2f08bb",
+      "6ad10b3c8e79ce5c6a070d0e",
+      "6ad98c7c8e79ce13f3b5318f",
+      "6ad0b6cdb5e475513b7776ba",
+      "6ad10b2d2bc0c44f935d8221",
+      "6ad83989b5e4758976161289",
+      "6ad0b9c22bc0c44f95412437",
+      "6ad10b63b5e475512cceee3c",
+      "6ad98ca82bc0c4b69061876a",
+      "6ad0b6d78e79ce8ffe90d205"
+    ]
+  }
 }
