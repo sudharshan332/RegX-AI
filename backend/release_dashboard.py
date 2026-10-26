@@ -45,6 +45,10 @@ class DashboardError(Exception):
     pass
 
 
+def _blank_status(status):
+    return (status or "").strip().lower() in ("", "not run", "not_run")
+
+
 def _result_kind(status):
     value = (status or "").strip().lower()
     if value in _PASS:
@@ -183,21 +187,52 @@ def classify_path(path, milestone, root=None):
     return "/".join(feat_parts), False
 
 
-def _overall_run(item):
+def _pass_number(name):
+    match = re.search(r"(\d+)\s*$", name or "")
+    return int(match.group(1)) if match else -1
+
+
+def _run_time(run):
+    value = run.get("end_time") or run.get("start_time")
+    if isinstance(value, dict):
+        value = value.get("$date")
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _branch_run(item):
+    """Latest run recorded on this milestone, not a carried-over overall.
+
+    RC1/RC2/RC3 are the runs on this release. overall can say succeeded
+    when none of those passes actually ran.
+    """
     last_result = item.get("last_result")
     if not isinstance(last_result, list):
         return {}
-    chosen = None
+    overall = None
+    ran = []
+    has_branch_pass = False
     for entry in last_result:
-        if isinstance(entry, dict) and str(entry.get("pass_name") or "").lower() == "overall":
-            chosen = entry
-            break
-    if chosen is None:
-        chosen = last_result[0] if last_result and isinstance(last_result[0], dict) else None
-    if not isinstance(chosen, dict):
-        return {}
-    run = chosen.get("run")
-    return run if isinstance(run, dict) else {}
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("pass_name") or "").strip()
+        run = entry.get("run") if isinstance(entry.get("run"), dict) else {}
+        if name.lower() == "overall":
+            overall = run
+            continue
+        if not name:
+            continue
+        has_branch_pass = True
+        if str(run.get("status") or "").strip():
+            ran.append((_run_time(run), _pass_number(name), run))
+    if has_branch_pass:
+        if not ran:
+            return {}
+        ran.sort()
+        return ran[-1][2]
+    return overall if isinstance(overall, dict) else {}
 
 
 def parse_row(item, milestone, root=None):
@@ -217,27 +252,31 @@ def parse_row(item, milestone, root=None):
             in_regression = True
     if not feats and not in_regression:
         return None
-    run = _overall_run(item)
-    tickets = _ticket_ids(run.get("tickets")) or _ticket_ids(item.get("tickets"))
+    run = _branch_run(item)
+    tickets = _ticket_ids(run.get("tickets"))
+    status = str(run.get("status") or "").strip() or "Not run"
     return {
         "name": name,
         "in_regression": in_regression,
-        "status": str(run.get("status") or "").strip(),
+        "status": status,
         "issue_type": str(run.get("issue_type") or "").strip(),
         "tickets": tickets,
         "owners": _owners(tc.get("owners")),
         "feats": feats,
+        "target_branch": str(item.get("target_branch") or "").strip(),
     }
 
 
 def _merge_test(existing, incoming):
     existing["in_regression"] = existing["in_regression"] or incoming["in_regression"]
-    if not existing["status"] and incoming["status"]:
+    if _blank_status(existing["status"]) and not _blank_status(incoming["status"]):
         existing["status"] = incoming["status"]
         existing["issue_type"] = incoming["issue_type"]
         existing["tickets"] = incoming["tickets"]
     if not existing["owners"] and incoming["owners"]:
         existing["owners"] = incoming["owners"]
+    if incoming.get("target_branch") and not existing.get("target_branch"):
+        existing["target_branch"] = incoming["target_branch"]
     for key, display in incoming["feats"].items():
         existing["feats"].setdefault(key, display)
 
@@ -259,6 +298,20 @@ def _color(tests):
     return color, round(rate), handed, passed, failed, not_run
 
 
+def _branch_matches_release(target_branch, release_branch, milestone):
+    """True when this row's branch is the selected release, including its -pc build."""
+    branch = (target_branch or "").strip().lower()
+    release = (release_branch or "").strip().lower()
+    if not branch:
+        return False
+    if release and (branch == release or branch.startswith(release + "-")):
+        return True
+    version = (milestone or "").strip().lower()
+    if not version:
+        return False
+    return re.search(r"(?<![\d.])" + re.escape(version) + r"(?![\d.])", branch) is not None
+
+
 def build_dashboard(rows, milestone, root=None, branch=None):
     info = release_info(milestone, root=root, branch=branch)
     if not info:
@@ -275,6 +328,13 @@ def build_dashboard(rows, milestone, root=None, branch=None):
             by_name[key] = parsed
         else:
             _merge_test(current, parsed)
+
+    for record in by_name.values():
+        target = record.get("target_branch") or ""
+        if target and not _branch_matches_release(target, info["branch"], info["milestone"]):
+            record["status"] = "Not run"
+            record["issue_type"] = ""
+            record["tickets"] = []
 
     feat_tests = {}
     for record in by_name.values():
@@ -345,6 +405,7 @@ def fetch_milestone_rows(milestone, root=None, branch=None):
                 "test_case.name": 1,
                 "test_case.test_sets": 1,
                 "test_case.owners": 1,
+                "target_branch": 1,
                 "last_result": 1,
             }},
             {"$skip": page * _PAGE_SIZE},

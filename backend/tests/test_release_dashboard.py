@@ -148,6 +148,60 @@ class ReleaseDashboardColorTests(unittest.TestCase):
         self.assertEqual(data["root"], "test_sets/milestones/7.6/CDP")
         self.assertIn("ganges-7.6-stable", data["sourcegraph"])
 
+    def test_overall_success_is_ignored_when_this_branch_did_not_run(self):
+        row = _row("cdp.a.Test.t1", [FEAT, REG])
+        row["last_result"] = [
+            {"pass_name": "overall", "run": {"status": "Succeeded"}},
+            {"pass_name": "RC1", "run": {"status": ""}},
+            {"pass_name": "RC2", "run": {"status": ""}},
+            {"pass_name": "RC3", "run": {"status": ""}},
+        ]
+        data = rd.build_dashboard([row], "7.7")
+        feat = data["feats"][0]
+        self.assertEqual(feat["tests"][0]["status"], "Not run")
+        self.assertEqual(feat["color"], "not_run")
+
+    def test_latest_branch_pass_wins_over_overall(self):
+        row = _row("cdp.a.Test.t1", [FEAT, REG])
+        row["last_result"] = [
+            {"pass_name": "overall", "run": {"status": "Succeeded"}},
+            {"pass_name": "RC1", "run": {"status": "Succeeded"}},
+            {"pass_name": "RC3", "run": {"status": "Failed"}},
+        ]
+        data = rd.build_dashboard([row], "7.7")
+        self.assertEqual(data["feats"][0]["tests"][0]["status"], "Failed")
+        self.assertEqual(data["feats"][0]["color"], "red")
+
+    def test_newer_branch_pass_wins_even_when_its_number_is_lower(self):
+        row = _row("cdp.a.Test.t1", [FEAT, REG])
+        row["last_result"] = [
+            {"pass_name": "overall", "run": {"status": "Succeeded", "end_time": {"$date": 300}}},
+            {"pass_name": "RC3", "run": {"status": "Succeeded", "end_time": {"$date": 100}}},
+            {"pass_name": "RC1", "run": {"status": "Failed", "end_time": {"$date": 200}}},
+        ]
+        data = rd.build_dashboard([row], "7.7")
+        self.assertEqual(data["feats"][0]["tests"][0]["status"], "Failed")
+
+    def test_result_from_another_product_branch_is_not_run(self):
+        row = _row("cdp.a.Test.t1", [FEAT, REG], status="Succeeded")
+        row["target_branch"] = "ncc-6.1.0-release"
+        data = rd.build_dashboard([row], "7.7")
+        self.assertEqual(data["feats"][0]["tests"][0]["status"], "Not run")
+
+    def test_pc_branch_matches_the_release_and_ncc_does_not(self):
+        self.assertTrue(rd._branch_matches_release(
+            "ganges-7.6-stable-pc", "ganges-7.6-stable", "7.6",
+        ))
+        self.assertTrue(rd._branch_matches_release(
+            "ganges-7.6.1-stable", "ganges-7.6-stable", "7.6.1",
+        ))
+        self.assertFalse(rd._branch_matches_release(
+            "ganges-7.6.1-stable", "ganges-7.6-stable", "7.6",
+        ))
+        self.assertFalse(rd._branch_matches_release(
+            "ncc-6.0.0-release", "ganges-7.6-stable", "7.6",
+        ))
+
     def test_not_run_when_handover_is_complete_but_a_test_has_no_result(self):
         data = rd.build_dashboard([
             _row("cdp.a.Test.t1", [FEAT, REG], status="Succeeded"),
