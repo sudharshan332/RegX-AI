@@ -53,7 +53,7 @@ function Dashboard() {
 
   const menuItems = [
     { id: 'home', label: 'Home', icon: '🏠', description: 'Regression Overview' },
-    { id: 'release-dashboard', label: 'Release Dashboard', icon: '🗂️', description: 'CDP feat handover status' },
+    { id: 'release-dashboard', label: 'Release Dashboard', icon: '🗂️', description: 'Release status and feat readiness' },
     { id: 'run-plan', label: 'Run Plan', icon: '📅', description: 'Regression Scheduling' },
     { id: 'handover', label: 'Handover', icon: '📤', description: 'New Testcase Onboarding' },
     { id: 'testcase', label: 'Testcase Management', icon: '📋', description: 'Testcase Management' },
