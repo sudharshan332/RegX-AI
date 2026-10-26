@@ -25833,7 +25833,13 @@ def flux_nutest_branch():
 
 # Read-only release dashboard. Imported here so a failure cannot change earlier routes.
 from release_dashboard import register_routes as register_release_dashboard_routes
-register_release_dashboard_routes(app, jwt_required)
+register_release_dashboard_routes(
+    app,
+    jwt_required,
+    fetch_tasks=fetch_regression_tasks,
+    fetch_results=fetch_test_results_batch_with_pagination,
+    qi_impact=calculate_bulk_issues_qi_impact,
+)
 
 
 # ======================================================
