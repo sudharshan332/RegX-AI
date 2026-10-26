@@ -22112,6 +22112,10 @@ def _query_jita_agave_test_results(raw_query, limit=50, sort_field="-start_time"
                 "[jita-analysis] GET agave_test_results returned %s items",
                 len(raw_items),
             )
+            return raw_items
+    except requests.Timeout as exc:
+        logger.warning("[jita-analysis] GET agave_test_results timed out: %s", exc)
+        return []
     except Exception as exc:
         logger.warning("[jita-analysis] GET agave_test_results failed: %s", exc)
 
@@ -22173,7 +22177,7 @@ def _fetch_handover_runs_for_test_name(test_name, branch, limit=HANDOVER_HISTORY
     if branch:
         regex_query["system_under_test.branch"] = branch
     items = filter_runs_for_branch(
-        _query_jita_agave_test_results(regex_query, limit=50),
+        _query_jita_agave_test_results(regex_query, limit=50, timeout=20),
         branch,
     )
     resolved, runs, ambiguous = pick_runs_for_test_query(test_name, items)
@@ -25843,4 +25847,4 @@ if __name__ == "__main__":
     host = os.getenv("FLASK_HOST", "0.0.0.0")
     port = int(os.getenv("FLASK_PORT", "5001"))
     debug = os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1", "yes")
-    app.run(host=host, port=port, debug=debug, use_reloader=False)
+    app.run(host=host, port=port, debug=debug, use_reloader=False, threaded=True)

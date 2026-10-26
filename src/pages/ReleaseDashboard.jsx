@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import * as XLSX from "xlsx";
 import api from "../api";
 import { API_BASE_URL } from "../config";
 import "./ReleaseDashboard.css";
@@ -52,7 +53,7 @@ const TEST_HELP = {
   black: "Not handed over.",
   red: "Failed.",
   green: "Passed.",
-  not_run: "No pass or fail result.",
+  not_run: "Not run on this branch.",
 };
 
 function ColorTip({ color, help, className, children }) {
@@ -77,6 +78,14 @@ function statusLabel(feat) {
   }
   if (feat.pass_rate != null) return `${feat.pass_rate}%`;
   return COLOR_LABEL[feat.color] || "";
+}
+
+function resultLabel(test) {
+  const status = (test.status || "").trim();
+  if (!status || status.toLowerCase() === "not run" || status.toLowerCase() === "not_run") {
+    return "Not run";
+  }
+  return status;
 }
 
 function testColor(test) {
@@ -113,7 +122,7 @@ function FeatTests({ title, tests }) {
                   {test.name}
                   <span className="rd-color-note">{TEST_HELP[color]}</span>
                 </td>
-                <td>{test.status || "—"}</td>
+                <td>{resultLabel(test)}</td>
                 <td>{test.issue_type || "—"}</td>
                 <td>
                   {(test.tickets || []).length === 0 && "—"}
@@ -143,7 +152,7 @@ export default function ReleaseDashboard() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState(null);
-  const [openFeat, setOpenFeat] = useState("");
+  const [openFeats, setOpenFeats] = useState(() => new Set());
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   const [addError, setAddError] = useState("");
@@ -158,12 +167,12 @@ export default function ReleaseDashboard() {
     setLoading(true);
     setError("");
     setData(null);
-    setOpenFeat("");
+    setOpenFeats(new Set());
     const params = { milestone };
     if (current.root) params.root = current.root;
     if (current.branch) params.branch = current.branch;
     api
-      .get(API, { params, timeout: 180000 })
+      .get(API, { params, timeout: 120000 })
       .then((response) => {
         if (!cancelled) setData(response.data);
       })
@@ -214,6 +223,63 @@ export default function ReleaseDashboard() {
   const feats = data?.feats || [];
 
   const summary = data?.summary || {};
+
+  function toggleFeat(name) {
+    setOpenFeats((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  function exportExcel() {
+    const rows = [[
+      "Feat", "Handed over", "Passed", "Failed", "Not run", "Pass %", "Status",
+    ]];
+    feats.forEach((feat) => {
+      const handed = (feat.tests || []).filter((test) => test.in_regression);
+      const pending = (feat.tests || []).filter((test) => !test.in_regression);
+      rows.push([
+        feat.name,
+        `${feat.handed_over}/${feat.total}`,
+        feat.passed,
+        feat.failed,
+        feat.not_run,
+        feat.pass_rate == null ? "—" : `${feat.pass_rate}%`,
+        statusLabel(feat),
+      ]);
+      rows.push(["Handed over", handed.length, "Not handed over", pending.length]);
+      const addTests = (title, tests) => {
+        if (title === "Handed over" && tests.length === 0) return;
+        rows.push([title]);
+        if (tests.length === 0) {
+          rows.push(["None"]);
+          return;
+        }
+        rows.push(["Test", "Status", "Bug type", "JIRA", "Owner"]);
+        tests.forEach((test) => {
+          rows.push([
+            test.name,
+            resultLabel(test),
+            test.issue_type || "—",
+            (test.tickets || []).map(jiraId).join(", ") || "—",
+            (test.owners || []).join(", ") || "—",
+          ]);
+        });
+      };
+      addTests("Handed over", handed);
+      addTests("Not handed over", pending);
+      rows.push([]);
+    });
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    sheet["!cols"] = [
+      { wch: 80 }, { wch: 16 }, { wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 12 }, { wch: 14 },
+    ];
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, sheet, "Release");
+    XLSX.writeFile(book, `release-${milestone}.xlsx`);
+  }
 
   return (
     <div className="rd-page">
@@ -275,6 +341,7 @@ export default function ReleaseDashboard() {
           <ColorTip color="yellow" className="rd-metric"><span className="rd-swatch rd-yellow" />{summary.yellow || 0}</ColorTip>
           <ColorTip color="green" className="rd-metric"><span className="rd-swatch rd-green" />{summary.green || 0}</ColorTip>
           <ColorTip color="not_run" className="rd-metric"><span className="rd-swatch rd-not_run" />{summary.not_run || 0}</ColorTip>
+          <button type="button" className="rd-export" onClick={exportExcel}>Export</button>
         </div>
       )}
 
@@ -300,7 +367,7 @@ export default function ReleaseDashboard() {
           </thead>
           <tbody>
             {feats.map((feat) => {
-              const isOpen = openFeat === feat.name;
+              const isOpen = openFeats.has(feat.name);
               const handed = feat.tests.filter((test) => test.in_regression);
               const pending = feat.tests.filter((test) => !test.in_regression);
               return (
@@ -310,7 +377,7 @@ export default function ReleaseDashboard() {
                       <button
                         type="button"
                         className="rd-feat-link"
-                        onClick={() => setOpenFeat(isOpen ? "" : feat.name)}
+                        onClick={() => toggleFeat(feat.name)}
                       >
                         {isOpen ? "▾" : "▸"} {feat.name}
                       </button>

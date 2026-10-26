@@ -833,7 +833,7 @@ export default function Handover() {
       const res = await api.post(
         JITA_ANALYSIS_API,
         { input, branch, min_passes_for_success: 1, use_sliding_eligibility: true },
-        { timeout: 120000, headers: { "Content-Type": "application/json" } }
+        { timeout: 180000, headers: { "Content-Type": "application/json" } }
       );
       if (res.data?.error) {
         setHandoverAnalysis({ error: res.data.error });
@@ -888,7 +888,7 @@ export default function Handover() {
       let errorMsg = "Failed to fetch JITA analysis.";
       
       if (err.code === "ECONNABORTED" || err.message?.includes("timeout")) {
-        errorMsg = "Request timed out after 2 minutes. The JITA task may be large or the server is slow. Please try again or check the JITA URL.";
+        errorMsg = "Request timed out. The JITA lookup is slow. Please try again.";
       } else if (err.message?.includes("Network Error") || err.code === "ERR_NETWORK" || err.code === "ECONNREFUSED") {
         errorMsg = "Network error: Unable to connect to the backend server. Please ensure:\n1. The backend is running (python3 backend/test_flask.py on port 5001)\n2. Your VPN is connected\n3. The backend server is accessible";
       } else if (err.response?.data?.error) {
