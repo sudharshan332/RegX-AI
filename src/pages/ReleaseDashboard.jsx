@@ -1107,7 +1107,6 @@ export default function ReleaseDashboard() {
           {feats.length > 0 && (
             <>
             <div className="rd-legend">
-              <span>Execution % is (passed + failed) / total. Pass % next to it is passed / (passed + failed).</span>
               <span className="rd-legend-item"><span className="rd-swatch rd-black" />0%</span>
               <span className="rd-legend-item"><span className="rd-swatch rd-red" />1% to 79%</span>
               <span className="rd-legend-item"><span className="rd-swatch rd-yellow" />80% to 99%</span>
