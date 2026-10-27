@@ -733,7 +733,7 @@
 .rd-test-green,
 .rd-test-green td { background: #d8f3dc; }
 .rd-test-not_run,
-.rd-test-not_run td { background: #fff4cc; }
+.rd-test-not_run td { background: #e4e7eb; }
 
 .rd-test-name {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

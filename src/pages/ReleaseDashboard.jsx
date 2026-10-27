@@ -56,11 +56,6 @@ function readLastMilestone(username) {
   }
 }
 
-const COLOR_LABEL = {
-  green: "Passed",
-  not_run: "Not run",
-};
-
 const COLOR_HELP = {
   black: "Not handed over, or only some tests match. The number is the percent handed over.",
   red: "Handed over and executed. Pass rate is 80% or below.",
@@ -91,19 +86,17 @@ function jiraId(ticket) {
   return match ? match[0].toUpperCase() : String(ticket || "");
 }
 
-function statusLabel(feat) {
-  if (feat.color === "black") {
-    const pct = feat.total ? Math.round((100 * feat.handed_over) / feat.total) : 0;
-    return `${pct}%`;
-  }
-  if (feat.pass_rate != null) return `${feat.pass_rate}%`;
-  return COLOR_LABEL[feat.color] || "";
-}
-
 function countOf(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return 0;
   return number;
+}
+
+function handoverPct(feat) {
+  const total = countOf(feat.total);
+  if (!total) return null;
+  const handed = Math.min(countOf(feat.handed_over), total);
+  return Math.round((100 * handed) / total);
 }
 
 function executionPct(feat) {
@@ -565,7 +558,7 @@ export default function ReleaseDashboard() {
         feat.failed,
         feat.not_run,
         feat.pass_rate == null ? "—" : `${feat.pass_rate}%`,
-        statusLabel(feat),
+        pctLabel(handoverPct(feat)),
         pctLabel(executionPct(feat)),
         pctLabel(executedPassPct(feat)),
       ]);
@@ -1150,8 +1143,8 @@ export default function ReleaseDashboard() {
                         <td>{feat.not_run}</td>
                         <td>{feat.pass_rate == null ? "—" : `${feat.pass_rate}%`}</td>
                         <td>
-                          <ColorTip color={feat.color} className="rd-color-end">
-                            <span className={`rd-status-box rd-${feat.color}`}>{statusLabel(feat)}</span>
+                          <ColorTip color={bandColor(handoverPct(feat))} help={BAND_HELP[bandColor(handoverPct(feat))]} className="rd-color-end">
+                            <span className={`rd-status-box rd-${bandColor(handoverPct(feat))}`}>{pctLabel(handoverPct(feat))}</span>
                           </ColorTip>
                         </td>
                         <td>
