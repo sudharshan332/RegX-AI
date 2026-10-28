@@ -12179,6 +12179,30 @@ def _ensure_retain_duration(retain, duration=RETAIN_DURATION_72H_MIN):
     return retain
 
 
+def _pin_rerun_retain(task_id, retain, auth):
+    """JITA /rerun can store exceptions as []. Write DataCorruptionError onto the new task."""
+    if not task_id or not isinstance(retain, dict) or not auth:
+        return
+    try:
+        resp = requests.put(
+            f"{JITA_BASE}/agave_tasks/{task_id}",
+            json={"retain_resources_config": retain},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            auth=auth,
+            verify=False,
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            logger.warning(
+                "[retrigger] retain pin %s HTTP %s: %s",
+                task_id, resp.status_code, (resp.text or "")[:300],
+            )
+        else:
+            logger.info("[retrigger] retain pin %s exceptions=DataCorruptionError", task_id)
+    except Exception as e:
+        logger.warning("[retrigger] retain pin %s failed: %s", task_id, e)
+
+
 @app.route("/mcp/regression/failed-analysis/retrigger-preview", methods=["POST"])
 @jwt_required
 def retrigger_preview_resource_config():
@@ -12323,6 +12347,9 @@ def _rerun_selected_tests(tests, overrides=None, parent_task_id=None, sync_to_tc
                 new_id = resp_data.get("_id")
                 if isinstance(new_id, dict) and "$oid" in new_id:
                     new_id = new_id["$oid"]
+                if new_id is not None:
+                    new_id = str(new_id)
+                _pin_rerun_retain(new_id, payload.get("retain_resources_config"), user_auth)
                 rerun_results.append({
                     "agave_task_id": task_id,
                     "success": True,
@@ -12474,6 +12501,7 @@ def retrigger_failed_testcases():
                         new_id = new_id["$oid"]
                     if new_id is not None:
                         new_id = str(new_id)
+                    _pin_rerun_retain(new_id, payload.get("retain_resources_config"), task_auth)
                     rerun_results.append({
                         "agave_task_id": task_id,
                         "success": True,
