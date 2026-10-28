@@ -939,7 +939,7 @@ export default function DynamicJobProfile() {
             onClick={() => setRetainSetupOnFailure(!retainSetupOnFailure)}
             role="switch"
             aria-checked={retainSetupOnFailure}
-            title="Retain test environment on failure (DataCorruptionError exception)"
+            title="On: retain the setup for every failure. Off: retain only on DataCorruptionError."
           >
             <div className="djp-toggle-knob" />
           </div>
