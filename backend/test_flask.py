@@ -13021,6 +13021,7 @@ def _build_rerun_payload(task_data, task_tests, overrides, username, sync_to_tcm
             spec["build"] = _sanitize_rm_build(spec["build"])
 
     retain = _ensure_retain_duration(task_data.get("retain_resources_config"), RETAIN_DURATION_72H_MIN)
+    retain["criteria"]["TEST_FAILURE"]["params"]["exceptions"] = ["DataCorruptionError"]
 
     sdk_opts = copy.deepcopy(task_data.get("sdk_installation_options") or {})
     if not isinstance(sdk_opts, dict):
