@@ -416,6 +416,7 @@ graph TB
         ENV8[CURSOR_BRIDGE_URL — default localhost:5002]
         ENV9[GERRIT_URL / GERRIT_HTTP_PASSWORD / SOURCEGRAPH_TOKEN]
         ENV10[REGX_USER_KEYS_FILE / REGX_ENCRYPTION_KEY]
+        ENV11[FLUX_API_BASE / REACT_APP_FLUX_API_BASE — Flux host]
     end
 
     subgraph "Filesystem"

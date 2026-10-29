@@ -16,7 +16,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FLUX_API_BASE = "http://10.61.4.219"
+DEFAULT_FLUX_API_BASE = "http://10.114.27.227/"
 REQUIRED_MCP_SERVERS = ("flux-jira-atlassian", "flux-gerrit")
 
 Transport = Callable[..., Any]

@@ -137,7 +137,7 @@ describe('Flux Quick Fix helpers', () => {
   });
 
   test('builds Flux task URL from record_id', () => {
-    expect(fluxTaskUrl(21)).toBe('http://10.61.4.219/task/21');
+    expect(fluxTaskUrl(21)).toBe('http://10.114.27.227/task/21');
     expect(fluxTaskUrl(21, 'http://example/task/21')).toBe('http://example/task/21');
     expect(fluxTaskUrl(null)).toBe('');
   });
