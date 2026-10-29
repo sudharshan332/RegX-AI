@@ -58,7 +58,7 @@ export function fluxCategoryLabel(category) {
 
 /** Flux UI / API origin (task pages live at {base}/task/{record_id}). */
 export const FLUX_UI_BASE = (
-  process.env.REACT_APP_FLUX_API_BASE || 'http://10.61.4.219'
+  process.env.REACT_APP_FLUX_API_BASE || 'http://10.114.27.227'
 ).replace(/\/$/, '');
 
 export function fluxTaskUrl(recordId, taskUrl = null) {
