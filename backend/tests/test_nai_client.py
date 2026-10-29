@@ -80,6 +80,155 @@ class TestNaiClient(unittest.TestCase):
         # Beta must not be preferred just because embeddings authenticated there.
         self.assertNotIn("nai-dre.beta.", bases[0])
 
+    def test_normalize_failing_code_object_passthrough(self):
+        self.assertEqual(
+            nai_client._normalize_failing_code(
+                {"file": "a.py", "line_range": "10-20", "snippet": "foo()"}
+            ),
+            {"file": "a.py", "line_range": "10-20", "snippet": "foo()"},
+        )
+        self.assertEqual(
+            nai_client._normalize_failing_code({"path": "b.py", "lines": "1"}),
+            {"file": "b.py", "line_range": "1", "snippet": ""},
+        )
+        # Legacy stringified value — surface as snippet so the UI shows something.
+        self.assertEqual(
+            nai_client._normalize_failing_code("someCall()"),
+            {"file": "", "line_range": "", "snippet": "someCall()"},
+        )
+        self.assertEqual(
+            nai_client._normalize_failing_code(None),
+            {"file": "", "line_range": "", "snippet": ""},
+        )
+
+    def test_normalize_str_list(self):
+        self.assertEqual(nai_client._normalize_str_list(None), [])
+        self.assertEqual(
+            nai_client._normalize_str_list(["a", "", "b"]),
+            ["a", "b"],
+        )
+        self.assertEqual(nai_client._normalize_str_list("single"), ["single"])
+
+    def test_normalize_tg_validation(self):
+        self.assertEqual(
+            nai_client._normalize_tg_validation(
+                {"ticket": "ENG-1", "verdict": "Correct", "reason": "match"}
+            ),
+            {"ticket": "ENG-1", "verdict": "Correct", "reason": "match"},
+        )
+        self.assertEqual(
+            nai_client._normalize_tg_validation(None, fallback_ticket="ENG-2"),
+            {"ticket": "ENG-2", "verdict": "", "reason": ""},
+        )
+
+    @patch.object(nai_client, "chat_text")
+    def test_analyze_testcase_with_nai_cdp_builds_triage_report(self, mock_chat):
+        model_response = (
+            '{\n'
+            '  "root_cause": "stargate FATAL at block_store.cc:718",\n'
+            '  "classification": "Product Issue",\n'
+            '  "confidence": "High",\n'
+            '  "suggested_fix": "Investigate CVM .99",\n'
+            '  "failing_code": {"file": "block_store.cc", "line_range": "718",'
+            '    "snippet": "CHECK(backing_store_)"},\n'
+            '  "related_components": ["stargate", "block_store"],\n'
+            '  "jira_duplicates": ["ENG-654321"],\n'
+            '  "tg_ticket_validation": {"ticket": "ENG-111",'
+            '    "verdict": "Incorrect", "reason": "different signature"},\n'
+            '  "triage_report": "h2. Bug Report: stargate FATAL\\n\\n'
+            'h3. Test Information\\n* *Testcase*: cdp.foo.bar\\n\\n'
+            'h3. Failure Summary\\nstargate FATAL at block_store.cc:718.\\n\\n'
+            'h3. Related Tickets\\n* ENG-654321 — Similar\\n\\n'
+            'h3. Links\\n* [Log Bundle|http://logs/x]"\n'
+            "}"
+        )
+        mock_chat.return_value = model_response
+        analysis = nai_client.analyze_testcase_with_nai(
+            testcase_name="cdp.foo.bar",
+            exception_summary="stargate crashed",
+            exception="FATAL ...",
+            test_log_url="http://logs/x",
+            jira_tickets=["ENG-999"],
+            triage_genie_ticket="ENG-111",
+            analysis_type="failed",
+        )
+        self.assertEqual(analysis["provider"], "nai")
+        self.assertEqual(analysis["classification"], "Product Issue")
+        self.assertEqual(
+            analysis["failing_code"],
+            {"file": "block_store.cc", "line_range": "718", "snippet": "CHECK(backing_store_)"},
+        )
+        self.assertEqual(analysis["related_components"], ["stargate", "block_store"])
+        self.assertEqual(analysis["jira_duplicates"], ["ENG-654321"])
+        self.assertEqual(analysis["tg_ticket_validation"]["verdict"], "Incorrect")
+        # Full JIRA-wiki triage report must be preserved for the "Skill Triage
+        # Report" section of the Deep AI "View details" modal.
+        self.assertIn("h2. Bug Report", analysis["triage_report"])
+        self.assertIn("h3. Test Information", analysis["triage_report"])
+        self.assertIn("h3. Failure Summary", analysis["triage_report"])
+        self.assertIn("h3. Related Tickets", analysis["triage_report"])
+        self.assertIn("h3. Links", analysis["triage_report"])
+        # The system prompt we routed to the model must contain the mandatory
+        # section checklist so non-reasoning NAI models still produce the
+        # structured report.
+        system_prompt = mock_chat.call_args[0][0]
+        self.assertIn("triage_report", system_prompt)
+        self.assertIn("Test Information", system_prompt)
+        self.assertIn("Failure Summary", system_prompt)
+        self.assertIn("Related Tickets", system_prompt)
+        self.assertIn("JIRA wiki markup", system_prompt)
+        # NAI has no MCP; the prompt must tell the model to work with the
+        # provided evidence and flag gaps instead of fabricating them.
+        self.assertIn("without live MCP tool access", system_prompt)
+
+    @patch.object(nai_client, "chat_text")
+    def test_analyze_testcase_with_nai_falls_back_when_model_emits_prose(self, mock_chat):
+        mock_chat.return_value = (
+            "stargate crashed because of X.\n\nh3. Failure Summary\nFATAL on CVM .99"
+        )
+        analysis = nai_client.analyze_testcase_with_nai(
+            testcase_name="cdp.foo.bar", exception_summary="stargate crashed"
+        )
+        # Even when the model forgets JSON, we must never return a blank
+        # Skill Triage Report — that's the bug the user hit on NAI SDK.
+        self.assertTrue(analysis["triage_report"])
+        self.assertIn("Failure Summary", analysis["triage_report"])
+        self.assertEqual(
+            analysis["failing_code"], {"file": "", "line_range": "", "snippet": ""}
+        )
+        self.assertEqual(analysis["classification"], "Unknown")
+
+    @patch.object(nai_client, "chat_text")
+    def test_analyze_testcase_with_nai_skipped_uses_rdm_prompt(self, mock_chat):
+        mock_chat.return_value = (
+            '{"root_cause": "Foundation failed", "classification": "Foundation Issue",'
+            ' "issue_category": "FOUNDATION", "confidence": "Medium",'
+            ' "suggested_fix": "retry", "failing_code": {},'
+            ' "related_components": ["foundation"],'
+            ' "existing_tickets": [{"ticket": "DIAL-123", "project": "DIAL",'
+            '   "match": "same error"}],'
+            ' "jira_duplicates": ["DIAL-123"],'
+            ' "recommended_action": "link_existing",'
+            ' "suggested_comment": "regx_rerun (DIAL-123)",'
+            ' "suggested_jira_project": "DIAL",'
+            ' "tg_ticket_validation": {"ticket": "DIAL-123",'
+            '   "verdict": "Correct", "reason": "match"},'
+            ' "triage_report": "h2. Skipped Test Triage\\n\\nh3. Links"}'
+        )
+        analysis = nai_client.analyze_testcase_with_nai(
+            testcase_name="cdp.foo.skip",
+            rdm_url="https://rdm.example/deploy/1",
+            rdm_message="Foundation failed",
+            analysis_type="skipped",
+        )
+        self.assertEqual(analysis["issue_category"], "FOUNDATION")
+        self.assertEqual(analysis["recommended_action"], "link_existing")
+        self.assertEqual(analysis["suggested_jira_project"], "DIAL")
+        self.assertEqual(len(analysis["existing_tickets"]), 1)
+        system_prompt = mock_chat.call_args[0][0]
+        self.assertIn("triage-rdm-deployment-failure", system_prompt)
+        self.assertIn("Deployment Failure Summary", system_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -130,6 +130,10 @@ class RetriggerPayloadTests(unittest.TestCase):
             payload["retain_resources_config"]["criteria"]["TEST_FAILURE"]["params"]["duration"],
             4320,
         )
+        self.assertEqual(
+            payload["retain_resources_config"]["criteria"]["TEST_FAILURE"]["params"]["exceptions"],
+            ["DataCorruptionError"],
+        )
 
     def test_pc_override_preserves_nos_cluster(self):
         payload = self.build(self.task, self.tests, {
@@ -514,6 +518,24 @@ class RetriggerPayloadTests(unittest.TestCase):
         self.assertEqual(
             payload["retain_resources_config"]["criteria"]["TEST_FAILURE"]["entity"],
             "CONTAINER",
+        )
+        self.assertEqual(
+            payload["retain_resources_config"]["criteria"]["TEST_FAILURE"]["params"]["exceptions"],
+            ["DataCorruptionError"],
+        )
+
+    def test_rerun_sets_data_corruption_error_even_when_source_retains_all(self):
+        self.task["retain_resources_config"]["criteria"]["TEST_FAILURE"]["params"]["exceptions"] = []
+        payload = self.build(self.task, self.tests, {}, "user")
+        self.assertEqual(
+            payload["retain_resources_config"]["criteria"]["TEST_FAILURE"]["params"]["exceptions"],
+            ["DataCorruptionError"],
+        )
+        self.task.pop("retain_resources_config")
+        missing = self.build(self.task, self.tests, {}, "user")
+        self.assertEqual(
+            missing["retain_resources_config"]["criteria"]["TEST_FAILURE"]["params"]["exceptions"],
+            ["DataCorruptionError"],
         )
 
     def test_sync_to_tcms_flag_included_when_enabled(self):

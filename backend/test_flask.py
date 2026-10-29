@@ -12185,6 +12185,30 @@ def _ensure_retain_duration(retain, duration=RETAIN_DURATION_72H_MIN):
     return retain
 
 
+def _pin_rerun_retain(task_id, retain, auth):
+    """JITA /rerun can store exceptions as []. Write DataCorruptionError onto the new task."""
+    if not task_id or not isinstance(retain, dict) or not auth:
+        return
+    try:
+        resp = requests.put(
+            f"{JITA_BASE}/agave_tasks/{task_id}",
+            json={"retain_resources_config": retain},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            auth=auth,
+            verify=False,
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            logger.warning(
+                "[retrigger] retain pin %s HTTP %s: %s",
+                task_id, resp.status_code, (resp.text or "")[:300],
+            )
+        else:
+            logger.info("[retrigger] retain pin %s exceptions=DataCorruptionError", task_id)
+    except Exception as e:
+        logger.warning("[retrigger] retain pin %s failed: %s", task_id, e)
+
+
 @app.route("/mcp/regression/failed-analysis/retrigger-preview", methods=["POST"])
 @jwt_required
 def retrigger_preview_resource_config():
@@ -12329,6 +12353,9 @@ def _rerun_selected_tests(tests, overrides=None, parent_task_id=None, sync_to_tc
                 new_id = resp_data.get("_id")
                 if isinstance(new_id, dict) and "$oid" in new_id:
                     new_id = new_id["$oid"]
+                if new_id is not None:
+                    new_id = str(new_id)
+                _pin_rerun_retain(new_id, payload.get("retain_resources_config"), user_auth)
                 rerun_results.append({
                     "agave_task_id": task_id,
                     "success": True,
@@ -12480,6 +12507,7 @@ def retrigger_failed_testcases():
                         new_id = new_id["$oid"]
                     if new_id is not None:
                         new_id = str(new_id)
+                    _pin_rerun_retain(new_id, payload.get("retain_resources_config"), task_auth)
                     rerun_results.append({
                         "agave_task_id": task_id,
                         "success": True,
@@ -13021,6 +13049,7 @@ def _build_rerun_payload(task_data, task_tests, overrides, username, sync_to_tcm
             spec["build"] = _sanitize_rm_build(spec["build"])
 
     retain = _ensure_retain_duration(task_data.get("retain_resources_config"), RETAIN_DURATION_72H_MIN)
+    retain["criteria"]["TEST_FAILURE"]["params"]["exceptions"] = ["DataCorruptionError"]
 
     sdk_opts = copy.deepcopy(task_data.get("sdk_installation_options") or {})
     if not isinstance(sdk_opts, dict):
@@ -25661,6 +25690,23 @@ def failed_analysis_deep_ai():
                 updated["deep_ai"]["root_cause"] = analysis.get("root_cause")
                 updated["deep_ai"]["classification"] = analysis.get("classification")
                 updated["deep_ai"]["confidence"] = analysis.get("confidence")
+                # Persist the full analysis so the Deep AI "View details" modal
+                # can re-render the Skill Triage Report after a page reload
+                # (previously only root_cause/classification/confidence were
+                # saved, so NAI + Cursor paths both lost `triage_report` on
+                # the cached read-back).
+                updated["deep_ai"]["suggested_fix"] = analysis.get("suggested_fix")
+                updated["deep_ai"]["failing_code"] = analysis.get("failing_code")
+                updated["deep_ai"]["related_components"] = analysis.get("related_components")
+                updated["deep_ai"]["jira_duplicates"] = analysis.get("jira_duplicates")
+                updated["deep_ai"]["triage_report"] = analysis.get("triage_report")
+                updated["deep_ai"]["tg_ticket_validation"] = (
+                    analysis.get("tg_ticket_validation")
+                    or first_level.get("tg_ticket_validation")
+                )
+                updated["deep_ai"]["ai_provider"] = provider
+                if provider == "nai":
+                    updated["deep_ai"]["model"] = nai_client.NAI_REASONING_DISPLAY
                 cached = persist_analysis_into_tag_payload(cached, testcase_id, updated)
                 # Also mirror session into cursor_ai for UX merge.
                 cursor_ai = dict(cached.get("cursor_ai") or {})
