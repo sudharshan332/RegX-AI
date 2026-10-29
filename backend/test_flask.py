@@ -25622,6 +25622,23 @@ def failed_analysis_deep_ai():
                 updated["deep_ai"]["root_cause"] = analysis.get("root_cause")
                 updated["deep_ai"]["classification"] = analysis.get("classification")
                 updated["deep_ai"]["confidence"] = analysis.get("confidence")
+                # Persist the full analysis so the Deep AI "View details" modal
+                # can re-render the Skill Triage Report after a page reload
+                # (previously only root_cause/classification/confidence were
+                # saved, so NAI + Cursor paths both lost `triage_report` on
+                # the cached read-back).
+                updated["deep_ai"]["suggested_fix"] = analysis.get("suggested_fix")
+                updated["deep_ai"]["failing_code"] = analysis.get("failing_code")
+                updated["deep_ai"]["related_components"] = analysis.get("related_components")
+                updated["deep_ai"]["jira_duplicates"] = analysis.get("jira_duplicates")
+                updated["deep_ai"]["triage_report"] = analysis.get("triage_report")
+                updated["deep_ai"]["tg_ticket_validation"] = (
+                    analysis.get("tg_ticket_validation")
+                    or first_level.get("tg_ticket_validation")
+                )
+                updated["deep_ai"]["ai_provider"] = provider
+                if provider == "nai":
+                    updated["deep_ai"]["model"] = nai_client.NAI_REASONING_DISPLAY
                 cached = persist_analysis_into_tag_payload(cached, testcase_id, updated)
                 # Also mirror session into cursor_ai for UX merge.
                 cursor_ai = dict(cached.get("cursor_ai") or {})
