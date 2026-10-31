@@ -19,6 +19,11 @@ import {
   shouldPostTriageScope,
   TG_SCOPE_POST_THRESHOLD,
 } from "./utils/regressionScope";
+import {
+  readHomeSelectedTag,
+  writeHomeSelectedTag,
+} from "./utils/browserSelectionStorage";
+import { useAuth } from "./context/AuthContext";
 import "./RegressionHome.css";
 
 const API_URL = `${API_BASE_URL}/mcp/regression/home`;
@@ -248,10 +253,9 @@ function BugPie({ segments, total, size = 150 }) {
   );
 }
 
-// Load tag from localStorage or use default
-const getStoredTag = () => {
-  const stored = localStorage.getItem("regressionDashboardTag");
-  return stored || DEFAULT_TAG;
+// Load tag from browser-local storage (never from shared backend).
+const getStoredTag = (user = null) => {
+  return readHomeSelectedTag(user) || DEFAULT_TAG;
 };
 
 
@@ -278,9 +282,10 @@ const getStoredAdvancedOptions = () => {
 };
 
 export default function RegressionHome() {
+  const { user } = useAuth();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [tag, setTag] = useState(getStoredTag());
+  const [tag, setTag] = useState(() => getStoredTag(null));
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [showAddRemoveTaskIds, setShowAddRemoveTaskIds] = useState(false);
   const [configTagInput, setConfigTagInput] = useState(tag);
@@ -395,7 +400,7 @@ export default function RegressionHome() {
     return trimmed.split(",").map(id => id.trim()).filter(id => id);
   };
 
-  // Load configuration from JSON file on component mount
+  // Load shared tag list / first-visit default from JSON; active tag is browser-local only.
   useEffect(() => {
     // Hidden Branches feature removed — drop stale client filter
     try {
@@ -409,14 +414,19 @@ export default function RegressionHome() {
         
         setAddedTags(config.added_tags || []);
         setDefaultTag(config.default_tag || null);
+
+        const browserTag = readHomeSelectedTag(user);
         
         if (config.input_mode === "tag") {
-          const effectiveTag = config.default_tag || config.tag || "";
+          // Prefer this browser/user's last tag; fall back to shared first-visit default.
+          const effectiveTag = browserTag || config.default_tag || config.tag || "";
           setTag(effectiveTag || null);
           setInputMode("tag");
           setConfigTagInput(effectiveTag);
           setModalInputMode("tag");
-          localStorage.setItem("regressionDashboardTag", effectiveTag || "");
+          if (effectiveTag) {
+            writeHomeSelectedTag(user, effectiveTag);
+          }
           localStorage.setItem("regressionDashboardInputMode", "tag");
           localStorage.removeItem("regressionDashboardTaskIds");
           setTaskIdsKey(null);
@@ -430,7 +440,7 @@ export default function RegressionHome() {
           setTaskIdsKey(taskIdsString);
           localStorage.setItem("regressionDashboardInputMode", "task_ids");
           localStorage.setItem("regressionDashboardTaskIds", taskIdsString);
-          localStorage.removeItem("regressionDashboardTag");
+          writeHomeSelectedTag(user, null);
         }
         setConfigLoaded(true);
       } catch (error) {
@@ -445,7 +455,7 @@ export default function RegressionHome() {
     api.get(TEAM_CONFIG_API)
       .then((res) => setTeamConfig(res.data?.team_config || {}))
       .catch((err) => console.error("Error loading team config:", err));
-  }, []); // Only run on mount
+  }, [user]); // Re-resolve when auth user id is available for scoped keys
 
   const activeConfigTag = (
     defaultTag ||
@@ -743,7 +753,8 @@ export default function RegressionHome() {
         // Update local state — reset Full regression link so prior job IDs never leak
         setTag(selectedTag || null);
         setConfigTagInput(selectedTag || "");
-        localStorage.setItem("regressionDashboardTag", selectedTag || "");
+        // Active tag is browser/user local; default_tag above is only the first-visit fallback.
+        writeHomeSelectedTag(user, selectedTag || null);
         localStorage.setItem("regressionDashboardInputMode", "tag");
         clearFullRegressionLink();
         setGlobalJitaTaskIds([]);
@@ -801,7 +812,7 @@ export default function RegressionHome() {
         // Store task IDs and clear tag (task_ids mode = selected job link)
         setTag(null);
         setDefaultTag(null);
-        localStorage.removeItem("regressionDashboardTag");
+        writeHomeSelectedTag(user, null);
         localStorage.setItem("regressionDashboardInputMode", "task_ids");
         const normalized = persistFullRegressionLink(taskIds, null);
         setGlobalJitaTaskIds(normalized);
@@ -2079,28 +2090,17 @@ export default function RegressionHome() {
             <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
               <label style={{ fontSize: "13px", fontWeight: "500", whiteSpace: "nowrap" }}>Tag:</label>
               <select
-                value={tag || defaultTag || ""}
+                value={tag || ""}
                 onChange={async (e) => {
                   const selected = e.target.value || null;
-                  if (selected === (tag || defaultTag)) return;
+                  if (selected === (tag || null)) return;
                   // Drop prior job's Full regression IDs before loading new tag
                   clearFullRegressionLink();
                   setGlobalJitaTaskIds([]);
                   setTag(selected);
-                  setDefaultTag(selected);
-                  localStorage.setItem("regressionDashboardTag", selected || "");
+                  // Persist only in this browser/user — never write shared default_tag.
+                  writeHomeSelectedTag(user, selected || null);
                   if (selected) {
-                    try {
-                      await api.post(CONFIG_API, {
-                        input_mode: "tag",
-                        default_tag: selected,
-                        added_tags: addedTags,
-                        tag: selected,
-                        task_ids: []
-                      });
-                    } catch (err) {
-                      console.error("Failed to save tag config:", err);
-                    }
                     setBranchQiData({});
                     await fetchData({ tag: selected });
                     await fetchTriageCount(selected);
@@ -2113,17 +2113,6 @@ export default function RegressionHome() {
                     setTriageAccuracyData(null);
                     setQiSummaryReport(null);
                     setBranchQiData({});
-                    try {
-                      await api.post(CONFIG_API, {
-                        input_mode: "tag",
-                        default_tag: null,
-                        added_tags: addedTags,
-                        tag: "",
-                        task_ids: []
-                      });
-                    } catch (err) {
-                      console.error("Failed to save tag config:", err);
-                    }
                   }
                 }}
                 style={{
