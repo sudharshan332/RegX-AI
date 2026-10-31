@@ -12,6 +12,11 @@ import {
 import { shouldRefetchOwnerJiraDetails } from "./utils/dashboardRefreshAfterAppend";
 import { classifyBugAge, resolveRunStartDate } from "./utils/bugAge";
 import {
+  homeDerivedTablesResetPayload,
+  planHomePageParallelLoads,
+  runHomePageLoadsInParallel,
+} from "./utils/homePageParallelLoad";
+import {
   clearFullRegressionLink,
   persistFullRegressionLink,
   readScopedFullRegressionTaskIds,
@@ -468,6 +473,43 @@ export default function RegressionHome() {
     }
   }, [showConfigModal]);
 
+  // Clear derived Home tables and flip per-section loaders so tag/config
+  // changes paint progressive placeholders instead of blocking the page.
+  const applyHomeDerivedTablesReset = () => {
+    const reset = homeDerivedTablesResetPayload();
+    const plan = planHomePageParallelLoads(advancedOptions);
+    setRows([]);
+    setOldestStartDate(null);
+    setLoading(true);
+    setLoadingTriage(true);
+    if (plan.fetches.includes("owner_triage_report")) {
+      setLoadingOwnerReport(true);
+    }
+    if (plan.fetches.includes("qi_summary")) {
+      setLoadingQiSummary(true);
+    }
+    if (plan.fetches.includes("triage_accuracy")) {
+      setLoadingTriageAccuracy(true);
+    }
+    if (plan.fetches.includes("tcms_overview")) {
+      setLoadingTcmsOverview(true);
+    }
+    setTriageCount(reset.triageCount);
+    setOwnerJiraDetails(reset.ownerJiraDetails);
+    setJiraDetailsError(reset.jiraDetailsError);
+    setBulkIssuesAiAnalysis(reset.bulkIssuesAiAnalysis);
+    setOwnerTicketsAiAnalysis(reset.ownerTicketsAiAnalysis);
+    setOwnerReportRows(reset.ownerReportRows);
+    setOwnerReportMeta(reset.ownerReportMeta);
+    setOwnerReportError(reset.ownerReportError);
+    setOwnerReportInvalid(reset.ownerReportInvalid);
+    setTriageAccuracyData(reset.triageAccuracyData);
+    setQiSummaryReport(reset.qiSummaryReport);
+    setTcmsOverviewData(reset.tcmsOverviewData);
+    setJitaTcmsComparison(reset.jitaTcmsComparison);
+    setBranchQiData(reset.branchQiData);
+  };
+
   // Fetch data based on current configuration
   const fetchData = async (params) => {
     try {
@@ -754,33 +796,25 @@ export default function RegressionHome() {
         
         // Close modal first
         setShowConfigModal(false);
-        
-        // Clear cached QI data so buttons re-appear for fresh load
-        setBranchQiData({});
 
-        // Fetch data only if a tag is selected
+        // Progressive Home loads: clear derived tables immediately. Tag /
+        // inputMode updates trigger independent useEffects in parallel —
+        // never await summary → triage → advanced sequentially.
+        applyHomeDerivedTablesReset();
+
         if (selectedTag) {
-          await fetchData({ tag: selectedTag });
-          await fetchTriageCount(selectedTag);
-          try {
-            if (advancedOptions.qiSummaryReport) {
-              await fetchQiSummaryReport(selectedTag);
-            } else {
-              setQiSummaryReport(null);
-              setLoadingQiSummary(false);
-            }
-            if (advancedOptions.triageAccuracy) {
-              await fetchTriageAccuracy(selectedTag);
-            }
-          } catch (error) {
-            console.error("Error loading advanced options data:", error);
+          if (!advancedOptions.qiSummaryReport) {
+            setLoadingQiSummary(false);
           }
         } else {
           setRows([]);
           setOldestStartDate(null);
-          setTriageCount(null);
-          setTriageAccuracyData(null);
-          setQiSummaryReport(null);
+          setLoading(false);
+          setLoadingTriage(false);
+          setLoadingOwnerReport(false);
+          setLoadingQiSummary(false);
+          setLoadingTriageAccuracy(false);
+          setLoadingTcmsOverview(false);
         }
       } else {
         // Task IDs mode
@@ -814,29 +848,11 @@ export default function RegressionHome() {
         // Close modal first
         setShowConfigModal(false);
 
-        // Clear cached QI data so buttons re-appear for fresh load
-        setBranchQiData({});
-        
-        // Fetch data automatically after save
-        await fetchData({ task_ids: taskIds.join(",") });
-        
-        // Triage Count is always loaded by default, checkbox only controls visibility
-        // Refresh triage count using task IDs
-        await fetchTriageCount(null, taskIds.join(","));
-        
-        // Fetch data if advanced options are enabled
-        try {
-          if (advancedOptions.qiSummaryReport) {
-            await fetchQiSummaryReport(null, taskIds.join(","));
-          } else {
-            setQiSummaryReport(null);
-            setLoadingQiSummary(false);
-          }
-          if (advancedOptions.triageAccuracy) {
-            await fetchTriageAccuracy(null, taskIds.join(","));
-          }
-        } catch (error) {
-          console.error("Error loading advanced options data:", error);
+        // Progressive Home loads — clear derived tables; taskIdsKey /
+        // inputMode updates fire independent useEffects in parallel.
+        applyHomeDerivedTablesReset();
+        if (!advancedOptions.qiSummaryReport) {
+          setLoadingQiSummary(false);
         }
       }
       
@@ -1061,18 +1077,18 @@ export default function RegressionHome() {
       : safeScopedTaskIds(savedMode === "tag" ? tag : null);
 
     if (savedMode === "tag" && tag) {
-      await Promise.all([
-        fetchOwnerTriageReport({ tagToUse: tag }),
-        fetchTriageCount(tag, null),
+      await runHomePageLoadsInParallel([
+        () => fetchOwnerTriageReport({ tagToUse: tag }),
+        () => fetchTriageCount(tag, null),
       ]);
       return;
     }
 
     if (ids.length > 0) {
       setOwnerReportTaskIds(ids);
-      await Promise.all([
-        fetchOwnerTriageReport({ taskIds: ids }),
-        fetchTriageCount(null, ids.join(",")),
+      await runHomePageLoadsInParallel([
+        () => fetchOwnerTriageReport({ taskIds: ids }),
+        () => fetchTriageCount(null, ids.join(",")),
       ]);
       return;
     }
@@ -1747,19 +1763,11 @@ export default function RegressionHome() {
   };
 
   // Note: Advanced options data is NOT loaded automatically on page load
-  // Data is only fetched when user explicitly saves the advanced options
+  // Data is only fetched when user explicitly saves the advanced options.
+  // Home tables load independently (progressive): do not gate the whole page
+  // on regression summary — each section renders as soon as its data is ready.
 
-  if (loading) {
-    return (
-      <div className="container">
-        <div style={{ padding: "20px", textAlign: "center" }}>
-          <div>Loading Regression Dashboard...</div>
-        </div>
-      </div>
-    );
-  }
-  
-    return (
+  return (
       <div className="container">
       {/* Tab Bar */}
       {deepAnalysisTabs.length > 0 && (
@@ -2086,6 +2094,10 @@ export default function RegressionHome() {
                   // Drop prior job's Full regression IDs before loading new tag
                   clearFullRegressionLink();
                   setGlobalJitaTaskIds([]);
+                  // Clear derived tables immediately so each section shows its
+                  // own loader; tag state change fires independent useEffects
+                  // in parallel (summary / triage / advanced) — no sequential await.
+                  applyHomeDerivedTablesReset();
                   setTag(selected);
                   setDefaultTag(selected);
                   localStorage.setItem("regressionDashboardTag", selected || "");
@@ -2101,18 +2113,15 @@ export default function RegressionHome() {
                     } catch (err) {
                       console.error("Failed to save tag config:", err);
                     }
-                    setBranchQiData({});
-                    await fetchData({ tag: selected });
-                    await fetchTriageCount(selected);
-                    if (advancedOptions.qiSummaryReport) await fetchQiSummaryReport(selected);
-                    if (advancedOptions.triageAccuracy) await fetchTriageAccuracy(selected);
                   } else {
                     setRows([]);
                     setOldestStartDate(null);
-                    setTriageCount(null);
-                    setTriageAccuracyData(null);
-                    setQiSummaryReport(null);
-                    setBranchQiData({});
+                    setLoading(false);
+                    setLoadingTriage(false);
+                    setLoadingOwnerReport(false);
+                    setLoadingQiSummary(false);
+                    setLoadingTriageAccuracy(false);
+                    setLoadingTcmsOverview(false);
                     try {
                       await api.post(CONFIG_API, {
                         input_mode: "tag",
@@ -2844,6 +2853,11 @@ export default function RegressionHome() {
       )}
 
         <h3 style={{ marginBottom: "10px" }}>Regression Summary</h3>
+        {loading ? (
+          <div className="rh-report-loading" style={{ marginBottom: "20px" }}>
+            Loading regression summary…
+          </div>
+        ) : (
         <table className="dashboard-table">
           <thead>
             <tr>
@@ -3082,8 +3096,9 @@ export default function RegressionHome() {
             })}
           </tbody>
         </table>
+        )}
 
-      {/* Triage Count Section */}
+      {/* Triage Count Section — loads independently of Regression Summary */}
       {advancedOptions.triageCount && (
         <div style={{ marginTop: "40px", padding: "20px", background: "#f8f9fa", borderRadius: "8px" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", marginBottom: "15px" }}>
@@ -3117,7 +3132,7 @@ export default function RegressionHome() {
           {/* Notebook-schema owner table — 1-Click moves to top-right in Phase 4 */}
           <div style={{ marginBottom: "20px" }}>
             <h4 style={{ marginBottom: "10px" }}>Owner status breakdown (Failed / Skipped / Warning / Killed)</h4>
-            {loadingOwnerReport && !ownerReportRows ? (
+            {loadingOwnerReport ? (
               <div style={{ color: "#666", fontStyle: "italic" }}>
                 Loading owner triage report…
               </div>
