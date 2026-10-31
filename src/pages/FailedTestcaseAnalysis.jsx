@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
 import { API_BASE_URL } from '../config';
 import { extractJitaTaskIds, buildJitaResultsUrls } from '../utils/jitaTaskIds';
+import { readHomeSelectedTag } from '../utils/browserSelectionStorage';
+import { useAuth } from '../context/AuthContext';
 import './FailedTestcaseAnalysis.css';
 
 const API_BASE = `${API_BASE_URL}/mcp/regression/failed-analysis`;
@@ -972,13 +974,19 @@ function buildResultGroups(rows) {
 }
 
 export default function FailedTestcaseAnalysis() {
+  const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [streamPhase, setStreamPhase] = useState('');
   const [totalExpected, setTotalExpected] = useState(0);
-  const [tag, setTag] = useState(() => localStorage.getItem('regressionDashboardTag') || 'cdp_master_full_reg');
+  const [tag, setTag] = useState(() => readHomeSelectedTag(user) || 'cdp_master_full_reg');
   const [taskIds, setTaskIds] = useState('');
   const [inputMode, setInputMode] = useState('tag');
+
+  useEffect(() => {
+    const stored = readHomeSelectedTag(user);
+    if (stored) setTag(stored);
+  }, [user]);
   const [results, setResults] = useState([]);
   const [filteredResults, setFilteredResults] = useState([]);
   const [error, setError] = useState(null);

@@ -3,6 +3,12 @@ import * as XLSX from "xlsx";
 import api from "../api";
 import { API_BASE_URL } from "../config";
 import { useAuth } from "../context/AuthContext";
+import {
+  readReleaseList,
+  readReleaseMilestone,
+  writeReleaseList,
+  writeReleaseMilestone,
+} from "../utils/browserSelectionStorage";
 import "./ReleaseDashboard.css";
 
 const API = `${API_BASE_URL}/mcp/regression/release-dashboard`;
@@ -11,8 +17,7 @@ const DEFAULT_RELEASES = [
   { milestone: "7.7" },
   { milestone: "7.6" },
 ];
-const SAVED_RELEASES_KEY = "regx.release-dashboard.releases";
-const LAST_MILESTONE_PREFIX = "regx.release-dashboard.last";
+const DEFAULT_MILESTONE = "7.7";
 const BUILTIN = new Set(DEFAULT_RELEASES.map((item) => item.milestone));
 const VIEW_TYPES = [
   { id: "all", label: "All" },
@@ -21,17 +26,13 @@ const VIEW_TYPES = [
 ];
 const TAG_PRESETS = ["Full regression", "Upgrade", "External storage", "Other"];
 
-function savedReleases() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SAVED_RELEASES_KEY) || "[]");
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item) => item && item.milestone && !BUILTIN.has(item.milestone));
-  } catch (err) {
-    return [];
-  }
+function savedReleases(user) {
+  return readReleaseList(user).filter(
+    (item) => item && item.milestone && !BUILTIN.has(item.milestone)
+  );
 }
 
-function rememberReleases(releases) {
+function rememberReleases(user, releases) {
   const extras = releases
     .filter((item) => item && item.milestone && !BUILTIN.has(item.milestone))
     .map((item) => ({
@@ -41,19 +42,7 @@ function rememberReleases(releases) {
       sourcegraph: item.sourcegraph || "",
       lookedUp: true,
     }));
-  localStorage.setItem(SAVED_RELEASES_KEY, JSON.stringify(extras));
-}
-
-function lastMilestoneKey(username) {
-  return `${LAST_MILESTONE_PREFIX}.${username || "anonymous"}`;
-}
-
-function readLastMilestone(username) {
-  try {
-    return localStorage.getItem(lastMilestoneKey(username)) || "7.7";
-  } catch (err) {
-    return "7.7";
-  }
+  writeReleaseList(user, extras);
 }
 
 const COLOR_HELP = {
@@ -262,9 +251,11 @@ function GapTable({ rows }) {
 
 export default function ReleaseDashboard() {
   const { user } = useAuth();
-  const username = user?.username || user?.sub || "";
-  const [releases, setReleases] = useState(() => [...DEFAULT_RELEASES, ...savedReleases()]);
-  const [milestone, setMilestone] = useState(() => readLastMilestone(username));
+  const [releases, setReleases] = useState(() => [...DEFAULT_RELEASES, ...savedReleases(null)]);
+  const [milestone, setMilestone] = useState(() =>
+    readReleaseMilestone(null, DEFAULT_MILESTONE)
+  );
+  // Shared across Summary + Feat Readiness (Feature Handover & Audit) in this browser.
   const [tab, setTab] = useState("summary");
   const [viewType, setViewType] = useState("all");
   const [loading, setLoading] = useState(false);
@@ -298,13 +289,17 @@ export default function ReleaseDashboard() {
 
   const selected = releases.find((item) => item.milestone === milestone) || { milestone };
 
+  // Re-hydrate from user-scoped keys once auth resolves (initial state may be anonymous).
   useEffect(() => {
-    try {
-      localStorage.setItem(lastMilestoneKey(username), milestone);
-    } catch (err) {
-      // The selector still works if storage is blocked.
-    }
-  }, [milestone, username]);
+    const storedMilestone = readReleaseMilestone(user, DEFAULT_MILESTONE);
+    setMilestone(storedMilestone);
+    const extras = savedReleases(user);
+    setReleases([...DEFAULT_RELEASES, ...extras]);
+  }, [user]);
+
+  useEffect(() => {
+    writeReleaseMilestone(user, milestone);
+  }, [milestone, user]);
 
   useEffect(() => {
     if (releases.some((item) => item.milestone === milestone)) return;
@@ -440,7 +435,7 @@ export default function ReleaseDashboard() {
         setReleases((prev) => {
           const rest = prev.filter((item) => item.milestone !== info.milestone);
           const next = [...rest, { ...info, lookedUp: true }];
-          rememberReleases(next);
+          rememberReleases(user, next);
           return next;
         });
         const pending = draftTags;
@@ -616,7 +611,7 @@ export default function ReleaseDashboard() {
               className={`rd-tab${tab === "feats" ? " is-active" : ""}`}
               onClick={() => setTab("feats")}
             >
-              Feat Readiness
+              Feature Handover & Audit
             </button>
           </div>
         </div>
