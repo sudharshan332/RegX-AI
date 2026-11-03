@@ -1834,14 +1834,15 @@ def save_regression_config_endpoint():
         if input_mode not in ["tag", "task_ids"]:
             return jsonify({"error": "input_mode must be 'tag' or 'task_ids'"}), 400
         
-        default_tag = data.get("default_tag")
-        added_tags = data.get("added_tags")
-        if added_tags is None:
-            added_tags = []
-        if not isinstance(added_tags, list):
-            added_tags = []
-        
         existing = load_regression_config()
+        default_tag = data.get("default_tag")
+        # Omitting added_tags must not wipe the catalog (task-ID saves used to do this).
+        if "added_tags" not in data or data.get("added_tags") is None:
+            added_tags = list(existing.get("added_tags") or [])
+        else:
+            added_tags = data.get("added_tags")
+        if not isinstance(added_tags, list):
+            added_tags = list(existing.get("added_tags") or [])
         # Preserve per-tag appended task IDs across config saves
         preserved_extras = existing.get("tag_extra_task_ids") or {}
         if not isinstance(preserved_extras, dict):
@@ -1866,8 +1867,13 @@ def save_regression_config_endpoint():
         elif input_mode == "task_ids":
             if not config["task_ids"] or len(config["task_ids"]) == 0:
                 return jsonify({"error": "task_ids is required when input_mode is 'task_ids'"}), 400
+            # Fetch mode changes; the saved tag catalog is removed only by DELETE /config/tags.
+            if not config["added_tags"]:
+                config["added_tags"] = [
+                    str(t).strip() for t in (existing.get("added_tags") or []) if t and str(t).strip()
+                ]
             config["tag"] = ""
-            config["default_tag"] = None
+            config["default_tag"] = existing.get("default_tag") or config.get("default_tag")
         
         save_regression_config(config)
         if input_mode == "task_ids":
@@ -11955,13 +11961,16 @@ def save_saved_tag_results(tag_name):
         "saved_at": datetime.utcnow().isoformat() + "Z",
         "count": len(results),
     }
+    existing = load_failed_analysis_results(tag_name) or {}
     # Preserve previously saved intelligent_triage / flux entries when client omits the map.
-    if not intelligent_triage or not flux_quick_fix:
-        existing = load_failed_analysis_results(tag_name) or {}
-        if not intelligent_triage and existing.get("intelligent_triage"):
-            payload["intelligent_triage"] = existing["intelligent_triage"]
-        if not flux_quick_fix and existing.get("flux_quick_fix"):
-            payload["flux_quick_fix"] = existing["flux_quick_fix"]
+    if not intelligent_triage and existing.get("intelligent_triage"):
+        payload["intelligent_triage"] = existing["intelligent_triage"]
+    if not flux_quick_fix and existing.get("flux_quick_fix"):
+        payload["flux_quick_fix"] = existing["flux_quick_fix"]
+    if "ai_skill_triage" in body:
+        payload["ai_skill_triage"] = body.get("ai_skill_triage") or {}
+    elif existing.get("ai_skill_triage"):
+        payload["ai_skill_triage"] = existing["ai_skill_triage"]
     save_failed_analysis_results(tag_name, payload)
     return jsonify({"success": True, "count": len(results), "saved_at": payload["saved_at"]})
 
@@ -25362,6 +25371,344 @@ def put_intelligent_triage_thresholds():
         return jsonify({"success": True, "thresholds": saved})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _local_skills_root():
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(project_root, ".cursor", "skills")
+
+
+def _load_synced_skill_text(skill_id):
+    """Return (text, directory) for a Skill Sync copy, or (None, directory)."""
+    skill_dir = os.path.join(_local_skills_root(), skill_id)
+    skill_md = os.path.join(skill_dir, "SKILL.md")
+    if not os.path.isfile(skill_md):
+        return None, skill_dir
+    chunks = []
+    with open(skill_md, "r", encoding="utf-8", errors="replace") as handle:
+        chunks.append(handle.read()[:16000])
+    extra_name = (
+        "archived-logs-reference.md"
+        if skill_id == "triage-cdp-test-failure"
+        else "rdm-overview-reference.md"
+    )
+    extra_path = os.path.join(skill_dir, extra_name)
+    if os.path.isfile(extra_path):
+        with open(extra_path, "r", encoding="utf-8", errors="replace") as handle:
+            chunks.append("\n\n# %s\n%s" % (extra_name, handle.read()[:8000]))
+    return "\n".join(chunks), skill_dir
+
+
+def _skill_triage_record(analysis, skill_used, skill_dir, provider, model, error=None, session_id="", known_tickets=None):
+    analysis = analysis if isinstance(analysis, dict) else {}
+    tickets = []
+    for raw in list(analysis.get("jira_duplicates") or []) + list(known_tickets or []):
+        key = str(raw or "").strip()
+        if key and key not in tickets:
+            tickets.append(key)
+    return {
+        "status": "error" if error else "complete",
+        "skill_used": skill_used,
+        "skill_source": "local_sync",
+        "skill_dir": skill_dir,
+        "ai_provider": provider,
+        "model": model,
+        "session_id": session_id or "",
+        "root_cause": analysis.get("root_cause") or "",
+        "classification": analysis.get("classification") or "",
+        "confidence": analysis.get("confidence") or "",
+        "suggested_fix": analysis.get("suggested_fix") or "",
+        "triage_report": analysis.get("triage_report") or "",
+        "jira_duplicates": tickets,
+        "created_ticket": analysis.get("created_ticket") or "",
+        "created_ticket_url": analysis.get("created_ticket_url") or "",
+        "error": error,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def _persist_ai_skill_triage(tag_name, testcase_id, record):
+    if not tag_name or not testcase_id:
+        return
+    cached = load_failed_analysis_results(tag_name) or {
+        "tag": tag_name,
+        "results": [],
+        "cursor_ai": {},
+        "intelligent_triage": {},
+    }
+    store = dict(cached.get("ai_skill_triage") or {})
+    store[str(testcase_id)] = record
+    cached["ai_skill_triage"] = store
+    save_failed_analysis_results(tag_name, cached)
+
+
+@app.route("/mcp/regression/failed-analysis/ai-skill-triage", methods=["POST"])
+@jwt_required
+def failed_analysis_ai_skill_triage():
+    """Run triage-cdp or triage-rdm using the synced skill and the active AI provider."""
+    try:
+        body = request.get_json(force=True) or {}
+        test_result = body.get("test_result") or body
+        testcase_name = test_result.get("testcase_name") or ""
+        if not testcase_name:
+            return jsonify({"success": False, "error": "testcase_name is required"}), 400
+
+        username = _current_username()
+        provider, key_err = require_ai_provider_key(username, body.get("ai_provider"))
+        if key_err:
+            err_body = dict(key_err[0])
+            err_body["success"] = False
+            return jsonify(err_body), key_err[1]
+
+        status = (test_result.get("status") or "").lower()
+        rdm_link = (
+            test_result.get("rdm_link")
+            or (test_result.get("rdm_info") or {}).get("rdm_link")
+            or ""
+        )
+        analysis_type = "skipped" if status == "skipped" else "failed"
+        skill_used = (
+            "triage-rdm-deployment-failure"
+            if analysis_type == "skipped"
+            else "triage-cdp-test-failure"
+        )
+        skill_text, skill_dir = _load_synced_skill_text(skill_used)
+        if not skill_text:
+            return jsonify({
+                "success": False,
+                "error": (
+                    "Skill %s is not synced. Open User Settings → Skill Sync and sync it into RegX."
+                    % skill_used
+                ),
+                "skill_used": skill_used,
+            }), 400
+
+        exception_summary = test_result.get("exception_summary") or ""
+        exception = test_result.get("exception") or ""
+        test_log_url = test_result.get("test_log_url") or ""
+        failure_stage = test_result.get("failure_stage") or ""
+        jira_tickets = list(test_result.get("jira_tickets") or [])
+        tg_ticket = (
+            test_result.get("triage_genie_ticket_id")
+            or test_result.get("triage_genie_ticket")
+            or ""
+        )
+        if tg_ticket and tg_ticket not in jira_tickets:
+            jira_tickets.append(tg_ticket)
+        rdm_message = (
+            test_result.get("rdm_message")
+            or (test_result.get("rdm_info") or {}).get("rdm_message")
+            or exception_summary
+            or ""
+        )
+        steps_log = test_result.get("steps_log") or ""
+        nutest_test_log = test_result.get("nutest_test_log") or ""
+        if not steps_log and not nutest_test_log and test_log_url and analysis_type != "skipped":
+            logs = fetch_testcase_logs(testcase_name, test_log_url)
+            steps_log = logs.get("steps_log", "")
+            nutest_test_log = logs.get("nutest_test_log", "")
+
+        skill_url = rdm_link if analysis_type == "skipped" else test_log_url
+        user_toks = resolve_user_settings_tokens(username)
+        model = nai_client.NAI_REASONING_DISPLAY if provider == "nai" else None
+        analysis = {}
+
+        if provider == "nai":
+            system = (
+                "You are triaging a Nutanix test failure by following the supplied skill. "
+                "Apply the skill's evidence rules. Do not invent log lines, tickets, or paths. "
+                "Respond with one JSON object only using keys: root_cause, classification, "
+                "confidence, suggested_fix, triage_report, jira_duplicates, skill_used."
+            )
+            user = "\n\n".join([
+                "Skill id: %s" % skill_used,
+                "Skill text:\n%s" % skill_text[:20000],
+                "Analysis type: %s" % analysis_type,
+                "Testcase: %s" % testcase_name,
+                "Failure stage: %s" % (failure_stage or "unknown"),
+                "Log or RDM URL: %s" % (skill_url or ""),
+                "Exception summary: %s" % (exception_summary or rdm_message or "")[:1500],
+                "Exception:\n%s" % (exception or rdm_message or "")[:2500],
+                "RDM message:\n%s" % (rdm_message or "")[:2000],
+                "Triage Genie ticket: %s" % (tg_ticket or ""),
+                "Known Jira tickets already linked to this test. "
+                "Put matching keys in jira_duplicates. Do not invent ticket keys: %s"
+                % json.dumps(jira_tickets)[:1500],
+                "steps.log:\n%s" % (steps_log or "")[:4000],
+                "nutest log:\n%s" % (nutest_test_log or "")[:4000],
+            ])
+            try:
+                content = nai_client.chat_text(
+                    system,
+                    user,
+                    username=username,
+                    max_tokens=3500,
+                    timeout=180,
+                )
+            except nai_client.NaiError as nai_err:
+                return jsonify({
+                    "success": False,
+                    "error": str(nai_err),
+                    "ai_provider": "nai",
+                    "skill_used": skill_used,
+                    "require_key_setup": nai_err.status in (401, 403),
+                }), 502 if nai_err.status not in (401, 403) else 403
+            parsed = nai_client.parse_json_object(content)
+            analysis = {
+                "root_cause": str(parsed.get("root_cause") or content[:2000] or "").strip(),
+                "classification": str(parsed.get("classification") or "Unknown").strip(),
+                "confidence": str(parsed.get("confidence") or "").strip(),
+                "suggested_fix": str(parsed.get("suggested_fix") or "").strip(),
+                "triage_report": str(parsed.get("triage_report") or content[:6000] or "").strip(),
+                "jira_duplicates": parsed.get("jira_duplicates") if isinstance(parsed.get("jira_duplicates"), list) else [],
+            }
+        else:
+            cursor_api_key = user_toks.get("cursor_api_key")
+            atlassian_tokens = build_atlassian_tokens_for_bridge(username)
+            payload = {
+                "testcase_name": testcase_name,
+                "exception_summary": exception_summary or rdm_message,
+                "exception": exception or rdm_message,
+                "steps_log": (steps_log or "")[:5000],
+                "nutest_test_log": (nutest_test_log or "")[:5000],
+                "test_log_url": skill_url or test_log_url,
+                "rdm_url": rdm_link,
+                "rdm_message": rdm_message,
+                "jita_task_id": test_result.get("agave_task_id") or "",
+                "jira_tickets": jira_tickets,
+                "failure_stage": failure_stage,
+                "triage_genie_ticket": tg_ticket,
+                "analysis_type": analysis_type,
+                "cursor_api_key": cursor_api_key,
+                "atlassian_tokens": atlassian_tokens,
+                "local_skill_text": skill_text[:20000],
+                "local_skill_dir": skill_dir,
+                "prefer_sourcegraph_skill": False,
+                "skill_fallback_local": True,
+            }
+            resp = requests.post(
+                "%s/analyze-testcase" % CURSOR_BRIDGE_URL,
+                json=payload,
+                timeout=600,
+            )
+            if resp.status_code != 200:
+                error_msg = (
+                    resp.json().get("error", resp.text)
+                    if resp.headers.get("content-type", "").startswith("application/json")
+                    else resp.text
+                )
+                return jsonify({"success": False, "error": "Bridge error: %s" % error_msg}), 502
+            bridge_data = resp.json() or {}
+            analysis = bridge_data.get("analysis") or {}
+            session_id = bridge_data.get("session_id") or ""
+
+        if provider == "nai":
+            session_id = _nai_new_session_id()
+            with _cursor_ai_jobs_lock:
+                _cursor_ai_jobs[session_id] = {
+                    "provider": "nai",
+                    "status": "done",
+                    "analysis": analysis,
+                    "created_at": datetime.now().isoformat(),
+                    "username": (username or "").strip().lower(),
+                }
+
+        record = _skill_triage_record(
+            analysis, skill_used, skill_dir, provider, model,
+            session_id=session_id, known_tickets=jira_tickets,
+        )
+        tag_name = (body.get("tag") or test_result.get("tag") or "").strip()
+        testcase_id = str(test_result.get("testcase_id") or "")
+        _persist_ai_skill_triage(tag_name, testcase_id, record)
+        return jsonify({"success": True, "ai_skill_triage": record, "testcase_id": testcase_id})
+    except requests.exceptions.ConnectionError:
+        return jsonify({
+            "success": False,
+            "error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start",
+        }), 503
+    except requests.exceptions.Timeout:
+        return jsonify({"success": False, "error": "AI Skill triage timed out."}), 504
+    except Exception as exc:
+        logger.error("Error in ai-skill-triage: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/mcp/regression/failed-analysis/ai-skill-triage/follow-up", methods=["POST"])
+@jwt_required
+def failed_analysis_ai_skill_follow_up():
+    """Continue an AI Skill triage chat and store updated fields on the tag file."""
+    try:
+        body = request.get_json(force=True) or {}
+        question = (body.get("question") or "").strip()
+        if not question:
+            return jsonify({"success": False, "error": "question is required"}), 400
+        tag_name = (body.get("tag") or "").strip()
+        testcase_id = str(body.get("testcase_id") or "")
+        prior = body.get("record") if isinstance(body.get("record"), dict) else {}
+        session_id = body.get("session_id") or prior.get("session_id") or ""
+        provider = (prior.get("ai_provider") or body.get("ai_provider") or "").strip().lower()
+        username = _current_username()
+        if str(session_id).startswith("nai-"):
+            provider = "nai"
+        analysis = {}
+        if provider == "nai" or not session_id:
+            key_err = require_ai_provider_key(username, "nai")[1]
+            if key_err:
+                err_body = dict(key_err[0])
+                err_body["success"] = False
+                return jsonify(err_body), key_err[1]
+            analysis = nai_client.follow_up_with_nai(
+                question,
+                prior_analysis=prior,
+                recovery_context={"question": question},
+                username=username,
+            )
+        else:
+            user_toks = resolve_user_settings_tokens(username)
+            resp = requests.post(
+                "%s/follow-up" % CURSOR_BRIDGE_URL,
+                json={
+                    "session_id": session_id,
+                    "question": question,
+                    "mode": body.get("mode") or "ask",
+                    "recovery_context": {"latest_analysis": prior},
+                    "cursor_api_key": user_toks.get("cursor_api_key"),
+                    "atlassian_tokens": build_atlassian_tokens_for_bridge(username),
+                },
+                timeout=600,
+            )
+            if resp.status_code != 200:
+                error_msg = (
+                    resp.json().get("error", resp.text)
+                    if resp.headers.get("content-type", "").startswith("application/json")
+                    else resp.text
+                )
+                return jsonify({"success": False, "error": "Bridge error: %s" % error_msg}), 502
+            analysis = (resp.json() or {}).get("analysis") or {}
+
+        updated = dict(prior)
+        for field in ("root_cause", "classification", "confidence", "suggested_fix", "triage_report"):
+            if analysis.get(field):
+                updated[field] = analysis.get(field)
+        updated["session_id"] = session_id or updated.get("session_id") or ""
+        updated["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        _persist_ai_skill_triage(tag_name, testcase_id, updated)
+        return jsonify({
+            "success": True,
+            "session_id": updated.get("session_id") or "",
+            "analysis": analysis,
+            "ai_skill_triage": updated,
+        })
+    except nai_client.NaiError as nai_err:
+        return jsonify({"success": False, "error": str(nai_err)}), 502
+    except requests.exceptions.ConnectionError:
+        return jsonify({
+            "success": False,
+            "error": "Cursor AI bridge is not running. Start it with: cd cursor-bridge && npm start",
+        }), 503
+    except Exception as exc:
+        logger.error("Error in ai-skill-triage follow-up: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
 
 
 @app.route("/mcp/regression/failed-analysis/deep-ai", methods=["POST"])

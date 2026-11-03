@@ -261,10 +261,11 @@ function GapTable({ rows }) {
 }
 
 export default function ReleaseDashboard() {
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const username = user?.username || user?.sub || "";
   const [releases, setReleases] = useState(() => [...DEFAULT_RELEASES, ...savedReleases()]);
   const [milestone, setMilestone] = useState(() => readLastMilestone(username));
+  const [milestoneReady, setMilestoneReady] = useState(false);
   const [tab, setTab] = useState("summary");
   const [viewType, setViewType] = useState("all");
   const [loading, setLoading] = useState(false);
@@ -299,12 +300,19 @@ export default function ReleaseDashboard() {
   const selected = releases.find((item) => item.milestone === milestone) || { milestone };
 
   useEffect(() => {
+    if (authLoading) return;
+    setMilestone(readLastMilestone(username));
+    setMilestoneReady(true);
+  }, [authLoading, username]);
+
+  useEffect(() => {
+    if (!milestoneReady || authLoading) return;
     try {
       localStorage.setItem(lastMilestoneKey(username), milestone);
     } catch (err) {
       // The selector still works if storage is blocked.
     }
-  }, [milestone, username]);
+  }, [milestone, username, milestoneReady, authLoading]);
 
   useEffect(() => {
     if (releases.some((item) => item.milestone === milestone)) return;
@@ -312,7 +320,7 @@ export default function ReleaseDashboard() {
   }, [milestone, releases]);
 
   useEffect(() => {
-    if (tab !== "feats") return undefined;
+    if (!milestoneReady || tab !== "feats") return undefined;
     let cancelled = false;
     const current = releases.find((item) => item.milestone === milestone) || { milestone };
     setLoading(true);
@@ -339,10 +347,10 @@ export default function ReleaseDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [tab, milestone, releases]);
+  }, [tab, milestone, releases, milestoneReady]);
 
   useEffect(() => {
-    if (tab !== "summary") return undefined;
+    if (!milestoneReady || tab !== "summary") return undefined;
     let cancelled = false;
     const current = releases.find((item) => item.milestone === milestone) || { milestone };
     setSummaryLoading(true);
@@ -372,9 +380,10 @@ export default function ReleaseDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [tab, milestone, releases, viewType]);
+  }, [tab, milestone, releases, viewType, milestoneReady]);
 
   useEffect(() => {
+    if (!milestoneReady) return undefined;
     let cancelled = false;
     setTags([]);
     setTagsFor("");
@@ -393,10 +402,10 @@ export default function ReleaseDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [milestone]);
+  }, [milestone, milestoneReady]);
 
   useEffect(() => {
-    if (tab !== "summary" || !summary || tagsFor !== milestone || tags.length === 0) return undefined;
+    if (!milestoneReady || tab !== "summary" || !summary || tagsFor !== milestone || tags.length === 0) return undefined;
     let cancelled = false;
     const current = releases.find((item) => item.milestone === milestone) || { milestone };
     setCompareLoading(true);
@@ -421,7 +430,7 @@ export default function ReleaseDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [tab, summary, tags, tagsFor, milestone, releases, viewType]);
+  }, [tab, summary, tags, tagsFor, milestone, releases, viewType, milestoneReady]);
 
   function addRelease(event) {
     event.preventDefault();

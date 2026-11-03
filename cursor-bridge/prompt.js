@@ -36,6 +36,21 @@ const CDP_SKILL_FILES = [
 
 const RDM_SKILL_DIR = `${SKILL_BASE}/triage-rdm-deployment-failure`;
 
+function localSkillBlock(opts) {
+  const text = String((opts && opts.localSkillText) || "").trim();
+  if (!text) return "";
+  const dir = (opts && opts.localSkillDir) || "RegX .cursor/skills";
+  return `
+### Local synced skill (authoritative)
+
+Skill directory: \`${dir}\`
+
+Follow this text from User Settings → Skill Sync. Do not re-read SKILL.md from Sourcegraph when this text is present. Read extra reference files from that directory only when the workflow requires them.
+
+${text.slice(0, 20000)}
+`;
+}
+
 /**
  * Build the prompt for analyzing a FAILED testcase.
  *
@@ -84,6 +99,7 @@ export function buildFailedAnalysisPrompt(opts) {
 
 You are triaging a failed nutest testcase. You MUST follow the
 **triage-cdp-test-failure** skill from the nutest-py3-tests repository.
+${localSkillBlock(opts)}
 
 ### Step 1 — Load skill guidance (lazy, not all files)
 
@@ -213,6 +229,7 @@ export function buildSkippedAnalysisPrompt(opts) {
 You are triaging a skipped nutest testcase caused by an RDM deployment failure.
 You MUST read and follow the **triage-rdm-deployment-failure** skill from the
 nutest-py3-tests repository:
+${localSkillBlock(opts)}
 \`${NUTEST_REPO}/-/tree/${RDM_SKILL_DIR}\`
 
 Do **not** file a JIRA ticket yourself. Classify the failure and recommend

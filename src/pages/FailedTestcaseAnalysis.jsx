@@ -58,7 +58,7 @@ export function fluxCategoryLabel(category) {
 
 /** Flux UI / API origin (task pages live at {base}/task/{record_id}). */
 export const FLUX_UI_BASE = (
-  process.env.REACT_APP_FLUX_API_BASE || 'http://10.61.4.219'
+  process.env.REACT_APP_FLUX_API_BASE || 'http://10.114.27.227'
 ).replace(/\/$/, '');
 
 export function fluxTaskUrl(recordId, taskUrl = null) {
@@ -647,6 +647,7 @@ const COLUMNS = [
   { id: 'auto_test_details', label: 'Auto Test Details', defaultVisible: true },
   { id: 'glean_search', label: 'Glean Search', defaultVisible: true },
   { id: 'cursor_ai_analysis', label: 'Deep AI / Cursor', defaultVisible: false },
+  { id: 'ai_skill_triage', label: 'AI Skill triage', defaultVisible: true },
   { id: 'triage_genie_ticket', label: 'Triage Genie Ticket', defaultVisible: true },
   { id: 'triage_genie_review', label: 'Triage Genie Review', defaultVisible: true },
   { id: 'jira_tickets', label: 'Jira Tickets', defaultVisible: true },
@@ -671,6 +672,7 @@ const JITA_TASK_COL_KEY = 'failedAnalysisAddedJitaTask';
 const COMPLETE_LOGS_COL_KEY = 'failedAnalysisAddedCompleteLogsPath';
 const JIRA_META_COL_KEY = 'failedAnalysisAddedJiraMetaCols';
 const FLUX_COL_KEY = 'failedAnalysisAddedFluxQuickFix';
+const AI_SKILL_COL_KEY = 'failedAnalysisAddedAiSkillTriage';
 
 function getStoredVisibleColumns() {
   try {
@@ -725,6 +727,16 @@ function getStoredVisibleColumns() {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(cols));
         }
         localStorage.setItem(FLUX_COL_KEY, '1');
+        if (!localStorage.getItem(AI_SKILL_COL_KEY) && !cols.includes('ai_skill_triage')) {
+          const deepIdx = cols.indexOf('cursor_ai_analysis');
+          const gleanIdx = cols.indexOf('glean_search');
+          const insertAt = deepIdx !== -1 ? deepIdx + 1
+            : gleanIdx !== -1 ? gleanIdx + 1
+            : cols.length;
+          cols.splice(insertAt, 0, 'ai_skill_triage');
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(cols));
+        }
+        localStorage.setItem(AI_SKILL_COL_KEY, '1');
         return cols.length > 0 ? cols : DEFAULT_VISIBLE;
       }
     }
@@ -1126,6 +1138,9 @@ export default function FailedTestcaseAnalysis() {
   const [firstLevelAiLoading, setFirstLevelAiLoading] = useState({});
   const [firstLevelAiResults, setFirstLevelAiResults] = useState({});
   const [deepAiLoading, setDeepAiLoading] = useState({});
+  const [aiSkillResults, setAiSkillResults] = useState({});
+  const [aiSkillLoading, setAiSkillLoading] = useState({});
+  const [aiSkillBulkRunning, setAiSkillBulkRunning] = useState(false);
   const [deepAiResults, setDeepAiResults] = useState({});
   const [triageAnalysisModal, setTriageAnalysisModal] = useState(null);
 
@@ -1373,6 +1388,7 @@ export default function FailedTestcaseAnalysis() {
       setDeepAiResults(deepHydrate);
       const fluxHydrated = hydrateFluxJobsFromMap(data.flux_quick_fix || {});
       setFluxJobs(fluxHydrated);
+      setAiSkillResults(data.ai_skill_triage || {});
       fluxJobsRef.current = fluxHydrated;
       fluxResumeInFlight.current = {};
     } catch (_) {
@@ -1384,6 +1400,7 @@ export default function FailedTestcaseAnalysis() {
       setIntelligentTriageResults({});
       setFirstLevelAiResults({});
       setDeepAiResults({});
+      setAiSkillResults({});
       setFluxJobs({});
       fluxJobsRef.current = {};
       fluxResumeInFlight.current = {};
@@ -1392,7 +1409,7 @@ export default function FailedTestcaseAnalysis() {
     }
   };
 
-  const saveResultsForTag = useCallback(async (tagName, rows, branch, cursorAiState = null, intelligentTriageState = null, fluxQuickFixState = null) => {
+  const saveResultsForTag = useCallback(async (tagName, rows, branch, cursorAiState = null, intelligentTriageState = null, fluxQuickFixState = null, aiSkillState = null) => {
     if (!tagName) return;
     setSavingResults(true);
     try {
@@ -1402,6 +1419,7 @@ export default function FailedTestcaseAnalysis() {
         ...(cursorAiState ? { cursor_ai: cursorAiState } : {}),
         ...(intelligentTriageState ? { intelligent_triage: intelligentTriageState } : {}),
         ...(fluxQuickFixState ? { flux_quick_fix: fluxQuickFixState } : {}),
+        ...(aiSkillState ? { ai_skill_triage: aiSkillState } : {}),
       });
     } catch (_) {}
     setSavingResults(false);
@@ -1427,8 +1445,9 @@ export default function FailedTestcaseAnalysis() {
       },
       intelligentTriageByTestcase,
       serializeFluxJobsMap(fluxJobs),
+      aiSkillResults,
     );
-  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, followUpHistoryByTestcase, intelligentTriageByTestcase, fluxJobs, saveResultsForTag]);
+  }, [inputMode, analysisTag, results, currentBranch, cursorAiResults, cursorAiSessions, followUpHistoryByTestcase, intelligentTriageByTestcase, fluxJobs, aiSkillResults, saveResultsForTag]);
 
   const buildIncludeParam = useCallback((cols) => {
     const include = new Set(['basic', 'exception_summary', 'intermittent']);
@@ -3475,6 +3494,204 @@ export default function FailedTestcaseAnalysis() {
     }
   };
 
+  const skillConfidenceLevel = (value) => {
+    const text = String(value || '').toLowerCase();
+    const numeric = Number(value);
+    if (text.includes('high') || (Number.isFinite(numeric) && numeric >= 0.8)) return 'high';
+    if (text.includes('medium') || (Number.isFinite(numeric) && numeric >= 0.5)) return 'medium';
+    return 'low';
+  };
+
+  const skillLooksIntermittent = (classification) => (
+    /flaky|intermittent|timing/i.test(String(classification || ''))
+  );
+
+  const skillTicketKeys = (record, result) => {
+    const keys = [];
+    const add = (raw) => {
+      const key = String(raw || '').trim();
+      if (key && !keys.includes(key)) keys.push(key);
+    };
+    (record?.jira_duplicates || []).forEach(add);
+    (result?.jira_tickets || []).forEach(add);
+    add(result?.triage_genie_ticket || result?.triage_genie_ticket_id);
+    return keys;
+  };
+
+  const openAiSkillModal = (result, record) => {
+    const testId = result.testcase_id;
+    setFollowUpInput('');
+    setFollowUpHistory(followUpHistoryByTestcase[testId] || []);
+    setFollowUpMode('ask');
+    setTriageAnalysisModal({
+      kind: 'skill',
+      testcase_name: result.testcase_name,
+      testcase_id: testId,
+      resultRow: result,
+      history_note: '',
+      ...record,
+    });
+    fetchHistory(result.testcase_name, true).then((runs) => {
+      const list = Array.isArray(runs) ? runs : [];
+      const passed = list.some(run => /pass|succeed/i.test(String(run.status || run.result || '')));
+      const exception = String(result.exception_summary || '').trim();
+      const repeated = exception && list.filter(run => String(run.exception_summary || run.exception || '').includes(exception.slice(0, 80))).length > 1;
+      const note = (passed || repeated)
+        ? 'Same-branch history agrees this looks intermittent.'
+        : '';
+      setTriageAnalysisModal(prev => (
+        prev && prev.kind === 'skill' && prev.testcase_id === testId
+          ? { ...prev, history_note: note }
+          : prev
+      ));
+    });
+  };
+
+  const updateSkillRecord = (testId, record) => {
+    setAiSkillResults(prev => ({ ...prev, [testId]: record }));
+    setTriageAnalysisModal(prev => (
+      prev && prev.kind === 'skill' && prev.testcase_id === testId
+        ? { ...prev, ...record }
+        : prev
+    ));
+  };
+
+  const handleSkillFollowUp = async () => {
+    if (!followUpInput.trim() || triageAnalysisModal?.kind !== 'skill') return;
+    const testId = triageAnalysisModal.testcase_id;
+    const question = followUpInput.trim();
+    setFollowUpLoading(true);
+    appendFollowUpMessage(testId, { role: 'user', text: question, mode: followUpMode });
+    setFollowUpInput('');
+    try {
+      const resp = await api.post(`${API_BASE}/ai-skill-triage/follow-up`, {
+        question,
+        mode: followUpMode,
+        tag: analysisTag || tag || selectedSavedTag || '',
+        testcase_id: testId,
+        session_id: triageAnalysisModal.session_id || '',
+        record: aiSkillResults[testId] || triageAnalysisModal,
+      });
+      const data = resp.data || {};
+      if (!data.success) throw new Error(data.error || 'Follow-up failed');
+      appendFollowUpMessage(testId, { role: 'assistant', data: data.analysis || {}, mode: followUpMode });
+      if (data.ai_skill_triage) updateSkillRecord(testId, data.ai_skill_triage);
+    } catch (error) {
+      appendFollowUpMessage(testId, {
+        role: 'error',
+        text: error.response?.data?.error || error.message,
+      });
+    } finally {
+      setFollowUpLoading(false);
+    }
+  };
+
+  const handleSkillCreateEng = async (record, result) => {
+    const level = skillConfidenceLevel(record?.confidence);
+    if (level === 'low') return;
+    if (level === 'medium' && !window.confirm('Create the ENG ticket from this skill triage?')) return;
+    const testId = result.testcase_id;
+    setFollowUpLoading(true);
+    try {
+      const resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/create-eng-ticket`, {
+        ticket_context: {
+          testcase_name: result.testcase_name,
+          root_cause: record.root_cause || '',
+          classification: record.classification || '',
+          suggested_fix: record.suggested_fix || '',
+          triage_report: record.triage_report || '',
+          confidence: record.confidence || '',
+          jira_duplicates: skillTicketKeys(record, result),
+          exception_summary: result.exception_summary || '',
+          test_log_url: result.test_log_url || '',
+          confirm: level === 'medium',
+        },
+        require_confirm: false,
+        confirm: true,
+      });
+      const data = resp.data || {};
+      if (!data.success) throw new Error(data.error || 'Create ENG failed');
+      if (data.needs_user_input) {
+        appendFollowUpMessage(testId, { role: 'assistant', data: data.analysis || { follow_up_answer: data.error }, mode: 'ask' });
+        return;
+      }
+      const next = {
+        ...(aiSkillResults[testId] || record),
+        created_ticket: data.key || '',
+        created_ticket_url: data.url || '',
+      };
+      updateSkillRecord(testId, next);
+    } catch (error) {
+      alert(`Create ENG failed: ${error.response?.data?.error || error.message}`);
+    } finally {
+      setFollowUpLoading(false);
+    }
+  };
+
+  const handleSkillRetrigger = async (result) => {
+    if (!result?.testcase_id) return;
+    setRetriggerLoading(true);
+    try {
+      const resp = await api.post(`${API_BASE}/retrigger`, {
+        tests: [{
+          testcase_id: result.testcase_id,
+          testcase_name: result.testcase_name,
+          agave_task_id: result.agave_task_id,
+        }],
+        overrides: {},
+        sync_to_tcms: false,
+      });
+      const data = resp.data || {};
+      if (!data.success && data.error) throw new Error(data.error);
+      alert('Re-trigger submitted for this testcase.');
+    } catch (error) {
+      alert(`Re-trigger failed: ${error.response?.data?.error || error.message}`);
+    } finally {
+      setRetriggerLoading(false);
+    }
+  };
+
+  const handleAiSkillTriage = async (result, { openModal = true } = {}) => {
+    const testId = result.testcase_id;
+    if (!testId) return null;
+    setAiSkillLoading(prev => ({ ...prev, [testId]: true }));
+    try {
+      const response = await api.post(`${API_BASE}/ai-skill-triage`, {
+        test_result: buildFailedAnalysisTestResult(result),
+        tag: analysisTag || tag || selectedSavedTag || '',
+      });
+      const data = response.data || {};
+      if (!data.success) {
+        throw new Error(data.error || 'AI Skill triage failed');
+      }
+      const record = data.ai_skill_triage || {};
+      setAiSkillResults(prev => ({ ...prev, [testId]: record }));
+      if (openModal) openAiSkillModal(result, record);
+      return record;
+    } catch (error) {
+      const message = error.response?.data?.error || error.message;
+      const record = { status: 'error', error: message };
+      setAiSkillResults(prev => ({ ...prev, [testId]: record }));
+      if (openModal) alert(`AI Skill triage failed: ${message}`);
+      return record;
+    } finally {
+      setAiSkillLoading(prev => ({ ...prev, [testId]: false }));
+    }
+  };
+
+  const handleSelectedAiSkillTriage = async () => {
+    const selected = filteredResults.filter(row => selectedRows.includes(row.testcase_id));
+    if (!selected.length || aiSkillBulkRunning) return;
+    setAiSkillBulkRunning(true);
+    try {
+      for (const row of selected) {
+        await handleAiSkillTriage(row, { openModal: false });
+      }
+    } finally {
+      setAiSkillBulkRunning(false);
+    }
+  };
+
   const handleAutoTestFixSuggest = async (result) => {
     const testId = result.testcase_id;
     if (!testId) return;
@@ -4531,6 +4748,55 @@ export default function FailedTestcaseAnalysis() {
           </td>
         );
       }
+      case 'ai_skill_triage': {
+        const skillRes = aiSkillResults[result.testcase_id];
+        const skillLoading = aiSkillLoading[result.testcase_id];
+        const summary = textOrEmpty(skillRes?.root_cause);
+        return (
+          <td key={colId} className="ai-skill-triage-cell">
+            {skillLoading ? (
+              <span className="cursor-ai-spinner">Triaging…</span>
+            ) : (
+              <div className="cursor-ai-actions">
+                <button
+                  type="button"
+                  className="btn-cursor-ai-analyze"
+                  onClick={() => handleAiSkillTriage(result)}
+                  title="Triage with triage-cdp-test-failure or triage-rdm-deployment-failure"
+                >
+                  {skillRes && skillRes.status !== 'error' ? 'Re-run' : 'AI Skill triage'}
+                </button>
+                {skillRes?.error && (
+                  <span className="cursor-ai-error-text" title={skillRes.error}>Failed</span>
+                )}
+                {skillRes && !skillRes.error && (
+                  <>
+                    <span className="deep-ai-skill" title={skillRes.skill_used}>
+                      {skillRes.classification || 'Complete'}
+                      {skillRes.confidence ? ` · ${skillRes.confidence}` : ''}
+                    </span>
+                    {skillTicketKeys(skillRes, result).slice(0, 2).map(key => (
+                      <a key={key} href={`${JIRA_URL}${key}`} target="_blank" rel="noopener noreferrer" className="jira-link">
+                        {key}
+                      </a>
+                    ))}
+                    {summary && (
+                      <div className="first-level-analysis-preview" title={summary}>{summary}</div>
+                    )}
+                    <button
+                      type="button"
+                      className="btn-view-analysis"
+                      onClick={() => openAiSkillModal(result, skillRes)}
+                    >
+                      View
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </td>
+        );
+      }
       case 'cursor_ai_analysis': {
         const aiRes = cursorAiResults[result.testcase_id];
         const isLoading = cursorAiLoading[result.testcase_id];
@@ -5362,6 +5628,15 @@ export default function FailedTestcaseAnalysis() {
               <button
                 type="button"
                 className="btn-cursor-ai-batch"
+                disabled={selectedRows.length === 0 || aiSkillBulkRunning}
+                onClick={handleSelectedAiSkillTriage}
+                title="Run AI Skill triage for the selected testcases"
+              >
+                {aiSkillBulkRunning ? 'Skill triaging…' : 'Selected AI Skill triage'}
+              </button>
+              <button
+                type="button"
+                className="btn-cursor-ai-batch"
                 disabled={selectedRows.length === 0 || !!cursorAiBatchJobId}
                 onClick={handleCursorAiBatchAnalyze}
                 title={
@@ -5734,6 +6009,8 @@ export default function FailedTestcaseAnalysis() {
               <h3>
                 {triageAnalysisModal.kind === 'rdm_skill'
                   ? 'AI RDM Failure Analysis'
+                  : triageAnalysisModal.kind === 'skill'
+                  ? 'AI Skill triage'
                   : triageAnalysisModal.kind === 'deep'
                   ? 'Deep AI Analysis'
                   : 'First Level AI Analysis'}
@@ -5742,6 +6019,73 @@ export default function FailedTestcaseAnalysis() {
             </div>
             <div className="modal-body glean-detail-body">
               <div className="glean-tc-name">{triageAnalysisModal.testcase_name}</div>
+              {triageAnalysisModal.kind === 'skill' && (
+                <div className="glean-section">
+                  <h4>AI Skill triage</h4>
+                  <div className="triage-action-row">
+                    <span className="badge glean-issue-badge">
+                      {textOrEmpty(triageAnalysisModal.classification) || 'Unknown type'}
+                    </span>
+                    <span className="badge triage-conf-badge">
+                      Confidence {textOrEmpty(triageAnalysisModal.confidence) || 'unknown'}
+                    </span>
+                  </div>
+                  <div className="glean-jira-list">
+                    {skillTicketKeys(triageAnalysisModal, triageAnalysisModal.resultRow).length === 0 && (
+                      <span>No related ticket found.</span>
+                    )}
+                    {skillTicketKeys(triageAnalysisModal, triageAnalysisModal.resultRow).map(key => (
+                      <a key={key} href={`${JIRA_URL}${key}`} target="_blank" rel="noopener noreferrer" className="jira-link">
+                        {key}
+                      </a>
+                    ))}
+                  </div>
+                  {triageAnalysisModal.created_ticket && (
+                    <a
+                      href={triageAnalysisModal.created_ticket_url || `${JIRA_URL}${triageAnalysisModal.created_ticket}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="jira-link"
+                    >
+                      Created {triageAnalysisModal.created_ticket}
+                    </a>
+                  )}
+                  {triageAnalysisModal.history_note && <p>{triageAnalysisModal.history_note}</p>}
+                  {followUpHistory.length > 0 && (
+                    <div className="cursor-ai-followup-history">
+                      {followUpHistory.map((msg, i) => (
+                        <div key={i} className="glean-ai-analysis">
+                          {msg.role === 'user' ? msg.text : (msg.data?.follow_up_answer || msg.text || '')}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="triage-action-row">
+                    {skillLooksIntermittent(triageAnalysisModal.classification) && (
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={retriggerLoading}
+                        onClick={() => handleSkillRetrigger(triageAnalysisModal.resultRow)}
+                      >
+                        {retriggerLoading ? 'Re-triggering…' : 'Re-trigger'}
+                      </button>
+                    )}
+                    {skillConfidenceLevel(triageAnalysisModal.confidence) !== 'low' && (
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={followUpLoading || !!triageAnalysisModal.created_ticket}
+                        onClick={() => handleSkillCreateEng(triageAnalysisModal, triageAnalysisModal.resultRow)}
+                      >
+                        {skillConfidenceLevel(triageAnalysisModal.confidence) === 'high'
+                          ? 'Create ENG Ticket'
+                          : 'Create ENG Ticket (confirm)'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {triageAnalysisModal.decision && (
                 <div className="glean-section">
@@ -6365,7 +6709,28 @@ export default function FailedTestcaseAnalysis() {
                 </div>
               )}
             </div>
-            <div className={`modal-footer${triageAnalysisModal.kind === 'deep' ? ' cursor-ai-modal-footer' : ''}`}>
+            <div className={`modal-footer${triageAnalysisModal.kind === 'deep' || triageAnalysisModal.kind === 'skill' ? ' cursor-ai-modal-footer' : ''}`}>
+              {triageAnalysisModal.kind === 'skill' && (
+                <div className="cursor-ai-followup-bar">
+                  <input
+                    type="text"
+                    className="cursor-ai-followup-input"
+                    placeholder="Ask a follow-up about this skill triage…"
+                    value={followUpInput}
+                    onChange={e => setFollowUpInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && !followUpLoading) handleSkillFollowUp(); }}
+                    disabled={followUpLoading}
+                  />
+                  <button
+                    type="button"
+                    className="btn-primary cursor-ai-followup-send"
+                    onClick={handleSkillFollowUp}
+                    disabled={followUpLoading || !followUpInput.trim()}
+                  >
+                    {followUpLoading ? 'Sending...' : 'Ask'}
+                  </button>
+                </div>
+              )}
               {triageAnalysisModal.kind === 'deep' && (
                 <div className="cursor-ai-followup-bar">
                   <select

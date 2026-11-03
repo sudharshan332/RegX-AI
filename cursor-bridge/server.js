@@ -352,6 +352,8 @@ app.post("/analyze-testcase", async (req, res) => {
     gleanSnippets: glean_snippets || [],
     sourcegraphRepo: NUTEST_SOURCEGRAPH,
     skills: SKILLS,
+    localSkillText: req.body.local_skill_text || "",
+    localSkillDir: req.body.local_skill_dir || "",
   };
 
   const prompt = analysis_type === "skipped"
