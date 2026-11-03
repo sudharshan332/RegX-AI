@@ -6792,6 +6792,128 @@ def is_create_eng_ticket_intent(text):
     )
 
 
+_ADD_COMMENT_INTENT_RE = re.compile(
+    r"\b(add|post|append|put|write|leave|update\s+with)\b.{0,80}?\b(comment|note)\b",
+    re.IGNORECASE,
+)
+_JIRA_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+
+
+def is_add_jira_comment_intent(text):
+    """True when the user asks to add a comment onto an existing Jira ticket."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if not _ADD_COMMENT_INTENT_RE.search(raw):
+        return False
+    return bool(_JIRA_KEY_RE.search(raw.upper()))
+
+
+def extract_jira_key_from_text(text):
+    """Return the first ENG-style Jira key in the text (uppercased) or None."""
+    if not text:
+        return None
+    match = _JIRA_KEY_RE.search(str(text).upper())
+    return match.group(1) if match else None
+
+
+def _format_triage_report_comment(ticket_ctx):
+    """Build a Jira wiki-friendly comment body from the latest analysis context."""
+    ctx = ticket_ctx or {}
+    report = str(ctx.get("triage_report") or "").strip()
+    if report:
+        return report
+    parts = []
+    testcase = str(ctx.get("testcase_name") or "").strip()
+    if testcase:
+        parts.append(f"h3. Testcase\n{testcase}")
+    classification = str(ctx.get("classification") or ctx.get("issue_type") or "").strip()
+    if classification:
+        parts.append(f"h3. Classification\n{classification}")
+    root_cause = str(ctx.get("root_cause") or "").strip()
+    if root_cause:
+        parts.append(f"h3. Root Cause\n{root_cause}")
+    suggested_fix = str(ctx.get("suggested_fix") or "").strip()
+    if suggested_fix:
+        parts.append(f"h3. Suggested Fix\n{suggested_fix}")
+    recommended = str(ctx.get("recommended_action") or "").strip()
+    if recommended:
+        parts.append(f"h3. Recommended Action\n{recommended}")
+    suggested_comment = str(ctx.get("suggested_comment") or "").strip()
+    if suggested_comment:
+        parts.append(f"h3. Suggested Comment\n{suggested_comment}")
+    body = "\n\n".join(parts).strip()
+    return body or "Skill Triage Report (RegX AI): no triage report text available."
+
+
+def add_jira_issue_comment(ticket_key, comment_body, token=None):
+    """POST a comment onto a Jira issue via REST. Returns dict with ok/key/url or error."""
+    key = (ticket_key or "").strip().upper()
+    body = (comment_body or "").strip()
+    if not key:
+        return {"ok": False, "error": "Jira ticket key is required"}
+    if not body:
+        return {"ok": False, "error": "Comment body is empty — nothing to post"}
+    jira_token = resolve_jira_token(token)
+    if not jira_token:
+        return {
+            "ok": False,
+            "status": 401,
+            "error": format_mcp_token_connection_error("jira"),
+        }
+    url = f"{JIRA_BASE}/issue/{key}/comment"
+    try:
+        resp = requests.post(
+            url,
+            headers=get_jira_headers(jira_token),
+            json={"body": body},
+            timeout=30,
+        )
+    except requests.exceptions.ConnectionError as exc:
+        return {"ok": False, "error": f"Jira unreachable: {exc}"}
+    except requests.exceptions.Timeout:
+        return {"ok": False, "error": "Jira comment request timed out"}
+    if resp.status_code == 404:
+        return {
+            "ok": False,
+            "status": 404,
+            "error": f"Jira ticket {key} not found (404). Check the key and your access.",
+        }
+    if resp.status_code in (401, 403):
+        return {
+            "ok": False,
+            "status": resp.status_code,
+            "error": format_mcp_token_connection_error("jira"),
+        }
+    if resp.status_code >= 400:
+        err_text = ""
+        try:
+            err_json = resp.json()
+            err_text = (
+                err_json.get("errorMessages", [""])[0]
+                or next(iter((err_json.get("errors") or {}).values()), "")
+                or resp.text[:300]
+            )
+        except Exception:
+            err_text = resp.text[:300]
+        return {
+            "ok": False,
+            "status": resp.status_code,
+            "error": f"Jira comment failed ({resp.status_code}): {err_text}",
+        }
+    data = {}
+    try:
+        data = resp.json() or {}
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "key": key,
+        "comment_id": str(data.get("id") or ""),
+        "url": f"https://jira.nutanix.com/browse/{key}",
+    }
+
+
 def rewrite_agent_jira_credential_errors(text, username=None):
     """
     Replace agent/MCP env credential errors with User Settings guidance.
@@ -20360,6 +20482,75 @@ def cursor_ai_create_eng_ticket():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/mcp/regression/cursor-ai/add-jira-comment", methods=["POST"])
+@app.route("/api/mcp/regression/cursor-ai/add-jira-comment", methods=["POST"])
+@jwt_required
+def cursor_ai_add_jira_comment():
+    """Add a comment on a Jira issue via Jira REST using the User Settings token.
+
+    Used by the Deep AI follow-up chat when the user asks something like
+    "Add above Skill Triage Report as a comment in Jira Eng ticket ENG-12345".
+    Bypasses the Cursor bridge / MCP so a lost or expired agent session never
+    turns a Jira comment ask into a 404.
+    """
+    try:
+        body = request.get_json(force=True) or {}
+        ticket_ctx = body.get("ticket_context") or {}
+        jira_key = (
+            (body.get("jira_ticket") or "").strip().upper()
+            or extract_jira_key_from_text(body.get("question") or "")
+            or extract_jira_key_from_text(ticket_ctx.get("jira_ticket") or "")
+        )
+        if not jira_key:
+            return jsonify({
+                "success": False,
+                "error": (
+                    "Jira ticket key is required (e.g. ENG-12345)."
+                ),
+            }), 400
+        comment_body = str(
+            body.get("comment_body")
+            or ticket_ctx.get("comment_body")
+            or ""
+        ).strip() or _format_triage_report_comment(ticket_ctx)
+        jira_token = resolve_user_settings_tokens().get("atlassian_jira_token") or ""
+        if not jira_token:
+            return jsonify({
+                "success": False,
+                "error": format_mcp_token_connection_error("jira"),
+                "mcp_token_status": mcp_token_status_for_user(),
+            }), 400
+        result = add_jira_issue_comment(jira_key, comment_body, token=jira_token)
+        if not result.get("ok"):
+            status = int(result.get("status") or 400)
+            if status not in (400, 401, 403, 404):
+                status = 400
+            return jsonify({
+                "success": False,
+                "error": result.get("error") or "Failed to add Jira comment",
+                "jira_ticket": jira_key,
+                "mcp_token_status": mcp_token_status_for_user(),
+            }), status
+        return jsonify({
+            "success": True,
+            "jira_ticket": result.get("key"),
+            "comment_id": result.get("comment_id"),
+            "url": result.get("url"),
+            "analysis": {
+                "follow_up_answer": (
+                    f"Added Skill Triage Report as a comment on "
+                    f"[{result.get('key')}]({result.get('url')})."
+                ),
+                "jira_ticket": result.get("key"),
+                "jira_comment_id": result.get("comment_id"),
+                "jira_comment_url": result.get("url"),
+            },
+        })
+    except Exception as exc:
+        logger.error("Error in cursor-ai add-jira-comment: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
 @app.route("/mcp/regression/cursor-ai/follow-up", methods=["POST"])
 @app.route("/api/mcp/regression/cursor-ai/follow-up", methods=["POST"])
 @jwt_required
@@ -20396,6 +20587,63 @@ def cursor_ai_follow_up():
         pending_draft = latest.get("pending_ticket_draft") or ticket_ctx.get("pending_ticket_draft")
         confirm_ticket = bool(pending_draft) and is_confirm_eng_ticket_intent(question)
         create_ticket = is_create_eng_ticket_intent(question) or confirm_ticket
+
+        # Intercept "add Skill Triage Report as a comment on ENG-xxx" asks before
+        # the bridge call. The chat agent can't reliably post Jira comments via
+        # MCP from this UI, so we post directly via Jira REST using the login
+        # user's User Settings → Atlassian Jira Personal Token.
+        if not create_ticket and is_add_jira_comment_intent(question):
+            jira_key = (
+                extract_jira_key_from_text(question)
+                or extract_jira_key_from_text(body.get("jira_ticket") or "")
+            )
+            if not jira_key:
+                return jsonify({
+                    "success": False,
+                    "error": (
+                        "Could not find a Jira ticket key (e.g. ENG-12345) in the "
+                        "question. Reword as: 'Add the Skill Triage Report as a "
+                        "comment in ENG-12345'."
+                    ),
+                }), 400
+            comment_body = str(
+                body.get("comment_body")
+                or ticket_ctx.get("comment_body")
+                or ""
+            ).strip() or _format_triage_report_comment(ticket_ctx)
+            jira_token = resolve_user_settings_tokens().get("atlassian_jira_token") or ""
+            if not jira_token:
+                return jsonify({
+                    "success": False,
+                    "error": format_mcp_token_connection_error("jira"),
+                    "mcp_token_status": mcp_token_status_for_user(),
+                }), 400
+            comment_result = add_jira_issue_comment(
+                jira_key, comment_body, token=jira_token
+            )
+            if not comment_result.get("ok"):
+                status = int(comment_result.get("status") or 400)
+                if status not in (400, 401, 403, 404):
+                    status = 400
+                return jsonify({
+                    "success": False,
+                    "error": comment_result.get("error") or "Failed to add Jira comment",
+                    "jira_ticket": jira_key,
+                    "mcp_token_status": mcp_token_status_for_user(),
+                }), status
+            return jsonify({
+                "success": True,
+                "session_id": session_id,
+                "analysis": {
+                    "follow_up_answer": (
+                        f"Added Skill Triage Report as a comment on "
+                        f"[{comment_result.get('key')}]({comment_result.get('url')})."
+                    ),
+                    "jira_ticket": comment_result.get("key"),
+                    "jira_comment_id": comment_result.get("comment_id"),
+                    "jira_comment_url": comment_result.get("url"),
+                },
+            })
 
         if create_ticket:
             user_toks = resolve_user_settings_tokens()

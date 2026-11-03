@@ -2465,6 +2465,19 @@ export default function FailedTestcaseAnalysis() {
     }
   };
 
+  const JIRA_KEY_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/;
+  const extractJiraKeyFromText = (text) => {
+    const m = String(text || '').toUpperCase().match(JIRA_KEY_RE);
+    return m ? m[1] : '';
+  };
+  const isAddJiraCommentChatIntent = (text) => {
+    const raw = String(text || '').trim();
+    if (!raw) return false;
+    const addVerb = /\b(add|post|append|put|write|leave|update\s+with)\b.{0,80}?\b(comment|note)\b/i;
+    if (!addVerb.test(raw)) return false;
+    return Boolean(extractJiraKeyFromText(raw));
+  };
+
   const isCreateEngChatIntent = (text) => {
     const t = String(text || '')
       .toLowerCase()
@@ -2515,8 +2528,39 @@ export default function FailedTestcaseAnalysis() {
       let resp;
       const pendingDraft = ctx.latestAnalysis?.pending_ticket_draft;
       const confirmDraft = Boolean(pendingDraft) && /^(yes|y|confirm|ok|okay|proceed)\b/i.test(question.trim());
+      // Add Jira comment via dedicated User Settings Jira REST path — never agent
+      // MCP, so a lost/expired agent session can't 404 a plain comment ask.
+      if (isAddJiraCommentChatIntent(question)) {
+        const jiraKey = extractJiraKeyFromText(question);
+        const commentBody = String(
+          ctx.latestAnalysis?.triage_report
+          || ctx.latestAnalysis?.root_cause
+          || ''
+        ).trim();
+        resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/add-jira-comment`, {
+          jira_ticket: jiraKey,
+          question,
+          comment_body: commentBody || undefined,
+          ticket_context: ticketContext,
+        });
+        if (resp.data?.success) {
+          resp = {
+            data: {
+              success: true,
+              session_id: sessionId,
+              analysis: resp.data.analysis || {
+                follow_up_answer: resp.data.url
+                  ? `Added Skill Triage Report as a comment on [${resp.data.jira_ticket}](${resp.data.url}).`
+                  : `Added Skill Triage Report as a comment on ${resp.data.jira_ticket || jiraKey}.`,
+                jira_ticket: resp.data.jira_ticket || jiraKey,
+                jira_comment_id: resp.data.comment_id,
+                jira_comment_url: resp.data.url,
+              },
+            },
+          };
+        }
       // Create ENG via dedicated User Settings Jira REST path — never agent MCP / jira_helper.
-      if (isCreateEngChatIntent(question) || confirmDraft) {
+      } else if (isCreateEngChatIntent(question) || confirmDraft) {
         resp = await api.post(`${API_BASE_URL}/mcp/regression/cursor-ai/create-eng-ticket`, {
           ticket_context: {
             ...ticketContext,
