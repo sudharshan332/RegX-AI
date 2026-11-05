@@ -176,9 +176,12 @@ function riskLevel(impact) {
 function FeatTests({ title, tests }) {
   return (
     <div className="rd-split">
-      <h3>{title}</h3>
+      <div className="rd-split-head">
+        <h3>{title}</h3>
+        <span className="rd-split-count">{tests.length}</span>
+      </div>
       {tests.length === 0 ? (
-        <p className="rd-status">None</p>
+        <p className="rd-status">No testcases</p>
       ) : (
         <table className="rd-table">
           <thead>
@@ -271,6 +274,7 @@ export default function ReleaseDashboard() {
   const [error, setError] = useState("");
   const [data, setData] = useState(null);
   const [openFeats, setOpenFeats] = useState(() => new Set());
+  const [showHandoverTests, setShowHandoverTests] = useState(() => new Set());
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   const [addError, setAddError] = useState("");
@@ -537,6 +541,15 @@ export default function ReleaseDashboard() {
 
   function toggleFeat(name) {
     setOpenFeats((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  function toggleHandoverTests(name) {
+    setShowHandoverTests((prev) => {
       const next = new Set(prev);
       if (next.has(name)) next.delete(name);
       else next.add(name);
@@ -1161,12 +1174,31 @@ export default function ReleaseDashboard() {
                       {isOpen && (
                         <tr className="rd-expand">
                           <td colSpan={9}>
-                            <div className="rd-counts">
-                              <div>Handed over <strong>{handed.length}</strong></div>
-                              <div>Not handed over <strong>{pending.length}</strong></div>
+                            <div className="rd-feat-panel">
+                              <div className="rd-feat-toolbar">
+                                <div className="rd-counts">
+                                  <div>Not handed over <strong>{pending.length}</strong></div>
+                                  <div>Handed over <strong>{handed.length}</strong></div>
+                                </div>
+                                <button
+                                  type="button"
+                                  className={`rd-toggle${showHandoverTests.has(feat.name) ? " is-on" : ""}`}
+                                  aria-pressed={showHandoverTests.has(feat.name)}
+                                  disabled={handed.length === 0}
+                                  title={handed.length === 0 ? "No handed over testcases" : "Show handed over testcases"}
+                                  onClick={() => toggleHandoverTests(feat.name)}
+                                >
+                                  <span className="rd-toggle-track" aria-hidden="true">
+                                    <span className="rd-toggle-thumb" />
+                                  </span>
+                                  Show handed over
+                                </button>
+                              </div>
+                              <FeatTests title="Not handed over" tests={pending} />
+                              {showHandoverTests.has(feat.name) && handed.length > 0 && (
+                                <FeatTests title="Handed over" tests={handed} />
+                              )}
                             </div>
-                            {handed.length > 0 && <FeatTests title="Handed over" tests={handed} />}
-                            <FeatTests title="Not handed over" tests={pending} />
                           </td>
                         </tr>
                       )}
