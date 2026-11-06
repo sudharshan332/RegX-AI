@@ -10,6 +10,7 @@ const JIRA_URL = "https://jira.nutanix.com/browse/";
 const DEFAULT_RELEASES = [
   { milestone: "7.7" },
   { milestone: "7.6" },
+  { milestone: "7.5" },
 ];
 const SAVED_RELEASES_KEY = "regx.release-dashboard.releases";
 const LAST_MILESTONE_PREFIX = "regx.release-dashboard.last";
@@ -176,9 +177,12 @@ function riskLevel(impact) {
 function FeatTests({ title, tests }) {
   return (
     <div className="rd-split">
-      <h3>{title}</h3>
+      <div className="rd-split-head">
+        <h3>{title}</h3>
+        <span className="rd-split-count">{tests.length}</span>
+      </div>
       {tests.length === 0 ? (
-        <p className="rd-status">None</p>
+        <p className="rd-status">No testcases</p>
       ) : (
         <table className="rd-table">
           <thead>
@@ -261,17 +265,17 @@ function GapTable({ rows }) {
 }
 
 export default function ReleaseDashboard() {
-  const { user, loading: authLoading } = useAuth();
+  const { user } = useAuth();
   const username = user?.username || user?.sub || "";
   const [releases, setReleases] = useState(() => [...DEFAULT_RELEASES, ...savedReleases()]);
   const [milestone, setMilestone] = useState(() => readLastMilestone(username));
-  const [milestoneReady, setMilestoneReady] = useState(false);
   const [tab, setTab] = useState("summary");
   const [viewType, setViewType] = useState("all");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState(null);
   const [openFeats, setOpenFeats] = useState(() => new Set());
+  const [showHandoverTests, setShowHandoverTests] = useState(() => new Set());
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   const [addError, setAddError] = useState("");
@@ -300,19 +304,12 @@ export default function ReleaseDashboard() {
   const selected = releases.find((item) => item.milestone === milestone) || { milestone };
 
   useEffect(() => {
-    if (authLoading) return;
-    setMilestone(readLastMilestone(username));
-    setMilestoneReady(true);
-  }, [authLoading, username]);
-
-  useEffect(() => {
-    if (!milestoneReady || authLoading) return;
     try {
       localStorage.setItem(lastMilestoneKey(username), milestone);
     } catch (err) {
       // The selector still works if storage is blocked.
     }
-  }, [milestone, username, milestoneReady, authLoading]);
+  }, [milestone, username]);
 
   useEffect(() => {
     if (releases.some((item) => item.milestone === milestone)) return;
@@ -320,7 +317,7 @@ export default function ReleaseDashboard() {
   }, [milestone, releases]);
 
   useEffect(() => {
-    if (!milestoneReady || tab !== "feats") return undefined;
+    if (tab !== "feats") return undefined;
     let cancelled = false;
     const current = releases.find((item) => item.milestone === milestone) || { milestone };
     setLoading(true);
@@ -347,10 +344,10 @@ export default function ReleaseDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [tab, milestone, releases, milestoneReady]);
+  }, [tab, milestone, releases]);
 
   useEffect(() => {
-    if (!milestoneReady || tab !== "summary") return undefined;
+    if (tab !== "summary") return undefined;
     let cancelled = false;
     const current = releases.find((item) => item.milestone === milestone) || { milestone };
     setSummaryLoading(true);
@@ -380,10 +377,9 @@ export default function ReleaseDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [tab, milestone, releases, viewType, milestoneReady]);
+  }, [tab, milestone, releases, viewType]);
 
   useEffect(() => {
-    if (!milestoneReady) return undefined;
     let cancelled = false;
     setTags([]);
     setTagsFor("");
@@ -402,10 +398,10 @@ export default function ReleaseDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [milestone, milestoneReady]);
+  }, [milestone]);
 
   useEffect(() => {
-    if (!milestoneReady || tab !== "summary" || !summary || tagsFor !== milestone || tags.length === 0) return undefined;
+    if (tab !== "summary" || !summary || tagsFor !== milestone || tags.length === 0) return undefined;
     let cancelled = false;
     const current = releases.find((item) => item.milestone === milestone) || { milestone };
     setCompareLoading(true);
@@ -430,7 +426,7 @@ export default function ReleaseDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [tab, summary, tags, tagsFor, milestone, releases, viewType, milestoneReady]);
+  }, [tab, summary, tags, tagsFor, milestone, releases, viewType]);
 
   function addRelease(event) {
     event.preventDefault();
@@ -553,9 +549,18 @@ export default function ReleaseDashboard() {
     });
   }
 
+  function toggleHandoverTests(name) {
+    setShowHandoverTests((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
   function exportExcel() {
     const rows = [[
-      "Feat", "Handed over", "Passed", "Failed", "Not run", "Pass %", "Handover %", "Execution %", "Pass %",
+      "Feat", "Handed over", "Passed", "Failed", "Not run", "Handover %", "Execution %", "Pass %", "LST owner",
     ]];
     feats.forEach((feat) => {
       const handed = (feat.tests || []).filter((test) => test.in_regression);
@@ -566,10 +571,10 @@ export default function ReleaseDashboard() {
         feat.passed,
         feat.failed,
         feat.not_run,
-        feat.pass_rate == null ? "—" : `${feat.pass_rate}%`,
         pctLabel(handoverPct(feat)),
         pctLabel(executionPct(feat)),
         pctLabel(executedPassPct(feat)),
+        feat.lst_owner || "—",
       ]);
       rows.push(["Handed over", handed.length, "Not handed over", pending.length]);
       const addTests = (title, tests) => {
@@ -1122,7 +1127,6 @@ export default function ReleaseDashboard() {
                   <th>Passed</th>
                   <th>Failed</th>
                   <th>Not run</th>
-                  <th>Pass %</th>
                   <th>Handover %</th>
                   <th>Execution %</th>
                   <th>Pass %</th>
@@ -1140,17 +1144,19 @@ export default function ReleaseDashboard() {
                         <td>
                           <button
                             type="button"
-                            className="rd-feat-link"
+                            className="rd-feat-link rd-color"
                             onClick={() => toggleFeat(feat.name)}
                           >
                             {isOpen ? "▾" : "▸"} {feat.name}
+                            <span className="rd-color-note">
+                              {feat.lst_owner ? `LST owner: ${feat.lst_owner}` : "LST owner unavailable"}
+                            </span>
                           </button>
                         </td>
                         <td>{feat.handed_over}/{feat.total}</td>
                         <td>{feat.passed}</td>
                         <td>{feat.failed}</td>
                         <td>{feat.not_run}</td>
-                        <td>{feat.pass_rate == null ? "—" : `${feat.pass_rate}%`}</td>
                         <td>
                           <ColorTip color={bandColor(handoverPct(feat))} help={BAND_HELP[bandColor(handoverPct(feat))]} className="rd-color-end">
                             <span className={`rd-status-box rd-${bandColor(handoverPct(feat))}`}>{pctLabel(handoverPct(feat))}</span>
@@ -1169,13 +1175,27 @@ export default function ReleaseDashboard() {
                       </tr>
                       {isOpen && (
                         <tr className="rd-expand">
-                          <td colSpan={9}>
-                            <div className="rd-counts">
-                              <div>Handed over <strong>{handed.length}</strong></div>
-                              <div>Not handed over <strong>{pending.length}</strong></div>
+                          <td colSpan={8}>
+                            <div className="rd-feat-panel">
+                              <div className="rd-feat-toolbar">
+                                <div className="rd-counts">
+                                  <div>Not handed over <strong>{pending.length}</strong></div>
+                                  <div>Handed over <strong>{handed.length}</strong></div>
+                                </div>
+                                <label className="rd-show-tests">
+                                  <input
+                                    type="checkbox"
+                                    checked={showHandoverTests.has(feat.name)}
+                                    onChange={() => toggleHandoverTests(feat.name)}
+                                  />
+                                  Show handed over
+                                </label>
+                              </div>
+                              <FeatTests title="Not handed over" tests={pending} />
+                              {showHandoverTests.has(feat.name) && (
+                                <FeatTests title="Handed over" tests={handed} />
+                              )}
                             </div>
-                            {handed.length > 0 && <FeatTests title="Handed over" tests={handed} />}
-                            <FeatTests title="Not handed over" tests={pending} />
                           </td>
                         </tr>
                       )}
