@@ -826,6 +826,288 @@ def parse_json_object(text: str) -> Dict[str, Any]:
     return {}
 
 
+# ---------------------------------------------------------------------------
+# Deep testcase triage via NAI reasoning model
+# ---------------------------------------------------------------------------
+
+# JIRA wiki markup template for the FAILED test ("triage-cdp-test-failure") skill.
+# Keeps the mandatory section checklist from
+# .cursor/skills/triage-cdp-test-failure/report-template-reference.md so the
+# NAI model emits a Skill Triage Report comparable to the Cursor-bridge path.
+_CDP_SKILL_SYSTEM_PROMPT = """You are a senior Nutanix regression failure analyst running the
+`triage-cdp-test-failure` skill without live MCP tool access. Classify each
+failure as exactly one of: `Test Issue`, `Product Issue`, `Infra Issue`, or
+`Flaky / Timing`.
+
+Reporting discipline (apply to every field):
+- Treat observations (what you can see in the provided logs / tickets) as
+  facts; cite the source inline (log file name, line, ticket key).
+- Mark inferences with hedging ("appears to", "is consistent with", "likely").
+- Say "unknown from the provided logs" when evidence is missing — never
+  fabricate log lines, ticket keys, commit hashes, or file paths.
+- A similar JIRA ticket is a hypothesis, not proof: validate the Triage
+  Genie suggestion against the actual failure signature.
+
+Deliverable — respond with ONE JSON object only (no markdown fence outside
+JSON, no prose before/after) using exactly these keys:
+
+  root_cause           string  evidence-backed causal chain
+  classification       string  one of the four classes above
+  confidence           string  High | Medium | Low
+  suggested_fix        string  concrete next step for the owner
+  failing_code         object  { "file": str, "line_range": str, "snippet": str }
+                               (use empty strings when the failing code is
+                               not identifiable; never omit the keys)
+  related_components   array of strings  (e.g. ["stargate", "pithos"])
+  jira_duplicates      array of strings  (e.g. ["ENG-123456"])
+  tg_ticket_validation object  { "ticket": str, "verdict":
+                               "Correct|Incorrect|Partial|Missing",
+                               "reason": str }
+  triage_report        string  FULL JIRA wiki markup report following the
+                               mandatory template below (not a short summary)
+
+`triage_report` MUST follow this JIRA wiki markup template verbatim. Include
+sections 1–4, 11, 12 unconditionally; include 5–10 only when the provided
+evidence supports them (omit the whole section when it does not). Use `h2.`
+and `h3.` for headers, `*bold*` with single asterisks, `[text|url]` for
+links, and `{code}...{code}` or `{code:python}...{code}` for code blocks.
+Do NOT prefix with ```wiki or any Markdown fences — emit raw JIRA wiki
+markup inside the JSON string value.
+
+```
+h2. Bug Report: [Service] [Fatal / SIGSEGV / Core / Validation] - [Brief]
+
+h3. Test Information
+* *Testcase*: <full testcase name>
+* *Cluster*: <cluster or "unknown">
+* *NOS Version*: <version or "unknown">
+* *Build Commit*: <commit or "unknown">
+* *GBN*: <gbn or "unknown">
+* *Date*: <YYYY-MM-DD if visible>
+* *External Storage*: <vendor / N/A>
+
+h3. Cluster Configuration
+{code:python}
+<Python pformat of base_config summary if available, else write
+"unknown from provided evidence">
+{code}
+
+h3. Failure Summary
+<Factual observed-vs-inferred narrative with log citations. State disposition
+(product bug / test bug / infra / flaky) and flag any evidence gaps.>
+
+h3. Integrity / Test Failures   (conditional — include only when steps.log
+                                 shows IO integrity / workload failures)
+<time, VM, disk table in {code} blocks>
+
+h3. Error Injection Timeline   (conditional — include only when background
+                                job logs show EI events)
+{code}
+StartTime            EndTime               Component
+{code}
+
+h3. Fatal Error / Signal Error / Core   (conditional — include only when
+                                         fatals / SIGSEGV / cores exist)
+* *CVMs Affected*: <ips>
+* *Service*: <service>
+* *Time*: <YYYY-MM-DD HH:MM:SS>
+* *Type*: Fatal | SIGSEGV | Core
+{code}
+<fatal / signal line>
+{code}
+
+h3. Stack Trace   (conditional — include only when stack trace available)
+{code}
+<stack frames>
+{code}
+
+h3. Activity Trace   (conditional — include only when traces correlate)
+{code}
+<activity trace lines>
+{code}
+
+h3. Log Context   (conditional — include only when ±50 lines around the
+                   fatal are available)
+{code}
+<log context>
+{code}
+
+h3. Related Tickets
+* *ENG-XXXXX*: <summary> — *Disposition*: Duplicate|Similar — *Status*:
+  Open|Resolved — Fix: [Gerrit NNNN|https://nugerrit.ntnxdpro.com/c/main/+/NNNN]
+  (list each candidate ticket; write "None found" when no evidence links any)
+
+h3. Links
+* [Log Bundle|<test_log_url>]
+* <additional error.json / CVM / base config / test log links when visible>
+```
+
+Rules:
+- Never emit the ```wiki / ```json fences outside the JSON object.
+- The outermost response must parse as a single JSON object.
+- Keep the triage_report in JIRA wiki markup (no Markdown ##, **, or `[text](url)`).
+- When evidence is missing for a section marked (conditional), omit that
+  entire section header; do not write "N/A" rows.
+- Always include the top-level log URL as the first "Log Bundle" link.
+"""
+
+
+# JIRA wiki markup template for the SKIPPED / RDM deployment-failure skill.
+_RDM_SKILL_SYSTEM_PROMPT = """You are a senior Nutanix regression analyst running the
+`triage-rdm-deployment-failure` skill without live MCP tool access.
+Classify the deployment failure as one of: `Foundation Issue`,
+`Infra Issue`, `Product Issue`, `Config Issue`, `Plugin Issue`,
+`Intermittent`, or `Other`.
+
+Reporting discipline:
+- Cite observations from the RDM failure message, deployment logs, or
+  pre-fetched JIRA tickets. Hedge inferences. Say "unknown from provided
+  evidence" when a link in the causal chain cannot be verified.
+- A similar DIAL / ENG ticket is a hypothesis — only recommend
+  `link_existing` when the ticket describes the same root cause.
+- Do NOT file JIRA tickets yourself; recommend one of
+  `link_existing | rerun | disable_node_and_rerun | create_jira`.
+
+Deliverable — respond with ONE JSON object only (no markdown fences outside
+JSON, no prose before/after) using exactly these keys:
+
+  root_cause              string
+  classification          string  (one of the 7 classes above)
+  issue_category          string  FOUNDATION | INFRA | PRODUCT | CONFIG |
+                                   PLUGIN | INTERMITTENT | OTHER
+  confidence              string  High | Medium | Low
+  failing_code            object  { "file": str, "line_range": str,
+                                     "snippet": str } (empty strings OK)
+  suggested_fix           string
+  related_components      array of strings
+  existing_tickets        array of objects
+                           { "ticket": "DIAL-XXXX", "project": "DIAL|ENG",
+                             "match": "...reason..." }
+  jira_duplicates         array of ticket keys
+  recommended_action      string  link_existing | create_jira | rerun |
+                                   disable_node_and_rerun
+  suggested_comment       string  e.g. "regx_rerun (DIAL-23079)"
+  suggested_jira_project  string  DIAL or ENG
+  tg_ticket_validation    object  { "ticket": str, "verdict":
+                                     "Correct|Incorrect|Partial|Missing",
+                                     "reason": str }
+  triage_report           string  FULL triage report in JIRA wiki markup
+
+`triage_report` MUST follow this template (keep the headings, drop
+conditional sections when evidence is absent, do not output ```json or
+```wiki fences inside the string):
+
+```
+h2. Skipped Test Triage: <testcase>
+
+h3. Test Information
+* *Testcase*: <full testcase name>
+* *JITA Task*: [<task_id>|https://jita.eng.nutanix.com/results?task_ids=<task_id>]
+* *RDM Scheduled Deployment*: [<rdm url>|<rdm url>]
+* *Skip Reason*: <exception_summary / rdm_message>
+
+h3. Deployment Failure Summary
+<Observed-vs-inferred narrative; cite the RDM failure message, deployment
+log lines, Foundation node names, etc. Flag evidence gaps explicitly.>
+
+h3. Recommended Action
+* *Action*: <recommended_action>
+* *Suggested Comment*: {{<suggested_comment>}}
+* *Suggested Project*: <DIAL|ENG>
+
+h3. Related Tickets
+* *DIAL-XXXXX* / *ENG-XXXXX*: <summary> — *Match*: same root cause / similar
+  / unrelated — *Status*: Open|Resolved
+  (list "None found" when no evidence links any)
+
+h3. Links
+* [RDM / Deployment Log|<rdm_url or deployment log url>]
+* [JITA Task|https://jita.eng.nutanix.com/results?task_ids=<task_id>]
+```
+
+Rules:
+- Return raw JIRA wiki markup inside `triage_report`; no Markdown ##, **, [text](url).
+- Keep tg_ticket_validation and recommended_action consistent (e.g. a
+  Correct TG ticket typically implies `link_existing`).
+- Never invent ticket keys, node names, or RDM log lines.
+"""
+
+
+def _format_ticket_hint(ticket: Any) -> str:
+    """Render a glean / jira ticket row in a compact, model-friendly form."""
+    if isinstance(ticket, dict):
+        key = ticket.get("ticket") or ticket.get("key") or ""
+        summary = (
+            ticket.get("jira_summary")
+            or ticket.get("glean_title")
+            or ticket.get("summary")
+            or ticket.get("title")
+            or ""
+        )
+        status = ticket.get("jira_status") or ticket.get("status") or ""
+        parts = [str(key)]
+        if status:
+            parts.append(f"[{status}]")
+        if summary:
+            parts.append(f"— {summary}")
+        return " ".join(p for p in parts if p).strip()
+    return str(ticket)
+
+
+def _format_snippet_hint(snippet: Any) -> str:
+    if isinstance(snippet, dict):
+        title = snippet.get("title") or snippet.get("source") or "Untitled"
+        body = (snippet.get("snippet") or snippet.get("text") or "")[:220]
+        url = snippet.get("url") or ""
+        line = f"- {title}"
+        if url:
+            line += f" ({url})"
+        if body:
+            line += f": {body}"
+        return line
+    return f"- {str(snippet)[:220]}"
+
+
+def _normalize_failing_code(value: Any) -> Dict[str, str]:
+    """Coerce the model's `failing_code` into the UI's expected object shape."""
+    if isinstance(value, dict):
+        return {
+            "file": str(value.get("file") or value.get("path") or "").strip(),
+            "line_range": str(
+                value.get("line_range")
+                or value.get("lines")
+                or value.get("line")
+                or ""
+            ).strip(),
+            "snippet": str(value.get("snippet") or value.get("code") or "").strip(),
+        }
+    text = str(value or "").strip()
+    if not text:
+        return {"file": "", "line_range": "", "snippet": ""}
+    # Legacy: model emitted plain text — surface it as the snippet so the UI
+    # still shows something under "Failing Code".
+    return {"file": "", "line_range": "", "snippet": text}
+
+
+def _normalize_str_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _normalize_tg_validation(value: Any, fallback_ticket: str = "") -> Dict[str, str]:
+    if isinstance(value, dict):
+        return {
+            "ticket": str(value.get("ticket") or fallback_ticket or "").strip(),
+            "verdict": str(value.get("verdict") or "").strip(),
+            "reason": str(value.get("reason") or "").strip(),
+        }
+    return {"ticket": str(fallback_ticket or ""), "verdict": "", "reason": ""}
+
+
 def analyze_testcase_with_nai(
     *,
     testcase_name: str,
@@ -846,69 +1128,133 @@ def analyze_testcase_with_nai(
     api_key: Optional[str] = None,
     model: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Deep testcase analysis via NAI reasoning model (Cursor-bridge compatible shape)."""
+    """Deep testcase analysis via NAI reasoning model (Cursor-bridge compatible shape).
+
+    The system prompt bundles the ``triage-cdp-test-failure`` /
+    ``triage-rdm-deployment-failure`` skill's mandatory report template so
+    the NAI reasoning model produces a JIRA-wiki markup *Skill Triage
+    Report* comparable to the Cursor SDK path (which runs the real skill
+    through Sourcegraph/Glean MCP). NAI has no live MCP access, so the
+    model is told to work from the provided evidence only and to flag
+    missing data instead of fabricating it.
+    """
     tickets = list(jira_tickets or [])
     glean = list(glean_tickets or [])
     snippets = list(glean_snippets or [])
-    system = (
-        "You are a senior Nutanix regression failure analyst. "
-        "Classify failures as Test Issue, Product Issue, Infra Issue, or Flaky / Timing. "
-        "Respond with a single JSON object only (no markdown outside JSON) using keys: "
-        "root_cause, classification, confidence, suggested_fix, failing_code, "
-        "related_components (array), jira_duplicates (array), triage_report."
-    )
+    atype = (analysis_type or "failed").strip().lower()
+
+    system = _RDM_SKILL_SYSTEM_PROMPT if atype == "skipped" else _CDP_SKILL_SYSTEM_PROMPT
+
+    ticket_hints = "\n".join(f"- {_format_ticket_hint(t)}" for t in tickets[:12]) or "- none provided"
+    glean_hints = "\n".join(f"- {_format_ticket_hint(t)}" for t in glean[:12]) or "- none pre-fetched"
+    snippet_hints = "\n".join(_format_snippet_hint(s) for s in snippets[:6]) or "- none pre-fetched"
+
     user_parts = [
-        f"Analysis type: {analysis_type}",
+        f"Analysis mode: {atype}",
         f"Testcase: {testcase_name}",
         f"Failure stage: {failure_stage or 'unknown'}",
-        f"Exception summary: {(exception_summary or rdm_message or '')[:1500]}",
-        f"Exception: {(exception or rdm_message or '')[:2500]}",
-        f"Log URL: {test_log_url or rdm_url or ''}",
-        f"RDM URL: {rdm_url or ''}",
-        f"Triage Genie ticket: {triage_genie_ticket or ''}",
-        f"Jira tickets: {json.dumps(tickets)[:1500]}",
-        f"Glean tickets: {json.dumps(glean)[:1500]}",
-        f"Glean snippets: {json.dumps(snippets)[:1200]}",
-        f"steps.log (truncated):\n{(steps_log or '')[:4000]}",
-        f"nutest log (truncated):\n{(nutest_test_log or '')[:4000]}",
+        f"Triage Genie suggested ticket: {triage_genie_ticket or 'none'}",
+        f"Test log URL: {test_log_url or 'unknown'}",
     ]
+    if atype == "skipped" and rdm_url:
+        user_parts.append(f"RDM scheduled-deployment URL: {rdm_url}")
+    user_parts.append(
+        f"Exception summary:\n{(exception_summary or rdm_message or 'N/A')[:2000]}"
+    )
+    user_parts.append(
+        f"Exception / traceback:\n```\n{(exception or rdm_message or 'N/A')[:4000]}\n```"
+    )
+    user_parts.append(f"Linked Jira tickets:\n{ticket_hints}")
+    user_parts.append(f"Pre-fetched tickets from error-message search:\n{glean_hints}")
+    user_parts.append(f"Pre-fetched Glean snippets:\n{snippet_hints}")
+
+    if steps_log:
+        user_parts.append(
+            f"steps.log (truncated):\n```\n{str(steps_log)[:6000]}\n```"
+        )
+    if nutest_test_log:
+        user_parts.append(
+            f"nutest_test.log (truncated):\n```\n{str(nutest_test_log)[:6000]}\n```"
+        )
+
+    user_parts.append(
+        "Return ONLY the single JSON object described in the system prompt. "
+        "`triage_report` must be the FULL JIRA wiki markup report, not a "
+        "paragraph summary. Omit conditional sections when the evidence does "
+        "not support them, but always include Test Information, Failure "
+        "Summary, Related Tickets, and Links."
+    )
+
     content = chat_text(
         system,
         "\n\n".join(user_parts),
         model=model,
         api_key=api_key,
         username=username,
-        max_tokens=3500,
-        timeout=180,
+        max_tokens=6000,
+        timeout=240,
     )
     parsed = parse_json_object(content)
     if not parsed:
+        # Model produced free-form text instead of JSON. Keep that output
+        # inside `triage_report` so the UI still shows something, and
+        # surface a clear root_cause stub for the badges.
         parsed = {
-            "root_cause": content[:4000] or "NAI returned an empty analysis",
+            "root_cause": (content[:4000] or "NAI returned an empty analysis").strip(),
             "classification": "Unknown",
-            "confidence": "low",
+            "confidence": "Low",
             "suggested_fix": "",
-            "failing_code": "",
+            "failing_code": {},
             "related_components": [],
             "jira_duplicates": [],
-            "triage_report": content[:6000],
+            "triage_report": content.strip() if content else "",
         }
-    analysis = {
-        "root_cause": str(parsed.get("root_cause") or content[:2000] or "").strip(),
-        "classification": str(parsed.get("classification") or "Unknown").strip(),
-        "confidence": str(parsed.get("confidence") or "medium").strip(),
+
+    triage_report_raw = parsed.get("triage_report")
+    if isinstance(triage_report_raw, (dict, list)):
+        triage_report_text = json.dumps(triage_report_raw, indent=2)
+    else:
+        triage_report_text = str(triage_report_raw or "").strip()
+    if not triage_report_text:
+        # Last-ditch: expose the raw model output so the "Skill Triage
+        # Report" section is never silently empty on the NAI path.
+        triage_report_text = (content or "").strip()
+
+    analysis: Dict[str, Any] = {
+        "root_cause": str(parsed.get("root_cause") or "").strip() or (content[:2000] if content else ""),
+        "classification": str(parsed.get("classification") or "Unknown").strip() or "Unknown",
+        "confidence": str(parsed.get("confidence") or "Medium").strip() or "Medium",
         "suggested_fix": str(parsed.get("suggested_fix") or "").strip(),
-        "failing_code": str(parsed.get("failing_code") or "").strip(),
-        "related_components": parsed.get("related_components") or [],
-        "jira_duplicates": parsed.get("jira_duplicates") or [],
-        "triage_report": str(parsed.get("triage_report") or content[:6000] or "").strip(),
+        "failing_code": _normalize_failing_code(parsed.get("failing_code")),
+        "related_components": _normalize_str_list(parsed.get("related_components")),
+        "jira_duplicates": _normalize_str_list(parsed.get("jira_duplicates")),
+        "tg_ticket_validation": _normalize_tg_validation(
+            parsed.get("tg_ticket_validation"), fallback_ticket=triage_genie_ticket
+        ),
+        "triage_report": triage_report_text,
         "provider": "nai",
         "model": resolve_model(model),
     }
-    if not isinstance(analysis["related_components"], list):
-        analysis["related_components"] = [str(analysis["related_components"])]
-    if not isinstance(analysis["jira_duplicates"], list):
-        analysis["jira_duplicates"] = [str(analysis["jira_duplicates"])]
+
+    if atype == "skipped":
+        analysis["issue_category"] = str(parsed.get("issue_category") or "").strip()
+        analysis["recommended_action"] = str(parsed.get("recommended_action") or "").strip()
+        analysis["suggested_comment"] = str(parsed.get("suggested_comment") or "").strip()
+        analysis["suggested_jira_project"] = str(parsed.get("suggested_jira_project") or "").strip()
+        existing = parsed.get("existing_tickets") or []
+        if isinstance(existing, list):
+            analysis["existing_tickets"] = [
+                {
+                    "ticket": str((t or {}).get("ticket") or "").strip(),
+                    "project": str((t or {}).get("project") or "").strip(),
+                    "match": str((t or {}).get("match") or "").strip(),
+                }
+                for t in existing
+                if isinstance(t, dict)
+            ]
+        else:
+            analysis["existing_tickets"] = []
+
     return analysis
 
 
