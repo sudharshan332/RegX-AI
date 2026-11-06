@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import quote
 
@@ -42,7 +43,14 @@ RELEASES = {
         "root": "test_sets/milestones/7.6/CDP",
         "branch": "ganges-7.6-stable",
     },
+    # 7.5 and older maintenance releases keep feat LST files in this folder,
+    # not under CDP/FEATS. See ganges-7.5-stable/.../milestones/7.5/cdp.
+    "7.5": {
+        "root": "test_sets/milestones/7.5/cdp",
+        "branch": "ganges-7.5-stable",
+    },
 }
+_FEAT_ID_RE = re.compile(r"feat[-_](\d+)", re.I)
 _ROOT_RE = re.compile(r"^test_sets/milestones/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+$")
 _PASS = {"succeeded", "passed", "success", "pass"}
 _FAIL = {"failed", "failure", "fail", "error"}
@@ -60,6 +68,7 @@ _BULK_MIN = 5
 _TOP_QI = 5
 _RESULT_RANK = {"pass": 2, "fail": 1, "other": 0}
 _JIRA_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+", re.I)
+_LST_ASSIGNEE_RE = re.compile(r"^assignee:\s*(.+?)\s*$", re.I)
 _BUG_TYPES = "product,test,framework,infra,other"
 
 # Filled by register_routes from the already-loaded Flask module.
@@ -189,12 +198,63 @@ def release_info(milestone, root=None, branch=None):
     }
 
 
+def _flat_cdp_root(root):
+    """7.5-style tree: LST files live in ``.../cdp``, not ``.../CDP/FEATS``."""
+    return (root or "").rstrip("/").split("/")[-1] == "cdp"
+
+
+def _regression_name(name):
+    low = (name or "").lower()
+    if low.endswith(".lst"):
+        low = low[:-4]
+    return low == "regression" or low.startswith("regression")
+
+
+def _feat_id_from_name(name):
+    """``FEAT-17081.lst`` and ``feat_14492_zk.lst`` both name FEAT-14492 / FEAT-17081."""
+    match = _FEAT_ID_RE.search(name or "")
+    if not match:
+        return ""
+    return "FEAT-%s" % match.group(1)
+
+
+def _train_key(version):
+    parts = (version or "").split(".")
+    if len(parts) < 2 or not all(part.isdigit() for part in parts):
+        return None
+    return int(parts[0]), int(parts[1])
+
+
+def _uses_flat_cdp(version):
+    """7.6 and newer use CDP/FEATS. 7.5 and older MR trains use milestones/<ver>/cdp."""
+    key = _train_key(version)
+    return bool(key) and key < (7, 6)
+
+
+def milestone_tree(milestone):
+    """Root folder and nutest branch for a release that is not hard-coded."""
+    mapped = nutest_branch_for(milestone)
+    if not mapped:
+        return None
+    version = mapped["milestone"]
+    folder = "cdp" if _uses_flat_cdp(version) else "CDP"
+    return {
+        "milestone": version,
+        "root": "test_sets/milestones/%s/%s" % (version, folder),
+        "branch": mapped["branch"],
+    }
+
+
 def classify_path(path, milestone, root=None):
     """Return (feat_name or '', in_regression) for one test-set path.
 
-    Feats are the directories under <root>/FEATS/, one row per directory.
+    On 7.6 and 7.7, feats are the directories under <root>/FEATS/.
     Nested folders stay separate (FEAT-19686/FEAT-17396 is not FEAT-19686).
     <root>/REGRESSION/ is the handover set and is not a feat row.
+
+    On 7.5 and older maintenance releases the LST files sit in <root>
+    (``test_sets/milestones/<version>/cdp``). The feat is the id in the
+    file name. A regression folder or regression LST is handover.
     """
     info = release_info(milestone, root=root)
     if not info:
@@ -209,6 +269,13 @@ def classify_path(path, milestone, root=None):
     parts = [part for part in path[idx + len(root):].split("/") if part]
     if not parts:
         return "", False
+    if _flat_cdp_root(info["root"]):
+        if any(_regression_name(part) for part in parts):
+            return "", True
+        filename = parts[-1]
+        if not filename.lower().endswith(".lst"):
+            return "", False
+        return _feat_id_from_name(filename), False
     head = parts[0].lower()
     if head == "regression" or head.startswith("regression"):
         return "", True
@@ -220,6 +287,43 @@ def classify_path(path, milestone, root=None):
     if not feat_parts:
         return "", False
     return "/".join(feat_parts), False
+
+
+def _clean_assignee(value):
+    text = (value or "").strip().strip(",").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1].strip()
+    return text
+
+
+def lst_owner_from_text(text):
+    """Assignee from a feat LST. It is usually the second line: ``assignee: name``."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    for line in lines:
+        match = _LST_ASSIGNEE_RE.match(line)
+        if match:
+            return _clean_assignee(match.group(1))
+    if (
+        len(lines) >= 2
+        and lines[0].lower().startswith("summary:")
+        and ":" not in lines[1]
+        and not lines[1].startswith("#")
+    ):
+        return _clean_assignee(lines[1])
+    return ""
+
+
+def _remember_lst(store, feat_key, path):
+    if not feat_key or not path or not str(path).lower().endswith(".lst"):
+        return
+    paths = store.setdefault(feat_key, [])
+    if path not in paths:
+        paths.append(path)
+
+
+def _remember_lst_many(store, feat_key, paths):
+    for path in paths or []:
+        _remember_lst(store, feat_key, path)
 
 
 def _pass_number(name):
@@ -285,11 +389,13 @@ def parse_row(item, milestone, root=None):
     if not name:
         return None
     feats = {}
+    lst_files = {}
     in_regression = False
     for path in _paths(tc.get("test_sets")):
         feat, is_reg = classify_path(path, milestone, root=root)
         if feat:
             feats[feat.lower()] = feat
+            _remember_lst(lst_files, feat.lower(), path)
         if is_reg:
             in_regression = True
     if not feats and not in_regression:
@@ -305,6 +411,7 @@ def parse_row(item, milestone, root=None):
         "tickets": tickets,
         "owners": _owners(tc.get("owners")),
         "feats": feats,
+        "lst_files": lst_files,
         "target_branch": str(item.get("target_branch") or "").strip(),
         "run_time": _run_time(run),
     }
@@ -335,6 +442,9 @@ def _merge_test(existing, incoming, release_branch, milestone):
         existing["owners"] = incoming["owners"]
     for key, display in incoming["feats"].items():
         existing["feats"].setdefault(key, display)
+    existing_lst = existing.setdefault("lst_files", {})
+    for key, paths in (incoming.get("lst_files") or {}).items():
+        _remember_lst_many(existing_lst, key, paths)
     existing_rank = _branch_rank(existing, release_branch, milestone)
     incoming_rank = _branch_rank(incoming, release_branch, milestone)
     if incoming_rank > existing_rank:
@@ -413,8 +523,15 @@ def build_dashboard(rows, milestone, root=None, branch=None):
     for record in by_name.values():
         record["result"] = _result_kind(record["status"])
         for feat_key, display in record["feats"].items():
-            bucket = feat_tests.setdefault(feat_key, {"name": display, "tests": []})
+            bucket = feat_tests.setdefault(
+                feat_key, {"name": display, "tests": [], "lst_files": []},
+            )
             bucket["tests"].append(record)
+            _remember_lst_many(
+                {feat_key: bucket["lst_files"]},
+                feat_key,
+                (record.get("lst_files") or {}).get(feat_key),
+            )
 
     feats = []
     for bucket in feat_tests.values():
@@ -435,6 +552,8 @@ def build_dashboard(rows, milestone, root=None, branch=None):
             "failed": failed,
             "not_run": not_run,
             "pass_rate": pass_rate,
+            "lst_files": list(bucket.get("lst_files") or []),
+            "lst_owner": "",
             "tests": [
                 {
                     "name": test["name"],
@@ -455,17 +574,268 @@ def build_dashboard(rows, milestone, root=None, branch=None):
     return info
 
 
+def _looks_like_lst(text):
+    sample = (text or "").lstrip()[:200].lower()
+    if not sample or sample.startswith("<!doctype") or sample.startswith("<html"):
+        return False
+    return True
+
+
+def _sourcegraph_token():
+    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    if token:
+        return token
+    try:
+        from flask import g, has_request_context
+        if not has_request_context():
+            return ""
+        user = getattr(g, "current_user", None) or {}
+        username = (user.get("sub") or user.get("username") or "").strip()
+        if not username:
+            return ""
+        from user_keys import get_user_key
+        return (get_user_key(username, "sourcegraph_token") or "").strip()
+    except Exception:
+        return ""
+
+
+def _graphql(query, variables, token):
+    """One Sourcegraph GraphQL call. Returns the data object, or {}."""
+    if not token:
+        return {}
+    base = (os.getenv("SOURCEGRAPH_URL") or _SG).rstrip("/")
+    payload = {"query": query, "variables": variables}
+    for api_path in ("/.api/graphql", "/api/graphql"):
+        for scheme in ("token %s", "Bearer %s"):
+            try:
+                response = requests.post(
+                    base + api_path,
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": scheme % token,
+                    },
+                    timeout=20,
+                    verify=False,
+                )
+            except requests.RequestException as exc:
+                logger.warning("Sourcegraph request failed: %s", exc)
+                continue
+            if response.status_code != 200:
+                continue
+            try:
+                body = response.json()
+            except ValueError:
+                continue
+            if body.get("errors"):
+                continue
+            data = body.get("data")
+            if isinstance(data, dict):
+                return data
+    return {}
+
+
+def _commit_node(data):
+    repo = (data or {}).get("repository") or {}
+    return repo.get("commit") or {}
+
+
+def feat_folder(root, feat_name):
+    """Directory of one feat on the release tree: ``<root>/FEATS/<feat>``."""
+    return "%s/FEATS/%s" % ((root or "").strip("/"), (feat_name or "").strip("/"))
+
+
+def _list_entries(folder, branch, token):
+    """Files and directories directly inside one nutest folder."""
+    query = (
+        "query RepoTree($repo: String!, $rev: String!, $path: String!) {"
+        " repository(name: $repo) { commit(rev: $rev) {"
+        " tree(path: $path) { entries { name path isDirectory } } } } }"
+    )
+    data = _graphql(query, {"repo": _REPO, "rev": branch or "HEAD", "path": folder}, token)
+    entries = (_commit_node(data).get("tree") or {}).get("entries") or []
+    found = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "")
+        if not name:
+            continue
+        found.append({
+            "name": name,
+            "path": entry.get("path") or "%s/%s" % (folder, name),
+            "isDirectory": bool(entry.get("isDirectory")),
+        })
+    return found
+
+
+def _list_lst_files(folder, branch, token):
+    """``.lst`` files sitting directly in the feat folder."""
+    paths = []
+    for entry in _list_entries(folder, branch, token):
+        name = entry["name"]
+        if entry.get("isDirectory") or not name.lower().endswith(".lst"):
+            continue
+        paths.append(entry["path"])
+    return paths
+
+
+def _flat_lst_index(root, branch, token, list_entries, list_lsts):
+    """Map FEAT-id to the LST paths under a 7.5-style ``cdp`` folder.
+
+    Feat lists sit in the folder itself and in child folders such as
+    ``from_iris``. Regression folders are handover lists, not feat owners.
+    """
+    index = {}
+
+    def add(path):
+        if not str(path).lower().endswith(".lst"):
+            return
+        feat = _feat_id_from_name(str(path).rsplit("/", 1)[-1])
+        if not feat:
+            return
+        paths = index.setdefault(feat.lower(), [])
+        if path not in paths:
+            paths.append(path)
+
+    try:
+        entries = list_entries(root, branch, token) or []
+    except Exception as exc:
+        logger.warning("Could not list %s: %s", root, exc)
+        return index
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "")
+        path = entry.get("path") or "%s/%s" % (root, name)
+        if entry.get("isDirectory"):
+            if _regression_name(name):
+                continue
+            try:
+                nested = list_lsts(path, branch, token) or []
+            except Exception as exc:
+                logger.warning("Could not list %s: %s", path, exc)
+                continue
+            for nested_path in nested:
+                add(nested_path)
+        else:
+            add(path)
+    return index
+
+
+def _owners_from_paths(paths, branch, token, read_file):
+    names = []
+    for path in paths or []:
+        try:
+            text = read_file(path, branch, token) or ""
+        except Exception as exc:
+            logger.warning("Could not read %s: %s", path, exc)
+            continue
+        owner = lst_owner_from_text(text)
+        if owner and owner not in names:
+            names.append(owner)
+    return ", ".join(names)
+
+
+def _read_lst_graphql(path, branch, token):
+    """Read one file through the Sourcegraph GraphQL API."""
+    query = (
+        "query RepoFile($repo: String!, $rev: String!, $path: String!) {"
+        " repository(name: $repo) { commit(rev: $rev) { blob(path: $path) { content } } } }"
+    )
+    data = _graphql(query, {"repo": _REPO, "rev": branch or "HEAD", "path": path}, token)
+    blob = _commit_node(data).get("blob") or _commit_node(data).get("file") or {}
+    text = blob.get("content") if isinstance(blob, dict) else ""
+    if not _looks_like_lst(text):
+        return ""
+    return text[:8000]
+
+
+def _owner_from_feat_folder(root, feat_name, branch, token, list_lsts, read_file):
+    folder = feat_folder(root, feat_name)
+    try:
+        paths = list_lsts(folder, branch, token) or []
+    except Exception as exc:
+        logger.warning("Could not list feat folder %s: %s", folder, exc)
+        return ""
+    names = []
+    for path in paths:
+        try:
+            text = read_file(path, branch, token) or ""
+        except Exception as exc:
+            logger.warning("Could not read %s: %s", path, exc)
+            continue
+        owner = lst_owner_from_text(text)
+        if owner and owner not in names:
+            names.append(owner)
+    if names:
+        logger.info("Feat %s owner %s from %s", feat_name, ", ".join(names), ", ".join(paths))
+    else:
+        logger.info("Feat %s has no assignee in %s", feat_name, folder)
+    return ", ".join(names)
+
+
+def attach_lst_owners(dashboard, read_file=None, list_lsts=None, list_entries=None, token=None):
+    """Owner of a feat is the assignee in its LST file.
+
+    7.6 and 7.7 keep that file inside ``<root>/FEATS/<feat>``.
+    7.5 and older maintenance releases keep it in ``<root>`` itself
+    (``test_sets/milestones/<version>/cdp``).
+    """
+    if not isinstance(dashboard, dict):
+        return dashboard
+    feats = dashboard.get("feats") or []
+    branch = dashboard.get("branch") or ""
+    root = dashboard.get("root") or ""
+    # Resolve the token on this thread. Worker threads do not see the login.
+    resolved = token if token is not None else _sourcegraph_token()
+    if read_file is None and not resolved:
+        logger.warning("LST owner lookup skipped: no Sourcegraph token")
+        return dashboard
+    list_fn = list_lsts or _list_lst_files
+    read_fn = read_file or _read_lst_graphql
+    entries_fn = list_entries or _list_entries
+    flat_index = None
+    if _flat_cdp_root(root):
+        flat_index = _flat_lst_index(root, branch, resolved, entries_fn, list_fn)
+
+    def _one(feat):
+        name = feat.get("name") or ""
+        if flat_index is not None:
+            return _owners_from_paths(flat_index.get(name.lower()), branch, resolved, read_fn)
+        return _owner_from_feat_folder(root, name, branch, resolved, list_fn, read_fn)
+
+    if not feats:
+        return dashboard
+    workers = min(8, len(feats))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_map = {pool.submit(_one, feat): feat for feat in feats}
+        for future in as_completed(future_map):
+            feat = future_map[future]
+            try:
+                feat["lst_owner"] = future.result() or ""
+            except Exception as exc:
+                logger.warning("LST owner lookup failed for %s: %s", feat.get("name"), exc)
+                feat["lst_owner"] = ""
+    return dashboard
+
+
 def fetch_milestone_rows(milestone, root=None, branch=None):
     info = release_info(milestone, root=root, branch=branch)
     if not info:
         raise DashboardError("Unsupported release")
-    root = re.escape(info["root"])
+    root_path = info["root"]
+    escaped = re.escape(root_path)
+    if _flat_cdp_root(root_path):
+        pattern = escaped + "/"
+    else:
+        pattern = escaped + "/(FEATS|REGRESSION)/"
     match = {
         "$and": [
             {"target_milestone": milestone},
             {"deleted": False},
             {"test_case.deprecated": False},
-            {"test_case.test_sets": {"$regex": root + "/(FEATS|REGRESSION)/", "$options": "i"}},
+            {"test_case.test_sets": {"$regex": pattern, "$options": "i"}},
         ]
     }
     rows = []
@@ -513,18 +883,19 @@ def fetch_milestone_rows(milestone, root=None, branch=None):
 
 
 def lookup_release(nos):
-    """7.6.1 uses ganges-7.6-stable. 7.5.1 uses ganges-7.5-stable."""
+    """7.6.1 uses CDP/FEATS on ganges-7.6-stable.
+
+    7.5.1 and other maintenance releases on the 7.5 train (and older
+    trains) use ``test_sets/milestones/<version>/cdp`` on that train branch.
+    """
     mapped = nutest_branch_for(nos)
     if not mapped:
         raise DashboardError("Enter a NOS version such as 7.5.1")
     milestone = mapped["milestone"]
     if milestone in RELEASES:
         return release_info(milestone)
-    return release_info(
-        milestone,
-        root="test_sets/milestones/%s/CDP" % milestone,
-        branch=mapped["branch"],
-    )
+    tree = milestone_tree(milestone)
+    return release_info(milestone, root=tree["root"], branch=tree["branch"])
 
 
 def view_type(raw):
@@ -1629,9 +2000,14 @@ def register_routes(app, jwt_required, fetch_tasks=None, fetch_results=None, qi_
             rows = fetch_milestone_rows(info["milestone"], root=info["root"], branch=info["branch"])
         except DashboardError as exc:
             return jsonify({"error": str(exc)}), 502
-        return jsonify(build_dashboard(
+        dashboard = build_dashboard(
             rows, info["milestone"], root=info["root"], branch=info["branch"],
-        ))
+        )
+        try:
+            attach_lst_owners(dashboard)
+        except Exception as exc:
+            logger.warning("LST owner lookup failed: %s", exc)
+        return jsonify(dashboard)
 
     @app.route("/mcp/regression/release-dashboard/lookup", methods=["POST"])
     @app.route("/api/mcp/regression/release-dashboard/lookup", methods=["POST"])

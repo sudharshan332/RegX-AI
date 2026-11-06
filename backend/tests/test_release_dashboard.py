@@ -109,6 +109,39 @@ class ReleaseDashboardColorTests(unittest.TestCase):
         self.assertEqual(feat["color"], "red")
         self.assertEqual(feat["pass_rate"], 80)
 
+    def test_lst_owner_comes_from_the_feat_file_header(self):
+        data = rd.build_dashboard([
+            _row("cdp.a.Test.t1", [FEAT, REG]),
+        ], "7.7")
+        feat = data["feats"][0]
+        self.assertEqual(feat["lst_files"], [FEAT])
+        self.assertEqual(feat["lst_owner"], "")
+        folder = "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/Kronos-FEAT-1"
+
+        def list_lsts(folder_path, branch, token):
+            self.assertEqual(folder_path, folder)
+            self.assertEqual(branch, "ganges-7.7-stable")
+            return [folder + "/suite.lst"]
+
+        def read_file(path, branch, token):
+            self.assertEqual(path, folder + "/suite.lst")
+            self.assertEqual(branch, "ganges-7.7-stable")
+            return "summary: Kronos-FEAT-1\nassignee: Ada Lovelace\ntestcases: [\ncdp.a.Test.t1\n]\n"
+
+        rd.attach_lst_owners(data, read_file=read_file, list_lsts=list_lsts, token="test-token")
+        self.assertEqual(feat["lst_owner"], "Ada Lovelace")
+
+    def test_html_shell_is_not_treated_as_an_lst(self):
+        self.assertFalse(rd._looks_like_lst("<!doctype html><html></html>"))
+        self.assertTrue(rd._looks_like_lst("summary: FEAT\nassignee: a@nutanix.com\n"))
+
+    def test_lst_owner_is_the_assignee_line(self):
+        text = "summary: FEAT-13874\nassignee: siddhant.hazari@nutanix.com\ntestcases: [\ncdp.a.Test.t1\n]\n"
+        self.assertEqual(rd.lst_owner_from_text(text), "siddhant.hazari@nutanix.com")
+        self.assertEqual(rd.lst_owner_from_text('summary: x\nassignee: "Zhijun Zhao"\n'), "Zhijun Zhao")
+        self.assertEqual(rd.lst_owner_from_text("summary: x\nAda Lovelace\n"), "Ada Lovelace")
+        self.assertEqual(rd.lst_owner_from_text("no assignee\ncdp.a.Test.t1\n"), "")
+
     def test_regression_folder_is_not_listed_as_a_feat(self):
         data = rd.build_dashboard([
             _row("cdp.a.Test.t1", [FEAT]),
@@ -256,6 +289,67 @@ class ReleaseBranchTests(unittest.TestCase):
         info = rd.lookup_release("7.6")
         self.assertEqual(info["branch"], "ganges-7.6-stable")
         self.assertEqual(info["root"], "test_sets/milestones/7.6/CDP")
+
+    def test_7_5_and_its_maintenance_releases_use_the_cdp_folder(self):
+        info = rd.lookup_release("7.5")
+        self.assertEqual(info["root"], "test_sets/milestones/7.5/cdp")
+        self.assertEqual(info["branch"], "ganges-7.5-stable")
+        patch = rd.lookup_release("7.5.1")
+        self.assertEqual(patch["root"], "test_sets/milestones/7.5.1/cdp")
+        self.assertEqual(patch["branch"], "ganges-7.5-stable")
+        older = rd.lookup_release("7.3.1")
+        self.assertEqual(older["root"], "test_sets/milestones/7.3.1/cdp")
+        self.assertEqual(older["branch"], "ganges-7.3-stable")
+
+    def test_flat_cdp_lst_name_is_the_feat(self):
+        root = "test_sets/milestones/7.5/cdp"
+        feat, handover = rd.classify_path(root + "/FEAT-17081.lst", "7.5")
+        self.assertEqual((feat, handover), ("FEAT-17081", False))
+        nested, nested_reg = rd.classify_path(
+            root + "/from_iris/feat_14492_zk_reactive_approach.lst", "7.5",
+        )
+        self.assertEqual((nested, nested_reg), ("FEAT-14492", False))
+        reg_feat, is_reg = rd.classify_path(
+            root + "/onprem/Regression_team_owned_lst/official.lst", "7.5",
+        )
+        self.assertEqual((reg_feat, is_reg), ("", True))
+        other, other_reg = rd.classify_path(root + "/cdp_gold_suite_tests.lst", "7.5")
+        self.assertEqual((other, other_reg), ("", False))
+
+    def test_flat_cdp_owner_is_the_assignee_in_that_folder(self):
+        root = "test_sets/milestones/7.5/cdp"
+        data = {
+            "root": root,
+            "branch": "ganges-7.5-stable",
+            "feats": [{"name": "FEAT-17081", "lst_owner": ""}, {"name": "FEAT-14492", "lst_owner": ""}],
+        }
+
+        def list_entries(folder, branch, token):
+            self.assertEqual(folder, root)
+            self.assertEqual(branch, "ganges-7.5-stable")
+            return [
+                {"name": "FEAT-17081.lst", "path": root + "/FEAT-17081.lst", "isDirectory": False},
+                {"name": "from_iris", "path": root + "/from_iris", "isDirectory": True},
+                {"name": "onprem", "path": root + "/onprem", "isDirectory": True},
+            ]
+
+        def list_lsts(folder, branch, token):
+            if folder.endswith("/from_iris"):
+                return [folder + "/feat_14492_zk_reactive_approach.lst"]
+            return []
+
+        def read_file(path, branch, token):
+            if path.endswith("FEAT-17081.lst"):
+                return "summary: x\nassignee: nidhi.bhardwa@nutanix.com\n"
+            if path.endswith("feat_14492_zk_reactive_approach.lst"):
+                return "summary: y\nassignee: ada@nutanix.com\n"
+            self.fail(path)
+
+        rd.attach_lst_owners(
+            data, read_file=read_file, list_lsts=list_lsts, list_entries=list_entries, token="t",
+        )
+        self.assertEqual(data["feats"][0]["lst_owner"], "nidhi.bhardwa@nutanix.com")
+        self.assertEqual(data["feats"][1]["lst_owner"], "ada@nutanix.com")
 
     def test_bad_versions_and_roots_are_rejected(self):
         self.assertIsNone(rd.nutest_branch_for(""))
