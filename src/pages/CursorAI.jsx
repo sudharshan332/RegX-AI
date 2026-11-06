@@ -77,6 +77,9 @@ export default function CursorAI() {
   const [loading, setLoading] = useState(false);
   const [showMcpPanel, setShowMcpPanel] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [mcpStatus, setMcpStatus] = useState(null);
+  const [mcpStatusLoading, setMcpStatusLoading] = useState(false);
+  const [mcpStatusError, setMcpStatusError] = useState('');
   const [syncingSkills, setSyncingSkills] = useState(false);
   const [syncResult, setSyncResult] = useState(null);
   const [chatAgentId, setChatAgentId] = useState(null);
@@ -194,6 +197,24 @@ export default function CursorAI() {
     loadRegressionContext();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const loadMcpStatus = useCallback(async () => {
+    setMcpStatusLoading(true);
+    setMcpStatusError('');
+    try {
+      const { data } = await api.get(`${API_BASE}/mcp-servers`, { timeout: 60000 });
+      setMcpStatus(data);
+    } catch (err) {
+      setMcpStatus(null);
+      setMcpStatusError(err.response?.data?.error || 'Could not check MCP servers');
+    } finally {
+      setMcpStatusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showSettings) loadMcpStatus();
+  }, [showSettings, loadMcpStatus]);
 
   useEffect(() => {
     const handleOpenSettings = () => {
@@ -671,6 +692,46 @@ export default function CursorAI() {
               <section className="settings-section">
                 <h4>API Keys</h4>
                 <KeyManagementPanel onClose={() => setShowSettings(false)} />
+              </section>
+
+              <section className="settings-section">
+                <h4>MCP Servers</h4>
+                <p>
+                  Checks whether each MCP server is reachable. Servers that need a
+                  personal token stay unusable until that key is saved under API Keys.
+                </p>
+                <button
+                  type="button"
+                  className="sync-skills-btn"
+                  onClick={loadMcpStatus}
+                  disabled={mcpStatusLoading}
+                >
+                  {mcpStatusLoading ? 'Testing…' : 'Test MCP servers'}
+                </button>
+                {mcpStatusError && (
+                  <div className="sync-status error">{mcpStatusError}</div>
+                )}
+                {mcpStatus?.servers && (
+                  <div className="mcp-status-summary">
+                    {mcpStatus.active || 0} active · {mcpStatus.inactive || 0} inactive
+                  </div>
+                )}
+                <ul className="mcp-status-list">
+                  {(mcpStatus?.servers || []).map(server => (
+                    <li key={server.id} className="mcp-status-item">
+                      <div className="mcp-status-row">
+                        <span className="mcp-server-name">{server.name || server.id}</span>
+                        <span className={`mcp-status-badge ${server.status === 'active' ? 'active' : 'inactive'}`}>
+                          {server.status === 'active' ? 'Active' : 'Inactive'}
+                        </span>
+                      </div>
+                      <div className="mcp-server-desc">{server.description}</div>
+                      {server.key_message && (
+                        <div className="mcp-key-note">{server.key_message}</div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
               </section>
 
               <section className="settings-section">

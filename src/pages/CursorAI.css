@@ -706,6 +706,65 @@
   padding-left: 16px;
 }
 
+.mcp-status-summary {
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.mcp-status-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.mcp-status-item {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.mcp-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mcp-status-badge {
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.mcp-status-badge.active {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.mcp-status-badge.inactive {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.mcp-key-note {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
 /* Scrollbar */
 .cursor-ai-messages::-webkit-scrollbar,
 .mcp-panel::-webkit-scrollbar {

@@ -98,9 +98,14 @@ class TestTargetBranch(unittest.TestCase):
         self.assertEqual(fn("7.6"), "ganges-7.6-stable")
         self.assertEqual(fn("ganges-7.6-stable"), "ganges-7.6-stable")
         self.assertEqual(fn("7.5"), "ganges-7.5-stable")
-        self.assertEqual(fn("7.6.0.6"), "ganges-7.6.0.6-stable")
-        self.assertEqual(fn("ganges-7.6.0.6-stable"), "ganges-7.6.0.6-stable")
-        self.assertEqual(fn("7.5.2"), "ganges-7.5.2-stable")
+        self.assertEqual(fn("7.6.1"), "ganges-7.6-stable")
+        self.assertEqual(fn("7.6.2"), "ganges-7.6-stable")
+        self.assertEqual(fn("ganges-7.6.1-stable"), "ganges-7.6-stable")
+        self.assertEqual(fn("7.6.0.6"), "ganges-7.6-stable")
+        self.assertEqual(fn("ganges-7.6.0.6-stable"), "ganges-7.6-stable")
+        self.assertEqual(fn("7.7"), "ganges-7.7-stable")
+        self.assertEqual(fn("7.7.1"), "ganges-7.7-stable")
+        self.assertEqual(fn("7.5.2"), "ganges-7.5-stable")
         parse = ns["_parse_tcms_target"]
         self.assertEqual(
             parse("AOS-ganges-7.5.2-stable-tar", "AOS"),
@@ -124,7 +129,7 @@ class TestTargetBranch(unittest.TestCase):
             "target": "AOS-ganges-7.5.2-stable-tar",
         })
         self.assertEqual(specs[0]["target_service"], "NutestPy3Tests")
-        self.assertEqual(specs[0]["target_branch"], "ganges-7.5.2-stable")
+        self.assertEqual(specs[0]["target_branch"], "ganges-7.5-stable")
         self.assertEqual(specs[1]["target_service"], "AOS")
         self.assertEqual(specs[1]["target_branch"], "ganges-7.5.2-stable")
         self.assertEqual(specs[1]["target_package_type"], "tar")

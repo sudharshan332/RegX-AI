@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
 import { API_BASE_URL } from '../config';
+import { buildJitaResultsUrl, buildJitaResultsUrls, normalizeJitaTaskIdList } from '../utils/jitaTaskIds';
 import { useTaskContext } from '../context/TaskContext';
 import AiMarkdown from '../components/AiMarkdown';
 import * as XLSX from 'xlsx';
@@ -33,6 +34,8 @@ const ALL_COLUMNS = [
   { key: 'priority',          label: 'Priority',          sortable: true,  defaultVisible: true  },
   { key: 'tags',              label: 'Tags',              sortable: false, defaultVisible: true  },
   { key: 'last_status',       label: 'Status',            sortable: true,  defaultVisible: true  },
+  { key: 'jita_task_id',      label: 'Jita Task ID',      sortable: true,  defaultVisible: true  },
+  { key: 'tc_type',           label: 'Run Type',          sortable: true,  defaultVisible: true  },
   { key: 'last_run_date',     label: 'Last Run Date',     sortable: true,  defaultVisible: true  },
   { key: 'last_passed_date',  label: 'Last Passed Date',  sortable: true,  defaultVisible: true  },
   { key: 'stability',         label: 'Stability',         sortable: true,  defaultVisible: true  },
@@ -62,6 +65,17 @@ const ALL_COLUMNS = [
 ];
 
 const DEFAULT_VISIBLE = new Set(ALL_COLUMNS.filter(c => c.defaultVisible).map(c => c.key));
+
+const RUN_TYPE_LABELS = {
+  feat: 'Feat',
+  regression: 'Regression',
+  smart_qual: 'Smart Qual',
+};
+
+function formatRunType(value) {
+  if (!value) return '';
+  return RUN_TYPE_LABELS[value] || value;
+}
 
 const CUSTOM_BRANCHES_STORAGE_KEY = 'tc-mgmt-custom-branches';
 
@@ -102,6 +116,18 @@ function renderCell(tc, colKey) {
           {tc.last_status || '—'}
         </span>
       );
+    case 'jita_task_id': {
+      const taskId = normalizeJitaTaskIdList([tc.jita_task_id])[0];
+      if (!taskId) return '—';
+      const href = buildJitaResultsUrl([taskId]);
+      return (
+        <a className="tc-ticket-link" href={href} target="_blank" rel="noopener noreferrer">
+          {taskId}
+        </a>
+      );
+    }
+    case 'tc_type':
+      return formatRunType(tc.tc_type) || '—';
     case 'last_run_date':
     case 'last_passed_date':
     case 'automated_date':
@@ -191,6 +217,11 @@ export default function TestcaseManagement() {
   const [nameExactMatch, setNameExactMatch] = useState(false);
   const [tagFilter, setTagFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [runTypeFilter, setRunTypeFilter] = useState('');
+  const [serviceFilter, setServiceFilter] = useState('');
+  const [triageFilter, setTriageFilter] = useState('');
+  const [failStageFilter, setFailStageFilter] = useState('');
+  const [jitaPages, setJitaPages] = useState([]);
   const [lastRunDate, setLastRunDate] = useState('');
   const [lastRunDateOp, setLastRunDateOp] = useState('>=');
   const [componentFilter, setComponentFilter] = useState('');
@@ -514,6 +545,8 @@ export default function TestcaseManagement() {
         if (col.key === 'published_ops')
           return [col.label, (tc.published_success_ops != null && tc.published_total_ops != null)
             ? `${tc.published_success_ops}/${tc.published_total_ops}` : ''];
+        if (col.key === 'tc_type')
+          return [col.label, formatRunType(v)];
         if (typeof v === 'boolean') return [col.label, v ? 'Yes' : 'No'];
         return [col.label, v != null ? v : ''];
       }))
@@ -605,10 +638,79 @@ export default function TestcaseManagement() {
     return [...set].sort();
   }, [testcases]);
 
+  const availableServices = React.useMemo(() => {
+    const set = new Set();
+    testcases.forEach(tc => { if (tc.target_service) set.add(tc.target_service); });
+    return [...set].sort();
+  }, [testcases]);
+
+  const availableFailStages = React.useMemo(() => {
+    const set = new Set();
+    testcases.forEach(tc => { if (tc.fail_stage) set.add(tc.fail_stage); });
+    return [...set].sort();
+  }, [testcases]);
+
+  const openMergedJitaLink = async () => {
+    const names = [...new Set(filtered.map(tc => tc.name).filter(Boolean))];
+    if (!names.length) {
+      showToast('No testcases in the current filter.', 'error');
+      return;
+    }
+    showToast(`Looking up Jita tasks for ${names.length} testcases...`, 'info');
+    try {
+      const res = await api.post(
+        `${API_BASE_URL}/mcp/regression/testcase-mgmt/jita-task-ids`,
+        { branch, team, names },
+        { timeout: 300000 },
+      );
+      const byName = res.data?.task_ids || {};
+      setTestcases(prev => prev.map(tc => (
+        byName[tc.name] ? { ...tc, jita_task_id: byName[tc.name] } : tc
+      )));
+      const ids = normalizeJitaTaskIdList(names.map(name => byName[name]));
+      if (!ids.length) {
+        setJitaPages([]);
+        showToast('TCMS returned no Jita task IDs for the filtered testcases.', 'error');
+        return;
+      }
+      const pages = buildJitaResultsUrls(ids).map(url => {
+        const match = url.match(/task_ids=([^&]+)/);
+        const count = match ? match[1].split(',').filter(Boolean).length : 0;
+        return { url, count };
+      });
+      setJitaPages(pages);
+      if (pages.length === 1) {
+        window.open(pages[0].url, '_blank', 'noopener,noreferrer');
+        showToast(`Opened ${ids.length} unique Jita task${ids.length === 1 ? '' : 's'}.`, 'success');
+        return;
+      }
+      showToast(`${ids.length} unique Jita tasks split into ${pages.length} pages. Click a page button to open it.`, 'success');
+    } catch (err) {
+      showToast(err.response?.data?.error || 'Failed to look up Jita task IDs', 'error');
+    }
+  };
+
   const filtered = React.useMemo(() => {
     let list = testcases;
     if (componentFilter) {
       list = list.filter(tc => tc.primary_component === componentFilter);
+    }
+    if (runTypeFilter) {
+      const hasRunType = testcases.some(tc => tc.tc_type);
+      if (hasRunType) {
+        list = list.filter(tc => (tc.tc_type || '') === runTypeFilter);
+      }
+    }
+    if (serviceFilter) {
+      list = list.filter(tc => tc.target_service === serviceFilter);
+    }
+    if (triageFilter === 'true') {
+      list = list.filter(tc => tc.is_triaged === true);
+    } else if (triageFilter === 'false') {
+      list = list.filter(tc => !tc.is_triaged);
+    }
+    if (failStageFilter) {
+      list = list.filter(tc => tc.fail_stage === failStageFilter);
     }
     if (lastRunDate) {
       list = list.filter(tc => {
@@ -618,7 +720,7 @@ export default function TestcaseManagement() {
       });
     }
     return list;
-  }, [testcases, componentFilter, lastRunDate, lastRunDateOp]);
+  }, [testcases, componentFilter, lastRunDate, lastRunDateOp, runTypeFilter, serviceFilter, triageFilter, failStageFilter]);
 
   // Sorting
   const sorted = [...filtered].sort((a, b) => {
@@ -880,6 +982,24 @@ export default function TestcaseManagement() {
           </button>
 
           <button
+            className="tc-btn tc-btn-outline"
+            onClick={openMergedJitaLink}
+            disabled={filtered.length === 0}
+          >
+            Jita Task Link
+          </button>
+          {jitaPages.length > 1 && jitaPages.map((page, index) => (
+            <button
+              key={page.url}
+              className="tc-btn tc-btn-outline"
+              onClick={() => window.open(page.url, '_blank', 'noopener,noreferrer')}
+              title={`Open ${page.count} unique Jita tasks`}
+            >
+              Jita page {index + 1} ({page.count})
+            </button>
+          ))}
+
+          <button
             className="tc-btn tc-btn-reload"
             onClick={handleReload}
             disabled={reloading}
@@ -962,6 +1082,37 @@ export default function TestcaseManagement() {
             <option value="">All</option>
             <option value="succeeded">Succeeded</option>
             <option value="failed">Failed</option>
+          </select>
+        </div>
+        <div className="tc-mgmt-filter-group">
+          <label>Service:</label>
+          <select value={serviceFilter} onChange={e => setServiceFilter(e.target.value)}>
+            <option value="">All</option>
+            {availableServices.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        <div className="tc-mgmt-filter-group">
+          <label>Triage:</label>
+          <select value={triageFilter} onChange={e => setTriageFilter(e.target.value)}>
+            <option value="">All</option>
+            <option value="true">Triaged</option>
+            <option value="false">Not triaged</option>
+          </select>
+        </div>
+        <div className="tc-mgmt-filter-group">
+          <label>Fail Stage:</label>
+          <select value={failStageFilter} onChange={e => setFailStageFilter(e.target.value)}>
+            <option value="">All</option>
+            {availableFailStages.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        <div className="tc-mgmt-filter-group">
+          <label>Run Type:</label>
+          <select value={runTypeFilter} onChange={e => setRunTypeFilter(e.target.value)}>
+            <option value="">All</option>
+            <option value="feat">Feat</option>
+            <option value="regression">Regression</option>
+            <option value="smart_qual">Smart Qual</option>
           </select>
         </div>
         <div className="tc-mgmt-filter-group tc-name-filter-group">

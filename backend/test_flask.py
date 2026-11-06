@@ -13339,13 +13339,17 @@ def _tcms_nutest_target_branch(branch):
     """
     Map Testcase Management branch key → NutestPy3Tests target_branch in TCMS.
 
-    UI / storage use short versions ('7.6'); all_test_cases uses 'ganges-7.6-stable'.
+    UI / storage keep the milestone ('7.6.1'). NutestPy3Tests lives on the
+    major.minor train: 7.6, 7.6.1, and 7.6.2 → ganges-7.6-stable;
+    7.7 and 7.7.1 → ganges-7.7-stable. master stays master.
     """
     key = _normalize_tc_branch_key(branch)
     if key == "master":
         return "master"
     if re.match(r"^\d+(?:\.\d+)+$", key):
-        return f"ganges-{key}-stable"
+        parts = key.split(".")
+        train = ".".join(parts[:2]) if len(parts) >= 2 else key
+        return f"ganges-{train}-stable"
     b = (branch or "").strip()
     if b.startswith("ganges-") and b.endswith("-stable"):
         return b
@@ -13825,7 +13829,10 @@ def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip,
 
     Master and release branches use different filter clauses:
     - Master includes release_name exclusion and metadata tag exclusions.
-    - Release branches include tc_type filter for regression/smart_qual.
+    - Every milestone follows the TCMS milestone page type=All: team +
+      test-set path + pass=overall, with no tc_type filter. Run Type
+      (Feat / Regression / Smart Qual) is applied in the UI from the
+      stored tc_type field.
     Both include a team-specific test_sets regex.
     """
     is_master = milestone == "master"
@@ -13846,13 +13853,13 @@ def _build_aggregate_payload(milestone, team_prefix, team, test_set_regex, skip,
             {"test_case.deprecated": False},
         ]}
     else:
+        identity = {
+            "target_milestone": milestone,
+            "last_result": {"$elemMatch": {"pass_name": "overall"}},
+            "deleted": False,
+        }
         match_clause = {"$and": [
-            {
-                "target_milestone": milestone,
-                "last_result": {"$elemMatch": {"pass_name": "overall"}},
-                "deleted": False,
-                "tc_type": {"$in": ["regression", "smart_qual"]},
-            },
+            identity,
             {"test_case.test_sets": {"$regex": test_set_regex, "$options": "i"}},
             {"additional_data.team": f"{team_prefix}/{team}"},
             {"test_case.test_sets": {"$regex": team_test_set_regex, "$options": "i"}},
@@ -13928,8 +13935,11 @@ def _normalize_testcase(item):
         "test_sets": tc.get("test_sets", []),
         "team": ad.get("team", []),
         "target_service": item.get("target_service", ""),
+        "fail_stage": ad.get("fail_stage") or "",
+        "jita_task_id": "",
         "target": item.get("target", ""),
         "framework": tc.get("framework", ""),
+        "tc_type": item.get("tc_type", "") or "",
         "last_status": last_status,
         "last_run_date": last_run_date,
         "last_passed_date": last_passed_date,
@@ -13979,6 +13989,69 @@ def _fetch_tags_for_testcases(testcases, branch_key):
         for fut in as_completed(futures):
             fut.result()
 
+    return testcases
+
+
+def _jita_task_id_from_result(row):
+    """TCMS stores the Jita task under additional_data.jita_task_id.$oid."""
+    if not isinstance(row, dict):
+        return ""
+    extra = row.get("additional_data") or {}
+    return _extract_mongo_oid(extra.get("jita_task_id") or row.get("jita_task_id"))
+
+
+def _latest_test_result(name, repo_branch):
+    """Latest failed/warning/infra/timeout test_results row for a name."""
+    raw_query = json.dumps({
+        "test_case.name": name,
+        "test_case.repo_branch": repo_branch,
+        "test_case.framework": "nutest-py3-tests",
+        "status": {"$in": ["failed", "warning", "infraerror", "timeout"]},
+    })
+    url = (
+        "https://tcms.eng.nutanix.com/api/v1/test_results"
+        f"?raw_query={urllib.parse.quote(raw_query)}&sort=-end_time&limit=6"
+    )
+    resp = requests.get(url, auth=_tcms_auth(), verify=False, timeout=30)
+    if resp.status_code != 200:
+        return None
+    rows = resp.json().get("data") or []
+    return rows[0] if rows else None
+
+
+def _apply_latest_result(tc, row):
+    row = row or {}
+    tc["jita_task_id"] = _jita_task_id_from_result(row)
+    extra = row.get("additional_data") or {}
+    stage = extra.get("fail_stage")
+    if stage:
+        tc["fail_stage"] = stage
+    service = row.get("service")
+    if service and not tc.get("target_service"):
+        tc["target_service"] = service
+    triage = row.get("triage") or {}
+    if "is_triaged" in triage:
+        tc["is_triaged"] = bool(triage.get("is_triaged"))
+
+
+def _fetch_jita_task_ids(testcases, repo_branch):
+    """Fill jita_task_id from the latest TCMS test result for each name."""
+    if not testcases or not repo_branch:
+        return testcases
+
+    def _one(tc):
+        name = (tc.get("name") or "").strip()
+        if not name:
+            return
+        try:
+            _apply_latest_result(tc, _latest_test_result(name, repo_branch))
+        except Exception as exc:
+            logger.warning("Failed to fetch jita_task_id for %s: %s", name, exc)
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = [pool.submit(_one, tc) for tc in testcases if tc.get("name")]
+        for fut in as_completed(futures):
+            fut.result()
     return testcases
 
 
@@ -14183,6 +14256,7 @@ def testcase_mgmt_fetch_data():
         )
 
         _fetch_tags_for_testcases(all_testcases, branch)
+        _fetch_jita_task_ids(all_testcases, nutest_branch)
         tagged = sum(1 for t in all_testcases if t.get("tags"))
         with_tcms = sum(1 for t in all_testcases if t.get("tcms_oid"))
         logger.info(
@@ -14219,6 +14293,47 @@ def testcase_mgmt_fetch_data():
     except Exception as e:
         logger.error(f"Error fetching testcase data: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/mcp/regression/testcase-mgmt/jita-task-ids", methods=["POST"])
+@jwt_required
+def testcase_mgmt_jita_task_ids():
+    """Look up latest Jita task ids for the given testcase names."""
+    body = request.get_json(force=True) or {}
+    branch = _normalize_tc_branch_key(body.get("branch", "master"))
+    team = body.get("team", "CDP")
+    names = [str(n).strip() for n in (body.get("names") or []) if str(n).strip()]
+    if not names:
+        return jsonify({"error": "names are required"}), 400
+
+    repo_branch = _tcms_nutest_target_branch(branch)
+    rows = [{"name": name} for name in names]
+    _fetch_jita_task_ids(rows, repo_branch)
+    by_name = {row["name"]: row.get("jita_task_id") or "" for row in rows}
+
+    data = _load_tc_data(branch, team)
+    changed = False
+    for tc in data.get("testcases") or []:
+        name = tc.get("name")
+        if name not in by_name:
+            continue
+        match = next((row for row in rows if row["name"] == name), None)
+        if not match:
+            continue
+        if match.get("jita_task_id"):
+            tc["jita_task_id"] = match["jita_task_id"]
+            changed = True
+        if match.get("fail_stage"):
+            tc["fail_stage"] = match["fail_stage"]
+            changed = True
+    if changed:
+        _save_tc_data(branch, team, data)
+
+    return jsonify({
+        "branch": branch,
+        "repo_branch": repo_branch,
+        "task_ids": by_name,
+    })
 
 
 @app.route("/mcp/regression/testcase-mgmt/testcases", methods=["GET", "POST"])
@@ -20608,18 +20723,24 @@ def cursor_ai_follow_up():
 # ======================================================
 
 MCP_SERVER_CONFIGS = {
-    "regx-data": {"url": "http://localhost:5003", "description": "RegX regression data"},
-    "atlassian": {"url": "https://panacea-dev.eng.nutanix.com/mcp/atlassian", "description": "Jira & Confluence"},
-    "gw-sourcegraph": {"url": "https://panacea-dev.eng.nutanix.com/mcp/sourcegraph", "description": "Code search"},
-    "gw-jita": {"url": "https://panacea-dev.eng.nutanix.com/mcp/jita", "description": "JITA log access"},
-    "gw-diamond": {"url": "https://panacea-dev.eng.nutanix.com/mcp/diamond", "description": "Diamond storage"},
-    "gw-glean": {"url": "https://panacea-dev.eng.nutanix.com/mcp/glean", "description": "Internal knowledge search"},
-    "gw-supportgpt": {"url": "https://panacea-dev.eng.nutanix.com/mcp/supportgpt", "description": "Support knowledge base"},
-    "gw-nurag": {"url": "https://panacea-dev.eng.nutanix.com/mcp/nurag", "description": "Advanced RAG"},
-    "gw-slack": {"url": "https://panacea-dev.eng.nutanix.com/mcp/slack", "description": "Slack integration"},
-    "gw-panacea": {"url": "https://panacea-dev.eng.nutanix.com/mcp/panacea", "description": "Automated RCA"},
-    "gw-live-debug": {"url": "https://panacea-dev.eng.nutanix.com/mcp/live-debug", "description": "Live debugging"},
-    "auto-handoff": {"url": "http://10.40.224.6:9001/sse", "description": "Auto handoff"},
+    "regx-data": {"name": "RegX Data", "url": "http://localhost:5003", "description": "RegX regression data"},
+    "atlassian": {"name": "Atlassian", "url": "https://panacea-dev.eng.nutanix.com/mcp/atlassian", "description": "Jira & Confluence"},
+    "gw-sourcegraph": {"name": "Sourcegraph", "url": "https://panacea-dev.eng.nutanix.com/mcp/sourcegraph", "description": "Code search"},
+    "gw-jita": {"name": "JITA", "url": "https://panacea-dev.eng.nutanix.com/mcp/jita", "description": "JITA log access"},
+    "gw-diamond": {"name": "Diamond", "url": "https://panacea-dev.eng.nutanix.com/mcp/diamond", "description": "Diamond storage"},
+    "gw-glean": {"name": "Glean", "url": "https://panacea-dev.eng.nutanix.com/mcp/glean", "description": "Internal knowledge search"},
+    "gw-supportgpt": {"name": "SupportGPT", "url": "https://panacea-dev.eng.nutanix.com/mcp/supportgpt", "description": "Support knowledge base"},
+    "gw-nurag": {"name": "NuRAG", "url": "https://panacea-dev.eng.nutanix.com/mcp/nurag", "description": "Advanced RAG"},
+    "gw-slack": {"name": "Slack", "url": "https://panacea-dev.eng.nutanix.com/mcp/slack", "description": "Slack integration"},
+    "gw-panacea": {"name": "Panacea", "url": "https://panacea-dev.eng.nutanix.com/mcp/panacea", "description": "Automated RCA"},
+    "gw-live-debug": {"name": "Live Debug", "url": "https://panacea-dev.eng.nutanix.com/mcp/live-debug", "description": "Live debugging"},
+    "auto-handoff": {"name": "Auto Handoff", "url": "http://10.40.224.6:9001/sse", "description": "Auto handoff"},
+}
+
+# MCP servers that stay unusable until the logged-in user saves a token.
+MCP_SERVER_USER_KEY = {
+    "atlassian": "atlassian",
+    "gw-sourcegraph": "sourcegraph",
 }
 
 SOURCEGRAPH_SKILL_REPO = "nugerrit.ntnxdpro.com/nutest-py3-tests"
@@ -22028,15 +22149,58 @@ def cursor_ai_chat():
 @app.route("/api/mcp/regression/cursor-ai/mcp-servers", methods=["GET"])
 @jwt_required
 def cursor_ai_list_mcp_servers():
-    """List available MCP servers and their status."""
+    """Probe configured MCP servers and report key readiness for the user."""
+    username = _current_username()
+    token_status = mcp_token_status_for_user(username)
+    probes = {}
+
+    def _probe(sid, url):
+        return sid, _probe_mcp_endpoint(url)
+
+    with ThreadPoolExecutor(max_workers=min(8, len(MCP_SERVER_CONFIGS) or 1)) as executor:
+        futures = [
+            executor.submit(_probe, sid, cfg["url"])
+            for sid, cfg in MCP_SERVER_CONFIGS.items()
+        ]
+        for fut in as_completed(futures):
+            sid, result = fut.result()
+            probes[sid] = result
+
     servers = []
+    active = 0
     for sid, cfg in MCP_SERVER_CONFIGS.items():
+        probe = probes.get(sid) or {"ok": False, "status": "unavailable"}
+        is_active = bool(probe.get("ok"))
+        if is_active:
+            active += 1
+        key_field = MCP_SERVER_USER_KEY.get(sid)
+        key_ok = True
+        key_message = None
+        if key_field:
+            entry = token_status.get(key_field) or {}
+            key_ok = bool(entry.get("ok"))
+            if not key_ok:
+                key_message = entry.get("error") or (
+                    "A user-specific key in User Settings → API Keys is required "
+                    "before this MCP server can be used."
+                )
         servers.append({
             "id": sid,
+            "name": cfg.get("name") or sid,
             "url": cfg["url"],
-            "description": cfg["description"],
+            "description": cfg.get("description") or "",
+            "status": "active" if is_active else "inactive",
+            "requires_user_key": bool(key_field),
+            "key_ready": key_ok if key_field else True,
+            "key_message": key_message,
         })
-    return jsonify({"success": True, "servers": servers})
+    inactive = len(servers) - active
+    return jsonify({
+        "success": True,
+        "servers": servers,
+        "active": active,
+        "inactive": inactive,
+    })
 
 
 
