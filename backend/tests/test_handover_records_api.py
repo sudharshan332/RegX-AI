@@ -185,6 +185,105 @@ class HandoverRecordsApiTests(unittest.TestCase):
         self.assertEqual(row["by_whom"], "alice@nutanix.com")
         self.assertTrue(row["can_delete"])
 
+    def test_save_stores_commit_message_and_test_owner(self):
+        ho = self.client.post(
+            "/mcp/regression/handover-record",
+            json={
+                "test_names": ["cdp.foo.test_owner"],
+                "lst_file": "test_sets/foo.lst",
+                "lst_files": ["test_sets/foo.lst"],
+                "branch": "master",
+                "commit_message": "Testcase Handover\n\nnote from user",
+                "cr_subject": "Testcase Handover",
+                "cr_description": "Reviewers               : \n\nnote from user",
+                "test_owner": "qa.owner",
+                "handover_tickets": ["ENG-1"],
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(ho.status_code, 200)
+        ho_row = self.client.post(
+            "/mcp/regression/handover-records", json={"q": "test_owner"}, headers=self.headers
+        ).get_json()["results"][0]
+        self.assertEqual(ho_row["commit_message"], "Testcase Handover\n\nnote from user")
+        self.assertEqual(ho_row["test_owner"], "qa.owner")
+        self.assertEqual(ho_row["cr_subject"], "Testcase Handover")
+        self.assertEqual(ho_row["lst_file"], "test_sets/foo.lst")
+
+        dep = self.client.post(
+            "/mcp/regression/deprecation-record",
+            json={
+                "test_names": ["cdp.bar.test_owner"],
+                "lst_file": "test_sets/bar.lst",
+                "branch": "ganges-7.6-stable",
+                "commit_message": "Testcase Deprecation\n\nOwner: qa.owner",
+                "cr_subject": "Testcase Deprecation",
+                "cr_description": "Owner: qa.owner",
+                "test_owner": "qa.owner",
+                "jira_tickets": ["ENG-2"],
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(dep.status_code, 200)
+        dep_row = self.client.post(
+            "/mcp/regression/deprecation-records", json={"q": "test_owner"}, headers=self.headers
+        ).get_json()["results"][0]
+        self.assertEqual(dep_row["commit_message"], "Testcase Deprecation\n\nOwner: qa.owner")
+        self.assertEqual(dep_row["test_owner"], "qa.owner")
+        self.assertEqual(dep_row["cr_subject"], "Testcase Deprecation")
+        self.assertEqual(dep_row["branch"], "ganges-7.6-stable")
+
+    def test_second_save_replaces_unstamped_row(self):
+        payload = {
+            "test_names": ["cdp.foo.test_again"],
+            "lst_file": "test_sets/foo.lst",
+            "lst_files": ["test_sets/foo.lst"],
+            "branch": "ganges-7.6-stable",
+            "commit_message": "first subject\n\nfirst body",
+            "test_owner": "qa.owner",
+        }
+        first = self.client.post("/mcp/regression/handover-record", json=payload, headers=self.headers)
+        self.assertEqual(first.status_code, 200)
+        payload["commit_message"] = "second subject\n\nsecond body"
+        payload["cr_status"] = "creating"
+        second = self.client.post("/mcp/regression/handover-record", json=payload, headers=self.headers)
+        self.assertEqual(second.status_code, 200)
+        rows = [
+            r for r in self.tf._load_handover_records()
+            if r.get("test_name") == "cdp.foo.test_again"
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["commit_message"], "second subject\n\nsecond body")
+
+        self.tf._add_handover_records(
+            ["cdp.foo.test_stamped"],
+            [],
+            "alice@nutanix.com",
+            branch="ganges-7.6-stable",
+            lst_file="test_sets/foo.lst",
+            cr_status="created",
+        )
+        stored = self.tf._load_handover_records()
+        for rec in stored:
+            if rec.get("test_name") == "cdp.foo.test_stamped":
+                rec["gerrit_change_id"] = "999"
+        self.tf._save_handover_records(stored)
+        self.tf._add_handover_records(
+            ["cdp.foo.test_stamped"],
+            [],
+            "alice@nutanix.com",
+            branch="ganges-7.6-stable",
+            lst_file="test_sets/foo.lst",
+            commit_message="retry",
+            cr_status="creating",
+        )
+        stamped_rows = [
+            r for r in self.tf._load_handover_records()
+            if r.get("test_name") == "cdp.foo.test_stamped"
+        ]
+        self.assertEqual(len(stamped_rows), 2)
+        self.assertEqual(sum(1 for r in stamped_rows if r.get("gerrit_change_id") == "999"), 1)
+
     def test_jp_delete_admin_users_can_delete(self):
         prev = set(self.tf.JP_DELETE_ADMIN_USERS)
         self.tf.JP_DELETE_ADMIN_USERS = set(prev) | {"alice"}

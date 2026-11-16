@@ -360,6 +360,41 @@ class TestGerritLstClient(unittest.TestCase):
         self.assertEqual(put_calls[0]["data"], new.encode("utf-8"))
         self.assertFalse(any("git" in c["url"] for c in calls))
 
+    def test_publish_retries_commit_message_on_change_id_conflict(self):
+        import json as json_mod
+
+        calls = []
+        message_attempts = {"n": 0}
+        cid = "I" + ("d" * 40)
+
+        def transport(method, url, json=None, data=None, headers=None, auth=None, timeout=None):
+            calls.append({"method": method, "url": url, "json": json})
+            if url.endswith("/a/changes/") and method == "POST":
+                body = {"_number": 7, "id": "proj~master~%s" % cid, "change_id": cid}
+                return _FakeResp(201, ")]}'\n" + json_mod.dumps(body))
+            if url.endswith("edit:message") and method == "PUT":
+                message_attempts["n"] += 1
+                if message_attempts["n"] == 1:
+                    return _FakeResp(409, ")]}'\n" + json_mod.dumps({"message": "Change-Id mismatch"}))
+                return _FakeResp(200, ")]}'\n{}")
+            return _FakeResp(200, ")]}'\n{}")
+
+        client = GerritLstClient(
+            "https://nugerrit.ntnxdpro.com", "user", "pw", "nutest-py3-tests", transport=transport
+        )
+        result = client.publish_lst_edits(
+            "master",
+            "Testcase Handover\n\nnote from user",
+            {"test_sets/foo.lst": "new\n"},
+            [],
+        )
+        self.assertEqual(result["gerrit_change_id"], "7")
+        msg_calls = [c for c in calls if c["url"].endswith("edit:message")]
+        self.assertEqual(len(msg_calls), 2)
+        self.assertIn("note from user", msg_calls[1]["json"]["message"])
+        self.assertIn("Change-Id: %s" % cid, msg_calls[1]["json"]["message"])
+        self.assertTrue(any(c["url"].endswith("edit:publish") for c in calls))
+
 
 if __name__ == "__main__":
     unittest.main()

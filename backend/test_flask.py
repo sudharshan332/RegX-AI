@@ -22866,6 +22866,46 @@ def _save_handover_records(records):
         logger.error(f"Could not save handover records: {e}")
 
 
+def _same_unstamped_record(rec, names, by_whom, branch, lst_files):
+    """True when rec is an unstamped row this save should replace."""
+    if not isinstance(rec, dict):
+        return False
+    if (rec.get("gerrit_change_id") or "").strip():
+        return False
+    if (rec.get("test_name") or "").strip() not in names:
+        return False
+    who = (by_whom or "").strip().lower()
+    rec_who = (rec.get("by_whom") or "").strip().lower()
+    if who and rec_who and rec_who != who:
+        return False
+    branch_s = (branch or "").strip()
+    rec_branch = (rec.get("branch") or "").strip()
+    if branch_s and rec_branch and rec_branch != branch_s:
+        return False
+    lst_set = {str(x).strip() for x in (lst_files or []) if str(x).strip()}
+    rec_lsts = set()
+    if (rec.get("lst_file") or "").strip():
+        rec_lsts.add((rec.get("lst_file") or "").strip())
+    for raw in rec.get("lst_files") or []:
+        path = str(raw or "").strip()
+        if path:
+            rec_lsts.add(path)
+    if lst_set and rec_lsts and not (rec_lsts & lst_set):
+        return False
+    return True
+
+
+def _drop_replaced_unstamped_records(records, test_names, by_whom, branch, lst_files):
+    """Drop a previous Save for the same test so Take handover does not duplicate it."""
+    names = {str(n).strip() for n in (test_names or []) if str(n).strip()}
+    if not names:
+        return list(records or [])
+    return [
+        rec for rec in (records or [])
+        if not _same_unstamped_record(rec, names, by_whom, branch, lst_files)
+    ]
+
+
 def _add_handover_records(
     test_names,
     tickets,
@@ -22881,9 +22921,17 @@ def _add_handover_records(
     cr_status="",
     cr_subject="",
     cr_description="",
+    commit_message="",
+    test_owner="",
 ):
     """Add handover records for test names"""
-    records = _load_handover_records()
+    records = _drop_replaced_unstamped_records(
+        _load_handover_records(),
+        test_names,
+        by_whom,
+        branch,
+        list(lst_files or []) + ([lst_file] if lst_file else []),
+    )
     now = datetime.utcnow().isoformat()
     ticket_list = tickets if isinstance(tickets, list) else []
     test_bug_types = test_bug_types if isinstance(test_bug_types, dict) else {}
@@ -22897,6 +22945,8 @@ def _add_handover_records(
     cr_status_val = (cr_status or "").strip()
     cr_subject_val = (cr_subject or "").strip()
     cr_description_val = (cr_description or "").strip()
+    commit_msg = (commit_message or "").strip()
+    owner_val = (test_owner or "").strip()
     for test_name in test_names:
         if not (test_name and test_name.strip()):
             continue
@@ -22930,6 +22980,10 @@ def _add_handover_records(
             rec["cr_subject"] = cr_subject_val
         if cr_description_val:
             rec["cr_description"] = cr_description_val
+        if commit_msg:
+            rec["commit_message"] = commit_msg
+        if owner_val:
+            rec["test_owner"] = owner_val
         if test_name in test_bug_types and test_bug_types[test_name]:
             rec["bug_type"] = test_bug_types[test_name]
         records.append(rec)
@@ -23031,6 +23085,8 @@ def handover_record():
     cr_status = (data.get("cr_status") or "").strip()
     cr_subject = (data.get("cr_subject") or "").strip()
     cr_description = (data.get("cr_description") or "").strip()
+    commit_message = (data.get("commit_message") or "").strip()
+    test_owner = (data.get("test_owner") or data.get("owner") or "").strip()
     if not test_names:
         return jsonify({"error": "test_names is required"}), 400
     if not notes:
@@ -23055,6 +23111,8 @@ def handover_record():
         cr_status=cr_status,
         cr_subject=cr_subject,
         cr_description=cr_description,
+        commit_message=commit_message,
+        test_owner=test_owner,
     )
     return jsonify({
         "success": True,
@@ -23185,8 +23243,17 @@ def _add_deprecation_records(
     notes="",
     cr_status="",
     commit_message="",
+    cr_subject="",
+    cr_description="",
+    test_owner="",
 ):
-    records = _load_deprecation_records()
+    records = _drop_replaced_unstamped_records(
+        _load_deprecation_records(),
+        test_names,
+        by_whom,
+        branch,
+        list(lst_files or []) + ([lst_file] if lst_file else []),
+    )
     now = datetime.utcnow().isoformat()
     tickets_list = [str(t).strip() for t in (jira_tickets or []) if str(t).strip()] if isinstance(jira_tickets, list) else []
     reviewers_list = [str(r).strip() for r in (reviewers or []) if str(r).strip()] if isinstance(reviewers, list) else []
@@ -23195,6 +23262,9 @@ def _add_deprecation_records(
     )
     cr_status_val = (cr_status or "").strip() or "pending_manual"
     commit_msg = (commit_message or "").strip()
+    cr_subject_val = (cr_subject or "").strip()
+    cr_description_val = (cr_description or "").strip()
+    owner_val = (test_owner or "").strip()
     lst_files_list = [str(x).strip() for x in (lst_files or []) if str(x).strip()] if isinstance(lst_files, list) else []
     if lst_file and lst_file not in lst_files_list:
         lst_files_list.append(lst_file)
@@ -23218,6 +23288,12 @@ def _add_deprecation_records(
             rec["lst_files"] = lst_files_list
         if commit_msg:
             rec["commit_message"] = commit_msg
+        if cr_subject_val:
+            rec["cr_subject"] = cr_subject_val
+        if cr_description_val:
+            rec["cr_description"] = cr_description_val
+        if owner_val:
+            rec["test_owner"] = owner_val
         records.append(rec)
     _save_deprecation_records(records)
     logger.info("[DEPRECATION-RECORD] Saved %s record(s), by %s", len(test_names), by_whom)
@@ -23327,6 +23403,9 @@ def deprecation_record():
     reviewers = data.get("reviewers") or []
     notes = (data.get("notes") or "").strip()
     commit_message = (data.get("commit_message") or "").strip()
+    cr_subject = (data.get("cr_subject") or "").strip()
+    cr_description = (data.get("cr_description") or "").strip()
+    test_owner = (data.get("test_owner") or data.get("owner") or "").strip()
     _add_deprecation_records(
         test_names,
         by_whom or "unknown",
@@ -23338,6 +23417,9 @@ def deprecation_record():
         notes=notes,
         cr_status="pending_manual",
         commit_message=commit_message,
+        cr_subject=cr_subject,
+        cr_description=cr_description,
+        test_owner=test_owner,
     )
     return jsonify({
         "success": True,
@@ -23418,12 +23500,144 @@ def validate_jira_ticket():
 # ======================================================
 # Handover - validate-lst, create-lst-cr, check-lst-testcases, search-lst-file, deprecate-lst-cr, deprecation-search
 # ======================================================
-def validate_with_sourcegraph(repo_name, branch, file_path, explicit_token=None):
-    """Validate branch and file exist in repo via Sourcegraph.
+def _quote_sourcegraph_value(value):
+    """Quote a Sourcegraph filter value so '-' is not parsed as NOT."""
+    text = str(value or "").strip().replace("\\", "\\\\").replace('"', '\\"')
+    return '"%s"' % text
 
-    Uses the logged-in user's Sourcegraph token (Settings) with env fallback.
-    Tries branch aliases (e.g. 7.5.2 → ganges-7.5-stable) before failing.
+
+def _validation_revision_candidates(branch):
+    """CR target branch first, then the typed name and aliases.
+
+    The Gerrit CR is pushed to ``_handover_nutest_branch`` (for example
+    ``7.5.2`` and ``ganges-7.6-stable-pc`` both become ``ganges-7.6-stable``).
+    Validation must check that same revision first so a file is not marked
+    missing on a name the CR will not use. Master is not a fallback unless
+    the user asked for master.
     """
+    exact = (branch or "").strip() or "master"
+    mapped = _handover_nutest_branch(exact)
+    ordered = []
+    for name in [mapped, exact] + list(_branch_alias_candidates(exact)):
+        n = (name or "").strip()
+        if not n or n in ordered:
+            continue
+        if n.lower() == "master" and exact.lower() != "master" and mapped.lower() != "master":
+            continue
+        ordered.append(n)
+    return ordered or [exact]
+
+
+def _interpret_revision_blob(commit_present, blob_content):
+    """Map one revision's commit/blob to (branch_valid, file_valid).
+
+    ``blob_content is None`` means the blob is missing. An empty string is a real file.
+    """
+    if not commit_present:
+        return False, False
+    if blob_content is None:
+        return True, False
+    return True, True
+
+
+_LST_REV_BLOB_QUERY = (
+    "query LstCheck($repo: String!, $rev: String!, $path: String!) { "
+    "repository(name: $repo) { commit(rev: $rev) { oid blob(path: $path) { content } } } }"
+)
+
+
+def _sourcegraph_graphql_urls():
+    base_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
+    urls = []
+    configured = (os.getenv("SOURCEGRAPH_GRAPHQL_URL") or "").strip().rstrip("/")
+    if configured:
+        urls.append(configured)
+    configured_path = (os.getenv("SOURCEGRAPH_GRAPHQL_PATH") or "").strip()
+    if configured_path:
+        if not configured_path.startswith("/"):
+            configured_path = "/" + configured_path
+        if base_url:
+            urls.append(base_url + configured_path)
+    if base_url:
+        for path in ["/api/graphql", "/.api/graphql", "/graphql"]:
+            full = base_url + path
+            if full not in urls:
+                urls.append(full)
+    return urls
+
+
+def _query_revision_blob(repo_name, rev, file_path, explicit_token=None):
+    """Look up one revision and exact blob path.
+
+    Returns (status, content, error) where status is
+    ``auth``, ``unreachable``, ``missing_repo``, ``missing_rev``, ``missing_file``, or ``ok``.
+    ``content`` is the file text (possibly empty) only when status is ``ok``.
+    """
+    sg_token = resolve_sourcegraph_token(explicit_token)
+    if not sg_token:
+        return "auth", None, (
+            "Sourcegraph token missing. Add Sourcegraph Token in Settings → API Key Configuration "
+            "(or set SOURCEGRAPH_TOKEN on the backend)."
+        )
+    urls = _sourcegraph_graphql_urls()
+    if not urls:
+        return "unreachable", None, "SOURCEGRAPH_URL not set"
+    auth_headers = [
+        {"Content-Type": "application/json", "Authorization": "token %s" % sg_token},
+        {"Content-Type": "application/json", "Authorization": "Bearer %s" % sg_token},
+    ]
+    payload = {
+        "query": _LST_REV_BLOB_QUERY,
+        "variables": {"repo": repo_name, "rev": rev, "path": file_path},
+    }
+    saw_auth = False
+    for url in urls:
+        for headers in auth_headers:
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=20, verify=False)
+            except Exception:
+                continue
+            if resp.status_code in (401, 403):
+                saw_auth = True
+                continue
+            if resp.status_code != 200:
+                continue
+            try:
+                data = resp.json()
+            except Exception:
+                continue
+            if data.get("errors") and not (data.get("data") or {}).get("repository"):
+                err_text = " ".join(
+                    str((e or {}).get("message") or "") for e in (data.get("errors") or [])
+                ).lower()
+                if "auth" in err_text or "unauthorized" in err_text:
+                    saw_auth = True
+                continue
+            repo_node = (data.get("data") or {}).get("repository")
+            if repo_node is None:
+                if "repository" in (data.get("data") or {}):
+                    return "missing_repo", None, "Repository '%s' was not found in Sourcegraph." % repo_name
+                continue
+            commit = repo_node.get("commit")
+            if not commit:
+                return "missing_rev", None, None
+            blob = commit.get("blob") if isinstance(commit, dict) else None
+            if not isinstance(blob, dict) or blob.get("content") is None:
+                return "missing_file", None, None
+            return "ok", blob.get("content") if isinstance(blob.get("content"), str) else "", None
+    if saw_auth:
+        return "auth", None, "Sourcegraph authentication failed. Check your Sourcegraph Token in Settings."
+    return "unreachable", None, "Sourcegraph not configured or unreachable"
+
+
+def _locate_lst_blob(repo_name, branch, file_path, explicit_token=None):
+    """Resolve the typed branch (then aliases, never master) and the exact LST path.
+
+    Stops at the first revision that exists. Does not treat a file on a later
+    revision as proof the requested file exists.
+    """
+    requested = (branch or "").strip() or "master"
+    file_path = (file_path or "").strip()
     results = {
         "branch_valid": None,
         "file_valid": None,
@@ -23431,138 +23645,71 @@ def validate_with_sourcegraph(repo_name, branch, file_path, explicit_token=None)
         "file_error": None,
         "file_suggestions": [],
         "branch_suggestions": [],
-        "resolved_branch": (branch or "master").strip() or "master",
+        "resolved_branch": requested,
         "auth_required": False,
         "message": "",
     }
-    sg_token = resolve_sourcegraph_token(explicit_token)
-    sg_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
-    sg_graphql_path = (os.getenv("SOURCEGRAPH_GRAPHQL_PATH") or "/api/graphql").strip() or "/api/graphql"
-    auth_msg = (
-        "Sourcegraph token missing. Add Sourcegraph Token in Settings → API Key Configuration "
-        "(or set SOURCEGRAPH_TOKEN on the backend)."
-    )
-    if not sg_token:
-        results["auth_required"] = True
-        results["branch_error"] = auth_msg
-        results["file_error"] = auth_msg
-        results["message"] = auth_msg
-        return results
-    base_url = sg_url
-    if not base_url:
-        results["branch_error"] = "SOURCEGRAPH_URL not set"
-        results["file_error"] = "SOURCEGRAPH_URL not set"
-        return results
-    api_urls_to_try = []
-    sg_graphql_url = (os.getenv("SOURCEGRAPH_GRAPHQL_URL") or "").strip().rstrip("/")
-    if sg_graphql_url:
-        api_urls_to_try.append(sg_graphql_url)
-    base = (base_url or "").strip().rstrip("/")
-    graphql_path = sg_graphql_path
-    if not graphql_path.startswith("/"):
-        graphql_path = "/" + graphql_path
-    if base:
-        api_url = base + graphql_path
-        if api_url not in api_urls_to_try:
-            api_urls_to_try.append(api_url)
-    if base:
-        for p in ["/api/graphql", "/.api/graphql", "/graphql"]:
-            full = base + p
-            if full not in api_urls_to_try:
-                api_urls_to_try.append(full)
-    auth_headers = [
-        {"Content-Type": "application/json", "Authorization": "token %s" % sg_token},
-        {"Content-Type": "application/json", "Authorization": "Bearer %s" % sg_token},
-    ]
-
-    def run_search(search_query, url=None):
-        urls = [url] if url else api_urls_to_try
-        for u in urls:
-            if not u:
-                continue
-            for headers in auth_headers:
-                try:
-                    resp = requests.post(
-                        u,
-                        json={
-                            "query": (
-                                "query Search($q: String!) { search(query: $q) { results "
-                                "{ matchCount resultCount results { ... on FileMatch { file { path } } } } } }"
-                            ),
-                            "variables": {"q": search_query},
-                        },
-                        headers=headers,
-                        timeout=20,
-                        verify=False,
-                    )
-                    if resp.status_code in (401, 403):
-                        return None, "Sourcegraph authentication failed. Check your Sourcegraph Token in Settings."
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if data.get("errors"):
-                            continue
-                        sr = data.get("data", {}).get("search", {}).get("results")
-                        if sr is not None:
-                            match_count = (sr or {}).get("matchCount") or (sr or {}).get("resultCount") or len((sr or {}).get("results", []))
-                            return (match_count or 0), None
-                except Exception:
-                    continue
-        return None, "Sourcegraph not configured or unreachable"
-
-    try:
-        branch_candidates = _branch_alias_candidates(branch)
-        resolved_branch = None
-        last_err = None
-        for b in branch_candidates:
-            branch_query = "repo:%s rev:%s count:1" % (repo_name, b)
-            match_count, err = run_search(branch_query)
-            if err:
-                last_err = err
-                if "authentication failed" in err.lower():
-                    results["auth_required"] = True
-                    results["branch_valid"] = None
-                    results["file_valid"] = None
-                    results["branch_error"] = err
-                    results["file_error"] = err
-                    results["message"] = err
-                    return results
-                continue
-            if match_count > 0:
-                resolved_branch = b
-                break
-        results["branch_suggestions"] = branch_candidates[:6]
-        if resolved_branch:
-            results["branch_valid"] = True
-            results["resolved_branch"] = resolved_branch
-        elif last_err:
+    candidates = _validation_revision_candidates(requested)
+    results["branch_suggestions"] = candidates[:6]
+    unreachable = None
+    for rev in candidates:
+        status, content, err = _query_revision_blob(
+            repo_name, rev, file_path, explicit_token=explicit_token
+        )
+        if status == "auth":
+            results["auth_required"] = True
             results["branch_valid"] = None
-            results["branch_error"] = last_err
-        else:
-            results["branch_valid"] = False
-            results["branch_error"] = "Branch '%s' not found (tried: %s)" % (
-                branch, ", ".join(branch_candidates[:6])
-            )
-    except Exception as e:
-        results["branch_valid"] = None
-        results["branch_error"] = str(e)
-
-    try:
-        branch_for_file = results.get("resolved_branch") or branch
-        file_query = "repo:%s rev:%s file:%s type:path count:10" % (repo_name, branch_for_file, file_path)
-        match_count, err = run_search(file_query)
-        if err:
             results["file_valid"] = None
+            results["branch_error"] = err
             results["file_error"] = err
-            if "authentication failed" in err.lower():
-                results["auth_required"] = True
-                results["message"] = err
-        else:
-            results["file_valid"] = match_count > 0
-            if not results["file_valid"]:
-                results["file_error"] = "File '%s' not found on branch '%s'" % (file_path, branch_for_file)
-    except Exception as e:
+            results["message"] = err
+            return results, None
+        if status == "unreachable":
+            unreachable = err
+            continue
+        if status == "missing_repo":
+            results["branch_valid"] = False
+            results["file_valid"] = False
+            results["branch_error"] = err
+            results["file_error"] = err
+            results["message"] = err
+            return results, None
+        if status == "missing_rev":
+            continue
+        results["resolved_branch"] = rev
+        results["branch_valid"] = True
+        if status == "ok":
+            results["file_valid"] = True
+            return results, content if content is not None else ""
+        results["file_valid"] = False
+        results["file_error"] = "File '%s' not found on branch '%s'" % (file_path, rev)
+        return results, None
+    if unreachable:
+        results["branch_valid"] = None
         results["file_valid"] = None
-        results["file_error"] = str(e)
+        results["branch_error"] = unreachable
+        results["file_error"] = unreachable
+        results["message"] = unreachable
+        return results, None
+    tried = ", ".join(candidates[:6])
+    message = "Branch '%s' not found (tried: %s)" % (requested, tried)
+    results["branch_valid"] = False
+    results["file_valid"] = False
+    results["branch_error"] = message
+    results["file_error"] = message
+    results["message"] = message
+    return results, None
+
+
+def validate_with_sourcegraph(repo_name, branch, file_path, explicit_token=None):
+    """Validate branch and exact file path via Sourcegraph GraphQL.
+
+    Uses the logged-in user's Sourcegraph token (Settings) with env fallback.
+    Tries the typed revision first, then aliases, and never treats master as a
+    match for a different branch. File existence is an exact blob path, not a
+    regex ``file:`` search.
+    """
+    results, _content = _locate_lst_blob(repo_name, branch, file_path, explicit_token=explicit_token)
     return results
 
 
@@ -23727,7 +23874,7 @@ def validate_lst():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json() or {}
-    branch = _handover_nutest_branch(data.get("branch") or "master")
+    branch = (data.get("branch") or "master").strip() or "master"
     lst_file = (data.get("lst_file") or "").strip()
     repo_name = (data.get("repo_name") or os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")).strip()
     if not lst_file:
@@ -24411,6 +24558,15 @@ def _gerrit_identity_for_user():
     return gerrit_user, http_pwd, email or ""
 
 
+def _lst_owner_from_payload(data, gerrit_user=""):
+    """Prefer the Test owner field. Fall back to the Gerrit username."""
+    data = data or {}
+    owner = (data.get("test_owner") or data.get("owner") or "").strip()
+    if owner:
+        return owner
+    return (gerrit_user or "").strip()
+
+
 def _collect_lst_files_from_payload(data):
     """Merge lst_file + lst_files from a request body, unique, order preserved."""
     data = data or {}
@@ -24445,6 +24601,7 @@ def create_lst_cr():
     reviewers = [str(r).strip() for r in (data.get("reviewers") or []) if str(r).strip()]
     cr_subject = (data.get("cr_subject") or "Testcase Handover").strip() or "Testcase Handover"
     cr_description = (data.get("cr_description") or "").strip()
+    explicit_commit = (data.get("commit_message") or "").strip()
     handover_tickets = data.get("handover_tickets") or []
     if isinstance(handover_tickets, str):
         handover_tickets = [x.strip() for x in handover_tickets.split(",") if x.strip()]
@@ -24458,6 +24615,22 @@ def create_lst_cr():
     if not test_names:
         return jsonify({"error": "test_names is required"}), 400
 
+    if explicit_commit:
+        commit_msg = explicit_commit
+    else:
+        if not cr_description:
+            reviewers_line = ", ".join(reviewers) if reviewers else ""
+            tickets_line = ", ".join(handover_tickets) if handover_tickets else ""
+            tests_line = ", ".join(test_names[:15]) + (" ..." if len(test_names) > 15 else "")
+            cr_description = (
+                "Reviewers               : %s\n"
+                "Tickets resolved        : %s\n"
+                "Tests run               : %s\n"
+                "Target release          : %s\n"
+                "Code review URL         : "
+            ) % (reviewers_line, tickets_line, tests_line, branch)
+        commit_msg = cr_subject + "\n\n" + cr_description
+
     push_ref = _build_gerrit_push_ref(branch, reviewers)
     if manual_only:
         instructions = {
@@ -24468,7 +24641,7 @@ def create_lst_cr():
                 "2. Open the LST file: %s" % lst_files[0],
                 "3. Add the following %s test name(s) to the file:" % len(test_names),
                 "   " + "\n   ".join(test_names[:10]) + ("..." if len(test_names) > 10 else ""),
-                "4. Commit with message: 'Add %s test(s) to LST'" % len(test_names),
+                "4. Commit with message:\n%s" % commit_msg,
                 "5. Push for review: git push origin HEAD:%s" % push_ref,
             ],
         }
@@ -24507,18 +24680,7 @@ def create_lst_cr():
 
     from gerrit_lst_cr import GerritRestError, force_git_clone, git_fallback_enabled
 
-    if not cr_description:
-        reviewers_line = ", ".join(reviewers) if reviewers else ""
-        tickets_line = ", ".join(handover_tickets) if handover_tickets else ""
-        tests_line = ", ".join(test_names[:15]) + (" ..." if len(test_names) > 15 else "")
-        cr_description = (
-            "Reviewers               : %s\n"
-            "Tickets resolved        : %s\n"
-            "Tests run               : %s\n"
-            "Target release          : %s\n"
-            "Code review URL         : "
-        ) % (reviewers_line, tickets_line, tests_line, branch)
-    commit_msg = cr_subject + "\n\n" + cr_description
+    lst_owner = _lst_owner_from_payload(data, gerrit_user)
 
     if not force_git_clone():
         try:
@@ -24527,7 +24689,7 @@ def create_lst_cr():
                 branch, lst_files, test_names, reviewers, commit_msg,
                 gerrit_user, gerrit_pwd, gerrit_url, repo_path, mode="append",
                 handover_tickets=handover_tickets,
-                owner=gerrit_user,
+                owner=lst_owner,
             )
             _stamp_cr_result("handover", test_names, record_branches, lst_files, result)
             return jsonify(result)
@@ -24576,7 +24738,7 @@ def create_lst_cr():
             new_content, already_present, to_add = _append_missing_tests(
                 old_content,
                 test_names,
-                owner=gerrit_user,
+                owner=lst_owner,
                 branch=branch,
                 tickets=handover_tickets,
                 lst_path=lf,
@@ -24597,20 +24759,6 @@ def create_lst_cr():
                 "to_add": [],
             })
 
-        if not cr_description:
-            reviewers_line = ", ".join(reviewers) if reviewers else ""
-            tickets_line = ", ".join(handover_tickets) if handover_tickets else ""
-            all_to_add = [x for p in per_file for x in p["to_add"]]
-            tests_line = ", ".join(all_to_add[:15]) + (" ..." if len(all_to_add) > 15 else "")
-            cr_description = (
-                "Reviewers               : %s\n"
-                "Tickets resolved        : %s\n"
-                "Tests run               : %s\n"
-                "Target release          : %s\n"
-                "Code review URL         : "
-            ) % (reviewers_line, tickets_line, tests_line, branch)
-
-        commit_msg = cr_subject + "\n\n" + cr_description
         logger.info("create_lst_cr: committing %s test(s) on branch=%s", total_to_add, branch)
         parsed = _commit_and_push_gerrit_cr(
             repo_dir,
@@ -24668,7 +24816,7 @@ def check_lst_testcases():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json() or {}
-    branch = _handover_nutest_branch(data.get("branch") or "master")
+    branch = (data.get("branch") or "master").strip() or "master"
     lst_file = (data.get("lst_file") or "").strip().replace("(pasted content)", "").strip()
     test_names = data.get("test_names") or []
     lst_file_content = data.get("lst_file_content")
@@ -24692,29 +24840,40 @@ def check_lst_testcases():
         return jsonify(payload)
     if not lst_file:
         return jsonify({"error": "Enter LST file path or paste LST file content"}), 400
-    content, resolved_branch, resolved_path, err = _fetch_lst_content_for_check(
+    located, content = _locate_lst_blob(
         repo_name, branch, lst_file, explicit_token=data.get("sourcegraph_token")
     )
-    if err:
+    resolved_branch = located.get("resolved_branch") or branch
+    if not located.get("file_valid"):
+        err = located.get("file_error") or located.get("branch_error") or located.get("message") or (
+            "Could not fetch LST file from Sourcegraph."
+        )
         return jsonify({
             "error": err,
             "test_names": test_names,
             "present": [],
             "not_present": test_names,
-            "branch": branch,
+            "branch": resolved_branch,
+            "input_branch": branch,
+            "resolved_branch": resolved_branch,
             "lst_file": lst_file,
+            "branch_valid": located.get("branch_valid"),
+            "file_valid": located.get("file_valid"),
+            "auth_required": bool(located.get("auth_required")),
             "generated_at": datetime.utcnow().isoformat(),
         }), 200
-    already_present, not_present, extra = _check_testnames_in_lst_content(content, test_names)
+    already_present, not_present, extra = _check_testnames_in_lst_content(content or "", test_names)
     payload = {
-        "branch": resolved_branch or branch,
+        "branch": resolved_branch,
         "input_branch": branch,
-        "resolved_branch": resolved_branch or branch,
-        "lst_file": resolved_path or lst_file,
+        "resolved_branch": resolved_branch,
+        "lst_file": lst_file,
         "input_lst_file": lst_file,
         "test_names": test_names,
         "present": already_present,
         "not_present": not_present,
+        "branch_valid": True,
+        "file_valid": True,
         "generated_at": datetime.utcnow().isoformat(),
     }
     payload.update(extra or {})
@@ -24747,7 +24906,12 @@ def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_on
         {"Content-Type": "application/json", "Authorization": "Bearer %s" % token},
     ]
     escaped = test_name.replace("\\", "\\\\").replace('"', '\\"')
-    search_query = f'repo:{repo_name} rev:{rev} "{escaped}" count:{int(max_count) if max_count else 50}'
+    search_query = 'repo:%s rev:%s "%s" count:%s' % (
+        _quote_sourcegraph_value(repo_name),
+        _quote_sourcegraph_value(rev),
+        escaped,
+        int(max_count) if max_count else 50,
+    )
     payload = {"query": "query Search($q: String!) { search(query: $q) { results { matchCount results { ... on FileMatch { file { path } } } } } }", "variables": {"q": search_query}}
     for api_url in api_urls:
         for headers in auth_headers:
@@ -24933,7 +25097,8 @@ def deprecate_lst_cr():
     reviewers = [str(r).strip() for r in (data.get("reviewers") or []) if str(r).strip()]
     cr_subject = (data.get("cr_subject") or "").strip()
     cr_description = (data.get("cr_description") or "").strip()
-    legacy_commit = (data.get("commit_message") or "").strip()
+    explicit_commit = (data.get("commit_message") or "").strip()
+    test_owner = _lst_owner_from_payload(data, "")
     jira_tickets = data.get("jira_tickets") or data.get("tickets") or []
     if isinstance(jira_tickets, str):
         jira_tickets = [x.strip() for x in jira_tickets.split(",") if x.strip()]
@@ -24961,17 +25126,20 @@ def deprecate_lst_cr():
             "Code review URL         : "
         ) % (reviewers_line, tickets_line, branch)
 
-    if cr_subject or cr_description:
+    if explicit_commit:
+        commit_message = explicit_commit
+    elif cr_subject or cr_description:
         cr_subject = cr_subject or "Testcase Deprecation"
         if not cr_description:
             cr_description = _default_deprecation_description()
         commit_message = cr_subject + "\n\n" + cr_description
-    elif legacy_commit:
-        commit_message = legacy_commit
     else:
         cr_subject = "Testcase Deprecation"
         cr_description = _default_deprecation_description()
         commit_message = cr_subject + "\n\n" + cr_description
+
+    if test_owner and ("Owner: %s" % test_owner) not in commit_message:
+        commit_message = commit_message.rstrip() + "\nOwner: %s" % test_owner
 
     push_ref = _build_gerrit_push_ref(branch, reviewers)
     instructions = {
@@ -25029,7 +25197,7 @@ def deprecate_lst_cr():
                 branch, lst_files, test_names, reviewers, commit_message,
                 gerrit_user, gerrit_pwd, gerrit_url, repo_path, mode="remove",
                 handover_tickets=jira_tickets,
-                owner=gerrit_user,
+                owner=test_owner or gerrit_user,
             )
             _stamp_cr_result("deprecation", test_names, record_branches, lst_files, result)
             return jsonify(result)

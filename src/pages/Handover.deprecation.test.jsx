@@ -18,9 +18,18 @@ jest.mock('../context/AuthContext', () => ({
 
 async function searchDeprecation(testName = 'pkg.Test.test_foo') {
   fireEvent.click(screen.getByRole('tab', { name: 'Deprecation' }));
-  fireEvent.change(screen.getByPlaceholderText(/Test name/i), { target: { value: testName } });
-  fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  fireEvent.change(screen.getByPlaceholderText(/Testcase name/i), { target: { value: testName } });
+  fireEvent.change(screen.getByPlaceholderText('master'), { target: { value: 'master' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Fetch' }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Validate LST' })).toBeInTheDocument());
+}
+
+function fillDeprecationCrFields() {
+  fireEvent.change(screen.getByPlaceholderText('ENG-123, ENG-456'), { target: { value: 'ENG-1' } });
+  fireEvent.change(screen.getByPlaceholderText('firstname.lastname'), { target: { value: 'qa.owner' } });
+  const reviewer = screen.getByPlaceholderText(/type name/i);
+  fireEvent.change(reviewer, { target: { value: 'rev@nutanix.com' } });
+  fireEvent.keyDown(reviewer, { key: 'Enter', code: 'Enter' });
 }
 
 describe('Deprecation multi LST selection', () => {
@@ -53,14 +62,27 @@ describe('Deprecation multi LST selection', () => {
           },
         });
       }
+      if (path.includes('/validate-lst')) {
+        return Promise.resolve({
+          data: { branch_valid: true, file_valid: true, resolved_branch: 'master' },
+        });
+      }
+      if (path.includes('/check-lst-testcases')) {
+        return Promise.resolve({
+          data: {
+            present: ['pkg.Test.test_foo'],
+            not_present: [],
+            test_names: ['pkg.Test.test_foo'],
+            branch_valid: true,
+            file_valid: true,
+          },
+        });
+      }
       if (path.includes('/deprecate-lst-cr')) {
         return Promise.resolve({ data: { success: true, message: 'CR created', cr_url: 'https://gerrit.example/1' } });
       }
       if (path.includes('/deprecation-record')) {
         return Promise.resolve({ data: { success: true, message: 'Deprecation saved.' } });
-      }
-      if (path.includes('/check-lst-testcases')) {
-        return Promise.resolve({ data: { present: ['pkg.Test.test_foo'], not_present: [], test_names: ['pkg.Test.test_foo'] } });
       }
       return Promise.resolve({ data: {} });
     });
@@ -70,19 +92,19 @@ describe('Deprecation multi LST selection', () => {
     render(<Handover />);
     await searchDeprecation();
 
-    expect(screen.getByPlaceholderText(/Optional typed path/i)).toHaveValue('');
+    expect(screen.getByPlaceholderText(/test_sets\/milestones/i)).toHaveValue('');
     expect(screen.queryByText('auto-filled.lst')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Validate LST' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Create Gerrit CR' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Deprecate' })).toBeDisabled();
     expect(api.post.mock.calls.some(([url]) => String(url).includes('/deprecation-search'))).toBe(true);
   });
 
   test('typed LST path does not count until Add LST', async () => {
     render(<Handover />);
     await searchDeprecation();
-    fireEvent.change(screen.getByPlaceholderText('master'), { target: { value: 'master' } });
-    fireEvent.change(screen.getByPlaceholderText(/Optional typed path/i), {
+    fireEvent.change(screen.getByPlaceholderText('ENG-123, ENG-456'), { target: { value: 'ENG-1' } });
+    fireEvent.change(screen.getByPlaceholderText(/test_sets\/milestones/i), {
       target: { value: 'typed.lst' },
     });
     expect(screen.getByRole('button', { name: 'Validate LST' })).toBeDisabled();
@@ -91,22 +113,19 @@ describe('Deprecation multi LST selection', () => {
     expect(screen.getByText('typed.lst')).toBeInTheDocument();
   });
 
-  test('clicking two candidates selects both and Create CR sends lst_files', async () => {
+  test('clicking two candidates selects both and Deprecate sends lst files and owner', async () => {
     render(<Handover />);
     await searchDeprecation();
-    fireEvent.change(screen.getByPlaceholderText('master'), { target: { value: 'master' } });
 
     await waitFor(() => expect(screen.getByRole('button', { name: /test_sets\/foo\.lst/ })).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: 'Validate LST' })).toBeDisabled();
-    expect(screen.getByText(/Click to select suggested LST files/i)).toBeInTheDocument();
-
     fireEvent.click(screen.getByRole('button', { name: /test_sets\/foo\.lst/ }));
     fireEvent.click(screen.getByRole('button', { name: /test_sets\/bar\.lst/ }));
+    fillDeprecationCrFields();
 
-    expect(screen.getByRole('button', { name: 'Validate LST' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Create Gerrit CR' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Validate LST' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Deprecate' })).toBeEnabled());
 
-    fireEvent.click(screen.getByRole('button', { name: 'Create Gerrit CR' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Deprecate' }));
     await waitFor(() => {
       expect(api.post.mock.calls.some(([url]) => String(url).includes('/deprecate-lst-cr'))).toBe(true);
     });
@@ -115,8 +134,11 @@ describe('Deprecation multi LST selection', () => {
     expect(crCall[1].lst_file).toBe('test_sets/foo.lst');
     expect(crCall[1].branch).toBe('master');
     expect(crCall[1].test_names).toEqual(['pkg.Test.test_foo']);
+    expect(crCall[1].test_owner).toBe('qa.owner');
+    expect(crCall[1].commit_message).toContain('Owner: qa.owner');
 
     const recordCall = api.post.mock.calls.find(([url]) => String(url).includes('/deprecation-record'));
     expect(recordCall[1].lst_files).toEqual(['test_sets/foo.lst', 'test_sets/bar.lst']);
+    expect(recordCall[1].test_owner).toBe('qa.owner');
   });
 });

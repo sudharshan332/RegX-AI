@@ -696,6 +696,18 @@ class GerritLstClient:
             except GerritRestError as exc:
                 logger.warning("Could not add reviewer %s: %s", rid, exc.message)
 
+    def _lookup_change_id(self, change_id: str) -> str:
+        """Read the Change-Id Gerrit assigned when the change was created."""
+        path = "/a/changes/%s" % gerrit_encode_id(str(change_id))
+        try:
+            text = self._request("GET", path, timeout=20)
+            parsed = parse_gerrit_json(text)
+        except GerritRestError:
+            return ""
+        if isinstance(parsed, dict):
+            return extract_change_id_footer(parsed)
+        return ""
+
     def publish_lst_edits(
         self,
         branch: str,
@@ -712,14 +724,22 @@ class GerritLstClient:
         footer = extract_change_id_footer(created)
         for file_path, content in file_contents.items():
             self.put_edit(change_id, file_path, content)
+        assigned = footer
         try:
-            self.set_message(change_id, commit_message, change_id_footer=footer or None)
+            self.set_message(change_id, commit_message, change_id_footer=assigned or None)
         except GerritRestError as exc:
-            # 409 wrong Change-Id: keep Gerrit default subject and still publish file edits
-            if "Change-Id" in (exc.message or "") or exc.status_code == 409:
-                logger.warning("edit:message skipped (%s); publishing file edits with original subject", exc.message)
-            else:
+            conflict = "Change-Id" in (exc.message or "") or exc.status_code == 409
+            if not conflict:
                 raise
+            if not assigned:
+                assigned = self._lookup_change_id(change_id)
+            if not assigned:
+                raise
+            logger.warning(
+                "edit:message Change-Id mismatch (%s); retrying with assigned Change-Id",
+                exc.message,
+            )
+            self.set_message(change_id, commit_message, change_id_footer=assigned)
         self.publish(change_id)
         self.add_reviewers(change_id, reviewers or [])
         url = change_web_url(self.base_url, self.project, number)

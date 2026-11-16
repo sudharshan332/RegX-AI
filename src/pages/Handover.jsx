@@ -398,6 +398,7 @@ export default function Handover() {
   const [handoverLstSuggestion, setHandoverLstSuggestion] = useState(null);
   const [handoverSuggestingLst, setHandoverSuggestingLst] = useState(false);
   const [handoverCommitMessage, setHandoverCommitMessage] = useState("");
+  const [handoverTestOwner, setHandoverTestOwner] = useState("");
   const [handoverCreateLstLoading, setHandoverCreateLstLoading] = useState(false);
   const [handoverManualLstInstructions, setHandoverManualLstInstructions] = useState(null);
   const [handoverCrResult, setHandoverCrResult] = useState(null);
@@ -447,6 +448,7 @@ export default function Handover() {
   const deprecationCrBranchContainerRef = useRef(null);
   const [deprecationTicketsExtra, setDeprecationTicketsExtra] = useState("");
   const [deprecationCommitNote, setDeprecationCommitNote] = useState("");
+  const [deprecationTestOwner, setDeprecationTestOwner] = useState("");
   const [deprecationCrPreviewOpen, setDeprecationCrPreviewOpen] = useState(false);
   const [deprecationCrSubject, setDeprecationCrSubject] = useState("Testcase Deprecation");
   const [deprecationCrDescription, setDeprecationCrDescription] = useState("");
@@ -518,6 +520,13 @@ export default function Handover() {
     );
   };
 
+  const composeHandoverCommit = () => {
+    const note = (handoverCommitMessage || "").trim();
+    const subject = note || (handoverCrSubject || "Testcase Handover").trim() || "Testcase Handover";
+    const description = (handoverCrDescription || "").trim() || buildDefaultCrDescription();
+    return { subject, description, commitMsg: `${subject}\n\n${description}` };
+  };
+
   const buildDefaultDeprecationCrDescription = () => {
     const reviewersLine = (deprecationReviewers || "").split(",").map((r) => r.trim()).filter(Boolean).join(", ");
     const ticketsLine = (deprecationTicketsExtra || "").split(",").map((t) => t.trim()).filter(Boolean).join(", ");
@@ -532,11 +541,12 @@ export default function Handover() {
   };
 
   const composedDeprecationCommit = () => {
-    const subject = (deprecationCrSubject || "Testcase Deprecation").trim() || "Testcase Deprecation";
     const note = (deprecationCommitNote || "").trim();
+    const subject = note || (deprecationCrSubject || "Testcase Deprecation").trim() || "Testcase Deprecation";
+    const owner = (deprecationTestOwner || "").trim();
     let description = (deprecationCrDescription || "").trim() || buildDefaultDeprecationCrDescription();
-    if (note && !description.includes(note)) {
-      description = `${description}\n\n${note}`;
+    if (owner && !description.includes(`Owner: ${owner}`)) {
+      description = `${description}\nOwner: ${owner}`;
     }
     return { subject, description, commitMsg: `${subject}\n\n${description}` };
   };
@@ -755,7 +765,8 @@ export default function Handover() {
       alert("Please add at least one reviewer before previewing CR.");
       return;
     }
-    setHandoverCrSubject((prev) => prev || "Testcase Handover");
+    const note = (handoverCommitMessage || "").trim();
+    setHandoverCrSubject(note || (handoverCrSubject || "").trim() || "Testcase Handover");
     if (!(handoverCrDescription || "").trim()) {
       setHandoverCrDescription(buildDefaultCrDescription());
     }
@@ -779,7 +790,8 @@ export default function Handover() {
       alert("Please add at least one reviewer before previewing CR.");
       return;
     }
-    setDeprecationCrSubject((prev) => prev || "Testcase Deprecation");
+    const note = (deprecationCommitNote || "").trim();
+    setDeprecationCrSubject(note || (deprecationCrSubject || "").trim() || "Testcase Deprecation");
     if (!(deprecationCrDescription || "").trim()) {
       setDeprecationCrDescription(buildDefaultDeprecationCrDescription());
     }
@@ -823,6 +835,7 @@ export default function Handover() {
     setHandoverBranchSuggestions([]);
     setHandoverShowBranchDropdown(false);
     setHandoverCommitMessage(""); // Clear commit message from previous search
+    setHandoverTestOwner("");
     setHandoverCrPreviewOpen(false);
     setHandoverCrSubject("Testcase Handover");
     setHandoverCrDescription("");
@@ -1124,6 +1137,10 @@ export default function Handover() {
       alert("Please add at least one LST file path.");
       return;
     }
+    if (!(handoverTestOwner || "").trim()) {
+      alert("Please enter Test owner.");
+      return;
+    }
     if (!manualOnly) {
       const canProceed = handoverAnalysis?.all_tests_passed || selectedAreHandoverReady();
       if (!canProceed) {
@@ -1134,9 +1151,8 @@ export default function Handover() {
     setHandoverCreateLstLoading(true);
     setHandoverManualLstInstructions(null);
     setHandoverCrResult(null);
-    const commitMsg = "Add " + test_names.length + " test(s) to " + lst_file + (handoverCommitMessage.trim() ? "\n\n" + handoverCommitMessage.trim() : "");
-    const finalCrSubject = (handoverCrSubject || "Testcase Handover").trim() || "Testcase Handover";
-    const finalCrDescription = (handoverCrDescription || "").trim() || buildDefaultCrDescription();
+    const { subject: finalCrSubject, description: finalCrDescription, commitMsg } = composeHandoverCommit();
+    const testOwner = (handoverTestOwner || "").trim();
     try {
       const res = await api.post(
         CREATE_LST_CR_API,
@@ -1148,6 +1164,7 @@ export default function Handover() {
           manual_only: !!manualOnly,
           user_email: user?.email,
           user_name: user?.name || user?.username,
+          test_owner: testOwner,
           handover_tickets: handoverTicketsList,
           reviewers: reviewersList.length ? reviewersList : undefined,
           cr_subject: finalCrSubject,
@@ -1217,6 +1234,7 @@ export default function Handover() {
     setDeprecationCrSubject("Testcase Deprecation");
     setDeprecationCrDescription("");
     setDeprecationCommitNote("");
+    setDeprecationTestOwner("");
     try {
       const res = await api.post(DEPRECATION_SEARCH_API, { q: parts, branch });
       setDeprecationResults(res.data);
@@ -1347,24 +1365,68 @@ export default function Handover() {
     setDeprecationValidation(null);
     setDeprecationCrResult(null);
     try {
-      const files = await Promise.all(
+      const located = await Promise.all(
         lst_files.map((lst_file) =>
-          api.post(CHECK_LST_TESTCASES_API, { branch, lst_file, test_names }, { timeout: 30000 })
-            .then((r) => ({ lst_file, ...(r.data || {}) }))
+          api.post(
+            VALIDATE_LST_API,
+            { branch, lst_file, repo_name: "nugerrit.ntnxdpro.com/nutest-py3-tests" },
+            { timeout: 30000 }
+          ).then((r) => ({ lst_file, ...(r.data || {}) }))
             .catch((err) => ({
               lst_file,
-              error: err.response?.data?.error || err.message || "Check failed",
-              present: [],
-              not_present: test_names,
-              test_names,
+              error: err.response?.data?.error || err.message || "Validation failed",
+              branch_valid: null,
+              file_valid: null,
             }))
         )
+      );
+      const branchOk = located.length > 0 && located.every((r) => r.branch_valid === true);
+      const fileOk = located.length > 0 && located.every((r) => r.file_valid === true);
+      if (!branchOk || !fileOk) {
+        const detail = located.find((r) => r.branch_error || r.file_error || r.error);
+        setDeprecationValidation({
+          files: located,
+          test_names,
+          branch_valid: branchOk ? true : (located.some((r) => r.branch_valid === false) ? false : null),
+          file_valid: fileOk ? true : (located.some((r) => r.file_valid === false) ? false : null),
+          error: (detail && (detail.file_valid === true ? null : detail.file_error))
+            || (detail && (detail.branch_valid === true ? null : detail.branch_error))
+            || detail?.error
+            || "Branch or LST file could not be validated.",
+        });
+        return;
+      }
+      const files = await Promise.all(
+        located.map((locatedFile) => {
+          const lst_file = locatedFile.lst_file;
+          const resolvedBranch = (locatedFile.resolved_branch || branch).trim();
+          return api.post(
+            CHECK_LST_TESTCASES_API,
+            { branch: resolvedBranch, lst_file, test_names },
+            { timeout: 30000 }
+          ).then((r) => ({
+            lst_file,
+            branch_valid: true,
+            file_valid: true,
+            ...(r.data || {}),
+          })).catch((err) => ({
+            lst_file,
+            branch_valid: true,
+            file_valid: true,
+            error: err.response?.data?.error || err.message || "Check failed",
+            present: [],
+            not_present: test_names,
+            test_names,
+          }));
+        })
       );
       const firstError = files.find((f) => f.error);
       setDeprecationValidation({
         files,
         test_names,
-        error: firstError && files.length === 1 ? firstError.error : null,
+        branch_valid: true,
+        file_valid: true,
+        error: firstError ? firstError.error : null,
       });
     } catch (err) {
       let errorMsg = "Check failed";
@@ -1408,6 +1470,10 @@ export default function Handover() {
       alert("Please add reviewer(s) before saving.");
       return;
     }
+    if (!(deprecationTestOwner || "").trim()) {
+      alert("Please enter Test owner.");
+      return;
+    }
     setDeprecationCreateLstLoading(true);
     setDeprecationManualLstInstructions(null);
     setDeprecationCrResult(null);
@@ -1431,6 +1497,7 @@ export default function Handover() {
           jira_tickets: ticketsList.length ? ticketsList : undefined,
           reviewers: reviewersList.length ? reviewersList : undefined,
           notes,
+          test_owner: (deprecationTestOwner || "").trim(),
           by_whom: user?.email || user?.username || user?.name || "unknown",
           user_email: user?.email,
           user_name: user?.name || user?.username,
@@ -1479,6 +1546,10 @@ export default function Handover() {
       alert("Please add reviewer(s) before creating CR.");
       return;
     }
+    if (!(deprecationTestOwner || "").trim()) {
+      alert("Please enter Test owner.");
+      return;
+    }
     setDeprecationCreateLstLoading(true);
     setDeprecationManualLstInstructions(null);
     setDeprecationCrResult(null);
@@ -1500,6 +1571,7 @@ export default function Handover() {
             reviewers: reviewersList.length ? reviewersList : undefined,
             notes: "Deprecation CR requested via RegX.",
             cr_status: "creating",
+            test_owner: (deprecationTestOwner || "").trim(),
             by_whom: user?.email || user?.username || user?.name || "unknown",
           },
           { headers: getAuthHeaders() }
@@ -1519,6 +1591,7 @@ export default function Handover() {
           cr_description: description,
           jira_tickets: ticketsList.length ? ticketsList : undefined,
           reviewers: reviewersList.length ? reviewersList : undefined,
+          test_owner: (deprecationTestOwner || "").trim(),
           manual_only: false,
         },
         { headers: getAuthHeaders(), timeout: 600000 }
@@ -1681,6 +1754,10 @@ export default function Handover() {
       alert("Please add at least one LST file path.");
       return;
     }
+    if (!(handoverTestOwner || "").trim()) {
+      alert("Please enter Test owner.");
+      return;
+    }
 
     setHandoverCreateLstLoading(true);
     setHandoverCrResult(null);
@@ -1695,8 +1772,8 @@ export default function Handover() {
     });
     const hasPerTestBugTickets = Object.keys(test_bug_tickets).length > 0;
     const ticketsList = hasPerTestBugTickets ? undefined : [...new Set([...(handoverAnalysis.assigned_tickets || []), ...handoverTicketsList])];
-    const finalCrSubject = (handoverCrSubject || "Testcase Handover").trim() || "Testcase Handover";
-    const finalCrDescription = (handoverCrDescription || "").trim() || buildDefaultCrDescription();
+    const { subject: finalCrSubject, description: finalCrDescription, commitMsg } = composeHandoverCommit();
+    const testOwner = (handoverTestOwner || "").trim();
     const notes =
       "Handover saved without Gerrit push. Branch: " + branch +
       "; LST: " + lst_files.join(", ") +
@@ -1719,6 +1796,8 @@ export default function Handover() {
         cr_status: "pending_manual",
         cr_subject: finalCrSubject,
         cr_description: finalCrDescription,
+        commit_message: commitMsg,
+        test_owner: testOwner,
       });
       const saveResult = {
         success: true,
@@ -1727,8 +1806,7 @@ export default function Handover() {
         cr_status: res.data?.cr_status || "pending_manual",
       };
       setHandoverCrResult(saveResult);
-      setHandoverDataLocked(true);
-      alert(saveResult.message);
+      alert((saveResult.message || "Handover saved.") + " You can still take handover to create the CR.");
     } catch (err) {
       const errData = err.response?.data;
       setHandoverCrResult({
@@ -1797,6 +1875,10 @@ export default function Handover() {
       alert("Please add at least one LST file path.");
       return;
     }
+    if (!(handoverTestOwner || "").trim()) {
+      alert("Please enter Test owner.");
+      return;
+    }
 
     setHandoverCreateLstLoading(true);
     setHandoverManualLstInstructions(null);
@@ -1813,8 +1895,8 @@ export default function Handover() {
     const hasPerTestBugTickets = Object.keys(test_bug_tickets).length > 0;
     const ticketsList = hasPerTestBugTickets ? undefined : [...new Set([...(handoverAnalysis.assigned_tickets || []), ...handoverTicketsList])];
 
-    const finalCrSubject = (handoverCrSubject || "Testcase Handover").trim() || "Testcase Handover";
-    const finalCrDescription = (handoverCrDescription || "").trim() || buildDefaultCrDescription();
+    const { subject: finalCrSubject, description: finalCrDescription, commitMsg } = composeHandoverCommit();
+    const testOwner = (handoverTestOwner || "").trim();
 
     let handoverResult = null;
     let crResult = null;
@@ -1835,6 +1917,8 @@ export default function Handover() {
         cr_status: "creating",
         cr_subject: finalCrSubject,
         cr_description: finalCrDescription,
+        commit_message: commitMsg,
+        test_owner: testOwner,
       });
       handoverResult = { success: true, message: "Handover saved successfully." };
     } catch (err) {
@@ -1856,6 +1940,8 @@ export default function Handover() {
           reviewers: reviewersList,
           cr_subject: finalCrSubject,
           cr_description: finalCrDescription,
+          commit_message: commitMsg,
+          test_owner: testOwner,
         },
         { headers: getAuthHeaders(), timeout: 600000 }
       );
@@ -1934,7 +2020,7 @@ export default function Handover() {
       message = `✗ Both operations failed. Handover: ${handoverResult.error || "Unknown error"}. CR: ${crResult.error || crResult.message || "Unknown error"}`;
     }
     alert(message);
-    if (handoverResult.success || crResult.success) {
+    if (crResult?.success) {
       setHandoverDataLocked(true);
     }
 
@@ -2460,11 +2546,23 @@ export default function Handover() {
                   </div>
                   <div style={{ marginBottom: "10px", display: "flex", gap: "12px", flexWrap: "wrap" }}>
                     <div style={{ flex: 1, minWidth: "200px" }}>
-                      <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Commit Note (optional)</label>
+                      <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Commit subject</label>
                       <input type="text" value={handoverCommitMessage} onChange={(e) => {
-                        setHandoverCommitMessage(e.target.value);
-                        // Commit message doesn't affect validation, so no need to clear
-                      }} placeholder="Optional note appended after preview template" disabled={handoverDataLocked} style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box", backgroundColor: handoverDataLocked ? "#f3f4f6" : "white", opacity: handoverDataLocked ? 0.7 : 1 }} />
+                        const next = e.target.value;
+                        setHandoverCommitMessage(next);
+                        setHandoverCrSubject(next);
+                      }} placeholder="CR subject" disabled={handoverDataLocked} style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box", backgroundColor: handoverDataLocked ? "#f3f4f6" : "white", opacity: handoverDataLocked ? 0.7 : 1 }} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: "200px" }}>
+                      <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Test owner <span style={{ color: "#dc2626" }}>*</span></label>
+                      <input
+                        type="text"
+                        value={handoverTestOwner}
+                        onChange={(e) => setHandoverTestOwner(e.target.value)}
+                        placeholder="firstname.lastname"
+                        disabled={handoverDataLocked}
+                        style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box", backgroundColor: handoverDataLocked ? "#f3f4f6" : "white", opacity: handoverDataLocked ? 0.7 : 1 }}
+                      />
                     </div>
                   </div>
                   <div style={{ marginBottom: "10px" }}>
@@ -2558,10 +2656,12 @@ export default function Handover() {
                                              handoverValidation.file_valid === true && 
                                              handoverValidation.branch_valid === true &&
                                              !handoverValidation.error;
+                    const hasTestOwner = (handoverTestOwner || "").trim() !== "";
                     const isButtonDisabled = handoverCreateLstLoading || 
                                             handoverDataLocked ||
                                             getResolvedLstFiles().length === 0 || 
-                                            !hasLstValidation;
+                                            !hasLstValidation ||
+                                            !hasTestOwner;
                     
                     return (
                       <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "12px", alignItems: "center" }}>
@@ -2587,7 +2687,7 @@ export default function Handover() {
                             onClick={handleRecordHandoverAndCreateCR}
                             disabled={isButtonDisabled}
                             style={isButtonDisabled ? { ...btnPrimaryDisabled } : { ...btnPrimary }}
-                            title={isButtonDisabled ? (!hasLstValidation ? "Please validate LST file" : "") : "Save handover and create Gerrit CR"}
+                            title={isButtonDisabled ? (!hasLstValidation ? "Please validate LST file" : (!hasTestOwner ? "Please enter Test owner" : "")) : "Save handover and create Gerrit CR"}
                           >
                             {handoverCreateLstLoading ? "Processing..." : "Take handover"}
                           </button>
@@ -2596,7 +2696,12 @@ export default function Handover() {
                               Validate LST file to proceed
                             </span>
                           )}
-                          {hasLstValidation && (
+                          {hasLstValidation && !hasTestOwner && (
+                            <span style={{ fontSize: "11px", color: "#64748b", fontStyle: "italic" }}>
+                              Enter Test owner to proceed
+                            </span>
+                          )}
+                          {hasLstValidation && hasTestOwner && (
                             <span style={{ fontSize: "11px", color: "#16a34a", fontStyle: "italic", fontWeight: "500" }}>
                               ✓ Ready for handover
                             </span>
@@ -2819,12 +2924,24 @@ export default function Handover() {
                     const hasDeprecationLst = resolvedDeprecationLstFiles.length > 0;
                     const hasDeprecationBranch = (deprecationLstBranch || "").trim() !== "";
                     const hasDeprecationTickets = (deprecationTicketsExtra || "").trim() !== "";
+                    const hasTestOwner = (deprecationTestOwner || "").trim() !== "";
                     const hasLstValidation = deprecationValidation
+                      && deprecationValidation.branch_valid === true
+                      && deprecationValidation.file_valid === true
                       && !deprecationValidation.error
                       && Array.isArray(deprecationValidation.files)
                       && deprecationValidation.files.length > 0
-                      && deprecationValidation.files.every((f) => !f.error);
-                    const depActionsDisabled = deprecationCreateLstLoading || selectedCount === 0 || !hasDeprecationLst || !hasDeprecationBranch || !hasLstValidation;
+                      && deprecationValidation.files.every((f) => !f.error && f.file_valid !== false && f.branch_valid !== false);
+                    const selectedCovered = selectedTestNames.every((name) =>
+                      (deprecationValidation?.files || []).some((f) => {
+                        if (f.error || f.file_valid === false) return false;
+                        const presentList = (f.present || []).map((t) => (t || "").trim());
+                        const resolvedFrom = f.resolved_from || {};
+                        if (presentList.includes(name)) return true;
+                        return presentList.some((p) => resolvedFrom[p] === name);
+                      })
+                    );
+                    const depActionsDisabled = deprecationCreateLstLoading || selectedCount === 0 || !hasDeprecationLst || !hasDeprecationBranch || !hasLstValidation || !hasTestOwner || !selectedCovered;
                     const depValidateDisabled = deprecationValidating || selectedCount === 0 || !hasDeprecationLst || !hasDeprecationBranch || !hasDeprecationTickets;
                     return (
                       <>
@@ -2999,12 +3116,26 @@ export default function Handover() {
                         </div>
                         <div style={{ marginBottom: "10px", display: "flex", gap: "12px", flexWrap: "wrap" }}>
                           <div style={{ flex: 1, minWidth: "200px" }}>
-                            <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Commit Note (optional)</label>
+                            <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Commit subject</label>
                             <input
                               type="text"
                               value={deprecationCommitNote}
-                              onChange={(e) => setDeprecationCommitNote(e.target.value)}
-                              placeholder="Optional note appended after preview template"
+                              onChange={(e) => {
+                                const next = e.target.value;
+                                setDeprecationCommitNote(next);
+                                setDeprecationCrSubject(next);
+                              }}
+                              placeholder="CR subject"
+                              style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }}
+                            />
+                          </div>
+                          <div style={{ flex: 1, minWidth: "200px" }}>
+                            <label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Test owner <span style={{ color: "#dc2626" }}>*</span></label>
+                            <input
+                              type="text"
+                              value={deprecationTestOwner}
+                              onChange={(e) => setDeprecationTestOwner(e.target.value)}
+                              placeholder="firstname.lastname"
                               style={{ padding: "8px 12px", fontSize: "13px", width: "100%", border: "1px solid #d1d5db", borderRadius: "4px", boxSizing: "border-box" }}
                             />
                           </div>
@@ -3042,12 +3173,10 @@ export default function Handover() {
                                 const isPresent = (normalizedName) => {
                                   if (presentList.includes(normalizedName)) return true;
                                   if (presentList.some((p) => resolvedFrom[p] === normalizedName)) return true;
-                                  if (presentList.some((p) => p.includes(normalizedName))) return true;
                                   return false;
                                 };
                                 const displayName = (normalizedName) => {
-                                  const resolved = presentList.find((p) => resolvedFrom[p] === normalizedName)
-                                    || presentList.find((p) => p !== normalizedName && p.includes(normalizedName));
+                                  const resolved = presentList.find((p) => resolvedFrom[p] === normalizedName);
                                   return resolved && resolved !== normalizedName
                                     ? `${normalizedName}  →  ${resolved}`
                                     : normalizedName;
@@ -3117,7 +3246,7 @@ export default function Handover() {
                           <button onClick={handleDeprecationSave} disabled={depActionsDisabled} style={depActionsDisabled ? { ...btnTertiaryDisabled } : { ...btnTertiary }} title="Save deprecation data without creating a Gerrit CR">
                             {deprecationCreateLstLoading ? "Saving..." : "Save"}
                           </button>
-                          <button onClick={handleDeprecationCreateLstCr} disabled={depActionsDisabled} style={depActionsDisabled ? { ...btnPrimaryDisabled } : { ...btnPrimary }} title={depActionsDisabled ? (!hasLstValidation ? "Please validate LST file" : "") : "Save deprecation and create Gerrit CR"}>
+                          <button onClick={handleDeprecationCreateLstCr} disabled={depActionsDisabled} style={depActionsDisabled ? { ...btnPrimaryDisabled } : { ...btnPrimary }} title={depActionsDisabled ? (!hasLstValidation ? "Please validate LST file" : (!hasTestOwner ? "Please enter Test owner" : (!selectedCovered ? "Selected testcase is not in the LST" : ""))) : "Save deprecation and create Gerrit CR"}>
                             {deprecationCreateLstLoading ? "Processing..." : "Deprecate"}
                           </button>
                           {!hasLstValidation && (
@@ -3125,7 +3254,17 @@ export default function Handover() {
                               Validate LST file to proceed
                             </span>
                           )}
-                          {hasLstValidation && (
+                          {hasLstValidation && !hasTestOwner && (
+                            <span style={{ fontSize: "11px", color: "#64748b", fontStyle: "italic" }}>
+                              Enter Test owner to proceed
+                            </span>
+                          )}
+                          {hasLstValidation && hasTestOwner && !selectedCovered && (
+                            <span style={{ fontSize: "11px", color: "#b45309", fontStyle: "italic" }}>
+                              Selected testcase is not in the LST
+                            </span>
+                          )}
+                          {hasLstValidation && hasTestOwner && selectedCovered && (
                             <span style={{ fontSize: "11px", color: "#16a34a", fontStyle: "italic", fontWeight: "500" }}>
                               ✓ Ready for deprecation
                             </span>
