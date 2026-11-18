@@ -14,6 +14,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import TaskStatusIcon from './components/TaskStatusIcon';
 import LoginPage from './components/LoginPage';
 import { resolveDisplayName } from './utils/authUser';
+import { readAppLocation, writeAppHash } from './utils/appHash';
 import './App.css';
 
 const PAGE_COMPONENTS = {
@@ -29,25 +30,42 @@ const PAGE_COMPONENTS = {
   'cursor-ai': CursorAI,
 };
 
+function pageFromHash() {
+  const { page } = readAppLocation();
+  return PAGE_COMPONENTS[page] ? page : 'home';
+}
+
 function Dashboard() {
   const { user, logout } = useAuth();
-  const [activePage, setActivePage] = useState('home');
-  const [visitedPages, setVisitedPages] = useState(() => ['home']);
+  const [activePage, setActivePage] = useState(pageFromHash);
+  const [visitedPages, setVisitedPages] = useState(() => {
+    const id = pageFromHash();
+    return id === 'home' ? ['home'] : ['home', id];
+  });
   const [menuVisible, setMenuVisible] = useState(true);
 
-  const navigateToPage = useCallback((pageId) => {
+  const navigateToPage = useCallback((pageId, options = {}) => {
     const id = PAGE_COMPONENTS[pageId] ? pageId : 'home';
     setActivePage(id);
     setVisitedPages((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    if (!options.fromHash) {
+      const { tab } = readAppLocation();
+      writeAppHash(id, id === 'release-dashboard' ? { tab } : {});
+    }
   }, []);
 
   useEffect(() => {
     const handleSetActivePage = (event) => {
       navigateToPage(event.detail);
     };
+    const handleHashChange = () => {
+      navigateToPage(readAppLocation().page, { fromHash: true });
+    };
     window.addEventListener('setActivePage', handleSetActivePage);
+    window.addEventListener('hashchange', handleHashChange);
     return () => {
       window.removeEventListener('setActivePage', handleSetActivePage);
+      window.removeEventListener('hashchange', handleHashChange);
     };
   }, [navigateToPage]);
 

@@ -582,19 +582,18 @@ def _looks_like_lst(text):
 
 
 def _sourcegraph_token():
-    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
-    if token:
-        return token
+    """User Settings Sourcegraph token, else the shared service-account token."""
+    username = ""
     try:
         from flask import g, has_request_context
-        if not has_request_context():
-            return ""
-        user = getattr(g, "current_user", None) or {}
-        username = (user.get("sub") or user.get("username") or "").strip()
-        if not username:
-            return ""
-        from user_keys import get_user_key
-        return (get_user_key(username, "sourcegraph_token") or "").strip()
+        if has_request_context():
+            user = getattr(g, "current_user", None) or {}
+            username = (user.get("sub") or user.get("username") or "").strip()
+    except Exception:
+        username = ""
+    try:
+        from user_keys import resolve_service_token
+        return resolve_service_token("sourcegraph", username=username or None)
     except Exception:
         return ""
 

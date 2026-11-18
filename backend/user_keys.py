@@ -165,6 +165,37 @@ def mask_secret(value: str) -> str:
     return s[:4] + "****" + s[-4:]
 
 
+# Read-only shared service accounts. A User Settings value for the same field
+# overrides the env default. Write paths (for example Create ENG) must keep
+# calling get_user_key directly and must not use jira_readonly.
+SERVICE_ACCOUNT_KEYS = {
+    "sourcegraph": ("sourcegraph_token", "SOURCEGRAPH_TOKEN"),
+    "confluence": ("atlassian_confluence_token", "CONFLUENCE_TOKEN"),
+    "gerrit": ("gerrit_http_password", "GERRIT_HTTP_PASSWORD"),
+    "jira_readonly": ("atlassian_jira_token", "JIRA_READONLY_TOKEN"),
+}
+
+
+def resolve_service_token(
+    tool: str,
+    username: Optional[str] = None,
+    explicit: Optional[str] = None,
+) -> str:
+    """Resolve a read-only tool token: explicit, then user settings, then env."""
+    tok = (explicit or "").strip()
+    if tok and "****" not in tok:
+        return tok
+    spec = SERVICE_ACCOUNT_KEYS.get(tool)
+    if not spec:
+        return ""
+    key_name, env_name = spec
+    if username:
+        saved = (get_user_key(username, key_name) or "").strip()
+        if saved:
+            return saved
+    return (os.environ.get(env_name) or "").strip()
+
+
 def get_user_key(username: str, key_name: str) -> Optional[str]:
     """Return decrypted key for user, or None."""
     if not username or key_name not in ALLOWED_KEY_NAMES:

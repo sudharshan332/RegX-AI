@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 import api from "../api";
 import { API_BASE_URL } from "../config";
 import { useAuth } from "../context/AuthContext";
+import { readAppLocation, writeAppHash } from "../utils/appHash";
 import "./ReleaseDashboard.css";
 
 const API = `${API_BASE_URL}/mcp/regression/release-dashboard`;
@@ -269,7 +270,7 @@ export default function ReleaseDashboard() {
   const username = user?.username || user?.sub || "";
   const [releases, setReleases] = useState(() => [...DEFAULT_RELEASES, ...savedReleases()]);
   const [milestone, setMilestone] = useState(() => readLastMilestone(username));
-  const [tab, setTab] = useState("summary");
+  const [tab, setTab] = useState(() => (readAppLocation().tab === "feats" ? "feats" : "summary"));
   const [viewType, setViewType] = useState("all");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -310,6 +311,21 @@ export default function ReleaseDashboard() {
       // The selector still works if storage is blocked.
     }
   }, [milestone, username]);
+
+  const selectTab = (next) => {
+    setTab(next);
+    writeAppHash("release-dashboard", { tab: next });
+  };
+
+  useEffect(() => {
+    const syncTab = () => {
+      const location = readAppLocation();
+      if (location.page !== "release-dashboard") return;
+      setTab(location.tab === "feats" ? "feats" : "summary");
+    };
+    window.addEventListener("hashchange", syncTab);
+    return () => window.removeEventListener("hashchange", syncTab);
+  }, []);
 
   useEffect(() => {
     if (releases.some((item) => item.milestone === milestone)) return;
@@ -619,7 +635,7 @@ export default function ReleaseDashboard() {
               role="tab"
               aria-selected={tab === "summary"}
               className={`rd-tab${tab === "summary" ? " is-active" : ""}`}
-              onClick={() => setTab("summary")}
+              onClick={() => selectTab("summary")}
             >
               Summary
             </button>
@@ -628,7 +644,7 @@ export default function ReleaseDashboard() {
               role="tab"
               aria-selected={tab === "feats"}
               className={`rd-tab${tab === "feats" ? " is-active" : ""}`}
-              onClick={() => setTab("feats")}
+              onClick={() => selectTab("feats")}
             >
               Feat Readiness
             </button>
@@ -1144,14 +1160,14 @@ export default function ReleaseDashboard() {
                         <td>
                           <button
                             type="button"
-                            className="rd-feat-link rd-color"
+                            className="rd-feat-link"
                             onClick={() => toggleFeat(feat.name)}
                           >
                             {isOpen ? "▾" : "▸"} {feat.name}
-                            <span className="rd-color-note">
-                              {feat.lst_owner ? `LST owner: ${feat.lst_owner}` : "LST owner unavailable"}
-                            </span>
                           </button>
+                          <div className="rd-feat-owner">
+                            {feat.lst_owner ? `owner: ${feat.lst_owner}` : "owner unavailable"}
+                          </div>
                         </td>
                         <td>{feat.handed_over}/{feat.total}</td>
                         <td>{feat.passed}</td>

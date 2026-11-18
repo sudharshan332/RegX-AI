@@ -632,6 +632,15 @@
   color: #163e73;
 }
 
+.rd-feat-owner {
+  display: block;
+  margin: 2px 0 0 14px;
+  color: #627d98;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.3;
+}
+
 .rd-status-box {
   display: inline-flex;
   align-items: center;

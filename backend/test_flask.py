@@ -171,6 +171,7 @@ from dynamic_jp_clone import (
 from user_keys import (
     get_user_key,
     get_user_keys_masked,
+    resolve_service_token,
     upsert_user_keys,
     store_login_credential,
     get_login_credential,
@@ -7766,16 +7767,12 @@ def _infer_primary_component(ticket_ctx):
 
 
 def resolve_sourcegraph_token(explicit_token=None):
-    """Resolve Sourcegraph token from request/user settings/env."""
-    tok = (explicit_token or "").strip()
-    if tok and "****" not in tok:
-        return tok
-    username = _current_username()
-    if username:
-        saved = (get_user_key(username, "sourcegraph_token") or "").strip()
-        if saved:
-            return saved
-    return (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    """Resolve Sourcegraph token: request, then User Settings, then service account."""
+    return resolve_service_token(
+        "sourcegraph",
+        username=_current_username(),
+        explicit=explicit_token,
+    )
 
 
 def _infer_affects_version(ticket_ctx):
@@ -19646,7 +19643,7 @@ def validate_user_api_keys():
     if not sg_tok or "****" in sg_tok:
         sg_tok = get_user_key(username, "sourcegraph_token") or ""
     if not sg_tok:
-        sg_tok = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+        sg_tok = resolve_service_token("sourcegraph")
     if not sg_tok:
         results["sourcegraph_token"] = {
             "valid": None,
@@ -23816,16 +23813,12 @@ def _fetch_lst_content_for_check(repo_name, branch, lst_file, explicit_token=Non
 
 
 def resolve_sourcegraph_token(explicit_token=None):
-    """Resolve Sourcegraph token from request/user settings/env."""
-    tok = (explicit_token or "").strip()
-    if tok and "****" not in tok:
-        return tok
-    username = _current_username()
-    if username:
-        saved = (get_user_key(username, "sourcegraph_token") or "").strip()
-        if saved:
-            return saved
-    return (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    """Resolve Sourcegraph token: request, then User Settings, then service account."""
+    return resolve_service_token(
+        "sourcegraph",
+        username=_current_username(),
+        explicit=explicit_token,
+    )
 
 
 def _handover_nutest_branch(branch):
@@ -24884,7 +24877,9 @@ def search_sourcegraph_for_test(repo_name, test_name, rev="master", lst_files_on
     test_name = str(test_name).strip() if test_name else ""
     if not test_name:
         return []
-    token = (sg_token or os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    token = resolve_service_token(
+        "sourcegraph", username=_current_username(), explicit=sg_token
+    )
     if not token:
         return []
     base_url = (os.getenv("SOURCEGRAPH_URL") or "https://sourcegraph.ntnxdpro.com").strip().rstrip("/")
@@ -25076,7 +25071,7 @@ def search_lst_file():
     repo_name = os.getenv("SOURCEGRAPH_FIRST_REPO", "nugerrit.ntnxdpro.com/nutest-py3-tests")
     rev = _handover_nutest_branch(data.get("rev") or "master")
     lst_files = search_sourcegraph_for_test(repo_name, test_name, rev=rev, lst_files_only=True)
-    token = (os.getenv("SOURCEGRAPH_TOKEN") or "").strip()
+    token = resolve_sourcegraph_token()
     if not lst_files and not token:
         return jsonify({"test_name": test_name, "lst_files": [], "error": "Sourcegraph integration not configured. Set the SOURCEGRAPH_TOKEN environment variable.", "generated_at": datetime.utcnow().isoformat()})
     return jsonify({"test_name": test_name, "lst_files": [f["path"] for f in lst_files], "generated_at": datetime.utcnow().isoformat()})

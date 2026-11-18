@@ -11,6 +11,7 @@ from user_keys import (
     get_user_keys_masked,
     mask_secret,
     reset_fernet_cache_for_tests,
+    resolve_service_token,
     store_login_credential,
     upsert_user_keys,
 )
@@ -102,6 +103,53 @@ class TestUserKeys(unittest.TestCase):
         again = upsert_user_keys("dave", {"ai_provider": "cursor"})
         self.assertEqual(again["ai_provider"], "cursor")
         self.assertEqual(get_ai_provider("dave"), "cursor")
+
+    def test_service_token_user_overrides_env(self):
+        os.environ["SOURCEGRAPH_TOKEN"] = "svc-sourcegraph"
+        os.environ["JIRA_READONLY_TOKEN"] = "svc-jira-readonly"
+        try:
+            self.assertEqual(
+                resolve_service_token("sourcegraph", username="erin"),
+                "svc-sourcegraph",
+            )
+            upsert_user_keys("erin", {"sourcegraph_token": "user-sourcegraph-token"})
+            self.assertEqual(
+                resolve_service_token("sourcegraph", username="erin"),
+                "user-sourcegraph-token",
+            )
+            self.assertEqual(
+                resolve_service_token(
+                    "sourcegraph", username="erin", explicit="request-token"
+                ),
+                "request-token",
+            )
+            self.assertEqual(
+                resolve_service_token(
+                    "sourcegraph", username="erin", explicit="sg****oken"
+                ),
+                "user-sourcegraph-token",
+            )
+            # Shared defaults are not stored on the user and stay off the masked view.
+            masked = get_user_keys_masked("nobody")
+            self.assertEqual(masked["sourcegraph_token"], "")
+            # Write paths keep the personal Jira token; the read-only default is separate.
+            self.assertIsNone(get_user_key("erin", "atlassian_jira_token"))
+            self.assertEqual(
+                resolve_service_token("jira_readonly", username="erin"),
+                "svc-jira-readonly",
+            )
+        finally:
+            os.environ.pop("SOURCEGRAPH_TOKEN", None)
+            os.environ.pop("JIRA_READONLY_TOKEN", None)
+
+    def test_service_token_empty_when_unset(self):
+        os.environ.pop("SOURCEGRAPH_TOKEN", None)
+        os.environ.pop("CONFLUENCE_TOKEN", None)
+        os.environ.pop("GERRIT_HTTP_PASSWORD", None)
+        self.assertEqual(resolve_service_token("sourcegraph", username="ghost"), "")
+        self.assertEqual(resolve_service_token("confluence"), "")
+        self.assertEqual(resolve_service_token("gerrit"), "")
+        self.assertEqual(resolve_service_token("unknown-tool"), "")
 
 
 if __name__ == "__main__":
