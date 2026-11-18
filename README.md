@@ -1,155 +1,127 @@
-# Regression Dashboard
+# RegX-AI (Regression Dashboard)
 
-This project consists of a React frontend and a Flask backend for displaying regression test results.
+RegX-AI is a web app for planning, running, and analyzing regression tests. It is a React frontend and a Flask backend, with LDAP login and team-scoped data.
 
-**Documentation:** For architecture, integrations, and enhancement notes, see [PROJECT_DOCUMENTATION_AND_ARCHITECTURE.md](PROJECT_DOCUMENTATION_AND_ARCHITECTURE.md). For AI coding agents, see [AGENTS.md](AGENTS.md).
+**Docs:** architecture, integrations, and APIs are in [PROJECT_DOCUMENTATION_AND_ARCHITECTURE.md](PROJECT_DOCUMENTATION_AND_ARCHITECTURE.md). Agent orientation is in [AGENTS.md](AGENTS.md).
+
+## Stack
+
+- **Frontend:** React 19 in `src/` (Create React App). Dev server on port **3000**; `package.json` proxies API calls to port **5001**.
+- **Backend:** Flask in `backend/test_flask.py`. JSON routes live under `/mcp/regression/`.
+- **Auth:** LDAP (Active Directory) plus JWT. Login includes a team. The UI stays behind the login page until a session exists.
+- **Storage:** JSON and CSV under `data/{TEAM}/`. Default teams are `CDP_FT` and `CDP_ST` (`teams.json`).
+
+## Pages
+
+Sidebar pages in `src/App.jsx`:
+
+| Page | What it covers |
+|------|----------------|
+| Home | Regression overview by tag or task IDs, triage, QI |
+| Release Dashboard | Release status and feature readiness |
+| Run Plan | Scheduling, triggers, calendar, job profiles |
+| Handover | New testcase onboarding (LST, Jira, Gerrit) |
+| Testcase Management | Browse and tag testcases via TCMS |
+| Triage Genie | Automated failure triage jobs |
+| Failed Testcase Analysis | Rule-based and AI failure analysis |
+| Run Report | QI analysis and email |
+| Manage Job Profile | Create, clone, update, and migrate job profiles |
+| Cursor AI | Interactive AI chat, skills, and per-user API keys |
 
 ## Prerequisites
 
-- Node.js and npm (for React frontend)
-- Python 3.x (for Flask backend)
+- Node.js and npm
+- Python 3
 
 ## Setup
 
-### 1. Install Frontend Dependencies
-
 ```bash
 npm install
-```
-
-### 2. Install Backend Dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-Or if you need to use pip3:
+Use `pip3` if `pip` is not available.
 
-```bash
-pip3 install -r requirements.txt
-```
+Create a `.env` in the project root (or export the same variables). Do not commit secrets.
 
-### 3. Set Environment Variables (Optional)
+| Variable | Role |
+|----------|------|
+| `REACT_APP_API_URL` | Frontend API base (no trailing slash). Read through `src/config.js`. For local dev the proxy is enough and this can stay unset. |
+| `FLASK_HOST` | Bind address. Use `0.0.0.0` when other machines must reach the API. |
+| `FLASK_PORT` | Backend port (default `5001`). |
+| `FLASK_DEBUG` | Flask debug flag. |
+| `SECRET_KEY` or `REGX_SECRET_KEY` | JWT signing secret. |
+| `REGX_ENCRYPTION_KEY` | Fernet key for encrypted per-user API keys. |
 
-**One place for API URL:** The frontend reads the API base URL from `REACT_APP_API_URL`. All pages use it via `src/config.js`—change it once to reflect your backend.
+Rebuild the frontend (`npm run build`) after changing `REACT_APP_API_URL` so the production bundle picks it up.
 
-For **server deployment** (e.g. Rocky Linux at 10.111.52.90), create a `.env` in the project root (or set before build):
+## Run
 
-```bash
-# Frontend: backend URL (no trailing slash). Used everywhere via src/config.js.
-REACT_APP_API_URL=http://10.111.52.90:5001
-
-# Backend: bind to all interfaces and port (for remote access)
-export FLASK_HOST=0.0.0.0
-export FLASK_PORT=5001
-export FLASK_DEBUG=false
-```
-
-Then run `npm run build` so the built app uses that URL. On the server, start the backend with these env vars set so it listens on `0.0.0.0:5001`. Open the app at `http://10.111.52.90:3000` (dev server) or the URL where you serve the `build/` folder. Ensure firewall allows ports 5001 and 3000 (or 80 if using nginx).
-
-For Triage Genie features, set the authentication token:
-
-```bash
-export TRIAGE_GENIE_TOKEN="your_triage_genie_token_here"
-```
-
-Or add it to your shell profile (`.bashrc`, `.zshrc`, etc.) for persistence.
-
-## Running the Application
-
-### Start the Flask Backend
-
-In one terminal, navigate to the project root and run:
+Backend (port 5001):
 
 ```bash
 python3 backend/test_flask.py
 ```
 
-Or use the provided script:
+or:
 
 ```bash
 ./start_backend.sh
 ```
 
-The Flask server will start on **port 5001** (http://localhost:5001).
-
-**Note:** If you're using Triage Genie features, make sure `TRIAGE_GENIE_TOKEN` is set, otherwise you'll get authentication errors.
-
-### Start the React Frontend
-
-In another terminal, navigate to the project root and run:
+Frontend (port 3000):
 
 ```bash
 npm start
 ```
 
-The React app will start on **port 3000** (http://localhost:3000) and will automatically open in your browser.
+Start the backend before the UI. Open [http://localhost:3000](http://localhost:3000), sign in, and pick a team.
 
-**Important:** Make sure the Flask backend is running before accessing the frontend, otherwise you'll see a connection error.
+Production frontend:
 
-## Available Scripts
+```bash
+npm run build
+```
 
-In the project directory, you can run:
+Serve the `build/` folder and point `REACT_APP_API_URL` at the running backend. Allow the frontend and backend ports through the firewall.
 
-### `npm start`
+## Cursor bridge and RegX MCP
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+Flask and the React app are enough for the rest of the dashboard. Start these only for **Cursor AI** chat and **failed-test AI analysis**.
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+### Cursor bridge (required for those features)
 
-### `npm test`
+From `cursor-bridge/`, `npm start` runs `start.sh` and listens on port **5002** (`CURSOR_BRIDGE_PORT`). Flask calls it at `CURSOR_BRIDGE_URL` (default `http://localhost:5002`).
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+The Cursor API key comes from the signed-in user’s saved keys, or from `CURSOR_API_KEY` in the environment. Do not commit the key.
 
-### `npm run build`
+```bash
+cd cursor-bridge
+npm start
+```
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+### RegX MCP (optional)
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+From `cursor-bridge/`, `npm run start:mcp` runs `mcp-server.js` on port **5003**. Set `REGX_BACKEND_URL` to the Flask base (default `http://localhost:5001`) so the agent can call RegX data. The bridge attaches this server when MCP tools are enabled (`REGX_MCP_URL`, default `http://localhost:5003`).
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+```bash
+cd cursor-bridge
+REGX_BACKEND_URL="http://localhost:5001" npm run start:mcp
+```
 
-### `npm run eject`
+### Health checks
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+```bash
+curl http://localhost:5002/health
+curl http://localhost:5003/health
+```
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+## Scripts
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+- `npm start` — development server with reload
+- `npm test` — Jest test runner
+- `npm run build` — production bundle in `build/`
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+## Code review
 
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+Push review updates to `refs/for/<branch>` (for example `refs/for/main`). Do not push directly to the integration branch.
