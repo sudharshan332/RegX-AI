@@ -301,6 +301,8 @@ export default function ReleaseDashboard() {
   const [qi, setQi] = useState(null);
   const [qiLoading, setQiLoading] = useState(false);
   const [qiError, setQiError] = useState("");
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
 
   const selected = releases.find((item) => item.milestone === milestone) || { milestone };
 
@@ -341,6 +343,7 @@ export default function ReleaseDashboard() {
     setData(null);
     setOpenFeats(new Set());
     const params = { milestone };
+    if (refreshTick) params.fresh = refreshTick;
     if (current.root) params.root = current.root;
     if (current.branch) params.branch = current.branch;
     api
@@ -355,12 +358,16 @@ export default function ReleaseDashboard() {
         }
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       });
     return () => {
       cancelled = true;
+      setLoading(false);
     };
-  }, [tab, milestone, releases]);
+  }, [tab, milestone, releases, refreshTick]);
 
   useEffect(() => {
     if (tab !== "summary") return undefined;
@@ -374,6 +381,7 @@ export default function ReleaseDashboard() {
     setQi(null);
     setQiError("");
     const params = { milestone, type: viewType };
+    if (refreshTick) params.fresh = refreshTick;
     if (current.root) params.root = current.root;
     if (current.branch) params.branch = current.branch;
     api
@@ -388,12 +396,16 @@ export default function ReleaseDashboard() {
         }
       })
       .finally(() => {
-        if (!cancelled) setSummaryLoading(false);
+        if (!cancelled) {
+          setSummaryLoading(false);
+          setRefreshing(false);
+        }
       });
     return () => {
       cancelled = true;
+      setSummaryLoading(false);
     };
-  }, [tab, milestone, releases, viewType]);
+  }, [tab, milestone, releases, viewType, refreshTick]);
 
   useEffect(() => {
     let cancelled = false;
@@ -417,7 +429,10 @@ export default function ReleaseDashboard() {
   }, [milestone]);
 
   useEffect(() => {
-    if (tab !== "summary" || !summary || tagsFor !== milestone || tags.length === 0) return undefined;
+    if (tab !== "summary" || !summary || tagsFor !== milestone || tags.length === 0) {
+      setCompareLoading(false);
+      return undefined;
+    }
     let cancelled = false;
     const current = releases.find((item) => item.milestone === milestone) || { milestone };
     setCompareLoading(true);
@@ -441,6 +456,7 @@ export default function ReleaseDashboard() {
       });
     return () => {
       cancelled = true;
+      setCompareLoading(false);
     };
   }, [tab, summary, tags, tagsFor, milestone, releases, viewType]);
 
@@ -776,6 +792,18 @@ export default function ReleaseDashboard() {
             <span className="rd-branch" title={selected.sourcegraph || selected.branch}>{selected.branch}</span>
           ) : null}
         </div>
+        <button
+          type="button"
+          className="rd-refresh"
+          onClick={() => {
+            setRefreshing(true);
+            setRefreshTick(Date.now());
+          }}
+          disabled={refreshing}
+          title="Reload this release from Sourcegraph and TCMS"
+        >
+          {refreshing ? "Refreshing…" : "Refresh"}
+        </button>
       </div>
 
       {tab === "summary" && (

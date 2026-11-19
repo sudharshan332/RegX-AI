@@ -15,6 +15,30 @@
   margin-bottom: 18px;
 }
 
+.rd-refresh {
+  margin-left: auto;
+  align-self: flex-start;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid #c5ced8;
+  border-radius: 6px;
+  background: #fff;
+  color: #1b2838;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rd-refresh:hover:not(:disabled) {
+  border-color: #7d8b9a;
+  background: #f8fafc;
+}
+
+.rd-refresh:disabled {
+  cursor: progress;
+  color: #6b7785;
+}
+
 .rd-heading {
   display: flex;
   flex-direction: column;

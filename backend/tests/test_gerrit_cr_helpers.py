@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -176,6 +177,55 @@ class TestLstCrRemoveNotPresent(unittest.TestCase):
         self.assertEqual(result["removed"], ["cdp.foo.MyTest.test_basic"])
         self.assertEqual(result["not_present"], ["missing.test"])
         self.assertNotIn("test_basic", result["not_present"])
+
+
+class TestHandoverOwnerBlocks(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("FLASK_ENV", "testing")
+        try:
+            import test_flask as tf
+            cls.tf = tf
+        except Exception as exc:
+            raise unittest.SkipTest("test_flask import failed: %s" % exc) from exc
+
+    def test_lst_owner_is_the_testcase_owner(self):
+        content = "testcases: [\n]\n"
+        owners = {
+            "cdp.a.Test.one": "Ada Lovelace",
+            "cdp.a.Test.two": "Ada Lovelace",
+            "cdp.b.Test.three": "",
+        }
+        new, already, to_add = self.tf._append_tests_by_owner(
+            content,
+            ["cdp.a.Test.one", "cdp.a.Test.two", "cdp.b.Test.three"],
+            owners,
+            "ganges-7.7-stable",
+            ["ENG-1"],
+            "suite.lst",
+        )
+        self.assertEqual(already, [])
+        self.assertEqual(to_add, ["cdp.a.Test.one", "cdp.a.Test.two", "cdp.b.Test.three"])
+        self.assertEqual(new.count("# Owner:"), 1)
+        self.assertIn("# Owner: Ada Lovelace, Branch: ganges-7.7-stable", new)
+        self.assertNotIn("logged.in", new)
+        self.assertLess(new.index("cdp.a.Test.two"), new.index("cdp.b.Test.three"))
+
+    def test_form_owner_does_not_replace_a_missing_testcase_owner(self):
+        with patch.object(self.tf, "_lookup_tcms_owners", return_value={}) as lookup:
+            found = self.tf._handover_testcase_owners(
+                ["cdp.a.Test.one"],
+                {"test_owner": "logged.in", "owner": "logged.in"},
+                "7.7",
+            )
+        self.assertEqual(found, {})
+        self.assertTrue(lookup.called)
+        supplied = self.tf._handover_testcase_owners(
+            ["cdp.a.Test.one"],
+            {"test_owner": "logged.in", "test_owners": {"cdp.a.Test.one": "nidhi.bhardwa"}},
+            "7.7",
+        )
+        self.assertEqual(supplied, {"cdp.a.Test.one": "nidhi.bhardwa"})
 
 
 if __name__ == "__main__":
