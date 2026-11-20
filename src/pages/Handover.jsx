@@ -472,35 +472,6 @@ export default function Handover() {
     return {};
   };
 
-  const ownerLabel = (value) => {
-    if (!value) return "";
-    if (Array.isArray(value)) {
-      const parts = [];
-      value.forEach((item) => {
-        const label = ownerLabel(item);
-        if (label && !parts.includes(label)) parts.push(label);
-      });
-      return parts.join(", ");
-    }
-    if (typeof value === "object") {
-      return ownerLabel(value.name || value.display_name || value.displayName || value.email || value.username || "");
-    }
-    const text = String(value).trim();
-    const named = text.match(/^(.*?)\s*<[^>]+>$/);
-    return (named && named[1].trim()) || text;
-  };
-
-  const testOwnersFor = (names) => {
-    const cases = handoverAnalysis?.test_cases || [];
-    const map = {};
-    names.forEach((name) => {
-      const row = cases.find((tc) => tc.test_name === name);
-      const label = ownerLabel(row?.owners || row?.owner || row?.test_owner);
-      if (label) map[name] = label;
-    });
-    return map;
-  };
-
   const getSelectedHandoverTests = () => {
     if (!handoverAnalysis?.test_cases?.length) return [];
     return handoverSelectedTests.size > 0
@@ -1194,7 +1165,6 @@ export default function Handover() {
           user_email: user?.email,
           user_name: user?.name || user?.username,
           test_owner: testOwner,
-          test_owners: testOwnersFor(test_names),
           handover_tickets: handoverTicketsList,
           reviewers: reviewersList.length ? reviewersList : undefined,
           cr_subject: finalCrSubject,
@@ -1972,7 +1942,6 @@ export default function Handover() {
           cr_description: finalCrDescription,
           commit_message: commitMsg,
           test_owner: testOwner,
-          test_owners: testOwnersFor(test_names),
         },
         { headers: getAuthHeaders(), timeout: 600000 }
       );

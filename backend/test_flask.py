@@ -24443,7 +24443,6 @@ def _lst_cr_via_gerrit_rest(
     mode="append",
     handover_tickets=None,
     owner=None,
-    owners_by_test=None,
 ):
     """Create an LST CR with Gerrit Change Edit. mode is 'append' or 'remove'."""
     from gerrit_lst_cr import (
@@ -24460,9 +24459,7 @@ def _lst_cr_via_gerrit_rest(
     not_present_all = []
     total_changed = 0
     tickets = handover_tickets or []
-    owner_name = (owner or "").strip()
-    if mode != "append":
-        owner_name = (owner or gerrit_user or "").strip()
+    owner_name = (owner or gerrit_user or "").strip()
     for lf in lst_files:
         try:
             content = client.get_file(branch, lf)
@@ -24483,19 +24480,14 @@ def _lst_cr_via_gerrit_rest(
                 total_changed += len(removed)
             per_file.append({"lst_file": lf, "removed": removed, "not_present": not_present})
         else:
-            if owners_by_test is not None:
-                new_content, already, to_add = _append_tests_by_owner(
-                    content, test_names, owners_by_test, branch, tickets, lf,
-                )
-            else:
-                new_content, already, to_add = append_missing_tests(
-                    content,
-                    test_names,
-                    owner=owner_name,
-                    branch=branch,
-                    tickets=tickets,
-                    lst_path=lf,
-                )
+            new_content, already, to_add = append_missing_tests(
+                content,
+                test_names,
+                owner=owner_name,
+                branch=branch,
+                tickets=tickets,
+                lst_path=lf,
+            )
             logger.info(
                 "create_lst_cr append %s: requested=%s to_add=%s already_present=%s",
                 lf,
@@ -24560,157 +24552,12 @@ def _gerrit_identity_for_user():
 
 
 def _lst_owner_from_payload(data, gerrit_user=""):
-    """Prefer the Test owner field. Fall back to the Gerrit username.
-
-    Used for the deprecation commit note. Handover LST ``# Owner`` lines use
-    ``_handover_testcase_owners`` and never this fallback.
-    """
+    """Prefer the Test owner field. Fall back to the Gerrit username."""
     data = data or {}
     owner = (data.get("test_owner") or data.get("owner") or "").strip()
     if owner:
         return owner
     return (gerrit_user or "").strip()
-
-
-def _owner_label(value):
-    """Display name from a TCMS owner string, object, or list."""
-    if value is None:
-        return ""
-    if isinstance(value, list):
-        parts = []
-        for item in value:
-            label = _owner_label(item)
-            if label and label not in parts:
-                parts.append(label)
-        return ", ".join(parts)
-    if isinstance(value, dict):
-        for key in ("name", "display_name", "displayName", "full_name", "email", "username"):
-            label = _owner_label(value.get(key))
-            if label:
-                return label
-        return ""
-    text = str(value).strip()
-    if not text:
-        return ""
-    named = re.match(r"^(.*?)\s*<[^>]+>$", text)
-    if named and named.group(1).strip():
-        return named.group(1).strip()
-    return text
-
-
-def _group_tests_by_owner(test_names, owners_by_test):
-    """One block per owner, in the order owners first appear. Blank stays blank."""
-    buckets = {}
-    order = []
-    for raw in test_names or []:
-        name = str(raw or "").strip()
-        if not name:
-            continue
-        owner = _owner_label((owners_by_test or {}).get(name))
-        if owner not in buckets:
-            buckets[owner] = []
-            order.append(owner)
-        if name not in buckets[owner]:
-            buckets[owner].append(name)
-    return [(owner, buckets[owner]) for owner in order]
-
-
-def _lookup_tcms_owners(names, milestone=""):
-    """TCMS owners for the named tests. Empty on any failure."""
-    wanted = []
-    for raw in names or []:
-        name = str(raw or "").strip()
-        if name and name not in wanted:
-            wanted.append(name)
-    if not wanted:
-        return {}
-    match = {
-        "deleted": False,
-        "test_case.deprecated": False,
-        "test_case.name": {"$in": wanted},
-    }
-    text = (milestone or "").strip()
-    if text and text.lower() not in ("master", "main"):
-        try:
-            from release_dashboard import nutest_branch_for
-            mapped = nutest_branch_for(text)
-        except Exception:
-            mapped = None
-        if mapped and mapped.get("milestone") and mapped["milestone"] not in ("master", "main"):
-            text = mapped["milestone"]
-        if text.lower() not in ("master", "main"):
-            match["target_milestone"] = text
-    try:
-        response = _tcms_aggregate_post([
-            {"$match": match},
-            {"$project": {"name": 1, "test_case.name": 1, "test_case.owners": 1}},
-            {"$limit": len(wanted)},
-        ], timeout=20)
-    except Exception as exc:
-        logger.warning("TCMS owner lookup failed: %s", exc)
-        return {}
-    if getattr(response, "status_code", 0) != 200:
-        logger.warning("TCMS owner lookup HTTP %s", getattr(response, "status_code", ""))
-        return {}
-    try:
-        rows = _tcms_response_rows(response.json()) or []
-    except Exception as exc:
-        logger.warning("TCMS owner lookup returned unreadable JSON: %s", exc)
-        return {}
-    found = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        tc = row.get("test_case") if isinstance(row.get("test_case"), dict) else {}
-        name = str(tc.get("name") or row.get("name") or "").strip()
-        label = _owner_label(tc.get("owners"))
-        if name and label and name not in found:
-            found[name] = label
-    return found
-
-
-def _handover_testcase_owners(test_names, data, milestone=""):
-    """Owner of each handover test. The logged-in user is never a substitute."""
-    supplied = {}
-    raw = (data or {}).get("test_owners") or {}
-    if isinstance(raw, dict):
-        for key, value in raw.items():
-            name = str(key or "").strip()
-            label = _owner_label(value)
-            if name and label:
-                supplied[name] = label
-    missing = [name for name in test_names or [] if str(name or "").strip() and str(name).strip() not in supplied]
-    if not missing:
-        return supplied
-    found = _lookup_tcms_owners(missing, milestone)
-    still = [name for name in missing if name not in found]
-    if still and milestone:
-        found.update(_lookup_tcms_owners(still, ""))
-    for name, label in found.items():
-        if name not in supplied and label:
-            supplied[name] = label
-    return supplied
-
-
-def _append_tests_by_owner(content, test_names, owners_by_test, branch, tickets, lst_path):
-    """Insert one handover block per testcase owner."""
-    from gerrit_lst_cr import append_missing_tests
-
-    current = content or ""
-    already_all = []
-    to_add_all = []
-    for owner_name, names in _group_tests_by_owner(test_names, owners_by_test):
-        current, already, to_add = append_missing_tests(
-            current,
-            names,
-            owner=owner_name,
-            branch=branch,
-            tickets=tickets,
-            lst_path=lst_path,
-        )
-        already_all.extend(already)
-        to_add_all.extend(to_add)
-    return current, list(dict.fromkeys(already_all)), list(dict.fromkeys(to_add_all))
 
 
 def _collect_lst_files_from_payload(data):
@@ -24826,7 +24673,7 @@ def create_lst_cr():
 
     from gerrit_lst_cr import GerritRestError, force_git_clone, git_fallback_enabled
 
-    owners_by_test = _handover_testcase_owners(test_names, data, requested_branch)
+    lst_owner = _lst_owner_from_payload(data, gerrit_user)
 
     if not force_git_clone():
         try:
@@ -24835,7 +24682,7 @@ def create_lst_cr():
                 branch, lst_files, test_names, reviewers, commit_msg,
                 gerrit_user, gerrit_pwd, gerrit_url, repo_path, mode="append",
                 handover_tickets=handover_tickets,
-                owners_by_test=owners_by_test,
+                owner=lst_owner,
             )
             _stamp_cr_result("handover", test_names, record_branches, lst_files, result)
             return jsonify(result)
@@ -24868,6 +24715,8 @@ def create_lst_cr():
         _run_git(["config", "user.name", display_name], cwd=repo_dir, check=False)
         logger.info("create_lst_cr: applying LST edits on branch=%s files=%s", branch, lst_files)
 
+        from gerrit_lst_cr import append_missing_tests as _append_missing_tests
+
         per_file = []
         total_to_add = 0
         for lf in lst_files:
@@ -24879,13 +24728,13 @@ def create_lst_cr():
                 }), 400
             with open(abs_lst, "r", encoding="utf-8", errors="ignore") as fh:
                 old_content = fh.read()
-            new_content, already_present, to_add = _append_tests_by_owner(
+            new_content, already_present, to_add = _append_missing_tests(
                 old_content,
                 test_names,
-                owners_by_test,
-                branch,
-                handover_tickets,
-                lf,
+                owner=lst_owner,
+                branch=branch,
+                tickets=handover_tickets,
+                lst_path=lf,
             )
             if to_add:
                 with open(abs_lst, "w", encoding="utf-8") as fh:

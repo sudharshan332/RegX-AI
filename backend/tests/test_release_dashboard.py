@@ -30,9 +30,9 @@ def _row(name, paths, status="", issue_type="", tickets=None):
     }
 
 
-FEAT = "test_sets/milestones/7.7/CDP/FEATS/Kronos-FEAT-1/suite.lst"
-REG = "test_sets/milestones/7.7/CDP/REGRESSION/official.lst"
-TRANSIT = "test_sets/intransit/CDP/FEATS/Kronos-FEAT-1/suite.lst"
+FEAT = "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/Kronos-FEAT-1/suite.lst"
+REG = "test_sets/milestones/7.7/CDP/FunctionalTest/REGRESSION/official.lst"
+TRANSIT = "test_sets/intransit/CDP/FunctionalTest/FEATS/Kronos-FEAT-1/suite.lst"
 OTHER_RELEASE = "test_sets/milestones/7.6/CDP/REGRESSION/official.lst"
 
 
@@ -116,12 +116,7 @@ class ReleaseDashboardColorTests(unittest.TestCase):
         feat = data["feats"][0]
         self.assertEqual(feat["lst_files"], [FEAT])
         self.assertEqual(feat["lst_owner"], "")
-        folder = "test_sets/milestones/7.7/CDP/FEATS/Kronos-FEAT-1"
-
-        def list_entries(folder_path, branch, token):
-            self.assertEqual(folder_path, "test_sets/milestones/7.7")
-            self.assertEqual(branch, "ganges-7.7-stable")
-            return [{"name": "CDP", "path": folder_path + "/CDP", "isDirectory": True}]
+        folder = "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/Kronos-FEAT-1"
 
         def list_lsts(folder_path, branch, token):
             self.assertEqual(folder_path, folder)
@@ -133,9 +128,7 @@ class ReleaseDashboardColorTests(unittest.TestCase):
             self.assertEqual(branch, "ganges-7.7-stable")
             return "summary: Kronos-FEAT-1\nassignee: Ada Lovelace\ntestcases: [\ncdp.a.Test.t1\n]\n"
 
-        rd.attach_lst_owners(
-            data, read_file=read_file, list_lsts=list_lsts, list_entries=list_entries, token="test-token",
-        )
+        rd.attach_lst_owners(data, read_file=read_file, list_lsts=list_lsts, token="test-token")
         self.assertEqual(feat["lst_owner"], "Ada Lovelace")
 
     def test_html_shell_is_not_treated_as_an_lst(self):
@@ -155,20 +148,19 @@ class ReleaseDashboardColorTests(unittest.TestCase):
             _row("cdp.a.Test.t2", [REG], status="Failed"),
         ], "7.7")
         self.assertEqual([feat["name"] for feat in data["feats"]], ["Kronos-FEAT-1"])
-        self.assertEqual(data["root"], "test_sets/milestones/7.7")
-        self.assertEqual(data["branch"], "ganges-7.7-stable")
+        self.assertEqual(data["root"], "test_sets/milestones/7.7/CDP/FunctionalTest")
         self.assertIn("ganges-7.7-stable", data["sourcegraph"])
 
     def test_nested_feat_folders_are_separate_rows(self):
         data = rd.build_dashboard([
             _row("cdp.a.Test.a", [
-                "test_sets/milestones/7.7/CDP/FEATS/FEAT-19686/FEAT-17396/a.lst",
+                "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/FEAT-19686/FEAT-17396/a.lst",
             ]),
             _row("cdp.a.Test.b", [
-                "test_sets/milestones/7.7/CDP/FEATS/FEAT-19686/FEAT-18094/b.lst",
+                "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/FEAT-19686/FEAT-18094/b.lst",
             ]),
             _row("cdp.a.Test.c", [
-                "test_sets/milestones/7.7/CDP/FEATS/FEAT-19506/c.lst",
+                "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/FEAT-19506/c.lst",
             ]),
             _row("cdp.a.Test.reg", [REG], status="Failed"),
         ], "7.7")
@@ -186,7 +178,7 @@ class ReleaseDashboardColorTests(unittest.TestCase):
         ], "7.6")
         self.assertEqual(data["feats"][0]["name"], "Janus-FEAT-1")
         self.assertEqual(data["feats"][0]["color"], "green")
-        self.assertEqual(data["root"], "test_sets/milestones/7.6")
+        self.assertEqual(data["root"], "test_sets/milestones/7.6/CDP")
         self.assertIn("ganges-7.6-stable", data["sourcegraph"])
 
     def test_overall_success_is_ignored_when_this_branch_did_not_run(self):
@@ -277,9 +269,8 @@ class ReleaseBranchTests(unittest.TestCase):
 
     def test_added_version_uses_its_milestone_folder_and_train_branch(self):
         info = rd.lookup_release("7.6.1")
-        self.assertEqual(info["root"], "test_sets/milestones/7.6.1")
+        self.assertEqual(info["root"], "test_sets/milestones/7.6.1/CDP")
         self.assertEqual(info["branch"], "ganges-7.6-stable")
-        self.assertEqual(info["teams"], ["cdp", "mercury"])
 
     def test_custom_root_groups_a_release_that_is_not_built_in(self):
         root = "test_sets/milestones/7.6.1/CDP"
@@ -292,36 +283,22 @@ class ReleaseBranchTests(unittest.TestCase):
         self.assertEqual(data["feats"][0]["name"], "FEAT-18439")
         self.assertEqual(data["feats"][0]["color"], "green")
         self.assertEqual(data["branch"], "ganges-7.6-stable")
-        self.assertEqual(data["root"], "test_sets/milestones/7.6.1")
+        self.assertEqual(data["root"], root)
 
     def test_known_releases_skip_the_search(self):
         info = rd.lookup_release("7.6")
         self.assertEqual(info["branch"], "ganges-7.6-stable")
-        self.assertEqual(info["root"], "test_sets/milestones/7.6")
-        forced = rd.release_info("7.7", branch="master")
-        self.assertEqual(forced["branch"], "ganges-7.7-stable")
-        self.assertNotIn("@master/", forced["sourcegraph"])
-        lifted = rd.release_info(
-            "7.7",
-            root="test_sets/milestones/7.7/CDP/FunctionalTest",
-            branch="main",
-        )
-        self.assertEqual(lifted["root"], "test_sets/milestones/7.7")
-        self.assertEqual(lifted["branch"], "ganges-7.7-stable")
+        self.assertEqual(info["root"], "test_sets/milestones/7.6/CDP")
 
     def test_7_5_and_its_maintenance_releases_use_the_cdp_folder(self):
         info = rd.lookup_release("7.5")
-        self.assertEqual(info["root"], "test_sets/milestones/7.5")
+        self.assertEqual(info["root"], "test_sets/milestones/7.5/cdp")
         self.assertEqual(info["branch"], "ganges-7.5-stable")
         patch = rd.lookup_release("7.5.1")
-        self.assertEqual(patch["root"], "test_sets/milestones/7.5.1")
+        self.assertEqual(patch["root"], "test_sets/milestones/7.5.1/cdp")
         self.assertEqual(patch["branch"], "ganges-7.5-stable")
         older = rd.lookup_release("7.3.1")
-        self.assertEqual(older["root"], "test_sets/milestones/7.3.1")
-        later = rd.lookup_release("7.8")
-        self.assertEqual(later["root"], "test_sets/milestones/7.8")
-        self.assertEqual(later["branch"], "ganges-7.8-stable")
-        self.assertEqual(later["teams"], ["cdp", "mercury"])
+        self.assertEqual(older["root"], "test_sets/milestones/7.3.1/cdp")
         self.assertEqual(older["branch"], "ganges-7.3-stable")
 
     def test_flat_cdp_lst_name_is_the_feat(self):
@@ -338,31 +315,6 @@ class ReleaseBranchTests(unittest.TestCase):
         self.assertEqual((reg_feat, is_reg), ("", True))
         other, other_reg = rd.classify_path(root + "/cdp_gold_suite_tests.lst", "7.5")
         self.assertEqual((other, other_reg), ("", False))
-        mercury, mercury_reg = rd.classify_path(
-            "test_sets/milestones/7.7/mercury/FEATS/FEAT-9/suite.lst", "7.7",
-        )
-        self.assertEqual((mercury, mercury_reg), ("FEAT-9", False))
-        wrapped, wrapped_reg = rd.classify_path(
-            "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/FEAT-18954/suite.lst", "7.7",
-        )
-        self.assertEqual((wrapped, wrapped_reg), ("FEAT-18954", False))
-        mercury_reg_name, mercury_is_reg = rd.classify_path(
-            "test_sets/milestones/7.7/Mercury/FunctionalTest/REGRESSION/official.lst", "7.7",
-        )
-        self.assertEqual((mercury_reg_name, mercury_is_reg), ("", True))
-        pattern = rd.milestone_set_pattern(rd.release_info("7.7"))
-        self.assertRegex(
-            "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/FEAT-18954/suite.lst",
-            "(?i)" + pattern,
-        )
-        self.assertNotRegex(
-            "test_sets/milestones/7.7/AHV/FunctionalTest/FEATS/FEAT-1/suite.lst",
-            "(?i)" + pattern,
-        )
-        ignored, ignored_reg = rd.classify_path(
-            "test_sets/milestones/7.7/ahv/FEATS/FEAT-1/suite.lst", "7.7",
-        )
-        self.assertEqual((ignored, ignored_reg), ("", False))
 
     def test_flat_cdp_owner_is_the_assignee_in_that_folder(self):
         root = "test_sets/milestones/7.5/cdp"
@@ -470,8 +422,8 @@ class ReleaseBranchTests(unittest.TestCase):
     def test_one_test_in_two_feat_folders_is_listed_on_both(self):
         data = rd.build_dashboard([
             _row("cdp.a.Test.shared", [
-                "test_sets/milestones/7.7/CDP/FEATS/Alpha/a.lst",
-                "test_sets/milestones/7.7/CDP/FEATS/Beta/b.lst",
+                "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/Alpha/a.lst",
+                "test_sets/milestones/7.7/CDP/FunctionalTest/FEATS/Beta/b.lst",
                 REG,
             ], status="Succeeded"),
         ], "7.7")
@@ -521,9 +473,7 @@ class ReleaseSummaryTests(unittest.TestCase):
     def test_all_scope_has_no_release_or_tag_exclusion(self):
         clauses = rd.summary_match("7.6.1", "all")["$and"]
         self.assertIn({"target_milestone": "7.6.1"}, clauses)
-        teams = next(clause["additional_data.team"]["$in"] for clause in clauses if "additional_data.team" in clause)
-        self.assertIn("7.6.1/CDP", teams)
-        self.assertIn("7.6.1/Mercury", teams)
+        self.assertIn({"additional_data.team": "7.6.1/CDP"}, clauses)
         self.assertIn({"deleted": False}, clauses)
         self.assertFalse(any("release_name" in clause for clause in clauses))
         self.assertFalse(any("test_case.metadata.tags" in clause for clause in clauses))
@@ -553,8 +503,7 @@ class ReleaseSummaryTests(unittest.TestCase):
         self.assertIn("type=Feat", feat)
         self.assertNotIn("tab=package_type", feat)
         self.assertIn("type=Regression", regression)
-        self.assertIn("mercury", overall)
-        self.assertIn("cdp", overall)
+        self.assertIn("7.6.1%2FCDP", overall)
 
     def test_summary_counts_handover_and_component_qi(self):
         rows = [
@@ -706,9 +655,7 @@ class ReleaseSummaryTests(unittest.TestCase):
         self.assertEqual(untouched[0]["qi"], 70.0)
         self.assertEqual(untouched[0]["qi_source"], "tcms_rows")
         match = rd.component_metrics_match("7.6.1", "regression")["$and"]
-        teams = next(clause["additional_data.team"]["$in"] for clause in match if "additional_data.team" in clause)
-        self.assertIn("7.6.1/CDP", teams)
-        self.assertIn("7.6.1/Mercury", teams)
+        self.assertIn({"additional_data.team": "7.6.1/CDP"}, match)
         self.assertIn({"release_name": {"$ne": "7.6.1"}}, match)
 
     def test_active_bugs_follow_the_latest_jita_ticket(self):

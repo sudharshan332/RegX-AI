@@ -32,26 +32,26 @@ _MILESTONE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _REPO = "nugerrit.ntnxdpro.com/nutest-py3-tests"
 _SG = "https://sourcegraph.ntnxdpro.com"
 
-# Each release is the milestone directory on its nutest branch. Only the cdp
-# and mercury folders under that directory are tracked. 7.7 reads
-# nutest-py3-tests at ganges-7.7-stable, never master.
+# First folder under each root is a feat. A REGRESSION folder under that root
+# is the handover set for the same release.
 RELEASES = {
     "7.7": {
-        "root": "test_sets/milestones/7.7",
+        "root": "test_sets/milestones/7.7/CDP/FunctionalTest",
         "branch": "ganges-7.7-stable",
     },
     "7.6": {
-        "root": "test_sets/milestones/7.6",
+        "root": "test_sets/milestones/7.6/CDP",
         "branch": "ganges-7.6-stable",
     },
+    # 7.5 and older maintenance releases keep feat LST files in this folder,
+    # not under CDP/FEATS. See ganges-7.5-stable/.../milestones/7.5/cdp.
     "7.5": {
-        "root": "test_sets/milestones/7.5",
+        "root": "test_sets/milestones/7.5/cdp",
         "branch": "ganges-7.5-stable",
     },
 }
-_TEAMS = ("cdp", "mercury")
 _FEAT_ID_RE = re.compile(r"feat[-_](\d+)", re.I)
-_ROOT_RE = re.compile(r"^test_sets/milestones/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+_ROOT_RE = re.compile(r"^test_sets/milestones/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+$")
 _PASS = {"succeeded", "passed", "success", "pass"}
 _FAIL = {"failed", "failure", "fail", "error"}
 _PAGE_SIZE = 500
@@ -177,58 +177,23 @@ def _safe_root(root):
     return root
 
 
-def _milestone_dir(milestone):
-    text = (milestone or "").strip().strip("/")
-    if not text or text.lower() in ("master", "main"):
-        return ""
-    return "test_sets/milestones/%s" % text
-
-
-def _cover_both_teams(root, milestone):
-    """A saved CDP-only or FunctionalTest root still covers cdp and mercury."""
-    base = _milestone_dir(milestone)
-    cleaned = (root or "").strip().strip("/")
-    if not base or ".." in cleaned:
-        return cleaned
-    low = cleaned.lower()
-    if low == base.lower() or low.startswith(base.lower() + "/"):
-        return base
-    return cleaned
-
-
 def release_info(milestone, root=None, branch=None):
-    mapped = nutest_branch_for(milestone)
     cfg = RELEASES.get(milestone)
-    if not root:
-        if cfg:
-            root = cfg["root"]
-        elif mapped and mapped["branch"] != "master":
-            root = _milestone_dir(mapped["milestone"])
-    if root:
-        root = _cover_both_teams(root, mapped["milestone"] if mapped else milestone)
+    if cfg and not root:
+        root = cfg["root"]
+        branch = cfg["branch"]
     root = _safe_root(root)
     if not root:
         return None
-    # A numbered release must not fall back to master when the branch is omitted.
-    supplied = (branch or "").strip()
-    if mapped and mapped["branch"] != "master":
-        if not supplied or supplied.lower() in ("master", "main"):
-            branch = mapped["branch"]
-        else:
-            branch = supplied
-    elif not supplied:
-        branch = (cfg or {}).get("branch") or (mapped["branch"] if mapped else "")
-    else:
-        branch = supplied
+    if not branch:
+        mapped = nutest_branch_for(milestone)
+        branch = mapped["branch"] if mapped else ""
     if not branch:
         return None
-    layout = "flat" if _uses_flat_cdp(milestone) else "feats"
     return {
         "milestone": milestone,
         "root": root,
         "branch": branch,
-        "layout": layout,
-        "teams": list(_TEAMS),
         "sourcegraph": "%s/%s@%s/-/tree/%s" % (_SG, _REPO, branch, root),
     }
 
@@ -267,26 +232,17 @@ def _uses_flat_cdp(version):
 
 
 def milestone_tree(milestone):
-    """Milestone directory and nutest branch for a configured release version."""
+    """Root folder and nutest branch for a release that is not hard-coded."""
     mapped = nutest_branch_for(milestone)
-    if not mapped or mapped["branch"] == "master":
+    if not mapped:
         return None
     version = mapped["milestone"]
+    folder = "cdp" if _uses_flat_cdp(version) else "CDP"
     return {
         "milestone": version,
-        "root": _milestone_dir(version),
+        "root": "test_sets/milestones/%s/%s" % (version, folder),
         "branch": mapped["branch"],
     }
-
-
-def _team_remainder(root, parts):
-    """Path pieces inside cdp or mercury. None when the path is another team."""
-    tail = (root or "").rstrip("/").split("/")[-1].lower()
-    if tail in _TEAMS:
-        return parts
-    if not parts or parts[0].lower() not in _TEAMS:
-        return None
-    return parts[1:]
 
 
 def classify_path(path, milestone, root=None):
@@ -313,22 +269,13 @@ def classify_path(path, milestone, root=None):
     parts = [part for part in path[idx + len(root):].split("/") if part]
     if not parts:
         return "", False
-    parts = _team_remainder(info["root"], parts)
-    if parts is None:
-        return "", False
-    if not parts:
-        return "", False
-    if info.get("layout") == "flat" or _flat_cdp_root(info["root"]):
+    if _flat_cdp_root(info["root"]):
         if any(_regression_name(part) for part in parts):
             return "", True
         filename = parts[-1]
         if not filename.lower().endswith(".lst"):
             return "", False
         return _feat_id_from_name(filename), False
-    if parts[0].lower() == "functionaltest":
-        parts = parts[1:]
-    if not parts:
-        return "", False
     head = parts[0].lower()
     if head == "regression" or head.startswith("regression"):
         return "", True
@@ -804,22 +751,11 @@ def _read_lst_graphql(path, branch, token):
 
 
 def _owner_from_feat_folder(root, feat_name, branch, token, list_lsts, read_file):
-    folders = [feat_folder(root, feat_name)]
-    # 7.7 keeps FEATS under CDP/FunctionalTest and Mercury/FunctionalTest.
-    folders.append(feat_folder(root.rstrip("/") + "/FunctionalTest", feat_name))
-    paths = []
-    folder = folders[0]
-    for candidate in folders:
-        try:
-            found = list_lsts(candidate, branch, token) or []
-        except Exception as exc:
-            logger.warning("Could not list feat folder %s: %s", candidate, exc)
-            found = []
-        if found:
-            folder = candidate
-            paths = found
-            break
-    if not paths:
+    folder = feat_folder(root, feat_name)
+    try:
+        paths = list_lsts(folder, branch, token) or []
+    except Exception as exc:
+        logger.warning("Could not list feat folder %s: %s", folder, exc)
         return ""
     names = []
     for path in paths:
@@ -838,33 +774,12 @@ def _owner_from_feat_folder(root, feat_name, branch, token, list_lsts, read_file
     return ", ".join(names)
 
 
-def _team_directories(root, branch, token, list_entries):
-    """cdp and mercury directories, using the casing that exists on the branch."""
-    tail = (root or "").rstrip("/").split("/")[-1].lower()
-    if tail in _TEAMS:
-        return [root]
-    try:
-        entries = list_entries(root, branch, token) or []
-    except Exception as exc:
-        logger.warning("Could not list %s: %s", root, exc)
-        return []
-    found = []
-    for entry in entries:
-        if not isinstance(entry, dict) or not entry.get("isDirectory"):
-            continue
-        name = str(entry.get("name") or "")
-        if name.lower() not in _TEAMS:
-            continue
-        found.append(entry.get("path") or "%s/%s" % (root.rstrip("/"), name))
-    return found
-
-
 def attach_lst_owners(dashboard, read_file=None, list_lsts=None, list_entries=None, token=None):
     """Owner of a feat is the assignee in its LST file.
 
-    7.6, 7.7, and later keep that file inside ``<team>/FEATS/<feat>`` on
-    the release branch (7.7 is ganges-7.7-stable). 7.5 and older keep it
-    directly in the cdp or mercury folder.
+    7.6 and 7.7 keep that file inside ``<root>/FEATS/<feat>``.
+    7.5 and older maintenance releases keep it in ``<root>`` itself
+    (``test_sets/milestones/<version>/cdp``).
     """
     if not isinstance(dashboard, dict):
         return dashboard
@@ -879,32 +794,15 @@ def attach_lst_owners(dashboard, read_file=None, list_lsts=None, list_entries=No
     list_fn = list_lsts or _list_lst_files
     read_fn = read_file or _read_lst_graphql
     entries_fn = list_entries or _list_entries
-    layout = dashboard.get("layout")
-    if not layout:
-        layout = "flat" if _uses_flat_cdp(dashboard.get("milestone")) or _flat_cdp_root(root) else "feats"
-    team_roots = _team_directories(root, branch, resolved, entries_fn)
-    flat_index = {}
-    if layout == "flat":
-        for team_root in team_roots:
-            part = _flat_lst_index(team_root, branch, resolved, entries_fn, list_fn)
-            for key, paths in part.items():
-                bucket = flat_index.setdefault(key, [])
-                for path in paths:
-                    if path not in bucket:
-                        bucket.append(path)
+    flat_index = None
+    if _flat_cdp_root(root):
+        flat_index = _flat_lst_index(root, branch, resolved, entries_fn, list_fn)
 
     def _one(feat):
         name = feat.get("name") or ""
-        if layout == "flat":
+        if flat_index is not None:
             return _owners_from_paths(flat_index.get(name.lower()), branch, resolved, read_fn)
-        names = []
-        for team_root in team_roots:
-            owner = _owner_from_feat_folder(team_root, name, branch, resolved, list_fn, read_fn)
-            for piece in owner.split(","):
-                piece = piece.strip()
-                if piece and piece not in names:
-                    names.append(piece)
-        return ", ".join(names)
+        return _owner_from_feat_folder(root, name, branch, resolved, list_fn, read_fn)
 
     if not feats:
         return dashboard
@@ -921,26 +819,16 @@ def attach_lst_owners(dashboard, read_file=None, list_lsts=None, list_entries=No
     return dashboard
 
 
-def milestone_set_pattern(info):
-    """TCMS test-set regex for cdp and mercury on this release.
-
-    7.6 keeps FEATS directly under the team. 7.7 keeps the same folders
-    under ``<team>/FunctionalTest``.
-    """
-    root_path = info["root"]
-    escaped = re.escape(root_path)
-    inside_team = (root_path or "").rstrip("/").split("/")[-1].lower() in _TEAMS
-    team_prefix = "" if inside_team else "/(cdp|mercury)"
-    if info.get("layout") == "flat" or _flat_cdp_root(root_path):
-        return escaped + (team_prefix or "") + "/"
-    return escaped + team_prefix + "/(?:FunctionalTest/)?(FEATS|REGRESSION)/"
-
-
 def fetch_milestone_rows(milestone, root=None, branch=None):
     info = release_info(milestone, root=root, branch=branch)
     if not info:
         raise DashboardError("Unsupported release")
-    pattern = milestone_set_pattern(info)
+    root_path = info["root"]
+    escaped = re.escape(root_path)
+    if _flat_cdp_root(root_path):
+        pattern = escaped + "/"
+    else:
+        pattern = escaped + "/(FEATS|REGRESSION)/"
     match = {
         "$and": [
             {"target_milestone": milestone},
@@ -994,10 +882,10 @@ def fetch_milestone_rows(milestone, root=None, branch=None):
 
 
 def lookup_release(nos):
-    """Every configured release version uses its train branch.
+    """7.6.1 uses CDP/FEATS on ganges-7.6-stable.
 
-    7.7 is ganges-7.7-stable, never master. The tree is
-    ``test_sets/milestones/<version>`` and only cdp and mercury count.
+    7.5.1 and other maintenance releases on the 7.5 train (and older
+    trains) use ``test_sets/milestones/<version>/cdp`` on that train branch.
     """
     mapped = nutest_branch_for(nos)
     if not mapped:
@@ -1006,8 +894,6 @@ def lookup_release(nos):
     if milestone in RELEASES:
         return release_info(milestone)
     tree = milestone_tree(milestone)
-    if not tree:
-        raise DashboardError("Enter a NOS version such as 7.5.1")
     return release_info(milestone, root=tree["root"], branch=tree["branch"])
 
 
@@ -1030,12 +916,16 @@ def summary_match(milestone, raw_type):
     text = (milestone or "").strip()
     if not _MILESTONE_RE.match(text):
         raise DashboardError("Unsupported release")
+    broad = "test_sets/milestones/%s/" % text
+    team_path = "test_sets/milestones/%s/%s/" % (text, _TEAM)
     clauses = [
         {"target_milestone": text},
         {"deleted": False},
         {"test_case.deprecated": False},
+        {"test_case.test_sets": {"$regex": re.escape(broad), "$options": "i"}},
+        {"additional_data.team": "%s/%s" % (text, _TEAM)},
+        {"test_case.test_sets": {"$regex": re.escape(team_path), "$options": "i"}},
     ]
-    clauses.extend(_team_scope(text))
     if kind == "feat":
         clauses.append({"release_name": text})
         clauses.append({"test_case.metadata.tags": {"$nin": list(_EXCLUDED_TAGS)}})
@@ -1045,30 +935,11 @@ def summary_match(milestone, raw_type):
     return {"$and": clauses}
 
 
-def _team_scope(text):
-    """TCMS clauses that keep cdp and mercury and leave every other team out."""
-    names = []
-    for team in _TEAMS:
-        for label in (team, team.upper(), team.capitalize()):
-            value = "%s/%s" % (text, label)
-            if value not in names:
-                names.append(value)
-    path = "test_sets/milestones/%s/(?:cdp|mercury)/" % re.escape(text)
-    return [
-        {"additional_data.team": {"$in": names}},
-        {"test_case.test_sets": {"$regex": path, "$options": "i"}},
-    ]
-
-
 def _tcms_filters(text, kind):
     filters = [
-        {"field": "Test Sets", "op": "$regex", "value": [
-            "test_sets/milestones/%s/(cdp|mercury)/" % text,
-        ]},
-        {"field": "Team", "op": "$in", "value": [
-            "%s/CDP" % text,
-            "%s/Mercury" % text,
-        ]},
+        {"field": "Test Sets", "op": "$contains", "value": ["test_sets/milestones/%s/" % text]},
+        {"field": "Team", "op": "$eq", "value": ["%s/%s" % (text, _TEAM)]},
+        {"field": "Test Sets", "op": "$contains", "value": ["test_sets/milestones/%s/%s/" % (text, _TEAM)]},
     ]
     if kind == "feat":
         filters.append({"field": "Release", "op": "$eq", "value": [text]})
@@ -1498,10 +1369,14 @@ def component_metrics_match(milestone, raw_type):
     text = (milestone or "").strip()
     if not _MILESTONE_RE.match(text):
         raise DashboardError("Unsupported release")
+    broad = "test_sets/milestones/%s/" % text
+    team_path = "test_sets/milestones/%s/%s/" % (text, _TEAM)
     clauses = [
+        {"additional_data.team": "%s/%s" % (text, _TEAM)},
+        {"test_case.test_sets": {"$regex": re.escape(broad), "$options": "i"}},
+        {"test_case.test_sets": {"$regex": re.escape(team_path), "$options": "i"}},
         {"test_case.deprecated": False},
     ]
-    clauses.extend(_team_scope(text))
     if kind == "feat":
         clauses.append({"release_name": text})
         clauses.append({"test_case.metadata.tags": {"$nin": list(_EXCLUDED_TAGS)}})
@@ -2114,14 +1989,10 @@ def register_routes(app, jwt_required, fetch_tasks=None, fetch_results=None, qi_
         if not _MILESTONE_RE.match(milestone):
             return jsonify({"error": "Unsupported release"}), 400
         if milestone not in RELEASES and not root:
-            try:
-                info = lookup_release(milestone)
-            except DashboardError as exc:
-                return jsonify({"error": str(exc)}), 400
-            if branch and branch.lower() not in ("master", "main"):
-                info = release_info(milestone, root=info["root"], branch=branch)
-        else:
-            info = release_info(milestone, root=root or None, branch=branch or None)
+            return jsonify({
+                "error": "Add this release with + so its feat folder can be found.",
+            }), 400
+        info = release_info(milestone, root=root or None, branch=branch or None)
         if not info:
             return jsonify({"error": "Unsupported release"}), 400
         try:
